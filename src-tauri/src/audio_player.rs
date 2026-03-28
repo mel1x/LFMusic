@@ -1,3 +1,5 @@
+use base64::Engine;
+use lofty::picture::PictureType;
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
@@ -27,6 +29,9 @@ pub struct TrackMetadata {
     pub bitrate: Option<u32>,
     pub is_lossless: bool,
     pub file_path: String,
+    /// Обложка трека в виде data URL (data:image/jpeg;base64,...)
+    /// None если обложка не найдена или не удалось извлечь
+    pub cover_art: Option<String>,
 }
 
 /// Состояние воспроизведения
@@ -65,7 +70,6 @@ pub struct FadeOut<S: Source<Item = f32>> {
 
 impl<S: Source<Item = f32>> FadeOut<S> {
     pub fn new(source: S, duration: Duration) -> Self {
-        // Считаем сколько сэмплов занимает fade (с учётом каналов)
         let total_samples =
             (source.sample_rate() as f64 * duration.as_secs_f64()) as usize
             * source.channels() as usize;
@@ -77,7 +81,7 @@ impl<S: Source<Item = f32>> Iterator for FadeOut<S> {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
         if self.elapsed >= self.total_samples {
-            return None; // источник завершается — sink сам остановится
+            return None;
         }
         let gain = 1.0 - self.elapsed as f32 / self.total_samples as f32;
         let sample = self.source.next()? * gain;
@@ -124,16 +128,14 @@ fn extract_samples_into(buf: &AudioBufferRef, samples: &mut Vec<f32>) {
                 }
             }
         }
-        _ => {
-            // Fallback для других форматов
-        }
+        _ => {}
     }
 }
 
 impl SymphoniaSource {
     fn new_with_seek(file_path: &str, seek_secs: f64) -> Result<Self, String> {
         let mut source = Self::new(file_path)?;
-        
+
         if seek_secs > 0.0 {
             use symphonia::core::formats::{SeekMode, SeekTo};
             use symphonia::core::units::Time;
@@ -147,7 +149,6 @@ impl SymphoniaSource {
                 )
                 .map_err(|e| format!("Ошибка seek в файле: {}", e))?;
 
-            // Сбрасываем декодер — он мог накопить состояние (важно для FLAC!)
             source.decoder.reset();
             source.current_samples.clear();
             source.current_pos = 0;
@@ -215,7 +216,6 @@ impl SymphoniaSource {
                             return true;
                         }
                         Err(symphonia::core::errors::Error::DecodeError(_)) => {
-                            // Пропускаем повреждённые пакеты
                             continue;
                         }
                         Err(_) => return false,
@@ -249,24 +249,12 @@ impl Iterator for SymphoniaSource {
 impl Source for SymphoniaSource {
     fn current_frame_len(&self) -> Option<usize> {
         let remaining = self.current_samples.len() - self.current_pos;
-        if remaining > 0 {
-            Some(remaining)
-        } else {
-            None
-        }
+        if remaining > 0 { Some(remaining) } else { None }
     }
 
-    fn channels(&self) -> u16 {
-        self.channels
-    }
-
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    fn total_duration(&self) -> Option<Duration> {
-        None
-    }
+    fn channels(&self) -> u16 { self.channels }
+    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn total_duration(&self) -> Option<Duration> { None }
 }
 
 /// Основная структура аудиоплеера
@@ -277,14 +265,10 @@ pub struct AudioPlayer {
     current_track: Option<TrackMetadata>,
     state: PlaybackState,
     volume: f32,
-    /// Момент начала воспроизведения (или возобновления)
     playback_started_at: Option<Instant>,
-    /// Накопленная позиция до паузы (в секундах)
     accumulated_position: f64,
 }
 
-// OutputStream содержит *mut () который не Send/Sync,
-// но мы гарантируем безопасность через Mutex в lib.rs
 unsafe impl Send for AudioPlayer {}
 unsafe impl Sync for AudioPlayer {}
 
@@ -306,12 +290,38 @@ impl AudioPlayer {
         })
     }
 
-    /// Проверить, является ли формат MP4-контейнером (m4a, aac, mp4)
     fn is_mp4_container(extension: &str) -> bool {
         matches!(extension, "m4a" | "aac" | "mp4" | "m4b" | "m4p" | "m4r")
     }
 
-    /// Извлечь метаданные из аудиофайла
+    /// Извлечь обложку трека как data URL.
+    /// Возвращает None если обложка не найдена или произошла ошибка.
+    pub fn extract_cover_art(file_path: &str) -> Option<String> {
+        let path = PathBuf::from(file_path);
+
+        let tagged_file = Probe::open(&path).ok()?.read().ok()?;
+
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())?;
+
+        // Предпочитаем CoverFront, иначе берём первую доступную картинку
+        let picture = tag
+            .pictures()
+            .iter()
+            .find(|p| p.pic_type() == PictureType::CoverFront)
+            .or_else(|| tag.pictures().first())?;
+
+        let mime = picture
+            .mime_type()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "image/jpeg".to_string());
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(picture.data());
+        Some(format!("data:{};base64,{}", mime, b64))
+    }
+
+    /// Извлечь метаданные из аудиофайла (включая обложку)
     pub fn get_metadata(file_path: &str) -> Result<TrackMetadata, String> {
         let path = PathBuf::from(file_path);
 
@@ -355,7 +365,6 @@ impl AudioPlayer {
                     | symphonia::core::codecs::CODEC_TYPE_PCM_S32LE
                     | symphonia::core::codecs::CODEC_TYPE_PCM_F32LE
             ),
-            // Фолбэк по расширению если Symphonia не смог определить
             None => matches!(
                 extension.as_str(),
                 "flac" | "wav" | "alac" | "ape" | "wv" | "aiff" | "aif"
@@ -379,7 +388,6 @@ impl AudioPlayer {
         }
         .to_string();
 
-        // Читаем метаданные через lofty
         let mut title = None;
         let mut artist = None;
         let mut album = None;
@@ -388,6 +396,7 @@ impl AudioPlayer {
         let mut bit_depth = None;
         let mut channels = None;
         let mut bitrate = None;
+        let mut cover_art: Option<String> = None;
 
         if let Ok(tagged_file) = Probe::open(&path)
             .map_err(|e| format!("Ошибка открытия файла: {}", e))
@@ -397,7 +406,6 @@ impl AudioPlayer {
                     .map_err(|e| format!("Ошибка чтения тегов: {}", e))
             })
         {
-            // Получаем теги
             if let Some(tag) = tagged_file
                 .primary_tag()
                 .or_else(|| tagged_file.first_tag())
@@ -405,9 +413,25 @@ impl AudioPlayer {
                 title = tag.title().map(|s| s.to_string());
                 artist = tag.artist().map(|s| s.to_string());
                 album = tag.album().map(|s| s.to_string());
+
+                // Извлекаем обложку: сначала ищем CoverFront, потом любую картинку
+                if let Some(picture) = tag
+                    .pictures()
+                    .iter()
+                    .find(|p| p.pic_type() == PictureType::CoverFront)
+                    .or_else(|| tag.pictures().first())
+                {
+                    let mime = picture
+                        .mime_type()
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| "image/jpeg".to_string());
+
+                    let b64 = base64::engine::general_purpose::STANDARD
+                        .encode(picture.data());
+                    cover_art = Some(format!("data:{};base64,{}", mime, b64));
+                }
             }
 
-            // Получаем свойства аудио
             let properties = tagged_file.properties();
             duration_secs = Some(properties.duration().as_secs_f64());
             sample_rate = properties.sample_rate();
@@ -428,6 +452,7 @@ impl AudioPlayer {
             bitrate,
             is_lossless,
             file_path: file_path.to_string(),
+            cover_art,
         })
     }
 
@@ -441,7 +466,6 @@ impl AudioPlayer {
         if let Some(ref sink) = self.sink {
             if !sink.is_paused() {
                 sink.pause();
-                // Накапливаем время, прошедшее с момента начала/возобновления
                 if let Some(started) = self.playback_started_at.take() {
                     self.accumulated_position += started.elapsed().as_secs_f64();
                 }
@@ -461,7 +485,6 @@ impl AudioPlayer {
             .map_err(|e| format!("Не удалось создать sink: {}", e))?;
         new_sink.set_volume(self.volume);
 
-        // Используем SymphoniaSource для ВСЕХ форматов — он поддерживает seek
         let source = SymphoniaSource::new_with_seek(file_path, seek_secs)?;
         new_sink.append(source);
 
@@ -520,7 +543,6 @@ impl AudioPlayer {
 
         let was_paused = self.sink.as_ref().map(|s| s.is_paused()).unwrap_or(false);
 
-        // Останавливаем старый sink — очищает буфер, убирает "whoosh"
         if let Some(ref sink) = self.sink {
             sink.stop();
         }
@@ -559,7 +581,6 @@ impl AudioPlayer {
         let was_paused = self.sink.as_ref().map(|s| s.is_paused()).unwrap_or(false);
         let crossfade_dur = Duration::from_secs_f64(crossfade_secs);
 
-        // ── Fade-out: открываем файл с ТЕКУЩЕЙ позиции, затухаем ──
         let fade_out_sink = Sink::try_new(&self.stream_handle)
             .map_err(|e| format!("Ошибка fade-out sink: {}", e))?;
         fade_out_sink.set_volume(self.volume);
@@ -568,24 +589,20 @@ impl AudioPlayer {
             crossfade_dur,
         ));
 
-        // Старый sink глушим — fade-out sink уже играет вместо него
         if let Some(ref old_sink) = self.sink {
             old_sink.stop();
         }
 
-        // Даём fade-out sink доиграть в отдельном потоке (Sink: Send ✓)
         std::thread::spawn(move || {
             fade_out_sink.sleep_until_end();
-            // sink дропается здесь — аудио потока уже нет, тишина
         });
 
-        // ── Fade-in: открываем файл с ЦЕЛЕВОЙ позиции, нарастаем ──
         let new_sink = Sink::try_new(&self.stream_handle)
             .map_err(|e| format!("Ошибка нового sink: {}", e))?;
         new_sink.set_volume(self.volume);
         new_sink.append(
             SymphoniaSource::new_with_seek(&file_path, position_secs)?
-                .fade_in(crossfade_dur), // встроенный метод rodio
+                .fade_in(crossfade_dur),
         );
 
         if was_paused {
@@ -610,7 +627,6 @@ impl AudioPlayer {
             _ => 0.0,
         };
         let pos = self.accumulated_position + elapsed;
-        // Ограничиваем позицию длительностью трека
         if let Some(ref track) = self.current_track {
             if let Some(duration) = track.duration_secs {
                 return pos.min(duration);
@@ -621,7 +637,6 @@ impl AudioPlayer {
 
     /// Получить текущий статус плеера
     pub fn get_status(&mut self) -> PlayerStatus {
-        // Проверяем, не закончился ли трек
         if self.state == PlaybackState::Playing {
             if let Some(ref sink) = self.sink {
                 if sink.empty() {
@@ -691,15 +706,12 @@ impl AudioPlayer {
                 .to_lowercase();
 
             if supported.contains(&extension) {
-                if let Ok(metadata) = Self::get_metadata(
-                    &file_path.to_string_lossy()
-                ) {
+                if let Ok(metadata) = Self::get_metadata(&file_path.to_string_lossy()) {
                     tracks.push(metadata);
                 }
             }
         }
 
-        // Сортируем по имени файла
         tracks.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
         Ok(tracks)

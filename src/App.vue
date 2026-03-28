@@ -6,6 +6,7 @@ import CloseIcon from './components/Icons/CloseIcon.vue';
 
 import MainBlock from './components/MainBlock.vue';
 import Player from './components/Player.vue';
+import GithubIcon from './components/Icons/GithubIcon.vue';
 
 const win = getCurrentWindow();
 
@@ -17,10 +18,11 @@ const closeWindow = () => win.close();
 <template>
   <div class="hat" data-tauri-drag-region>
     <div class="winTitle">
-      <div class="mainTitle" data-tauri-drag-region>MixMusic</div>
+      <div class="mainTitle" data-tauri-drag-region>LFMusic</div>
       <div class="authorTitle" data-tauri-drag-region>by mel1x</div>
     </div>
     <div class="winControls">
+      <a href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
       <button class="controlsButton" @click="minimizeWindow"><MinimizeIcon /></button>
       <button class="controlsButton" @click="maximizeWindow"><MaximizeIcon /></button>
       <button class="controlsButton" @click="closeWindow"><CloseIcon /></button>
@@ -40,6 +42,9 @@ const closeWindow = () => win.close();
   outline: none;
   text-decoration: none;
 }
+svg {
+  display: block;
+}
 body {
   background-color: #0d0d0d;
 }
@@ -53,6 +58,7 @@ body {
   background-color: #0d0d0d;
 }
 .winTitle {
+  margin-top: 2px;
   padding: 0px 20px;
   display: flex;
   flex-direction: column;
@@ -82,6 +88,21 @@ body {
   flex-direction: row;
   align-items: center;
   justify-content: center;
+}
+.winControls a {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 3px;
+  justify-content: center;
+  color: #ffffffd5;
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 20px;
+  padding: 2px 8px 3px 3px;
+  border-radius: 16px;
+  background: linear-gradient(172deg, #454b5c, #181c26);
+  filter: grayscale();
 }
 .controlsButton {
   cursor: pointer;

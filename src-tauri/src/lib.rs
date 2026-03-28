@@ -77,10 +77,17 @@ fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> 
     Ok(player.get_status())
 }
 
-/// Получить метаданные файла без воспроизведения
+/// Получить метаданные файла без воспроизведения (включает обложку)
 #[tauri::command]
 fn get_track_metadata(file_path: String) -> Result<TrackMetadata, String> {
     AudioPlayer::get_metadata(&file_path)
+}
+
+/// Получить только обложку трека как data URL (для ленивой загрузки)
+/// Возвращает None если обложка не найдена
+#[tauri::command]
+fn get_cover_art(file_path: String) -> Result<Option<String>, String> {
+    Ok(AudioPlayer::extract_cover_art(&file_path))
 }
 
 /// Получить список поддерживаемых форматов
@@ -97,7 +104,6 @@ fn scan_directory(dir_path: String) -> Result<Vec<TrackMetadata>, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Инициализируем плеер
     let player = AudioPlayer::new().expect("Не удалось инициализировать аудиоплеер");
 
     tauri::Builder::default()
@@ -115,6 +121,7 @@ pub fn run() {
             player_seek_crossfade,
             player_get_status,
             get_track_metadata,
+            get_cover_art,
             get_supported_formats,
             scan_directory,
         ])

@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "mix-music",
+        "title": "LFMusic",
         "width": 1460,
         "height": 860,
+        "minWidth": 1144,
+        "minHeight": 675,
         "decorations": false
       }
     ],

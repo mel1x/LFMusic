@@ -2339,6 +2339,7 @@ dependencies = [
 name = "mix-music"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "lofty",
  "parking_lot",
  "rodio",

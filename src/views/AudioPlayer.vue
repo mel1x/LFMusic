@@ -16,6 +16,7 @@ interface TrackMetadata {
   bitrate: number | null;
   is_lossless: boolean;
   file_path: string;
+  cover_art: string | null;
 }
 
 interface PlayerStatus {
@@ -105,6 +106,14 @@ const hasPrev = computed(() => {
   return currentTrackIndex.value > 0;
 });
 
+/// Обложка текущего трека (берём из trackList если там уже загружена)
+const currentCoverArt = computed(() => {
+  if (!currentTrack.value) return null;
+  // Сначала проверяем в списке треков — там уже может быть cover_art
+  const inList = trackList.value.find(t => t.file_path === currentTrack.value!.file_path);
+  return inList?.cover_art ?? currentTrack.value.cover_art ?? null;
+});
+
 // --- Утилиты ---
 function extractFileName(filePath: string): string {
   const parts = filePath.replace(/\\/g, "/").split("/");
@@ -165,6 +174,11 @@ async function playTrack(track: TrackMetadata) {
     isLoading.value = true;
     errorMessage.value = "";
     const metadata = await invoke<TrackMetadata>("player_play", { filePath: track.file_path });
+    // Сохраняем cover_art из списка треков если в метаданных плеера его нет
+    if (!metadata.cover_art) {
+      const inList = trackList.value.find(t => t.file_path === track.file_path);
+      if (inList?.cover_art) metadata.cover_art = inList.cover_art;
+    }
     currentTrack.value = metadata;
     playbackState.value = "Playing";
     positionSecs.value = 0;
@@ -209,7 +223,6 @@ async function playNext() {
 }
 
 async function playPrev() {
-  // Если прошло больше 3 секунд — перемотать в начало, иначе предыдущий трек
   if (positionSecs.value > 3) {
     await seekTo(0);
   } else if (hasPrev.value) {
@@ -267,9 +280,13 @@ async function pollStatus() {
     }
 
     if (status.current_track) {
+      // Сохраняем обложку если в статусе она пришла, иначе берём из trackList
+      if (!status.current_track.cover_art) {
+        const inList = trackList.value.find(t => t.file_path === status.current_track!.file_path);
+        if (inList?.cover_art) status.current_track.cover_art = inList.cover_art;
+      }
       currentTrack.value = status.current_track;
     } else if (status.state === "Stopped") {
-      // Трек закончился — автоматически следующий
       if (currentTrack.value && hasNext.value) {
         await playNext();
       } else {
@@ -320,11 +337,28 @@ onUnmounted(() => {
         @click="playTrack(track)"
         @dblclick="playTrack(track)"
       >
-        <div class="track-item-index">
-          <span v-if="currentTrack?.file_path === track.file_path && isPlaying" class="playing-indicator">▶</span>
-          <span v-else-if="currentTrack?.file_path === track.file_path && playbackState === 'Paused'" class="playing-indicator paused">⏸</span>
-          <span v-else>{{ index + 1 }}</span>
+        <!-- Миниатюра обложки в списке -->
+        <div class="track-thumb">
+          <img
+            v-if="track.cover_art"
+            :src="track.cover_art"
+            class="track-thumb-img"
+            alt=""
+            draggable="false"
+          />
+          <div v-else class="track-thumb-placeholder">
+            <span>♪</span>
+          </div>
+          <!-- Оверлей с иконкой состояния поверх обложки -->
+          <div
+            class="track-thumb-overlay"
+            v-if="currentTrack?.file_path === track.file_path"
+          >
+            <span v-if="isPlaying" class="overlay-icon playing-anim">▶</span>
+            <span v-else class="overlay-icon">⏸</span>
+          </div>
         </div>
+
         <div class="track-item-info">
           <div class="track-item-name">{{ getTrackDisplayName(track) }}</div>
           <div class="track-item-meta">
@@ -346,15 +380,32 @@ onUnmounted(() => {
 
     <!-- Нижняя панель плеера -->
     <div class="player-bar" v-if="currentTrack">
-      <!-- Информация о треке -->
+      <!-- Обложка + информация о треке -->
       <div class="now-playing">
-        <div class="now-playing-title">{{ trackTitle }}</div>
-        <div class="now-playing-artist">{{ trackArtist }}</div>
-        <div class="now-playing-details">
-          <span class="format-badge" :class="{ lossless: currentTrack.is_lossless }">
-            {{ currentTrack.is_lossless ? "LOSSLESS" : "LOSSY" }}
-          </span>
-          <span class="now-playing-technical">{{ trackInfo }}</span>
+        <!-- Большая обложка текущего трека -->
+        <div class="cover-art-container">
+          <img
+            v-if="currentCoverArt"
+            :src="currentCoverArt"
+            class="cover-art-img"
+            :class="{ spinning: isPlaying }"
+            alt="Обложка"
+            draggable="false"
+          />
+          <div v-else class="cover-art-placeholder" :class="{ spinning: isPlaying }">
+            <span class="cover-art-note">♪</span>
+          </div>
+        </div>
+
+        <div class="now-playing-text">
+          <div class="now-playing-title">{{ trackTitle }}</div>
+          <div class="now-playing-artist">{{ trackArtist }}</div>
+          <div class="now-playing-details">
+            <span class="format-badge" :class="{ lossless: currentTrack.is_lossless }">
+              {{ currentTrack.is_lossless ? "LOSSLESS" : "LOSSY" }}
+            </span>
+            <span class="now-playing-technical">{{ trackInfo }}</span>
+          </div>
         </div>
       </div>
 
@@ -504,7 +555,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 20px;
+  padding: 8px 16px;
   cursor: pointer;
   transition: background 0.15s;
   user-select: none;
@@ -522,26 +573,59 @@ onUnmounted(() => {
   background: rgba(67, 97, 238, 0.2);
 }
 
-.track-item-index {
-  width: 28px;
-  text-align: center;
-  font-size: 0.8em;
-  opacity: 0.5;
+/* Миниатюра обложки в строке трека */
+.track-thumb {
+  position: relative;
+  width: 42px;
+  height: 42px;
   flex-shrink: 0;
+  border-radius: 6px;
+  overflow: hidden;
 }
 
-.track-item.active .track-item-index {
-  opacity: 1;
-  color: #4361ee;
+.track-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
-.playing-indicator {
-  color: #4361ee;
+.track-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.07);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1em;
+  opacity: 0.4;
+  border-radius: 6px;
+}
+
+/* Оверлей поверх миниатюры для активного трека */
+.track-thumb-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+}
+
+.overlay-icon {
   font-size: 0.9em;
+  color: #fff;
 }
 
-.playing-indicator.paused {
-  opacity: 0.6;
+/* Пульсирующая анимация для иконки воспроизведения */
+@keyframes playPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.overlay-icon.playing-anim {
+  animation: playPulse 1.2s ease-in-out infinite;
 }
 
 .track-item-info {
@@ -605,9 +689,61 @@ onUnmounted(() => {
   background: rgba(0, 0, 0, 0.2);
 }
 
+/* Блок now-playing: обложка слева, текст справа */
 .now-playing {
-  text-align: center;
-  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+/* Большая обложка в плеере */
+.cover-art-container {
+  flex-shrink: 0;
+  width: 72px;
+  height: 72px;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.cover-art-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.3s ease;
+}
+
+.cover-art-placeholder {
+  width: 100%;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+}
+
+.cover-art-note {
+  font-size: 1.8em;
+  opacity: 0.3;
+}
+
+/* Плавное "дыхание" обложки во время воспроизведения */
+@keyframes coverBreath {
+  0%, 100% { box-shadow: 0 4px 16px rgba(67, 97, 238, 0.25); }
+  50% { box-shadow: 0 4px 24px rgba(67, 97, 238, 0.55); }
+}
+
+.cover-art-container:has(.spinning) {
+  animation: coverBreath 2.4s ease-in-out infinite;
+}
+
+.now-playing-text {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
 }
 
 .now-playing-title {
@@ -622,12 +758,14 @@ onUnmounted(() => {
   font-size: 0.85em;
   opacity: 0.7;
   margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .now-playing-details {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 8px;
   margin-top: 6px;
   font-size: 0.75em;
@@ -851,13 +989,8 @@ onUnmounted(() => {
 }
 
 @keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.7;
-  }
-  50% {
-    opacity: 0.3;
-  }
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 0.3; }
 }
 
 .error {

@@ -1,30 +1,57 @@
 <script setup lang="ts">
+import ViewFrame from './ViewFrame.vue';
+import CloseIcon from './Icons/CloseIcon.vue';
 </script>
 
 <template>
-    <div class="mainWrapper">
-        <aside>
-
-        </aside>
-        <main>
-
-        </main>
+  <div class="mainWrapper">
+    <aside>
+      <RouterLink to="/" class="navLink"><CloseIcon />Audio Player</RouterLink>
+      <RouterLink to="/settings" class="navLink"><CloseIcon />Настройки</RouterLink>
+    </aside>
+    <div class="frameWrapper">
+      <ViewFrame>
+        <RouterView />
+      </ViewFrame>
     </div>
+  </div>
 </template>
 
 <style scoped>
 .mainWrapper {
-    display: flex;
-    flex-direction: row;
+  display: flex;
+  flex-direction: row;
 }
 aside {
-    width: 260px;
-    height: calc(100vh - 38px - 104px);
+  display: flex;
+  flex-direction: column;
+  padding: 32px 14px 20px;
+  gap: 8px;
+  width: 260px;
+  height: calc(100vh - 38px - 104px);
 }
-main {
-    width: calc(100% - 260px - 12px);
-    height: calc(100vh - 38px - 104px);
-    border-radius: 16px;
-    border: 0.0625rem solid hsla(0, 0%, 100%, 0.04);
+.navLink {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  color: hsla(0, 0%, 80%, 0.5);
+  width: 100%;
+  font-weight: 600;
+  padding: 10px 14px;
+  font-size: 16px;
+
+  transition: .2s;
+
+  &:hover {
+    color: hsla(0, 0%, 100%, 0.95);
+  }
+}
+.navLink.router-link-active {
+  color: hsla(0, 0%, 100%, 0.95);
+}
+.frameWrapper {
+  width: calc(100% - 260px - 12px);
+  height: calc(100vh - 38px - 104px);
 }
 </style>
