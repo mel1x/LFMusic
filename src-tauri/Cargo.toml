@@ -28,3 +28,4 @@ symphonia = { version = "0.5", features = ["all"] }
 lofty = "0.22"
 base64 = "0.22"
 rusqlite = { version = "0.31", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

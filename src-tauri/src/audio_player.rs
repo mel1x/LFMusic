@@ -1,4 +1,5 @@
 use base64::Engine;
+use image::GenericImageView;
 use lofty::picture::PictureType;
 use lofty::prelude::*;
 use lofty::probe::Probe;
@@ -33,6 +34,8 @@ pub struct TrackMetadata {
     pub file_path: String,
     /// Обложка трека в виде data URL (data:image/jpeg;base64,...)
     pub cover_art: Option<String>,
+    /// Акцентный цвет обложки в формате hex (#RRGGBB)
+    pub accent_color: Option<String>,
 }
 
 /// Состояние воспроизведения
@@ -277,6 +280,92 @@ fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(picture.data());
     Some(format!("data:{};base64,{}", mime, b64))
+}
+
+/// Извлечь акцентный цвет из сырых байтов изображения.
+/// Уменьшает изображение, отбирает наиболее насыщенный и яркий цвет.
+fn extract_accent_color(image_data: &[u8]) -> Option<String> {
+    let img = image::load_from_memory(image_data).ok()?;
+    let thumb = img.thumbnail(64, 64);
+
+    let mut best_color = (0u8, 0u8, 0u8);
+    let mut best_score: f32 = -1.0;
+
+    for (_x, _y, pixel) in thumb.pixels() {
+        let [r, g, b, _a] = pixel.0;
+        let rf = r as f32 / 255.0;
+        let gf = g as f32 / 255.0;
+        let bf = b as f32 / 255.0;
+
+        let max_c = rf.max(gf).max(bf);
+        let min_c = rf.min(gf).min(bf);
+        let delta = max_c - min_c;
+
+        // Насыщенность (HSV)
+        let saturation = if max_c > 0.0 { delta / max_c } else { 0.0 };
+        let lightness = (max_c + min_c) / 2.0;
+
+        // Отсеиваем слишком тёмные, слишком светлые и серые пиксели
+        if lightness < 0.15 || lightness > 0.85 || saturation < 0.2 {
+            continue;
+        }
+
+        // Предпочитаем насыщенные цвета средней яркости
+        let score = saturation * 2.0 + (1.0 - (lightness - 0.5).abs() * 2.0);
+        if score > best_score {
+            best_score = score;
+            best_color = (r, g, b);
+        }
+    }
+
+    if best_score < 0.0 {
+        // Фоллбэк: средний цвет
+        let (mut sr, mut sg, mut sb) = (0u64, 0u64, 0u64);
+        let mut count = 0u64;
+        for (_x, _y, pixel) in thumb.pixels() {
+            let [r, g, b, _a] = pixel.0;
+            sr += r as u64;
+            sg += g as u64;
+            sb += b as u64;
+            count += 1;
+        }
+        if count == 0 {
+            return None;
+        }
+        best_color = (
+            (sr / count) as u8,
+            (sg / count) as u8,
+            (sb / count) as u8,
+        );
+    }
+
+    Some(format!("#{:02X}{:02X}{:02X}", best_color.0, best_color.1, best_color.2))
+}
+
+/// Извлечь обложку и акцентный цвет из lofty тега
+fn cover_data_from_tag(tag: &lofty::tag::Tag) -> (Option<String>, Option<String>) {
+    let picture = tag
+        .pictures()
+        .iter()
+        .find(|p| p.pic_type() == PictureType::CoverFront)
+        .or_else(|| tag.pictures().first());
+
+    let Some(picture) = picture else {
+        return (None, None);
+    };
+
+    let data = picture.data();
+    let accent = extract_accent_color(data);
+
+    let mime = picture
+        .mime_type()
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "image/jpeg".to_string());
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    let cover = format!("data:{};base64,{}", mime, b64);
+
+    (Some(cover), accent)
 }
 
 /// Извлечь сэмплы из AudioBufferRef в вектор f32
@@ -598,6 +687,7 @@ impl AudioPlayer {
         let mut channels = None;
         let mut bitrate = None;
         let mut cover_art: Option<String> = None;
+        let mut accent_color: Option<String> = None;
 
         if let Ok(probe) = Probe::open(&path) {
             if let Ok(tagged_file) = probe.read() {
@@ -608,7 +698,9 @@ impl AudioPlayer {
                     title = tag.title().map(|s| s.to_string());
                     artist = tag.artist().map(|s| s.to_string());
                     album = tag.album().map(|s| s.to_string());
-                    cover_art = cover_art_from_tag(tag);
+                    let (cover, accent) = cover_data_from_tag(tag);
+                    cover_art = cover;
+                    accent_color = accent;
                 }
 
                 let properties = tagged_file.properties();
@@ -633,6 +725,7 @@ impl AudioPlayer {
             is_lossless,
             file_path: file_path.to_string(),
             cover_art,
+            accent_color,
         })
     }
 

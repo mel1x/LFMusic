@@ -95,6 +95,7 @@ impl MusicLibrary {
             bitrate: row.get(9)?,
             is_lossless: row.get::<_, i32>(10)? != 0,
             cover_art: None,
+            accent_color: None,
         })
     }
 
@@ -150,7 +151,7 @@ impl MusicLibrary {
     fn scan_folder_internal<F>(
         &mut self,
         folder: &str,
-        mut progress: F,
+        progress: F,
     ) -> Result<(), String>
     where
         F: FnMut(usize, usize),
@@ -162,77 +163,10 @@ impl MusicLibrary {
 
         let supported = AudioPlayer::supported_formats();
 
-        // Фаза 1: собираем все пути без чтения метаданных (быстро)
         let mut all_files: Vec<PathBuf> = Vec::new();
         Self::collect_audio_files(&path, &supported, 0, &mut all_files);
-        let total = all_files.len();
 
-        // Фаза 2: читаем метаданные только для изменившихся/новых файлов
-        let mut batch: Vec<(String, TrackMetadata, u64)> = Vec::new();
-
-        for (i, file_path) in all_files.iter().enumerate() {
-            progress(i + 1, total);
-
-            let path_str = file_path.to_string_lossy().to_string();
-            let mtime = Self::get_mtime(file_path);
-
-            let cached_mtime: Option<i64> = self
-                .conn
-                .query_row(
-                    "SELECT modified_secs FROM tracks WHERE file_path = ?1",
-                    params![path_str],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            if let Some(cached) = cached_mtime {
-                if cached as u64 == mtime {
-                    continue;
-                }
-            }
-
-            if let Ok(mut metadata) = AudioPlayer::get_metadata(&path_str) {
-                metadata.cover_art = None;
-                batch.push((path_str, metadata, mtime));
-            }
-        }
-
-        if !batch.is_empty() {
-            let tx = self
-                .conn
-                .transaction()
-                .map_err(|e| format!("Ошибка транзакции: {}", e))?;
-
-            for (file_path, m, mtime) in &batch {
-                tx.execute(
-                    "INSERT OR REPLACE INTO tracks
-                     (file_path, folder_path, title, artist, album, duration_secs,
-                      format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-                    params![
-                        file_path,
-                        folder,
-                        m.title,
-                        m.artist,
-                        m.album,
-                        m.duration_secs,
-                        m.format,
-                        m.sample_rate,
-                        m.bit_depth.map(|v| v as i32),
-                        m.channels.map(|v| v as i32),
-                        m.bitrate,
-                        m.is_lossless as i32,
-                        *mtime as i64,
-                    ],
-                )
-                .map_err(|e| format!("Ошибка вставки: {}", e))?;
-            }
-
-            tx.commit()
-                .map_err(|e| format!("Ошибка коммита: {}", e))?;
-        }
-
-        Ok(())
+        self.scan_folder_files(folder, &all_files, progress)
     }
 
     // ── Публичный API ───────────────────────────────────────────────────────
@@ -448,6 +382,7 @@ impl MusicLibrary {
 
             if let Ok(mut metadata) = AudioPlayer::get_metadata(&path_str) {
                 metadata.cover_art = None;
+                metadata.accent_color = None;
                 batch.push((path_str, metadata, mtime));
             }
         }

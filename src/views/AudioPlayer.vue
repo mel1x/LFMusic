@@ -21,6 +21,7 @@ interface TrackMetadata {
   is_lossless: boolean;
   file_path: string;
   cover_art: string | null;
+  accent_color: string | null;
 }
 
 interface PlayerStatus {
@@ -162,6 +163,10 @@ const currentCoverArt = computed(() => {
   if (!currentTrack.value) return null;
   const inList = trackList.value.find(t => t.file_path === currentTrack.value!.file_path);
   return inList?.cover_art ?? currentTrack.value.cover_art ?? null;
+});
+
+const currentAccentColor = computed(() => {
+  return currentTrack.value?.accent_color ?? null;
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -576,7 +581,7 @@ onUnmounted(() => {
     </div>
 
     <!-- ── Плеер ─────────────────────────────────────────────────────────── -->
-    <div class="player-bar" v-if="currentTrack">
+    <div class="player-bar" v-if="currentTrack" :style="currentAccentColor ? { '--accent-color': currentAccentColor } as any : {}">
       <div class="now-playing">
         <div class="cover-art-container">
           <img

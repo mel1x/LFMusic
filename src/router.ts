@@ -1,10 +1,15 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import AudioPlayer from "./views/AudioPlayer.vue"
-import Settings from './views/Settings.vue'
+import Main from './views/Main.vue'
+import Catalog from './views/Catalog.vue'
+import Search from './views/Search.vue'
 
 const routes = [
-  { path: '/', component: AudioPlayer },
-  { path: '/settings', component: Settings },
+  { path: '/search', component: Search },
+  { path: '/', component: Main },
+  { path: '/catalog', component: Catalog },
+  { path: '/test', component: AudioPlayer },
+  { path: '/settings', component: () => import('./views/Settings.vue') },
 ]
 
 export default createRouter({
