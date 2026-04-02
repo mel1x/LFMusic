@@ -101,7 +101,7 @@ body {
   margin-right: 20px;
   padding: 2px 8px 3px 3px;
   border-radius: 16px;
-  background: linear-gradient(172deg, #454b5c, #181c26);
+  background: linear-gradient(172deg, #454b5c, #1b1f2a);
   filter: grayscale();
 }
 .controlsButton {
