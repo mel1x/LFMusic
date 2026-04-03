@@ -1,8 +1,11 @@
 mod audio_player;
 mod library;
+mod settings;
 
 use audio_player::{AudioPlayer, PlayerStatus, TrackMetadata};
 use library::{FolderInfo, MusicLibrary};
+use settings::AppSettings;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 
@@ -19,6 +22,7 @@ struct ScanProgress {
 
 pub struct PlayerState(pub Mutex<AudioPlayer>);
 pub struct LibraryState(pub Mutex<MusicLibrary>);
+pub struct SettingsState(pub Mutex<(AppSettings, PathBuf)>);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Команды плеера (без изменений)
@@ -114,16 +118,20 @@ fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, St
 
 /// Добавить папку, просканировать, вернуть все треки из библиотеки
 #[tauri::command]
-fn library_add_folder(
+async fn library_add_folder(
     app: tauri::AppHandle,
-    state: State<LibraryState>,
     folder_path: String,
 ) -> Result<Vec<TrackMetadata>, String> {
-    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    library.add_folder(folder_path, |current, total| {
-        let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
-        let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        library.add_folder(folder_path, |current, total| {
+            let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
+            let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
+        })
     })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
 }
 
 /// Удалить папку и все её треки из кэша
@@ -145,15 +153,37 @@ fn library_get_tracks(state: State<LibraryState>) -> Result<Vec<TrackMetadata>, 
 
 /// Пересканировать все папки: обновить изменённые файлы, удалить несуществующие
 #[tauri::command]
-fn library_rescan(
+async fn library_rescan(
     app: tauri::AppHandle,
-    state: State<LibraryState>,
 ) -> Result<Vec<TrackMetadata>, String> {
-    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    library.rescan_all(|current, total| {
-        let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
-        let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        library.rescan_all(|current, total| {
+            let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
+            let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
+        })
     })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Команды настроек
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_settings(state: State<SettingsState>) -> Result<AppSettings, String> {
+    let state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(state.0.clone())
+}
+
+#[tauri::command]
+fn save_settings(state: State<SettingsState>, settings: AppSettings) -> Result<(), String> {
+    let mut state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    settings::save(&state.1, &settings)?;
+    state.0 = settings;
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -170,6 +200,9 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("Не удалось получить директорию данных приложения");
+
+            let app_settings = settings::load(&app_data_dir);
+            app.manage(SettingsState(Mutex::new((app_settings, app_data_dir.clone()))));
 
             let library =
                 MusicLibrary::new(app_data_dir).expect("Не удалось инициализировать библиотеку");
@@ -200,6 +233,9 @@ pub fn run() {
             library_remove_folder,
             library_get_tracks,
             library_rescan,
+            // Настройки
+            get_settings,
+            save_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

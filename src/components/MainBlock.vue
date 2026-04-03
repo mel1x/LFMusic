@@ -9,8 +9,9 @@ import CloseIcon from './Icons/CloseIcon.vue';
       <RouterLink to="/search" class="navLink"><CloseIcon />Поиск</RouterLink>
       <RouterLink to="/" class="navLink"><CloseIcon />Главная</RouterLink>
       <RouterLink to="/catalog" class="navLink"><CloseIcon />Каталог</RouterLink>
-      <RouterLink to="/test" class="navLink"><CloseIcon />Audio Player</RouterLink>
+      <RouterLink to="/collections" class="navLink"><CloseIcon />Коллекция</RouterLink>
       <RouterLink to="/settings" class="navLink"><CloseIcon />Настройки</RouterLink>
+      <RouterLink to="/test" class="navLink"><CloseIcon />Audio Player</RouterLink>
     </aside>
     <div class="frameWrapper">
       <ViewFrame>

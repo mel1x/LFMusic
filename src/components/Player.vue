@@ -16,6 +16,10 @@ import VolumeMinIcon from './Icons/VolumeMinIcon.vue';
 import VolumeZeroIcon from './Icons/VolumeZeroIcon.vue';
 import FullscreenIcon from './Icons/FullscreenIcon.vue';
 
+import { useSettings } from '../composables/useSettings';
+
+const { settings } = useSettings();
+
 const playerProgress = ref(0.0);
 
 const isShuffled = ref(false);
@@ -56,7 +60,7 @@ function onVolumeScroll(event: WheelEvent) {
 <template>
     <div class="player">
         <div class="asideWrapper">
-            <div class="aside">
+            <div v-if="settings.show_player_extra_block" class="aside">
                 sosi mne davai
             </div>
         </div>

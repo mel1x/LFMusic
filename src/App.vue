@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { onMounted } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import MaximizeIcon from './components/Icons/MaximizeIcon.vue';
 import MinimizeIcon from './components/Icons/MinimizeIcon.vue';
@@ -7,8 +8,12 @@ import CloseIcon from './components/Icons/CloseIcon.vue';
 import MainBlock from './components/MainBlock.vue';
 import Player from './components/Player.vue';
 import GithubIcon from './components/Icons/GithubIcon.vue';
+import { useSettings } from './composables/useSettings';
 
 const win = getCurrentWindow();
+const { settings, load } = useSettings();
+
+onMounted(load);
 
 const minimizeWindow = () => win.minimize();
 const maximizeWindow = () => win.toggleMaximize();
@@ -22,7 +27,7 @@ const closeWindow = () => win.close();
       <div class="authorTitle" data-tauri-drag-region>by mel1x</div>
     </div>
     <div class="winControls">
-      <a href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
+      <a v-if="settings.show_github_badge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
       <button class="controlsButton" @click="minimizeWindow"><MinimizeIcon /></button>
       <button class="controlsButton" @click="maximizeWindow"><MaximizeIcon /></button>
       <button class="controlsButton" @click="closeWindow"><CloseIcon /></button>
@@ -44,6 +49,9 @@ const closeWindow = () => win.close();
 }
 svg {
   display: block;
+}
+html {
+  background-color: #0d0d0d;
 }
 body {
   background-color: #0d0d0d;

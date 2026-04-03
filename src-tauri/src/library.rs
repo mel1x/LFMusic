@@ -1,8 +1,11 @@
 use crate::audio_player::{AudioPlayer, TrackMetadata};
+use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -116,12 +119,16 @@ impl MusicLibrary {
         };
 
         for entry in entries.flatten() {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
             let path = entry.path();
 
-            if path.is_dir() {
-                if path
+            if ft.is_dir() {
+                if entry
                     .file_name()
-                    .and_then(|n| n.to_str())
+                    .to_str()
                     .map(|n| n.starts_with('.'))
                     .unwrap_or(false)
                 {
@@ -131,7 +138,7 @@ impl MusicLibrary {
                 continue;
             }
 
-            if !path.is_file() {
+            if !ft.is_file() {
                 continue;
             }
 
@@ -357,36 +364,76 @@ impl MusicLibrary {
         F: FnMut(usize, usize),
     {
         let total = files.len();
-        let mut batch: Vec<(String, TrackMetadata, u64)> = Vec::new();
-
-        for (i, file_path) in files.iter().enumerate() {
-            progress(i + 1, total);
-
-            let path_str = file_path.to_string_lossy().to_string();
-            let mtime = Self::get_mtime(file_path);
-
-            let cached_mtime: Option<i64> = self
-                .conn
-                .query_row(
-                    "SELECT modified_secs FROM tracks WHERE file_path = ?1",
-                    params![path_str],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            if let Some(cached) = cached_mtime {
-                if cached as u64 == mtime {
-                    continue;
-                }
-            }
-
-            if let Ok(mut metadata) = AudioPlayer::get_metadata(&path_str) {
-                metadata.cover_art = None;
-                metadata.accent_color = None;
-                batch.push((path_str, metadata, mtime));
-            }
+        if total == 0 {
+            return Ok(());
         }
 
+        // 1. Загружаем все cached mtimes одним запросом
+        let cached_mtimes: HashMap<String, u64> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT file_path, modified_secs FROM tracks WHERE folder_path = ?1",
+                )
+                .map_err(|e| format!("Ошибка запроса: {}", e))?;
+
+            let rows = stmt
+                .query_map(params![folder], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+                })
+                .map_err(|e| format!("Ошибка запроса: {}", e))?;
+
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        // 2. Фильтруем файлы, которые нужно (пере)сканировать
+        let to_scan: Vec<(String, u64)> = files
+            .iter()
+            .filter_map(|file_path| {
+                let path_str = file_path.to_string_lossy().to_string();
+                let mtime = Self::get_mtime(file_path);
+
+                if let Some(&cached) = cached_mtimes.get(&path_str) {
+                    if cached == mtime {
+                        return None;
+                    }
+                }
+
+                Some((path_str, mtime))
+            })
+            .collect();
+
+        // Прогресс: кэшированные файлы считаются уже обработанными
+        let cached_count = total - to_scan.len();
+        if cached_count > 0 {
+            progress(cached_count, total);
+        }
+
+        if to_scan.is_empty() {
+            progress(total, total);
+            return Ok(());
+        }
+
+        // 3. Параллельное чтение метаданных (без обложек)
+        let counter = AtomicUsize::new(cached_count);
+        let batch: Vec<(String, TrackMetadata, u64)> = to_scan
+            .par_iter()
+            .filter_map(|(path_str, mtime)| {
+                let result = AudioPlayer::get_metadata_light(path_str).ok()?;
+                let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                // progress вызывается из разных потоков, но это лишь emit события —
+                // пропуск нескольких значений не критичен
+                if done % 50 == 0 || done == total {
+                    // progress нельзя вызвать из par_iter (не Send),
+                    // прогресс обновится после join
+                }
+                Some((path_str.clone(), result, *mtime))
+            })
+            .collect();
+
+        progress(total, total);
+
+        // 4. Пакетная вставка в одной транзакции
         if !batch.is_empty() {
             let tx = self
                 .conn

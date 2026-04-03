@@ -632,12 +632,21 @@ impl AudioPlayer {
         cover_art_from_tag(tag)
     }
 
+    /// Извлечь метаданные без обложки и акцентного цвета (для сканирования библиотеки)
+    pub fn get_metadata_light(file_path: &str) -> Result<TrackMetadata, String> {
+        Self::get_metadata_inner(file_path, false)
+    }
+
     /// Извлечь метаданные из аудиофайла.
     ///
     /// Для однозначных форматов (FLAC, MP3, WAV, OGG, ...) открывает файл один раз (lofty).
     /// Symphonia-проба используется только для контейнеров M4A/MP4, где кодек неоднозначен
     /// (AAC vs ALAC).
     pub fn get_metadata(file_path: &str) -> Result<TrackMetadata, String> {
+        Self::get_metadata_inner(file_path, true)
+    }
+
+    fn get_metadata_inner(file_path: &str, with_cover: bool) -> Result<TrackMetadata, String> {
         let path = PathBuf::from(file_path);
         if !path.exists() {
             return Err(format!("Файл не найден: {}", file_path));
@@ -698,9 +707,11 @@ impl AudioPlayer {
                     title = tag.title().map(|s| s.to_string());
                     artist = tag.artist().map(|s| s.to_string());
                     album = tag.album().map(|s| s.to_string());
-                    let (cover, accent) = cover_data_from_tag(tag);
-                    cover_art = cover;
-                    accent_color = accent;
+                    if with_cover {
+                        let (cover, accent) = cover_data_from_tag(tag);
+                        cover_art = cover;
+                        accent_color = accent;
+                    }
                 }
 
                 let properties = tagged_file.properties();
