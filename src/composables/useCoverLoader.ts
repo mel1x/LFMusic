@@ -58,6 +58,9 @@ export function useCoverLoader(options: CoverLoaderOptions) {
                 const preloadOnly = all.filter(p => !visible.includes(p));
                 const ordered = [...visible, ...preloadOnly];
 
+                for (const filePath of coverQueue) {
+                    loadingCovers.delete(filePath);
+                }
                 coverQueue = [];
                 for (const filePath of ordered) {
                     const track = options.getTrackByPath(filePath);

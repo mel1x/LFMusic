@@ -5,10 +5,22 @@ import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
 import { useVirtualScroll } from "./useVirtualScroll";
 import { useCoverLoader } from "./useCoverLoader";
+import router from "../router";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Типы
 // ──────────────────────────────────────────────────────────────────────────────
+
+export interface SavedPlayerState {
+  current_track_path: string | null;
+  position_secs: number;
+  volume: number;
+  shuffled: boolean;
+  repeat_mode: string;
+  queue: string[];
+  active_playlist_source: string | null;
+  current_route: string | null;
+}
 
 export interface TrackMetadata {
   title: string | null;
@@ -248,6 +260,7 @@ export function usePlayer() {
       isLoading.value = true;
       errorMessage.value = "";
       await initFolders();
+      await invoke("library_cleanup");
       trackList.value = await invoke<TrackMetadata[]>("library_get_tracks");
       shuffled.value = false;
       syncPlaybackOrder();
@@ -298,7 +311,7 @@ export function usePlayer() {
 
   // ── Управление плеером ────────────────────────────────────────────────────
 
-  async function playTrack(track: TrackMetadata) {
+  async function playTrack(track: TrackMetadata, _skipAttempt = false) {
     try {
       isLoading.value = true;
       errorMessage.value = "";
@@ -334,6 +347,19 @@ export function usePlayer() {
       positionSecs.value = 0;
       showSettings.value = false;
     } catch (e: any) {
+      // Удаляем недоступный трек из списка и пробуем следующий
+      const failedIdx = trackList.value.findIndex(t => t.file_path === track.file_path);
+      if (failedIdx !== -1) {
+        trackList.value.splice(failedIdx, 1);
+        syncPlaybackOrder();
+      }
+      if (!_skipAttempt && playbackOrder.value.length > 0) {
+        const nextIdx = Math.min(failedIdx, playbackOrder.value.length - 1);
+        if (nextIdx >= 0) {
+          await playTrack(playbackOrder.value[nextIdx], true);
+          return;
+        }
+      }
       errorMessage.value = `Ошибка воспроизведения: ${e}`;
     } finally {
       isLoading.value = false;
@@ -478,6 +504,75 @@ export function usePlayer() {
     }
   }
 
+  // ── Сохранение / восстановление состояния ─────────────────────────────────
+
+  async function saveState() {
+    const state: SavedPlayerState = {
+      current_track_path: currentTrack.value?.file_path ?? null,
+      position_secs: positionSecs.value,
+      volume: volume.value,
+      shuffled: shuffled.value,
+      repeat_mode: repeatMode.value,
+      queue: trackList.value.map(t => t.file_path),
+      active_playlist_source: activePlaylistSource.value,
+      current_route: router.currentRoute.value.path,
+    };
+    try {
+      await invoke("save_player_state", { playerState: state });
+    } catch (e) {
+      console.error("Ошибка сохранения состояния плеера:", e);
+    }
+  }
+
+  async function restoreState() {
+    try {
+      const saved = await invoke<SavedPlayerState>("load_player_state");
+
+      // Восстанавливаем громкость
+      volume.value = saved.volume;
+      await invoke("player_set_volume", { volume: saved.volume });
+
+      // Восстанавливаем режимы
+      shuffled.value = saved.shuffled;
+      repeatMode.value = saved.repeat_mode as "queue" | "track";
+      activePlaylistSource.value = saved.active_playlist_source;
+
+      // Восстанавливаем порядок воспроизведения
+      syncPlaybackOrder();
+
+      // Восстанавливаем маршрут
+      if (saved.current_route && saved.current_route !== router.currentRoute.value.path) {
+        router.replace(saved.current_route);
+      }
+
+      // Восстанавливаем текущий трек (без воспроизведения — на паузе)
+      if (saved.current_track_path) {
+        const track = getTrackByPath(saved.current_track_path);
+        if (track) {
+          // Загружаем трек, но сразу ставим на паузу и перематываем
+          const metadata = await invoke<TrackMetadata>("player_play", { filePath: track.file_path });
+          await invoke("player_pause");
+          if (saved.position_secs > 0) {
+            await invoke("player_seek", { positionSecs: saved.position_secs });
+          }
+          // Используем метаданные от player_play — они содержат accent_color
+          if (!metadata.cover_art && track.cover_art) {
+            metadata.cover_art = track.cover_art;
+          }
+          if (metadata.accent_color) {
+            const idx = getTrackIndex(metadata.file_path);
+            if (idx !== -1) trackList.value[idx].accent_color = metadata.accent_color;
+          }
+          currentTrack.value = metadata;
+          playbackState.value = "Paused";
+          positionSecs.value = saved.position_secs;
+        }
+      }
+    } catch (e) {
+      console.error("Ошибка восстановления состояния плеера:", e);
+    }
+  }
+
   // ── Инициализация (один раз) ─────────────────────────────────────────────
 
   async function init() {
@@ -486,6 +581,7 @@ export function usePlayer() {
 
     await loadSettings();
     await loadLibrary();
+    await restoreState();
     statusInterval = setInterval(pollStatus, 250);
   }
 
@@ -576,6 +672,7 @@ export function usePlayer() {
     toggleRepeat,
     syncPlaybackOrder,
     loadCoversForTracks,
+    saveState,
     destroy,
   };
 }

@@ -1,21 +1,24 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { onMounted, computed } from 'vue';
 import DeleteIcon from '../components/Icons/DeleteIcon.vue';
 import FolderIcon from '../components/Icons/FolderIcon.vue';
 import { useSettings } from '../composables/useSettings';
-import { useFolders } from '../composables/useFolders';
+import { usePlayer } from '../composables/usePlayer';
 import RefreshIcon from '../components/Icons/RefreshIcon.vue';
 import PlusIcon from '../components/Icons/PlusIcon.vue';
 
 const { settings, settingItems, load, save } = useSettings();
 const {
     folders, isScanning, removingFolder, scanProgress,
-    init, addFolder, removeFolder, rescanLibrary, folderDisplayName,
-} = useFolders();
+    addFolder, removeFolder, rescanLibrary, folderDisplayName,
+} = usePlayer();
+
+const sortedFolders = computed(() =>
+    [...folders.value].sort((a, b) => b.track_count - a.track_count)
+);
 
 onMounted(async () => {
     await load();
-    await init();
 });
 
 async function toggle(key: keyof typeof settings.value) {
@@ -65,7 +68,7 @@ async function toggle(key: keyof typeof settings.value) {
                 </div>
 
                 <div
-                    v-for="folder in folders"
+                    v-for="folder in sortedFolders"
                     :key="folder.path"
                     class="folderElem"
                     :class="{ 'folderMissing': !folder.exists }"

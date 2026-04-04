@@ -1,9 +1,11 @@
 mod audio_player;
 mod library;
+mod player_state;
 mod settings;
 
 use audio_player::{AudioPlayer, PlayerStatus, TrackMetadata};
 use library::{FolderInfo, MusicLibrary};
+use player_state::SavedPlayerState;
 use settings::AppSettings;
 use std::path::PathBuf;
 use std::sync::{Mutex, RwLock};
@@ -161,6 +163,13 @@ fn library_get_tracks(state: State<LibraryState>) -> Result<Vec<TrackMetadata>, 
     Ok(library.get_all_tracks())
 }
 
+/// Удалить из кэша треки, файлы которых больше не существуют на диске
+#[tauri::command]
+fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
+    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.cleanup_missing_tracks()
+}
+
 /// Пересканировать все папки: обновить изменённые файлы, удалить несуществующие
 #[tauri::command]
 async fn library_rescan(
@@ -194,6 +203,25 @@ fn save_settings(state: State<SettingsState>, settings: AppSettings) -> Result<(
     settings::save(&state.1, &settings)?;
     state.0 = settings;
     Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Команды состояния плеера
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn save_player_state(
+    state: State<SettingsState>,
+    player_state: SavedPlayerState,
+) -> Result<(), String> {
+    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    player_state::save(&settings.1, &player_state)
+}
+
+#[tauri::command]
+fn load_player_state(state: State<SettingsState>) -> Result<SavedPlayerState, String> {
+    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(player_state::load(&settings.1))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -243,10 +271,14 @@ pub fn run() {
             library_add_folder,
             library_remove_folder,
             library_get_tracks,
+            library_cleanup,
             library_rescan,
             // Настройки
             get_settings,
             save_settings,
+            // Состояние плеера
+            save_player_state,
+            load_player_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

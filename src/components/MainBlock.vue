@@ -38,6 +38,7 @@ aside {
   height: calc(100vh - 38px - 104px);
 }
 .navLink {
+  user-select: none;
   display: flex;
   flex-direction: row;
   align-items: center;

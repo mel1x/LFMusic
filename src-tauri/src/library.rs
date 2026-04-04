@@ -259,6 +259,45 @@ impl MusicLibrary {
         Ok(())
     }
 
+    /// Удаляет из кэша треки, файлы которых больше не существуют на диске
+    pub fn cleanup_missing_tracks(&mut self) -> Result<usize, String> {
+        let all_paths: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT file_path FROM tracks")
+                .map_err(|e| format!("Ошибка: {}", e))?;
+
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("Ошибка: {}", e))?;
+
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let dead: Vec<String> = all_paths
+            .into_iter()
+            .filter(|p| !PathBuf::from(p).exists())
+            .collect();
+
+        let count = dead.len();
+        if !dead.is_empty() {
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(|e| format!("Ошибка транзакции: {}", e))?;
+
+            for path in &dead {
+                tx.execute("DELETE FROM tracks WHERE file_path = ?1", params![path])
+                    .ok();
+            }
+
+            tx.commit()
+                .map_err(|e| format!("Ошибка коммита: {}", e))?;
+        }
+
+        Ok(count)
+    }
+
     pub fn get_all_tracks(&self) -> Vec<TrackMetadata> {
         let mut stmt = match self.conn.prepare(
             "SELECT file_path, title, artist, album, duration_secs,

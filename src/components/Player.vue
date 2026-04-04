@@ -89,7 +89,9 @@ const progressFillPercent = computed(() => {
 
 const codecDisplay = computed(() => {
     if (!currentTrack.value) return '';
-    return currentTrack.value.format?.toUpperCase() || '';
+    const fmt = currentTrack.value.format || '';
+    const match = fmt.match(/\(([^)]+)\)/);
+    return (match ? match[1] : fmt).toUpperCase();
 });
 
 const playerControlsEl = ref<HTMLElement | null>(null)
@@ -165,12 +167,14 @@ function onPlayerRipple(e: MouseEvent) {
                     <button
                         class="shuffleBtn"
                         :class="{ active: shuffled }"
+                        :disabled="!currentTrack"
                         @click="toggleShuffle"
                     >
                         <ShuffleIcon />
                     </button>
                     <button
                         class="prevBtn"
+                        :disabled="!currentTrack"
                         @click="playPrev"
                     >
                         <PrevIcon />
@@ -178,14 +182,15 @@ function onPlayerRipple(e: MouseEvent) {
                     <button
                         class="playBtn"
                         @click="togglePlayPause"
-                        :disabled="isStopped || isLoading"
+                        :disabled="isStopped && !isLoading"
                         :style="currentAccentColor ? { '--accent-color': currentAccentColor } as any : {}"
                     >
-                        <PauseIcon v-if="isPlaying" />
-                        <PlayIcon v-else />
+                        <PauseIcon style="margin-left:1.5px;" v-if="isPlaying" />
+                        <PlayIcon style="margin-left:1.5px;" v-else />
                     </button>
                     <button
                         class="nextBtn"
+                        :disabled="!currentTrack"
                         @click="playNext()"
                     >
                         <NextIcon />
@@ -193,6 +198,7 @@ function onPlayerRipple(e: MouseEvent) {
                     <button
                         class="repeatBtn"
                         :class="{ active: repeatMode === 'track' }"
+                        :disabled="!currentTrack"
                         @click="toggleRepeat"
                     >
                         <RepeatOneIcon v-if="repeatMode === 'track'" />
@@ -200,8 +206,8 @@ function onPlayerRipple(e: MouseEvent) {
                     </button>
                 </div>
                 <div class="additionalControls">
-                    <div class="queueList"><ListIcon /></div>
-                    <div class="codecInfo" v-if="codecDisplay">{{ codecDisplay }}</div>
+                    <div v-if="currentTrack" class="queueList"><ListIcon /></div>
+                    <div class="codecInfo" v-if="currentTrack && codecDisplay">{{ codecDisplay }}</div>
                     <div
                         class="volumeControl"
                         @click="toggleMute"
@@ -481,6 +487,10 @@ function onPlayerRipple(e: MouseEvent) {
         color: hsla(0, 0%, 100%, 0.8);
     }
 }
+.shuffleBtn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+}
 .shuffleBtn.active {
     color: hsla(0, 0%, 100%, 0.95);
 }
@@ -544,6 +554,10 @@ function onPlayerRipple(e: MouseEvent) {
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
     }
+}
+.repeatBtn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
 }
 .repeatBtn.active {
     color: hsla(0, 0%, 100%, 0.95);

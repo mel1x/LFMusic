@@ -9,22 +9,27 @@ import MainBlock from './components/MainBlock.vue';
 import Player from './components/Player.vue';
 import GithubIcon from './components/Icons/GithubIcon.vue';
 import { useSettings } from './composables/useSettings';
+import { usePlayer } from './composables/usePlayer';
 
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
+const { saveState, currentTrack } = usePlayer();
 
 onMounted(load);
 
 const minimizeWindow = () => win.minimize();
 const maximizeWindow = () => win.toggleMaximize();
-const closeWindow = () => win.close();
+const closeWindow = async () => {
+  await saveState();
+  win.close();
+};
 </script>
 
 <template>
   <div class="hat" data-tauri-drag-region>
     <div class="winTitle">
-      <div class="mainTitle" data-tauri-drag-region>LFMusic</div>
-      <div class="authorTitle" data-tauri-drag-region>by mel1x</div>
+      <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
+      <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.artist || 'Неизвестный исполнитель') : 'by mel1x' }}</div>
     </div>
     <div class="winControls">
       <a v-if="settings.show_github_badge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
@@ -66,11 +71,11 @@ body {
   background-color: #0d0d0d;
 }
 .winTitle {
-  margin-top: 2px;
+  margin-top: 8px;
   padding: 0px 20px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 3px;
 }
 .mainTitle {
   user-select: none;

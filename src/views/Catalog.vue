@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 import MoreIcon from '../components/Icons/MoreIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
@@ -10,6 +10,7 @@ import defaultCover from '../assets/trackCover.png';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
+import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 
 const {
     trackList,
@@ -43,6 +44,13 @@ const focusSearch = () => {
     searchInput.value?.focus()
 }
 
+function clearSearch() {
+    rawSearch.value = ''
+    debouncedSearch.value = ''
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+    searchInput.value?.focus()
+}
+
 const filteredTracks = computed(() => {
     const q = debouncedSearch.value.toLowerCase().trim()
     if (!q) return trackList.value
@@ -54,6 +62,28 @@ const filteredTracks = computed(() => {
     })
 })
 
+// ── Header height (for virtual scroll offset) ─────────────────────────────
+
+const scrollHeaderRef = ref<HTMLElement | null>(null)
+const scrollHeaderHeight = ref(0)
+let headerResizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+    if (scrollHeaderRef.value) {
+        scrollHeaderHeight.value = scrollHeaderRef.value.offsetHeight
+        headerResizeObserver = new ResizeObserver(() => {
+            if (scrollHeaderRef.value) {
+                scrollHeaderHeight.value = scrollHeaderRef.value.offsetHeight
+            }
+        })
+        headerResizeObserver.observe(scrollHeaderRef.value)
+    }
+})
+
+onUnmounted(() => {
+    headerResizeObserver?.disconnect()
+})
+
 // ── Virtual scroll ──────────────────────────────────────────────────────────
 
 const {
@@ -63,7 +93,7 @@ const {
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5 })
+} = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
 
 // Reset scroll on search change
 watch(debouncedSearch, () => {
@@ -113,42 +143,48 @@ function onCoverClick(track: TrackMetadata) {
 </script>
 
 <template>
-    <div class="pageRoot">
-        <div class="pageHat">
-            <div class="cover"></div>
-            <div class="dataZone">
-                <div class="info">
-                    <div class="listType">Библиотека</div>
-                    <h2 class="listName">Мой каталог</h2>
-                    <div class="listCount" v-if="trackList.length > 0">{{ trackList.length }} треков</div>
+    <div class="pageRoot" ref="trackListEl" @scroll="onScroll">
+        <div ref="scrollHeaderRef" class="scrollHeader">
+            <div class="pageHat">
+                <div class="cover"></div>
+                <div class="dataZone">
+                    <div class="info">
+                        <div class="listType">Библиотека</div>
+                        <h2 class="listName">Мой каталог</h2>
+                        <div class="listCount" v-if="trackList.length > 0">{{ trackList.length }} треков</div>
+                    </div>
+                    <div class="controls">
+                        <button class="playListBtn" @click="onPlayCatalog">
+                            <PauseIcon v-if="isCatalogActive && isPlaying" width="14" height="14" />
+                            <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
+                            Слушать
+                        </button>
+                        <button class="moreOptionsBtn"><MoreIcon width="22" height="22" /></button>
+                    </div>
                 </div>
-                <div class="controls">
-                    <button class="playListBtn" @click="onPlayCatalog">
-                        <PauseIcon v-if="isCatalogActive && isPlaying" width="14" height="14" />
-                        <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                        Слушать
-                    </button>
-                    <button class="moreOptionsBtn"><MoreIcon width="22" height="22" /></button>
+            </div>
+            <div class="searchZone">
+                <SearchIcon class="searchIcon" @click="focusSearch" />
+                <input
+                    ref="searchInput"
+                    type="text"
+                    class="search"
+                    name="search"
+                    id="search"
+                    placeholder="Поиск трека"
+                    autocomplete="off"
+                    :value="rawSearch"
+                    @input="onSearchInput"
+                />
+                <div class="searchClear" v-if="rawSearch" @click="clearSearch">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
                 </div>
             </div>
         </div>
-        <div class="searchZone">
-            <SearchIcon @click="focusSearch" />
-            <input
-                ref="searchInput"
-                type="text"
-                class="search"
-                name="search"
-                id="search"
-                placeholder="Поиск трека"
-                :value="rawSearch"
-                @input="onSearchInput"
-            />
-        </div>
         <div
             class="tracksList"
-            ref="trackListEl"
-            @scroll="onScroll"
             v-if="filteredTracks.length > 0"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
@@ -156,7 +192,10 @@ function onCoverClick(track: TrackMetadata) {
                 v-for="track in visibleTracks"
                 :key="track.file_path"
                 class="trackElem"
-                :class="{ active: currentTrack?.file_path === track.file_path }"
+                :class="{
+                    active: currentTrack?.file_path === track.file_path,
+                    activePaused: currentTrack?.file_path === track.file_path && !isPlaying,
+                }"
 
 
                 @click="onTrackClick($event)"
@@ -195,10 +234,15 @@ function onCoverClick(track: TrackMetadata) {
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
         <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0">
+            <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Ничего не найдено</div>
+            <div class="emptyDesc">Попробуйте изменить критерии поиска или добавить папки с треками в настройках.</div>
         </div>
         <div class="emptyState" v-else-if="trackList.length === 0">
-            <div class="emptyText">Нет треков в библиотеке</div>
+            <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
+            <div class="emptyText">Нет треков в каталоге</div>
+            <div class="emptyDesc">Добавьте папки с треками в настройках, чтобы они появились здесь.</div>
+            <RouterLink to="/settings" class="emptyBtn">Настройки</RouterLink>
         </div>
     </div>
 </template>
@@ -211,7 +255,13 @@ function onCoverClick(track: TrackMetadata) {
     width: 100%;
     height: 100%;
     background-color: #101010;
-    overflow: hidden;
+    overflow-y: scroll;
+}
+.pageRoot::-webkit-scrollbar { width: 6px; }
+.pageRoot::-webkit-scrollbar-track { background: transparent; }
+.pageRoot::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 3px;
 }
 .pageHat {
     display: flex;
@@ -331,7 +381,7 @@ function onCoverClick(track: TrackMetadata) {
     width: 100%;
     flex-shrink: 0;
 }
-.searchZone svg {
+.searchIcon {
     cursor: text;
     position: absolute;
     top: 50%;
@@ -344,14 +394,34 @@ function onCoverClick(track: TrackMetadata) {
         color: #909090;
     }
 }
-.searchZone:hover svg {
+.searchZone:hover .searchIcon {
     color: #909090;
+}
+.searchClear {
+    position: absolute;
+    height: max-content;
+    width: max-content;
+    top: 50%;
+    right: 9px;
+    transform: translateY(-50%);
+    cursor: pointer;
+    color: hsla(0, 0%, 100%, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    border-radius: 50%;
+    transition: .24s ease;
+
+    &:hover {
+        color: hsla(0, 0%, 100%, 0.6);
+    }
 }
 .search {
     width: 100%;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.04);
-    padding: 10px 16px 11px 40px;
+    padding: 10px 36px 11px 40px;
     font-size: 13px;
     font-weight: 400;
     color: hsla(0, 0%, 100%, 0.9);
@@ -364,15 +434,6 @@ function onCoverClick(track: TrackMetadata) {
 }
 .tracksList {
     margin-top: 28px;
-    flex: 1;
-    overflow-y: auto;
-    min-height: 0;
-}
-.tracksList::-webkit-scrollbar { width: 6px; }
-.tracksList::-webkit-scrollbar-track { background: transparent; }
-.tracksList::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.12);
-    border-radius: 3px;
 }
 .vsPad {
     width: 100%;
@@ -426,7 +487,8 @@ function onCoverClick(track: TrackMetadata) {
     object-fit: cover;
     display: block;
 }
-.trackElem:hover .trackCover {
+.trackElem:hover .trackCover,
+.trackElem.activePaused .trackCover {
     opacity: 0.5;
 }
 .trackElem.active .trackCover {
@@ -445,7 +507,8 @@ function onCoverClick(track: TrackMetadata) {
     transition: .31s ease;
     z-index: 3;
 }
-.trackElem:hover .hoverIcon {
+.trackElem:hover .hoverIcon,
+.trackElem.activePaused .hoverIcon {
     opacity: 1;
 }
 .hoverOptionsBtn {
@@ -505,6 +568,7 @@ function onCoverClick(track: TrackMetadata) {
     user-select: none;
     font-size: 14px;
     font-weight: 500;
+    font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.45);
     transition: .24s ease;
     flex-shrink: 0;
@@ -535,12 +599,51 @@ function onCoverClick(track: TrackMetadata) {
 .emptyState {
     flex: 1;
     display: flex;
+    gap: 10px;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
 }
+.emptyIcon {
+    padding: 6px;
+    border-radius: 5px;
+    background-color: hsla(0, 0%, 100%, 0.09);
+    color: #ffffff;
+}
 .emptyText {
-    font-size: 14px;
+    user-select: none;
+    font-size: 13px;
     font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.7);
+
+    transition: .24s ease;
+
+    &:hover {
+        color: hsla(0, 0%, 100%, 0.8);
+    }
+}
+.emptyDesc {
+    user-select: none;
+    text-align: center;
+    max-width: 270px;
+    font-size: 13px;
+    font-weight: 400;
     color: hsla(0, 0%, 100%, 0.3);
+}
+.emptyBtn {
+    user-select: none;
+    margin-top: 4px;
+    cursor: pointer;
+    padding: 8px 20px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.05);
+    color: hsla(0, 0%, 100%, 1);
+    font-size: 12px;
+    font-weight: 500;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(0, 0%, 100%, 0.07);
+    }
 }
 </style>
