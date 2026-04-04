@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import ViewFrame from './ViewFrame.vue';
-import CloseIcon from './Icons/CloseIcon.vue';
+import SearchIcon from './Icons/SearchIcon.vue';
+import CatalogIcon from './Icons/CatalogIcon.vue';
+import CollectionIcon from './Icons/CollectionIcon.vue';
+import SettingsIcon from './Icons/SettingsIcon.vue';
+import HomeIcon from './Icons/HomeIcon.vue';
 </script>
 
 <template>
   <div class="mainWrapper">
     <aside>
-      <RouterLink to="/search" class="navLink"><CloseIcon />Поиск</RouterLink>
-      <RouterLink to="/" class="navLink"><CloseIcon />Главная</RouterLink>
-      <RouterLink to="/catalog" class="navLink"><CloseIcon />Каталог</RouterLink>
-      <RouterLink to="/collections" class="navLink"><CloseIcon />Коллекция</RouterLink>
-      <RouterLink to="/settings" class="navLink"><CloseIcon />Настройки</RouterLink>
-      <RouterLink to="/test" class="navLink"><CloseIcon />Audio Player</RouterLink>
+      <RouterLink to="/search" class="navLink"><SearchIcon width="24" height="24" stroke-width="2.25" />Поиск</RouterLink>
+      <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" />Главная</RouterLink>
+      <RouterLink to="/collections" class="navLink"><CollectionIcon width="24" height="24" stroke-width="2.25" />Коллекция</RouterLink>
+      <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2.25" />Каталог</RouterLink>
+      <RouterLink to="/settings" class="navLink"><SettingsIcon width="24" height="24" stroke-width="2.25" />Настройки</RouterLink>
     </aside>
     <div class="frameWrapper">
       <ViewFrame>
@@ -45,14 +48,25 @@ aside {
   padding: 10px 14px;
   font-size: 16px;
 
-  transition: .2s;
+  transition: .2s ease;
 
   &:hover {
     color: hsla(0, 0%, 100%, 0.95);
   }
 }
+.navLink svg {
+  color: #6d6d6d;
+  transition: .2s ease;
+
+  .navLink:hover & {
+    color: #fff;
+  }
+}
 .navLink.router-link-active {
   color: hsla(0, 0%, 100%, 0.95);
+}
+.navLink.router-link-active svg {
+  color: #fff;
 }
 .frameWrapper {
   width: calc(100% - 260px - 12px);

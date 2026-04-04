@@ -254,6 +254,7 @@ async function toggle(key: keyof typeof settings.value) {
     flex-direction: row;
     gap: 7px;
     align-items: center;
+    margin-bottom: 3px;
 }
 .addFolder {
     user-select: none;

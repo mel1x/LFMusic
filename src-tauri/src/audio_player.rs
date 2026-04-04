@@ -1,5 +1,5 @@
 use base64::Engine;
-use image::GenericImageView;
+
 use lofty::picture::PictureType;
 use lofty::prelude::*;
 use lofty::probe::Probe;
@@ -39,7 +39,7 @@ pub struct TrackMetadata {
 }
 
 /// Состояние воспроизведения
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum PlaybackState {
     Stopped,
     Playing,
@@ -84,6 +84,13 @@ enum AudioCmd {
         current_pos: f64,
         volume: f32,
         was_paused: bool,
+        crossfade_secs: f64,
+        resp: Resp,
+    },
+    PlayCrossfade {
+        file_path: String,
+        seek_secs: f64,
+        volume: f32,
         crossfade_secs: f64,
         resp: Resp,
     },
@@ -283,63 +290,132 @@ fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
 }
 
 /// Извлечь акцентный цвет из сырых байтов изображения.
-/// Уменьшает изображение, отбирает наиболее насыщенный и яркий цвет.
+/// Использует auto-palette, затем выбирает наиболее подходящий для фона цвет:
+/// насыщенный, но не слишком яркий и не слишком тёмный (lightness 0.25–0.55).
+/// Если auto-palette не смог извлечь палитру — fallback на средний цвет.
 fn extract_accent_color(image_data: &[u8]) -> Option<String> {
     let img = image::load_from_memory(image_data).ok()?;
     let thumb = img.thumbnail(64, 64);
+    extract_via_palette(&thumb)
+}
 
-    let mut best_color = (0u8, 0u8, 0u8);
-    let mut best_score: f32 = -1.0;
+fn extract_via_palette(thumb: &image::DynamicImage) -> Option<String> {
+    use auto_palette::{ImageData, Palette, Swatch, Theme};
 
-    for (_x, _y, pixel) in thumb.pixels() {
-        let [r, g, b, _a] = pixel.0;
-        let rf = r as f32 / 255.0;
-        let gf = g as f32 / 255.0;
-        let bf = b as f32 / 255.0;
+    let image_data = ImageData::try_from(thumb).ok()?;
+    let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
 
-        let max_c = rf.max(gf).max(bf);
-        let min_c = rf.min(gf).min(bf);
-        let delta = max_c - min_c;
-
-        // Насыщенность (HSV)
-        let saturation = if max_c > 0.0 { delta / max_c } else { 0.0 };
-        let lightness = (max_c + min_c) / 2.0;
-
-        // Отсеиваем слишком тёмные, слишком светлые и серые пиксели
-        if lightness < 0.15 || lightness > 0.85 || saturation < 0.2 {
-            continue;
-        }
-
-        // Предпочитаем насыщенные цвета средней яркости
-        let score = saturation * 2.0 + (1.0 - (lightness - 0.5).abs() * 2.0);
-        if score > best_score {
-            best_score = score;
-            best_color = (r, g, b);
+    let mut candidates: Vec<Swatch<f64>> = Vec::new();
+    for theme in [Theme::Muted, Theme::Dark, Theme::Colorful] {
+        if let Ok(swatches) = palette.find_swatches_with_theme(5, theme) {
+            candidates.extend(swatches);
         }
     }
 
-    if best_score < 0.0 {
-        // Фоллбэк: средний цвет
-        let (mut sr, mut sg, mut sb) = (0u64, 0u64, 0u64);
-        let mut count = 0u64;
-        for (_x, _y, pixel) in thumb.pixels() {
-            let [r, g, b, _a] = pixel.0;
-            sr += r as u64;
-            sg += g as u64;
-            sb += b as u64;
-            count += 1;
-        }
-        if count == 0 {
-            return None;
-        }
-        best_color = (
-            (sr / count) as u8,
-            (sg / count) as u8,
-            (sb / count) as u8,
-        );
+    let best = candidates.iter().max_by(|a, b| {
+        let score = |s: &Swatch<f64>| -> f64 {
+            let rgb = s.color().to_rgb();
+            let (hue, saturation, lightness) = rgb_to_hsl(rgb.r, rgb.g, rgb.b);
+
+            let lightness_penalty = if lightness < 0.25 {
+                (0.25 - lightness) * 4.0
+            } else if lightness > 0.55 {
+                (lightness - 0.55) * 4.0
+            } else {
+                0.0
+            };
+
+            let yellow_penalty = if (30.0..=70.0).contains(&hue) {
+                0.6
+            } else {
+                0.0
+            };
+
+            saturation * 0.6 + (1.0 - lightness_penalty) * 0.4 - yellow_penalty
+        };
+        score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+
+    let rgb = best.color().to_rgb();
+    let (r, g, b) = adjust_for_background(rgb.r, rgb.g, rgb.b);
+    Some(format!("#{:02X}{:02X}{:02X}", r, g, b))
+}
+
+/// Конвертировать RGB -> HSL
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let rf = r as f64 / 255.0;
+    let gf = g as f64 / 255.0;
+    let bf = b as f64 / 255.0;
+
+    let max_c = rf.max(gf).max(bf);
+    let min_c = rf.min(gf).min(bf);
+    let delta = max_c - min_c;
+    let lightness = (max_c + min_c) / 2.0;
+
+    let hue = if delta == 0.0 {
+        0.0
+    } else if max_c == rf {
+        60.0 * (((gf - bf) / delta) % 6.0)
+    } else if max_c == gf {
+        60.0 * ((bf - rf) / delta + 2.0)
+    } else {
+        60.0 * ((rf - gf) / delta + 4.0)
+    };
+    let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+
+    let sat = if delta == 0.0 {
+        0.0
+    } else {
+        delta / (1.0 - (2.0 * lightness - 1.0).abs())
+    };
+
+    (hue, sat, lightness)
+}
+
+/// Конвертировать HSL -> RGB
+fn hsl_to_rgb(hue: f64, sat: f64, lightness: f64) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * lightness - 1.0).abs()) * sat.min(1.0);
+    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let m = lightness - c / 2.0;
+
+    let (r1, g1, b1) = match (hue as u32) / 60 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    (
+        ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+/// Подогнать цвет под фон: зажать яркость и насыщенность в комфортный диапазон.
+fn adjust_for_background(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let (mut hue, mut sat, mut lightness) = rgb_to_hsl(r, g, b);
+
+    // Сдвигаем жёлтые оттенки (30°–70°) в сторону тёплого оранжевого (~25°)
+    if (30.0..=70.0).contains(&hue) {
+        hue = 25.0 + (hue - 30.0) * 0.1; // 30°–70° -> 25°–29°
     }
 
-    Some(format!("#{:02X}{:02X}{:02X}", best_color.0, best_color.1, best_color.2))
+    // Зажимаем яркость в диапазон 0.22–0.50
+    lightness = lightness.clamp(0.22, 0.50);
+
+    // Ограничиваем максимальную насыщенность — убираем кислотность.
+    // Зелёный диапазон (80°–180°) склонен к токсичности.
+    let max_sat = if (80.0..=180.0).contains(&hue) {
+        0.45
+    } else {
+        0.55
+    };
+    sat = sat.min(max_sat);
+
+    hsl_to_rgb(hue, sat, lightness)
 }
 
 /// Извлечь обложку и акцентный цвет из lofty тега
@@ -450,6 +526,9 @@ fn audio_thread_loop(
     stream_handle: OutputStreamHandle,
 ) {
     let mut sink: Option<Sink> = None;
+    // Предыдущий fade-out sink — при новом crossfade старый немедленно останавливается,
+    // что ограничивает количество одновременных fade-потоков до одного.
+    let mut fadeout_sink: Option<Sink> = None;
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -481,6 +560,7 @@ fn audio_thread_loop(
             AudioCmd::Stop => {
                 if let Some(ref s) = sink { s.stop(); }
                 sink = None;
+                if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
             }
 
             AudioCmd::SetVolume(vol) => {
@@ -508,7 +588,10 @@ fn audio_thread_loop(
                 let result = (|| -> Result<(), String> {
                     let dur = Duration::from_secs_f64(crossfade_secs);
 
-                    // Fade-out на отдельном sink, уходит в фон
+                    // Останавливаем предыдущий fade-out, если есть
+                    if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
+
+                    // Fade-out на отдельном sink
                     let fade_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка fade-out sink: {}", e))?;
                     fade_sink.set_volume(volume);
@@ -518,7 +601,8 @@ fn audio_thread_loop(
                     ));
 
                     if let Some(ref old) = sink { old.stop(); }
-                    std::thread::spawn(move || { fade_sink.sleep_until_end(); });
+                    // Сохраняем fade-out sink вместо создания потока — rodio проигрывает его в фоне
+                    fadeout_sink = Some(fade_sink);
 
                     // Новый sink с fade-in
                     let new_sink = Sink::try_new(&stream_handle)
@@ -529,6 +613,33 @@ fn audio_thread_loop(
                             .fade_in(dur),
                     );
                     if was_paused { new_sink.pause(); }
+                    sink = Some(new_sink);
+                    Ok(())
+                })();
+                let _ = resp.send(result);
+            }
+
+            AudioCmd::PlayCrossfade {
+                file_path, seek_secs, volume, crossfade_secs, resp,
+            } => {
+                let result = (|| -> Result<(), String> {
+                    let dur = Duration::from_secs_f64(crossfade_secs);
+
+                    // Останавливаем предыдущий fade-out, если есть
+                    if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
+
+                    // Останавливаем старый sink — fade-in на новом треке
+                    // обеспечивает плавный переход
+                    if let Some(old_sink) = sink.take() { old_sink.stop(); }
+
+                    // Новый sink с fade-in
+                    let new_sink = Sink::try_new(&stream_handle)
+                        .map_err(|e| format!("Ошибка нового sink: {}", e))?;
+                    new_sink.set_volume(volume);
+                    new_sink.append(
+                        SymphoniaSource::new_with_seek(&file_path, seek_secs)?
+                            .fade_in(dur),
+                    );
                     sink = Some(new_sink);
                     Ok(())
                 })();
@@ -740,14 +851,9 @@ impl AudioPlayer {
         })
     }
 
-    /// Получить список поддерживаемых форматов
-    pub fn supported_formats() -> Vec<String> {
-        vec![
-            "flac".to_string(), "wav".to_string(), "mp3".to_string(),
-            "ogg".to_string(), "aac".to_string(), "m4a".to_string(),
-            "mp4".to_string(), "aiff".to_string(), "aif".to_string(),
-            "opus".to_string(),
-        ]
+    /// Получить список поддерживаемых форматов (статический срез)
+    pub fn supported_formats() -> &'static [&'static str] {
+        &["flac", "wav", "mp3", "ogg", "aac", "m4a", "mp4", "aiff", "aif", "opus"]
     }
 
     // ── Управление воспроизведением ─────────────────────────────────────────
@@ -755,6 +861,29 @@ impl AudioPlayer {
     /// Загрузить и воспроизвести файл
     pub fn play(&mut self, file_path: &str) -> Result<TrackMetadata, String> {
         self.play_from(file_path, 0.0)
+    }
+
+    pub fn play_crossfade(&mut self, file_path: &str, crossfade_secs: f64) -> Result<TrackMetadata, String> {
+        if crossfade_secs <= 0.0 || self.state == PlaybackState::Stopped {
+            return self.play(file_path);
+        }
+
+        let metadata = Self::get_metadata(file_path)?;
+
+        self.send(|resp| AudioCmd::PlayCrossfade {
+            file_path: file_path.to_string(),
+            seek_secs: 0.0,
+            volume: self.volume,
+            crossfade_secs,
+            resp,
+        })?;
+
+        self.current_track = Some(metadata.clone());
+        self.state = PlaybackState::Playing;
+        self.playback_started_at = Some(Instant::now());
+        self.accumulated_position = 0.0;
+
+        Ok(metadata)
     }
 
     fn play_from(&mut self, file_path: &str, seek_secs: f64) -> Result<TrackMetadata, String> {
@@ -902,7 +1031,7 @@ impl AudioPlayer {
         }
 
         PlayerStatus {
-            state: self.state.clone(),
+            state: self.state,
             volume: self.volume,
             position_secs: self.get_position(),
             current_file_path: self.current_track.as_ref().map(|t| t.file_path.clone()),

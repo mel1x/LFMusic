@@ -1,7 +1,10 @@
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+import { useSettings } from "./useSettings";
+import { useFolders } from "./useFolders";
+import { useVirtualScroll } from "./useVirtualScroll";
+import { useCoverLoader } from "./useCoverLoader";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Типы
@@ -30,11 +33,6 @@ export interface PlayerStatus {
   current_file_path: string | null;
 }
 
-export interface FolderInfo {
-  path: string;
-  track_count: number;
-  exists: boolean;
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Утилиты
@@ -52,57 +50,93 @@ function formatTime(seconds: number): string {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Singleton state (shared between all consumers)
+// ──────────────────────────────────────────────────────────────────────────────
+
+const currentTrack = ref<TrackMetadata | null>(null);
+const playbackState = ref<"Stopped" | "Playing" | "Paused">("Stopped");
+const volume = ref(1.0);
+const positionSecs = ref(0);
+const isLoading = ref(false);
+const errorMessage = ref("");
+const trackList = ref<TrackMetadata[]>([]);
+const isSeeking = ref(false);
+const seekValue = ref(0);
+let statusInterval: ReturnType<typeof setInterval> | null = null;
+let isHandlingTrackEnd = false;
+
+// Shuffle / Repeat
+const shuffled = ref(false);
+const repeatMode = ref<"queue" | "track">("queue");
+const playbackOrder = ref<TrackMetadata[]>([]);
+
+// Состояние библиотеки / настроек
+const showSettings = ref(false);
+
+// Active playlist source (used to know if catalog playlist is active)
+const activePlaylistSource = ref<string | null>(null);
+
+// Initialization flag
+let initialized = false;
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Composable
 // ──────────────────────────────────────────────────────────────────────────────
 
 export function usePlayer() {
-  // Состояние плеера
-  const currentTrack = ref<TrackMetadata | null>(null);
-  const playbackState = ref<"Stopped" | "Playing" | "Paused">("Stopped");
-  const volume = ref(1.0);
-  const positionSecs = ref(0);
-  const isLoading = ref(false);
-  const errorMessage = ref("");
-  const trackList = ref<TrackMetadata[]>([]);
-  const isSeeking = ref(false);
-  const seekValue = ref(0);
-  let statusInterval: ReturnType<typeof setInterval> | null = null;
-  let isHandlingTrackEnd = false;
+  const { settings, load: loadSettings } = useSettings();
+  const {
+    folders, isScanning, removingFolder, scanProgress,
+    init: initFolders, addFolder: addFolderRaw, removeFolder: removeFolderRaw,
+    rescanLibrary: rescanLibraryRaw, folderDisplayName,
+  } = useFolders();
 
-  // Shuffle / Repeat
-  const shuffled = ref(false);
-  const repeatMode = ref<"queue" | "track">("queue");
-  let originalOrder: TrackMetadata[] = [];
+  // ── Track map для O(1) поиска по file_path ──────────────────────────────
+
+  const trackMap = computed(() => new Map(trackList.value.map(t => [t.file_path, t])));
+
+  function getTrackByPath(filePath: string): TrackMetadata | undefined {
+    return trackMap.value.get(filePath);
+  }
+
+  function getTrackIndex(filePath: string): number {
+    return trackList.value.findIndex(t => t.file_path === filePath);
+  }
+
+  // ── Shuffle/Repeat helpers ────────────────────────────────────────────────
+
+  function buildShuffledOrder(excludeCurrentFromStart = false) {
+    const current = currentTrack.value;
+    const arr = excludeCurrentFromStart
+      ? [...trackList.value]
+      : trackList.value.filter(t => t.file_path !== current?.file_path);
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    if (excludeCurrentFromStart && current && arr[0]?.file_path === current.file_path) {
+      const swapIdx = 1 + Math.floor(Math.random() * (arr.length - 1));
+      [arr[0], arr[swapIdx]] = [arr[swapIdx], arr[0]];
+    }
+    playbackOrder.value = (!excludeCurrentFromStart && current) ? [current, ...arr] : arr;
+  }
+
+  function syncPlaybackOrder() {
+    if (shuffled.value) {
+      buildShuffledOrder();
+    } else {
+      playbackOrder.value = trackList.value;
+    }
+  }
 
   function toggleShuffle() {
     shuffled.value = !shuffled.value;
-    if (shuffled.value) {
-      originalOrder = [...trackList.value];
-      const current = currentTrack.value;
-      const rest = trackList.value.filter(t => t.file_path !== current?.file_path);
-      for (let i = rest.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [rest[i], rest[j]] = [rest[j], rest[i]];
-      }
-      trackList.value = current ? [current, ...rest] : rest;
-    } else {
-      if (originalOrder.length) trackList.value = originalOrder;
-      originalOrder = [];
-    }
+    syncPlaybackOrder();
   }
 
   function toggleRepeat() {
     repeatMode.value = repeatMode.value === "queue" ? "track" : "queue";
   }
-
-  // Состояние библиотеки / настроек
-  const showSettings = ref(false);
-  const folders = ref<FolderInfo[]>([]);
-  const isScanning = ref(false);
-  const scanMessage = ref("");
-  const removingFolder = ref<string | null>(null);
-  const scanProgress = ref({ current: 0, total: 0, percent: 0 });
-  let unlistenScanProgress: UnlistenFn | null = null;
 
   // ── Computed ──────────────────────────────────────────────────────────────
 
@@ -145,15 +179,15 @@ export function usePlayer() {
 
   const currentTrackIndex = computed(() => {
     if (!currentTrack.value) return -1;
-    return trackList.value.findIndex(t => t.file_path === currentTrack.value!.file_path);
+    return playbackOrder.value.findIndex(t => t.file_path === currentTrack.value!.file_path);
   });
 
-  const hasNext = computed(() => currentTrackIndex.value >= 0 && currentTrackIndex.value < trackList.value.length - 1);
+  const hasNext = computed(() => currentTrackIndex.value >= 0 && currentTrackIndex.value < playbackOrder.value.length - 1);
   const hasPrev = computed(() => currentTrackIndex.value > 0);
 
   const currentCoverArt = computed(() => {
     if (!currentTrack.value) return null;
-    const inList = trackList.value.find(t => t.file_path === currentTrack.value!.file_path);
+    const inList = getTrackByPath(currentTrack.value!.file_path);
     return inList?.cover_art ?? currentTrack.value.cover_art ?? null;
   });
 
@@ -161,32 +195,20 @@ export function usePlayer() {
     return currentTrack.value?.accent_color ?? null;
   });
 
-  // ── Virtual scroll ────────────────────────────────────────────────────────
+  // ── Virtual scroll (для AudioPlayer view) ─────────────────────────────────
 
   const ITEM_HEIGHT = 58;
-  const VSCROLL_BUFFER = 5;
   const COVER_PRELOAD_BUFFER = 16;
 
-  const trackListEl = ref<HTMLElement | null>(null);
-  const vsScrollTop = ref(0);
-  const vsContainerHeight = ref(600);
-
-  function onTrackListScroll(e: Event) {
-    vsScrollTop.value = (e.target as HTMLElement).scrollTop;
-  }
-
-  const vsRange = computed(() => {
-    const start = Math.max(0, Math.floor(vsScrollTop.value / ITEM_HEIGHT) - VSCROLL_BUFFER);
-    const end = Math.min(
-      trackList.value.length,
-      Math.ceil((vsScrollTop.value + vsContainerHeight.value) / ITEM_HEIGHT) + VSCROLL_BUFFER
-    );
-    return { start, end };
-  });
-
-  const visibleTracks = computed(() => trackList.value.slice(vsRange.value.start, vsRange.value.end));
-  const vsPaddingTop = computed(() => vsRange.value.start * ITEM_HEIGHT);
-  const vsPaddingBottom = computed(() => (trackList.value.length - vsRange.value.end) * ITEM_HEIGHT);
+  const {
+    containerEl: trackListEl,
+    scrollTop: vsScrollTop,
+    containerHeight: vsContainerHeight,
+    onScroll: onTrackListScroll,
+    visibleItems: visibleTracks,
+    paddingTop: vsPaddingTop,
+    paddingBottom: vsPaddingBottom,
+  } = useVirtualScroll(trackList, { itemHeight: ITEM_HEIGHT, buffer: 5 });
 
   const coverPreloadRange = computed(() => {
     const start = Math.max(0, Math.floor(vsScrollTop.value / ITEM_HEIGHT) - COVER_PRELOAD_BUFFER);
@@ -201,56 +223,14 @@ export function usePlayer() {
     trackList.value.slice(coverPreloadRange.value.start, coverPreloadRange.value.end)
   );
 
-  const loadingCovers = new Set<string>();
-  const MAX_CONCURRENT_COVERS = 3;
-  let activeCoverRequests = 0;
-  let coverQueue: string[] = [];
-  let coverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // ── Cover loader ────────────────────────────────────────────────────────
 
-  function processCoverQueue() {
-    while (activeCoverRequests < MAX_CONCURRENT_COVERS && coverQueue.length > 0) {
-      const filePath = coverQueue.shift()!;
-      const track = trackList.value.find(t => t.file_path === filePath);
-      if (!track || track.cover_art) {
-        loadingCovers.delete(filePath);
-        continue;
-      }
-      activeCoverRequests++;
-      invoke<string | null>("get_cover_art", { filePath })
-        .then(art => {
-          if (art) {
-            const idx = trackList.value.findIndex(t => t.file_path === filePath);
-            if (idx !== -1) trackList.value[idx].cover_art = art;
-          }
-        })
-        .catch(() => {})
-        .finally(() => {
-          loadingCovers.delete(filePath);
-          activeCoverRequests--;
-          processCoverQueue();
-        });
-    }
-  }
-
-  watch(coverPreloadTracks, (tracks) => {
-    if (coverDebounceTimer) clearTimeout(coverDebounceTimer);
-    coverDebounceTimer = setTimeout(() => {
-      // Visible tracks first, then preload buffer
-      const visible = visibleTracks.value.map(t => t.file_path);
-      const all = tracks.map(t => t.file_path);
-      const preloadOnly = all.filter(p => !visible.includes(p));
-      const ordered = [...visible, ...preloadOnly];
-
-      coverQueue = [];
-      for (const filePath of ordered) {
-        const track = trackList.value.find(t => t.file_path === filePath);
-        if (!track || track.cover_art || loadingCovers.has(filePath)) continue;
-        loadingCovers.add(filePath);
-        coverQueue.push(filePath);
-      }
-      processCoverQueue();
-    }, 50);
-  }, { immediate: true });
+  const { setupPreloadWatch, loadCoversForTracks } = useCoverLoader({
+    trackList,
+    getTrackByPath,
+    getTrackIndex,
+  });
+  setupPreloadWatch(coverPreloadTracks, visibleTracks);
 
   // ── Утилиты (публичные) ───────────────────────────────────────────────────
 
@@ -261,23 +241,16 @@ export function usePlayer() {
     return extractFileName(track.file_path);
   }
 
-  function folderDisplayName(path: string): string {
-    return path.replace(/\\/g, "/");
-  }
-
   // ── Загрузка библиотеки ───────────────────────────────────────────────────
 
   async function loadLibrary() {
     try {
       isLoading.value = true;
       errorMessage.value = "";
-      const [tracks, folderList] = await Promise.all([
-        invoke<TrackMetadata[]>("library_get_tracks"),
-        invoke<FolderInfo[]>("library_get_folders"),
-      ]);
-      trackList.value = tracks;
-      folders.value = folderList;
-      if (shuffled.value) { shuffled.value = false; originalOrder = []; }
+      await initFolders();
+      trackList.value = await invoke<TrackMetadata[]>("library_get_tracks");
+      shuffled.value = false;
+      syncPlaybackOrder();
     } catch (e: any) {
       errorMessage.value = `Ошибка загрузки: ${e}`;
     } finally {
@@ -285,62 +258,42 @@ export function usePlayer() {
     }
   }
 
-  // ── Управление папками ────────────────────────────────────────────────────
+  async function refreshLibrary() {
+    try {
+      const tracks = await invoke<TrackMetadata[]>("library_get_tracks");
+      const prevTrack = currentTrack.value;
+      trackList.value = tracks;
+      syncPlaybackOrder();
+
+      if (prevTrack && !tracks.some(t => t.file_path === prevTrack.file_path)) {
+        await invoke("player_stop");
+        playbackState.value = "Stopped";
+        currentTrack.value = null;
+        positionSecs.value = 0;
+      }
+    } catch (e: any) {
+      errorMessage.value = `Ошибка обновления библиотеки: ${e}`;
+    }
+  }
+
+  // ── Управление папками (делегирование в useFolders) ───────────────────────
 
   async function addFolder() {
-    try {
-      const dirPath = await open({ directory: true, multiple: false });
-      if (!dirPath) return;
-
-      isScanning.value = true;
-      scanMessage.value = "Сканирование...";
-      scanProgress.value = { current: 0, total: 0, percent: 0 };
-      errorMessage.value = "";
-
-      const tracks = await invoke<TrackMetadata[]>("library_add_folder", {
-        folderPath: dirPath as string,
-      });
-      trackList.value = tracks;
-      folders.value = await invoke<FolderInfo[]>("library_get_folders");
-      scanMessage.value = "";
-    } catch (e: any) {
-      errorMessage.value = `Ошибка добавления: ${e}`;
-      scanMessage.value = "";
-    } finally {
-      isScanning.value = false;
-    }
+    errorMessage.value = "";
+    await addFolderRaw();
+    await refreshLibrary();
   }
 
   async function removeFolder(folder: string) {
-    try {
-      removingFolder.value = folder;
-      await invoke("library_remove_folder", { folderPath: folder });
-      folders.value = folders.value.filter(f => f.path !== folder);
-      trackList.value = await invoke<TrackMetadata[]>("library_get_tracks");
-    } catch (e: any) {
-      errorMessage.value = `Ошибка удаления: ${e}`;
-    } finally {
-      removingFolder.value = null;
-    }
+    errorMessage.value = "";
+    await removeFolderRaw(folder);
+    await refreshLibrary();
   }
 
   async function rescanLibrary() {
-    try {
-      isScanning.value = true;
-      scanMessage.value = "Пересканирование...";
-      scanProgress.value = { current: 0, total: 0, percent: 0 };
-      errorMessage.value = "";
-
-      const tracks = await invoke<TrackMetadata[]>("library_rescan");
-      trackList.value = tracks;
-      folders.value = await invoke<FolderInfo[]>("library_get_folders");
-      scanMessage.value = "";
-    } catch (e: any) {
-      errorMessage.value = `Ошибка пересканирования: ${e}`;
-      scanMessage.value = "";
-    } finally {
-      isScanning.value = false;
-    }
+    errorMessage.value = "";
+    await rescanLibraryRaw();
+    await refreshLibrary();
   }
 
   // ── Управление плеером ────────────────────────────────────────────────────
@@ -349,16 +302,19 @@ export function usePlayer() {
     try {
       isLoading.value = true;
       errorMessage.value = "";
-      const metadata = await invoke<TrackMetadata>("player_play", { filePath: track.file_path });
+      const useCrossfade = settings.value.crossfade_between_tracks && playbackState.value === "Playing";
+      const metadata = useCrossfade
+        ? await invoke<TrackMetadata>("player_play_crossfade", { filePath: track.file_path, crossfadeSecs: 0.25 })
+        : await invoke<TrackMetadata>("player_play", { filePath: track.file_path });
 
       if (!metadata.cover_art) {
-        const inList = trackList.value.find(t => t.file_path === track.file_path);
+        const inList = getTrackByPath(track.file_path);
         if (inList?.cover_art) metadata.cover_art = inList.cover_art;
         else {
           invoke<string | null>("get_cover_art", { filePath: track.file_path })
             .then(art => {
               if (art) {
-                const idx = trackList.value.findIndex(t => t.file_path === track.file_path);
+                const idx = getTrackIndex(track.file_path);
                 if (idx !== -1) trackList.value[idx].cover_art = art;
                 if (currentTrack.value?.file_path === track.file_path)
                   currentTrack.value.cover_art = art;
@@ -369,6 +325,11 @@ export function usePlayer() {
       }
 
       currentTrack.value = metadata;
+      // Сохраняем accent_color в trackList, чтобы pollStatus не затирал его
+      if (metadata.accent_color) {
+        const idx = getTrackIndex(metadata.file_path);
+        if (idx !== -1) trackList.value[idx].accent_color = metadata.accent_color;
+      }
       playbackState.value = "Playing";
       positionSecs.value = 0;
       showSettings.value = false;
@@ -406,26 +367,43 @@ export function usePlayer() {
     }
   }
 
-  async function playNext() {
-    if (repeatMode.value === "track" && currentTrack.value) {
+  async function playNext(auto = false) {
+    if (auto && repeatMode.value === "track" && currentTrack.value) {
       await playTrack(currentTrack.value);
       return;
     }
+    if (playbackOrder.value.length === 0) return;
     if (hasNext.value) {
-      await playTrack(trackList.value[currentTrackIndex.value + 1]);
-    } else if (trackList.value.length > 0) {
-      await playTrack(trackList.value[0]);
+      await playTrack(playbackOrder.value[currentTrackIndex.value + 1]);
+    } else {
+      if (shuffled.value) buildShuffledOrder(true);
+      await playTrack(playbackOrder.value[0]);
     }
   }
 
   async function playPrev() {
-    if (positionSecs.value > 3) await seekTo(0);
-    else if (hasPrev.value) await playTrack(trackList.value[currentTrackIndex.value - 1]);
+    if (playbackOrder.value.length === 0) return;
+    if (positionSecs.value > 3) {
+      await seekTo(0);
+    } else if (hasPrev.value) {
+      await playTrack(playbackOrder.value[currentTrackIndex.value - 1]);
+    } else {
+      await playTrack(playbackOrder.value[playbackOrder.value.length - 1]);
+    }
   }
 
   async function changeVolume(event: Event) {
     const target = event.target as HTMLInputElement;
     const newVolume = parseFloat(target.value);
+    volume.value = newVolume;
+    try {
+      await invoke("player_set_volume", { volume: newVolume });
+    } catch (e: any) {
+      errorMessage.value = `Ошибка громкости: ${e}`;
+    }
+  }
+
+  async function setVolume(newVolume: number) {
     volume.value = newVolume;
     try {
       await invoke("player_set_volume", { volume: newVolume });
@@ -445,25 +423,23 @@ export function usePlayer() {
 
   async function onSeekEnd(event: Event) {
     const newPos = parseFloat((event.target as HTMLInputElement).value);
-    isSeeking.value = false;
+    seekValue.value = newPos;
+    positionSecs.value = newPos;
     await seekTo(newPos);
+    isSeeking.value = false;
   }
 
   async function seekTo(position: number) {
-    if (playbackState.value !== "Paused") {
-      try {
+    const useCrossfade = settings.value.crossfade_on_seek && playbackState.value !== "Paused";
+    try {
+      if (useCrossfade) {
         await invoke("player_seek_crossfade", { positionSecs: position, crossfadeSecs: 0.25 });
-        positionSecs.value = position;
-      } catch (e: any) {
-        errorMessage.value = `Ошибка перемотки: ${e}`;
+      } else {
+        await invoke("player_seek", { positionSecs: position });
       }
-    } else {
-      try {
-        await invoke("player_seek", { positionSecs: position, crossfadeSecs: 0.25 });
-        positionSecs.value = position;
-      } catch (e: any) {
-        errorMessage.value = `Ошибка перемотки: ${e}`;
-      }
+      positionSecs.value = position;
+    } catch (e: any) {
+      errorMessage.value = `Ошибка перемотки: ${e}`;
     }
   }
 
@@ -477,7 +453,7 @@ export function usePlayer() {
 
       if (status.current_file_path) {
         if (currentTrack.value?.file_path !== status.current_file_path) {
-          const inList = trackList.value.find(t => t.file_path === status.current_file_path);
+          const inList = getTrackByPath(status.current_file_path!);
           if (inList) {
             currentTrack.value = inList;
           } else {
@@ -489,13 +465,7 @@ export function usePlayer() {
         if (currentTrack.value && !isHandlingTrackEnd) {
           isHandlingTrackEnd = true;
           try {
-            if (repeatMode.value === "track") {
-              await playTrack(currentTrack.value);
-            } else if (hasNext.value) {
-              await playNext();
-            } else if (trackList.value.length > 0) {
-              await playTrack(trackList.value[0]);
-            }
+            await playNext(true);
           } finally {
             isHandlingTrackEnd = false;
           }
@@ -508,23 +478,27 @@ export function usePlayer() {
     }
   }
 
-  // ── Жизненный цикл ───────────────────────────────────────────────────────
+  // ── Инициализация (один раз) ─────────────────────────────────────────────
 
-  onMounted(async () => {
+  async function init() {
+    if (initialized) return;
+    initialized = true;
+
+    await loadSettings();
     await loadLibrary();
     statusInterval = setInterval(pollStatus, 250);
-    await nextTick();
-    if (trackListEl.value) vsContainerHeight.value = trackListEl.value.clientHeight;
-    unlistenScanProgress = await listen<{ current: number; total: number; percent: number }>(
-      "scan_progress",
-      (event) => { scanProgress.value = event.payload; }
-    );
-  });
+  }
 
-  onUnmounted(() => {
-    if (statusInterval) clearInterval(statusInterval);
-    if (unlistenScanProgress) unlistenScanProgress();
-  });
+  function destroy() {
+    if (statusInterval) {
+      clearInterval(statusInterval);
+      statusInterval = null;
+    }
+    initialized = false;
+  }
+
+  // Start init immediately on first import
+  init();
 
   return {
     // Состояние плеера
@@ -539,12 +513,12 @@ export function usePlayer() {
     seekValue,
     shuffled,
     repeatMode,
+    activePlaylistSource,
 
     // Состояние библиотеки / настроек
     showSettings,
     folders,
     isScanning,
-    scanMessage,
     removingFolder,
     scanProgress,
 
@@ -567,6 +541,7 @@ export function usePlayer() {
     currentAccentColor,
 
     // Virtual scroll
+    ITEM_HEIGHT,
     trackListEl,
     vsScrollTop,
     vsContainerHeight,
@@ -582,6 +557,7 @@ export function usePlayer() {
 
     // Действия
     loadLibrary,
+    refreshLibrary,
     addFolder,
     removeFolder,
     rescanLibrary,
@@ -591,10 +567,15 @@ export function usePlayer() {
     playNext,
     playPrev,
     changeVolume,
+    setVolume,
     onSeekStart,
     onSeekInput,
     onSeekEnd,
+    seekTo,
     toggleShuffle,
     toggleRepeat,
+    syncPlaybackOrder,
+    loadCoversForTracks,
+    destroy,
   };
 }

@@ -6,7 +6,7 @@ use audio_player::{AudioPlayer, PlayerStatus, TrackMetadata};
 use library::{FolderInfo, MusicLibrary};
 use settings::AppSettings;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use tauri::{Emitter, Manager, State};
 
 #[derive(Clone, serde::Serialize)]
@@ -20,7 +20,7 @@ struct ScanProgress {
 // State types
 // ──────────────────────────────────────────────────────────────────────────────
 
-pub struct PlayerState(pub Mutex<AudioPlayer>);
+pub struct PlayerState(pub RwLock<AudioPlayer>);
 pub struct LibraryState(pub Mutex<MusicLibrary>);
 pub struct SettingsState(pub Mutex<(AppSettings, PathBuf)>);
 
@@ -30,47 +30,57 @@ pub struct SettingsState(pub Mutex<(AppSettings, PathBuf)>);
 
 #[tauri::command]
 fn player_play(state: State<PlayerState>, file_path: String) -> Result<TrackMetadata, String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.play(&file_path)
 }
 
 #[tauri::command]
+fn player_play_crossfade(
+    state: State<PlayerState>,
+    file_path: String,
+    crossfade_secs: f64,
+) -> Result<TrackMetadata, String> {
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    player.play_crossfade(&file_path, crossfade_secs)
+}
+
+#[tauri::command]
 fn player_pause(state: State<PlayerState>) -> Result<(), String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.pause();
     Ok(())
 }
 
 #[tauri::command]
 fn player_resume(state: State<PlayerState>) -> Result<(), String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.resume();
     Ok(())
 }
 
 #[tauri::command]
 fn player_stop(state: State<PlayerState>) -> Result<(), String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.stop();
     Ok(())
 }
 
 #[tauri::command]
 fn player_set_volume(state: State<PlayerState>, volume: f32) -> Result<(), String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.set_volume(volume);
     Ok(())
 }
 
 #[tauri::command]
 fn player_get_volume(state: State<PlayerState>) -> Result<f32, String> {
-    let player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
     Ok(player.get_volume())
 }
 
 #[tauri::command]
 fn player_seek(state: State<PlayerState>, position_secs: f64) -> Result<(), String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.seek(position_secs)
 }
 
@@ -80,13 +90,13 @@ fn player_seek_crossfade(
     position_secs: f64,
     crossfade_secs: f64,
 ) -> Result<(), String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.seek_crossfade(position_secs, crossfade_secs)
 }
 
 #[tauri::command]
 fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> {
-    let mut player = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     Ok(player.get_status())
 }
 
@@ -102,7 +112,7 @@ fn get_cover_art(file_path: String) -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn get_supported_formats() -> Vec<String> {
-    AudioPlayer::supported_formats()
+    AudioPlayer::supported_formats().iter().map(|s| s.to_string()).collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -210,12 +220,13 @@ pub fn run() {
             app.manage(LibraryState(Mutex::new(library)));
             Ok(())
         })
-        .manage(PlayerState(Mutex::new(player)))
+        .manage(PlayerState(RwLock::new(player)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             // Плеер
             player_play,
+            player_play_crossfade,
             player_pause,
             player_resume,
             player_stop,

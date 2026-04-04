@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import trackCover from '../assets/trackCover.png';
 
 import MoreIcon from './Icons/MoreIcon.vue';
@@ -17,43 +17,95 @@ import VolumeZeroIcon from './Icons/VolumeZeroIcon.vue';
 import FullscreenIcon from './Icons/FullscreenIcon.vue';
 
 import { useSettings } from '../composables/useSettings';
+import { usePlayer } from '../composables/usePlayer';
 
 const { settings } = useSettings();
 
-const playerProgress = ref(0.0);
+const {
+    currentTrack,
+    volume,
+    positionSecs,
+    isSeeking,
+    seekValue,
+    durationSecs,
+    isPlaying,
+    isStopped,
+    isLoading,
+    shuffled,
+    repeatMode,
+    trackTitle,
+    trackArtist,
+    currentCoverArt,
+    currentAccentColor,
+    volumePercent,
+    togglePlayPause,
+    playNext,
+    playPrev,
+    toggleShuffle,
+    toggleRepeat,
+    setVolume,
+    onSeekStart,
+    onSeekInput,
+    onSeekEnd,
+} = usePlayer();
 
-const isShuffled = ref(false);
-const isRepeating = ref(false);
-const isPlaying = ref(false);
+// ── Volume ──────────────────────────────────────────────────────────────────
 
-const volume = ref(66);
-const prevVolume = ref(66);
-
-function toggleShuffle() {
-    isShuffled.value = !isShuffled.value;
-}
-
-function toggleRepeat() {
-    isRepeating.value = !isRepeating.value;
-}
-
-function togglePlay() {
-    isPlaying.value = !isPlaying.value;
-}
+const prevVolume = ref(volume.value || 0.66);
 
 function toggleMute() {
     if (volume.value === 0) {
-        volume.value = prevVolume.value || 66;
+        setVolume(prevVolume.value || 0.66);
     } else {
         prevVolume.value = volume.value;
-        volume.value = 0;
+        setVolume(0);
     }
 }
 
 function onVolumeScroll(event: WheelEvent) {
     event.preventDefault();
-    const delta = event.deltaY < 0 ? 1 : -1;
-    volume.value = Math.min(100, Math.max(0, volume.value + delta));
+    const delta = event.deltaY < 0 ? 0.01 : -0.01;
+    const newVol = Math.min(1, Math.max(0, volume.value + delta));
+    setVolume(newVol);
+}
+
+function onVolumeInput(event: Event) {
+    const val = parseFloat((event.target as HTMLInputElement).value);
+    setVolume(val);
+}
+
+// ── Progress slider ─────────────────────────────────────────────────────────
+
+const progressSliderValue = computed(() => {
+    return isSeeking.value ? seekValue.value : positionSecs.value;
+});
+
+const progressFillPercent = computed(() => {
+    if (!durationSecs.value) return 0;
+    return (progressSliderValue.value / durationSecs.value) * 100;
+});
+
+// ── Codec info ──────────────────────────────────────────────────────────────
+
+const codecDisplay = computed(() => {
+    if (!currentTrack.value) return '';
+    return currentTrack.value.format?.toUpperCase() || '';
+});
+
+const playerControlsEl = ref<HTMLElement | null>(null)
+
+function onPlayerRipple(e: MouseEvent) {
+    const el = playerControlsEl.value
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const ripple = document.createElement('span')
+    ripple.className = 'ripple'
+    const size = Math.max(rect.width, rect.height) * 2
+    ripple.style.width = ripple.style.height = size + 'px'
+    ripple.style.left = (e.clientX - rect.left - size / 2) + 'px'
+    ripple.style.top = (e.clientY - rect.top - size / 2) + 'px'
+    el.appendChild(ripple)
+    ripple.addEventListener('animationend', () => ripple.remove())
 }
 </script>
 
@@ -61,7 +113,6 @@ function onVolumeScroll(event: WheelEvent) {
     <div class="player">
         <div class="asideWrapper">
             <div v-if="settings.show_player_extra_block" class="aside">
-                sosi mne davai
             </div>
         </div>
         <div class="playerControlsWrapper">
@@ -69,55 +120,88 @@ function onVolumeScroll(event: WheelEvent) {
                 type="range"
                 class="progress-slider"
                 min="0"
-                max="120"
+                :max="durationSecs || 0"
                 step="0.1"
-                v-model="playerProgress"
+                :value="progressSliderValue"
+                @mousedown="onSeekStart"
+                @input="onSeekInput"
+                @mouseup="onSeekEnd"
+                @touchstart="onSeekStart"
+                @touchend="onSeekEnd"
+                :disabled="!currentTrack"
             />
-            <div class="playerControls">
+            <div ref="playerControlsEl" class="playerControls" :class="{ seeking: isSeeking }" :style="currentAccentColor ? { '--accent-color': currentAccentColor } as any : { '--accent-color': '#1a1a1a' }">
                 <div class="progress-bar-bg"></div>
-                <div class="progress-bar-fill" :style="{ width: (playerProgress / 1.2) + '%' }"></div>
-                <div class="progress-bg" :style="{ width: (playerProgress / 1.2) + '%' }"></div>
+                <div class="progress-bar-fill" :style="{ width: progressFillPercent + '%' }"></div>
+                <div class="progress-bg" :style="{ width: progressFillPercent + '%' }"></div>
             </div>
-            <div class="botPart">
+            <div class="botPart" @click.self="onPlayerRipple">
                 <div class="trackInfo">
                     <div class="coverWrapper">
                         <button class="fullscreenBtn"><FullscreenIcon /></button>
-                        <img :src="trackCover" alt="music" class="trackCover">
+                        <img
+                            v-if="currentCoverArt"
+                            :src="currentCoverArt"
+                            alt="cover"
+                            class="trackCover"
+                            draggable="false"
+                        />
+                        <img v-else :src="trackCover" alt="music" class="trackCover"></img>
                     </div>
-                    <div class="trackTitle">
+                    <div class="trackTitle" v-if="currentTrack">
                         <div class="topLine">
-                            <div class="trackName">Новый гимн РФ</div>
+                            <div class="trackName">{{ trackTitle }}</div>
                             <button class="moreBtn"><MoreIcon /></button>
                         </div>
-                        <div class="artistName">guntor</div>
+                        <div class="artistName">{{ trackArtist }}</div>
+                    </div>
+                    <div class="trackTitle" v-else>
+                        <div class="topLine">
+                            <div class="trackName noTrack">Нет трека</div>
+                        </div>
                     </div>
                 </div>
                 <div class="controls">
                     <button
                         class="shuffleBtn"
-                        :class="{ active: isShuffled }"
+                        :class="{ active: shuffled }"
                         @click="toggleShuffle"
                     >
                         <ShuffleIcon />
                     </button>
-                    <button class="prevBtn"><PrevIcon /></button>
-                    <button class="playBtn" @click="togglePlay">
+                    <button
+                        class="prevBtn"
+                        @click="playPrev"
+                    >
+                        <PrevIcon />
+                    </button>
+                    <button
+                        class="playBtn"
+                        @click="togglePlayPause"
+                        :disabled="isStopped || isLoading"
+                        :style="currentAccentColor ? { '--accent-color': currentAccentColor } as any : {}"
+                    >
                         <PauseIcon v-if="isPlaying" />
                         <PlayIcon v-else />
                     </button>
-                    <button class="nextBtn"><NextIcon /></button>
+                    <button
+                        class="nextBtn"
+                        @click="playNext()"
+                    >
+                        <NextIcon />
+                    </button>
                     <button
                         class="repeatBtn"
-                        :class="{ active: isRepeating }"
+                        :class="{ active: repeatMode === 'track' }"
                         @click="toggleRepeat"
                     >
-                        <RepeatOneIcon v-if="isRepeating" />
+                        <RepeatOneIcon v-if="repeatMode === 'track'" />
                         <RepeatIcon v-else />
                     </button>
                 </div>
                 <div class="additionalControls">
                     <div class="queueList"><ListIcon /></div>
-                    <div class="codecInfo">FLAC</div>
+                    <div class="codecInfo" v-if="codecDisplay">{{ codecDisplay }}</div>
                     <div
                         class="volumeControl"
                         @click="toggleMute"
@@ -128,18 +212,19 @@ function onVolumeScroll(event: WheelEvent) {
                                 type="range"
                                 class="volume-slider"
                                 min="0"
-                                max="100"
-                                step="1"
-                                v-model.number="volume"
-                                :style="{ '--val': volume + '%' }"
+                                max="1"
+                                step="0.01"
+                                :value="volume"
+                                :style="{ '--val': volumePercent + '%' }"
                                 @click.stop
+                                @input.stop="onVolumeInput"
                                 orient="vertical"
                             />
                         </div>
                         <VolumeZeroIcon v-if="volume === 0" />
-                        <VolumeMinIcon v-else-if="volume <= 40" />
+                        <VolumeMinIcon v-else-if="volume <= 0.4" />
                         <VolumeMaxIcon v-else />
-                        <span>{{ volume }}%</span>
+                        <span>{{ volumePercent }}%</span>
                     </div>
                 </div>
             </div>
@@ -164,7 +249,7 @@ function onVolumeScroll(event: WheelEvent) {
 .aside {
     width: 100%;
     height: 100%;
-    border-radius: 12px;
+    border-radius: 14px;
     background-color: #1a1a1a;
     border: 1px solid #ffffff04;
 }
@@ -188,6 +273,10 @@ function onVolumeScroll(event: WheelEvent) {
     cursor: pointer;
     z-index: 99999;
 }
+.progress-slider:disabled {
+    cursor: default;
+    opacity: 0.3;
+}
 .progress-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
@@ -209,9 +298,9 @@ function onVolumeScroll(event: WheelEvent) {
     flex-direction: column;
     width: 100%;
     height: 104px;
-    border-radius: 12px;
-    border: 1px solid #ffffff04;
-    background-color: #1a1a1a;
+    border-radius: 14px;
+    background-color: var(--accent-color);
+    transition: .24s ease;
 }
 .progress-bar-bg {
     height: 4px;
@@ -228,7 +317,7 @@ function onVolumeScroll(event: WheelEvent) {
     width: 0px;
     background-color: hsla(0, 0%, 100%, 0.65);
     opacity: 0;
-    transition: opacity 0.3s ease;
+    transition: width 0.25s linear, opacity 0.3s ease;
 }
 .progress-bg {
     position: absolute;
@@ -238,6 +327,7 @@ function onVolumeScroll(event: WheelEvent) {
     width: 0%;
     z-index: 1;
     background-color: hsla(0, 0%, 100%, 0.11);
+    transition: width 0.25s linear;
 }
 .playerControlsWrapper:hover .progress-bar-bg {
     opacity: 1;
@@ -247,9 +337,9 @@ function onVolumeScroll(event: WheelEvent) {
 }
 .botPart {
     left: 0;
-    top: 5px;
+    top: 6px;
     position: absolute;
-    height: calc(104px - 5px);
+    height: calc(104px - 6px);
     width: calc(100% - 12px);
     display: flex;
     flex-direction: row;
@@ -273,6 +363,7 @@ function onVolumeScroll(event: WheelEvent) {
     border-radius: 8px;
     overflow: hidden;
     transition: .24s;
+    flex-shrink: 0;
 }
 .fullscreenBtn {
     display: flex;
@@ -297,10 +388,12 @@ function onVolumeScroll(event: WheelEvent) {
     }
 }
 .trackCover {
+    user-select: none;
     width: 64px;
     height: 64px;
     border-radius: 8px;
     transition: .24s;
+    object-fit: cover;
 }
 .coverWrapper:hover .trackCover {
     filter: brightness(0.7);
@@ -319,6 +412,11 @@ function onVolumeScroll(event: WheelEvent) {
     flex-direction: row;
     align-items: center;
     gap: 8px;
+    max-width: 200px;
+    width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .topLine .trackName {
     user-select: none;
@@ -326,6 +424,13 @@ function onVolumeScroll(event: WheelEvent) {
     font-size: 15px;
     font-weight: 500;
     color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+}
+.topLine .trackName.noTrack {
+    color: hsla(0, 0%, 100%, 0.3);
 }
 .topLine .moreBtn {
     cursor: pointer;
@@ -341,7 +446,11 @@ function onVolumeScroll(event: WheelEvent) {
     }
 }
 .artistName {
+    max-width: 200px;
     width: max-content;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     user-select: none;
     cursor: default;
     font-size: 15px;
@@ -386,6 +495,10 @@ function onVolumeScroll(event: WheelEvent) {
         color: hsla(0, 0%, 100%, 0.8);
     }
 }
+.prevBtn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+}
 .playBtn {
     margin: 0px 4px;
     display: flex;
@@ -399,10 +512,11 @@ function onVolumeScroll(event: WheelEvent) {
     background-color: #ffffff;
     transition: .24s ease-in-out;
     transform-origin: center;
-
-    &:hover {
-        /* transform: scale(1.05); */
-    }
+    color: var(--accent-color);
+}
+.playBtn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
 }
 .nextBtn {
     cursor: pointer;
@@ -414,6 +528,10 @@ function onVolumeScroll(event: WheelEvent) {
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
     }
+}
+.nextBtn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
 }
 .repeatBtn {
     padding: 8px;
@@ -435,8 +553,11 @@ function onVolumeScroll(event: WheelEvent) {
     display: flex;
     flex-direction: row;
     align-items: center;
+    justify-content: end;
     gap: 24px;
     margin-right: 16px;
+    max-width: 260px;
+    width: 260px;
 }
 .queueList {
     margin-top: -1px;
@@ -491,7 +612,7 @@ function onVolumeScroll(event: WheelEvent) {
     visibility: hidden;
     opacity: 0;
     pointer-events: none;
-    
+
     display: flex;
     position: absolute;
     bottom: calc(100% - 4px);
@@ -501,7 +622,7 @@ function onVolumeScroll(event: WheelEvent) {
     border: 2px solid #ffffff20;
     border-radius: 24px;
     padding: 16px 2px;
-    
+
     z-index: 10;
     transition: opacity 0.2s ease, visibility 0.2s ease;
 }
@@ -512,7 +633,7 @@ function onVolumeScroll(event: WheelEvent) {
     bottom: -30px;
     left: -15px;
     right: -15px;
-    z-index: -1; 
+    z-index: -1;
 }
 .volumeControl:hover .volumeSliderPopup {
     visibility: visible;
@@ -528,7 +649,7 @@ function onVolumeScroll(event: WheelEvent) {
     appearance: none;
     -webkit-appearance: none;
     border-radius: 6px;
-    background: 
+    background:
   linear-gradient(to top, #fff var(--val, 50%), #ffffff20 var(--val, 50%)) center / 4px 100% no-repeat,
   #0d0d0d;
 }
@@ -538,9 +659,33 @@ function onVolumeScroll(event: WheelEvent) {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #fff !important; 
+    background: #fff !important;
 }
 .botPart:has(.volumeControl:hover) {
     z-index: 100000;
+}
+.playerControls.seeking {
+    transition: none;
+}
+.playerControls.seeking .progress-bar-fill {
+    transition: opacity 0.3s ease;
+}
+.playerControls.seeking .progress-bg {
+    transition: none;
+}
+.playerControls :deep(.ripple) {
+    position: absolute;
+    border-radius: 50%;
+    background: hsla(0, 0%, 100%, 0.15);
+    transform: scale(0);
+    animation: ripple-expand 0.6s ease-out forwards;
+    pointer-events: none;
+    z-index: 3;
+}
+@keyframes ripple-expand {
+    to {
+        transform: scale(1);
+        opacity: 0;
+    }
 }
 </style>

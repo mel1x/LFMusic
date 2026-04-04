@@ -2,7 +2,7 @@ use crate::audio_player::{AudioPlayer, TrackMetadata};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -105,7 +105,7 @@ impl MusicLibrary {
     /// Быстрый первый проход: собирает пути всех аудиофайлов без чтения метаданных
     fn collect_audio_files(
         dir: &std::path::Path,
-        supported: &[String],
+        supported: &HashSet<&str>,
         depth: usize,
         result: &mut Vec<PathBuf>,
     ) {
@@ -148,7 +148,7 @@ impl MusicLibrary {
                 .unwrap_or("")
                 .to_lowercase();
 
-            if supported.contains(&ext) {
+            if supported.contains(ext.as_str()) {
                 result.push(path);
             }
         }
@@ -168,7 +168,7 @@ impl MusicLibrary {
             return Err(format!("Не является директорией: {}", folder));
         }
 
-        let supported = AudioPlayer::supported_formats();
+        let supported: HashSet<&str> = AudioPlayer::supported_formats().iter().copied().collect();
 
         let mut all_files: Vec<PathBuf> = Vec::new();
         Self::collect_audio_files(&path, &supported, 0, &mut all_files);
@@ -179,6 +179,15 @@ impl MusicLibrary {
     // ── Публичный API ───────────────────────────────────────────────────────
 
     pub fn get_folders(&self) -> Vec<FolderInfo> {
+        self.get_folders_inner(true)
+    }
+
+    /// Быстрый вариант без проверки файловой системы (для частых вызовов)
+    pub fn get_folders_fast(&self) -> Vec<FolderInfo> {
+        self.get_folders_inner(false)
+    }
+
+    fn get_folders_inner(&self, check_exists: bool) -> Vec<FolderInfo> {
         let mut stmt = match self.conn.prepare(
             "SELECT f.path, COUNT(t.file_path) as cnt
              FROM folders f
@@ -192,7 +201,7 @@ impl MusicLibrary {
         let rows = match stmt.query_map([], |row| {
             let path: String = row.get(0)?;
             let track_count: usize = row.get(1)?;
-            let exists = PathBuf::from(&path).is_dir();
+            let exists = if check_exists { PathBuf::from(&path).is_dir() } else { true };
             Ok(FolderInfo {
                 path,
                 track_count,
@@ -290,7 +299,7 @@ impl MusicLibrary {
             rows.filter_map(|r| r.ok()).collect()
         };
 
-        let supported = AudioPlayer::supported_formats();
+        let supported: HashSet<&str> = AudioPlayer::supported_formats().iter().copied().collect();
 
         // Считаем общее количество файлов по всем папкам
         let mut folder_file_lists: Vec<(String, Vec<PathBuf>)> = Vec::new();
