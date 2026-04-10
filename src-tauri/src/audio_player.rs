@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{CodecType, DecoderOptions};
@@ -24,6 +25,7 @@ pub struct TrackMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub genre: Option<String>,
     pub duration_secs: Option<f64>,
     pub format: String,
     pub sample_rate: Option<u32>,
@@ -54,6 +56,207 @@ pub struct PlayerStatus {
     pub position_secs: f64,
     /// Путь текущего трека — для определения смены трека на фронте
     pub current_file_path: Option<String>,
+}
+
+// ── Эквалайзер ─────────────────────────────────────────────────────────────
+
+/// Центральные частоты 10-полосного эквалайзера (Гц)
+pub const EQ_BANDS: [f32; 10] = [60.0, 170.0, 310.0, 600.0, 1000.0, 3000.0, 6000.0, 12000.0, 14000.0, 16000.0];
+
+/// Настройки эквалайзера, разделяемые между AudioPlayer и EqSource
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqSettings {
+    /// Включён ли эквалайзер
+    pub enabled: bool,
+    /// Усиление каждой полосы в dB (от -12 до +12)
+    pub bands: Vec<f32>,
+    /// Общий уровень (preamp) в dB (от -12 до +12)
+    #[serde(default)]
+    pub gain: f32,
+}
+
+impl Default for EqSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bands: vec![0.0; 10],
+            gain: 0.0,
+        }
+    }
+}
+
+/// Коэффициенты биквадратного фильтра (Direct Form I)
+#[derive(Debug, Clone, Copy)]
+struct BiquadCoeffs {
+    b0: f32, b1: f32, b2: f32,
+    a1: f32, a2: f32,
+}
+
+impl BiquadCoeffs {
+    /// Рассчитать коэффициенты peaking EQ фильтра
+    fn peaking_eq(sample_rate: f32, center_freq: f32, gain_db: f32, q: f32) -> Self {
+        if gain_db.abs() < 0.01 {
+            // Нейтральный фильтр — пропускает без изменений
+            return Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
+        }
+
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * center_freq / sample_rate;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let a0 = 1.0 + alpha / a;
+        Self {
+            b0: (1.0 + alpha * a) / a0,
+            b1: (-2.0 * cos_w0) / a0,
+            b2: (1.0 - alpha * a) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha / a) / a0,
+        }
+    }
+}
+
+/// Состояние одного канала биквадратного фильтра
+#[derive(Debug, Clone, Copy, Default)]
+struct BiquadState {
+    x1: f32, x2: f32,
+    y1: f32, y2: f32,
+}
+
+impl BiquadState {
+    fn process(&mut self, coeffs: &BiquadCoeffs, input: f32) -> f32 {
+        let output = coeffs.b0 * input + coeffs.b1 * self.x1 + coeffs.b2 * self.x2
+            - coeffs.a1 * self.y1 - coeffs.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = input;
+        self.y2 = self.y1;
+        self.y1 = output;
+        output
+    }
+}
+
+/// Source-обёртка, применяющая 10-полосный параметрический EQ в реальном времени.
+/// Читает настройки из разделяемого Arc<RwLock<EqSettings>>.
+struct EqSource<S: Source<Item = f32>> {
+    source: S,
+    eq_settings: Arc<RwLock<EqSettings>>,
+    /// Текущие коэффициенты — пересчитываются при изменении настроек
+    coeffs: Vec<BiquadCoeffs>,
+    /// Состояние фильтров: [band][channel]
+    states: Vec<Vec<BiquadState>>,
+    /// Кэш последних значений bands для детекции изменений
+    cached_bands: Vec<f32>,
+    cached_enabled: bool,
+    /// Кэш общего уровня в dB
+    cached_gain_db: f32,
+    /// Общий уровень (линейный множитель)
+    cached_gain_linear: f32,
+    /// Счётчик сэмплов для периодической проверки настроек
+    samples_since_check: usize,
+    /// Счётчик текущего канала (interleaved: 0, 1, 0, 1, ...)
+    current_channel: usize,
+    channels: u16,
+    sample_rate: u32,
+}
+
+impl<S: Source<Item = f32>> EqSource<S> {
+    fn new(source: S, eq_settings: Arc<RwLock<EqSettings>>) -> Self {
+        let channels = source.channels();
+        let sample_rate = source.sample_rate();
+        let num_bands = EQ_BANDS.len();
+
+        let settings = eq_settings.read().unwrap();
+        let bands = settings.bands.clone();
+        let enabled = settings.enabled;
+        let gain_db = settings.gain;
+        drop(settings);
+
+        let coeffs: Vec<BiquadCoeffs> = EQ_BANDS.iter().enumerate().map(|(i, &freq)| {
+            let gain = bands.get(i).copied().unwrap_or(0.0);
+            BiquadCoeffs::peaking_eq(sample_rate as f32, freq, gain, 1.4)
+        }).collect();
+
+        let states = vec![vec![BiquadState::default(); channels as usize]; num_bands];
+
+        Self {
+            source,
+            eq_settings,
+            coeffs,
+            states,
+            cached_bands: bands,
+            cached_enabled: enabled,
+            cached_gain_db: gain_db,
+            cached_gain_linear: 10.0_f32.powf(gain_db / 20.0),
+            samples_since_check: 0,
+            current_channel: 0,
+            channels,
+            sample_rate,
+        }
+    }
+
+    /// Проверить и обновить коэффициенты при изменении настроек
+    fn maybe_update_coeffs(&mut self) {
+        let settings = match self.eq_settings.try_read() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        if settings.enabled == self.cached_enabled && settings.bands == self.cached_bands && settings.gain == self.cached_gain_db {
+            return;
+        }
+
+        self.cached_enabled = settings.enabled;
+        self.cached_bands = settings.bands.clone();
+        self.cached_gain_db = settings.gain;
+        self.cached_gain_linear = 10.0_f32.powf(settings.gain / 20.0);
+        drop(settings);
+
+        // Пересчитать коэффициенты
+        for (i, &freq) in EQ_BANDS.iter().enumerate() {
+            let gain = self.cached_bands.get(i).copied().unwrap_or(0.0);
+            self.coeffs[i] = BiquadCoeffs::peaking_eq(self.sample_rate as f32, freq, gain, 1.4);
+        }
+    }
+}
+
+impl<S: Source<Item = f32>> Iterator for EqSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let sample = self.source.next()?;
+
+        let ch = self.current_channel;
+        self.current_channel += 1;
+        if self.current_channel >= self.channels as usize {
+            self.current_channel = 0;
+        }
+
+        // Проверяем настройки каждые ~1024 сэмпла
+        self.samples_since_check += 1;
+        if self.samples_since_check >= 1024 {
+            self.samples_since_check = 0;
+            self.maybe_update_coeffs();
+        }
+
+        if !self.cached_enabled {
+            return Some(sample);
+        }
+
+        let mut out = sample * self.cached_gain_linear;
+        for (band_idx, coeffs) in self.coeffs.iter().enumerate() {
+            out = self.states[band_idx][ch].process(coeffs, out);
+        }
+
+        Some(out.clamp(-1.0, 1.0))
+    }
+}
+
+impl<S: Source<Item = f32>> Source for EqSource<S> {
+    fn current_frame_len(&self) -> Option<usize> { self.source.current_frame_len() }
+    fn channels(&self) -> u16 { self.channels }
+    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
 }
 
 // ── Команды аудио-потока ────────────────────────────────────────────────────
@@ -524,6 +727,7 @@ fn audio_thread_loop(
     rx: mpsc::Receiver<AudioCmd>,
     _stream: OutputStream, // должен жить пока работает поток
     stream_handle: OutputStreamHandle,
+    eq_settings: Arc<RwLock<EqSettings>>,
 ) {
     let mut sink: Option<Sink> = None;
     // Предыдущий fade-out sink — при новом crossfade старый немедленно останавливается,
@@ -538,7 +742,8 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
-                    new_sink.append(SymphoniaSource::new_with_seek(&file_path, seek_secs)?);
+                    let source = SymphoniaSource::new_with_seek(&file_path, seek_secs)?;
+                    new_sink.append(EqSource::new(source, eq_settings.clone()));
                     sink = Some(new_sink);
                     Ok(())
                 })();
@@ -573,7 +778,8 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
-                    new_sink.append(SymphoniaSource::new_with_seek(&file_path, position_secs)?);
+                    let source = SymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                    new_sink.append(EqSource::new(source, eq_settings.clone()));
                     if was_paused { new_sink.pause(); }
                     sink = Some(new_sink);
                     Ok(())
@@ -595,8 +801,9 @@ fn audio_thread_loop(
                     let fade_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка fade-out sink: {}", e))?;
                     fade_sink.set_volume(volume);
+                    let fade_source = SymphoniaSource::new_with_seek(&file_path, current_pos)?;
                     fade_sink.append(FadeOut::new(
-                        SymphoniaSource::new_with_seek(&file_path, current_pos)?,
+                        EqSource::new(fade_source, eq_settings.clone()),
                         dur,
                     ));
 
@@ -608,8 +815,9 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
+                    let source = SymphoniaSource::new_with_seek(&file_path, position_secs)?;
                     new_sink.append(
-                        SymphoniaSource::new_with_seek(&file_path, position_secs)?
+                        EqSource::new(source, eq_settings.clone())
                             .fade_in(dur),
                     );
                     if was_paused { new_sink.pause(); }
@@ -636,8 +844,9 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
+                    let source = SymphoniaSource::new_with_seek(&file_path, seek_secs)?;
                     new_sink.append(
-                        SymphoniaSource::new_with_seek(&file_path, seek_secs)?
+                        EqSource::new(source, eq_settings.clone())
                             .fade_in(dur),
                     );
                     sink = Some(new_sink);
@@ -667,6 +876,7 @@ pub struct AudioPlayer {
     volume: f32,
     playback_started_at: Option<Instant>,
     accumulated_position: f64,
+    eq_settings: Arc<RwLock<EqSettings>>,
 }
 
 impl AudioPlayer {
@@ -674,6 +884,8 @@ impl AudioPlayer {
     pub fn new() -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(0);
+        let eq_settings = Arc::new(RwLock::new(EqSettings::default()));
+        let eq_for_thread = eq_settings.clone();
 
         std::thread::Builder::new()
             .name("audio-output".into())
@@ -681,7 +893,7 @@ impl AudioPlayer {
                 match OutputStream::try_default() {
                     Ok((stream, handle)) => {
                         let _ = init_tx.send(Ok(()));
-                        audio_thread_loop(cmd_rx, stream, handle);
+                        audio_thread_loop(cmd_rx, stream, handle, eq_for_thread);
                     }
                     Err(e) => {
                         let _ = init_tx.send(Err(format!(
@@ -704,6 +916,7 @@ impl AudioPlayer {
             volume: 1.0,
             playback_started_at: None,
             accumulated_position: 0.0,
+            eq_settings,
         })
     }
 
@@ -801,6 +1014,7 @@ impl AudioPlayer {
         let mut title = None;
         let mut artist = None;
         let mut album = None;
+        let mut genre = None;
         let mut duration_secs = None;
         let mut sample_rate = None;
         let mut bit_depth = None;
@@ -818,6 +1032,7 @@ impl AudioPlayer {
                     title = tag.title().map(|s| s.to_string());
                     artist = tag.artist().map(|s| s.to_string());
                     album = tag.album().map(|s| s.to_string());
+                    genre = tag.genre().map(|s| s.to_string());
                     if with_cover {
                         let (cover, accent) = cover_data_from_tag(tag);
                         cover_art = cover;
@@ -838,6 +1053,7 @@ impl AudioPlayer {
             title,
             artist,
             album,
+            genre,
             duration_secs,
             format,
             sample_rate,
@@ -1035,6 +1251,56 @@ impl AudioPlayer {
             volume: self.volume,
             position_secs: self.get_position(),
             current_file_path: self.current_track.as_ref().map(|t| t.file_path.clone()),
+        }
+    }
+
+    // ── Управление эквалайзером ────────────────────────────────────────────
+
+    /// Установить усиление полос эквалайзера (в dB, от -12 до +12)
+    pub fn set_eq_bands(&self, bands: Vec<f32>) {
+        if let Ok(mut settings) = self.eq_settings.write() {
+            settings.bands = bands.into_iter().map(|b| b.clamp(-12.0, 12.0)).collect();
+        }
+    }
+
+    /// Получить текущие значения полос эквалайзера
+    pub fn get_eq_bands(&self) -> Vec<f32> {
+        self.eq_settings.read().map(|s| s.bands.clone()).unwrap_or_else(|_| vec![0.0; 10])
+    }
+
+    /// Установить общий уровень эквалайзера (в dB, от -12 до +12)
+    pub fn set_eq_gain(&self, gain: f32) {
+        if let Ok(mut settings) = self.eq_settings.write() {
+            settings.gain = gain.clamp(-12.0, 12.0);
+        }
+    }
+
+    /// Получить общий уровень эквалайзера
+    pub fn get_eq_gain(&self) -> f32 {
+        self.eq_settings.read().map(|s| s.gain).unwrap_or(0.0)
+    }
+
+    /// Включить/выключить эквалайзер
+    pub fn set_eq_enabled(&self, enabled: bool) {
+        if let Ok(mut settings) = self.eq_settings.write() {
+            settings.enabled = enabled;
+        }
+    }
+
+    /// Получить состояние эквалайзера
+    pub fn get_eq_enabled(&self) -> bool {
+        self.eq_settings.read().map(|s| s.enabled).unwrap_or(false)
+    }
+
+    /// Получить полные настройки эквалайзера
+    pub fn get_eq_settings(&self) -> EqSettings {
+        self.eq_settings.read().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Установить полные настройки эквалайзера
+    pub fn set_eq_settings(&self, settings: EqSettings) {
+        if let Ok(mut current) = self.eq_settings.write() {
+            *current = settings;
         }
     }
 }

@@ -82,5 +82,12 @@ export function useCoverLoader(options: CoverLoaderOptions) {
         processCoverQueue();
     }
 
-    return { setupPreloadWatch, loadCoversForTracks };
+    function clearQueue() {
+        for (const filePath of coverQueue) {
+            loadingCovers.delete(filePath);
+        }
+        coverQueue = [];
+    }
+
+    return { setupPreloadWatch, loadCoversForTracks, clearQueue };
 }

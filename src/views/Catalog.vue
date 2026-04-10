@@ -6,11 +6,15 @@ import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
 import SearchIcon from '../components/Icons/SearchIcon.vue';
 import defaultCover from '../assets/trackCover.png';
+import cover from '../assets/cover.png';
 
+import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
+import TrackContextMenu from '../components/TrackContextMenu.vue';
+import CatalogContextMenu from '../components/CatalogContextMenu.vue';
 
 const {
     trackList,
@@ -19,9 +23,10 @@ const {
     activePlaylistSource,
     playTrack,
     togglePlayPause,
-    syncPlaybackOrder,
+    setPlaylistSource,
     formatTime,
     loadCoversForTracks,
+    clearCoverQueue,
 } = usePlayer();
 
 // ── Search ──────────────────────────────────────────────────────────────────
@@ -51,14 +56,72 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
+// ── Genre filter ───────────────────────────────────────────────────────────
+
+const selectedGenre = ref<string | null>(null)
+
+const genreBarEl = ref<HTMLElement | null>(null)
+const canScrollLeft = ref(false)
+const canScrollRight = ref(false)
+
+const genreList = computed(() => {
+    const counts = new Map<string, number>()
+    for (const t of trackList.value) {
+        if (t.genre) {
+            counts.set(t.genre, (counts.get(t.genre) || 0) + 1)
+        }
+    }
+    return [...counts.entries()]
+        .filter(([, count]) => count > 1)
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => ({ name, count }))
+})
+
+function toggleGenre(genre: string) {
+    selectedGenre.value = selectedGenre.value === genre ? null : genre
+}
+
+function updateGenreScrollState() {
+    const el = genreBarEl.value
+    if (!el) return
+    canScrollLeft.value = el.scrollLeft > 2
+    canScrollRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 2
+}
+
+function onGenreWheel(e: WheelEvent) {
+    const el = genreBarEl.value
+    if (!el) return
+    el.scrollBy({ left: (e.deltaY !== 0 ? e.deltaY : e.deltaX) * 2, behavior: 'smooth' })
+}
+
+function scrollGenre(dir: -1 | 1) {
+    genreBarEl.value?.scrollBy({ left: dir * 400, behavior: 'smooth' })
+}
+
+function scrollToActiveGenre() {
+    if (!selectedGenre.value || !genreBarEl.value) return
+    const chip = genreBarEl.value.querySelector('.genreChip.active') as HTMLElement | null
+    if (!chip) return
+    const bar = genreBarEl.value
+    const chipLeft = chip.offsetLeft
+    const chipWidth = chip.offsetWidth
+    const barWidth = bar.clientWidth
+    bar.scrollTo({ left: chipLeft - barWidth / 2 + chipWidth / 2, behavior: 'smooth' })
+}
+
 const filteredTracks = computed(() => {
+    let list = trackList.value
+    if (selectedGenre.value) {
+        list = list.filter(t => t.genre === selectedGenre.value)
+    }
     const q = debouncedSearch.value.toLowerCase().trim()
-    if (!q) return trackList.value
-    return trackList.value.filter(t => {
+    if (!q) return list
+    return list.filter(t => {
         const title = (t.title || '').toLowerCase()
         const artist = (t.artist || '').toLowerCase()
+        const album = (t.album || '').toLowerCase()
         const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '').toLowerCase() || ''
-        return title.includes(q) || artist.includes(q) || fileName.includes(q)
+        return title.includes(q) || artist.includes(q) || album.includes(q) || fileName.includes(q)
     })
 })
 
@@ -75,8 +138,21 @@ onMounted(() => {
             if (scrollHeaderRef.value) {
                 scrollHeaderHeight.value = scrollHeaderRef.value.offsetHeight
             }
+            updateGenreScrollState()
         })
         headerResizeObserver.observe(scrollHeaderRef.value)
+    }
+    updateGenreScrollState()
+
+    // Восстанавливаем выбранный жанр из источника воспроизведения
+    const source = activePlaylistSource.value
+    if (source && source.startsWith('catalog:genre:')) {
+        selectedGenre.value = source.slice('catalog:genre:'.length)
+        // Скроллим до чипа жанра и загружаем обложки после рендера
+        setTimeout(() => {
+            scrollToActiveGenre()
+            loadCoversForTracks(visibleTracks.value)
+        }, 100)
     }
 })
 
@@ -95,30 +171,55 @@ const {
     resetScroll,
 } = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
 
-// Reset scroll on search change
-watch(debouncedSearch, () => {
+// Reset scroll on search/genre change
+watch([debouncedSearch, selectedGenre], () => {
     resetScroll()
 })
 
-// Load covers for visible tracks
+// Load covers for visible tracks (skip during scroll-to-top)
+const isScrollingToTop = ref(false)
+
 watch(visibleTracks, (tracks) => {
-    loadCoversForTracks(tracks)
+    if (!isScrollingToTop.value) {
+        loadCoversForTracks(tracks)
+    }
 }, { immediate: true })
 
 // ── Catalog play button ─────────────────────────────────────────────────────
 
-const isCatalogActive = computed(() => activePlaylistSource.value === 'catalog')
+const isCatalogActive = computed(() =>
+    activePlaylistSource.value === catalogSourceId.value
+)
 
 function onPlayCatalog() {
     if (isCatalogActive.value) {
         togglePlayPause()
     } else {
-        activePlaylistSource.value = 'catalog'
-        syncPlaybackOrder()
-        if (trackList.value.length > 0) {
-            playTrack(trackList.value[0])
+        setPlaylistSource(catalogSourceId.value, filteredTracks.value)
+        if (filteredTracks.value.length > 0) {
+            playTrack(filteredTracks.value[0])
         }
     }
+}
+
+// ── Sticky header ───────────────────────────────────────────────────────────
+
+const scrollY = ref(0)
+const showStickyHeader = computed(() => scrollY.value > 300)
+
+function handleScroll(e: Event) {
+    scrollY.value = (e.target as HTMLElement).scrollTop
+    if (isScrollingToTop.value && scrollY.value <= 10) {
+        isScrollingToTop.value = false
+        loadCoversForTracks(visibleTracks.value)
+    }
+    onScroll(e)
+}
+
+function scrollToTop() {
+    isScrollingToTop.value = true
+    clearCoverQueue()
+    trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 // ── Track click ─────────────────────────────────────────────────────────────
@@ -127,15 +228,54 @@ function onTrackClick(e: MouseEvent) {
     createRipple(e)
 }
 
+// ── Context menus ──────────────────────────────────────────────────────────
+
+const catalogMenu = ref<{ x: number; y: number } | null>(null)
+const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
+
+function openCatalogMenu(e: MouseEvent) {
+    e.stopPropagation()
+    if (catalogMenu.value) {
+        catalogMenu.value = null
+        return
+    }
+    const btn = (e.currentTarget as HTMLElement)
+    const rect = btn.getBoundingClientRect()
+    catalogMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6 }
+}
+
+function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
+    e.stopPropagation()
+    if (trackMenu.value?.track.file_path === track.file_path) {
+        trackMenu.value = null
+        return
+    }
+    const btn = (e.currentTarget as HTMLElement)
+    const rect = btn.getBoundingClientRect()
+    trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
+}
+
+async function moveTrackToTop(track: TrackMetadata) {
+    const idx = trackList.value.findIndex(t => t.file_path === track.file_path)
+    if (idx > 0) {
+        const [item] = trackList.value.splice(idx, 1)
+        trackList.value.unshift(item)
+    }
+    await invoke('library_move_track_to_top', { filePath: track.file_path })
+}
+
+// ── Track click ─────────────────────────────────────────────────────────
+
+const catalogSourceId = computed(() =>
+    selectedGenre.value ? `catalog:genre:${selectedGenre.value}` : 'catalog'
+)
+
 function onCoverClick(track: TrackMetadata) {
     if (currentTrack.value?.file_path === track.file_path) {
         togglePlayPause()
         return
     }
-    if (!isCatalogActive.value) {
-        activePlaylistSource.value = 'catalog'
-        syncPlaybackOrder()
-    }
+    setPlaylistSource(catalogSourceId.value, filteredTracks.value)
     playTrack(track)
 }
 
@@ -143,10 +283,18 @@ function onCoverClick(track: TrackMetadata) {
 </script>
 
 <template>
-    <div class="pageRoot" ref="trackListEl" @scroll="onScroll">
+    <div class="pageRoot" ref="trackListEl" @scroll="handleScroll">
+        <div class="stickyHeaderAnchor">
+            <Transition name="sticky-header">
+                <div v-if="showStickyHeader" class="stickyHeader">
+                    <div>Мой каталог</div>
+                    <button class="toTopBtn" @click="scrollToTop">Вверх</button>
+                </div>
+            </Transition>
+        </div>
         <div ref="scrollHeaderRef" class="scrollHeader">
             <div class="pageHat">
-                <div class="cover"></div>
+                <img alt="cover" :src="cover" class="cover"></img>
                 <div class="dataZone">
                     <div class="info">
                         <div class="listType">Библиотека</div>
@@ -159,7 +307,7 @@ function onCoverClick(track: TrackMetadata) {
                             <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
                             Слушать
                         </button>
-                        <button class="moreOptionsBtn"><MoreIcon width="22" height="22" /></button>
+                        <button class="moreOptionsBtn" @mousedown="openCatalogMenu($event)"><MoreIcon width="22" height="22" /></button>
                     </div>
                 </div>
             </div>
@@ -181,6 +329,34 @@ function onCoverClick(track: TrackMetadata) {
                         <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                     </svg>
                 </div>
+            </div>
+            <div class="genreBarWrap" v-if="genreList.length > 0" @wheel.prevent="onGenreWheel">
+                <button v-if="canScrollLeft" class="genreArrow left" @click="scrollGenre(-1)">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="genreBar" ref="genreBarEl" @scroll="updateGenreScrollState">
+                    <button
+                        v-for="g in genreList"
+                        :key="g.name"
+                        class="genreChip"
+                        :class="{ active: selectedGenre === g.name }"
+                        @click="toggleGenre(g.name)"
+                    >
+                        {{ g.name }}
+                        <div
+                            v-if="selectedGenre === g.name"
+                            class="genreChipClose"
+                            @click.stop="selectedGenre = null"
+                        >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </div>
+                    </button>
+                </div>
+                <button v-if="canScrollRight" class="genreArrow right" @click="scrollGenre(1)">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
             </div>
         </div>
         <div
@@ -228,8 +404,8 @@ function onCoverClick(track: TrackMetadata) {
                     <div class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
                     <div class="trackArtist">{{ track.artist || 'Неизвестный исполнитель' }}</div>
                 </div>
-                <div class="trackTime">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                <div class="hoverOptionsBtn"><MoreIcon width="26" height="26" /></div>
+                <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
+                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
             </div>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
@@ -244,6 +420,23 @@ function onCoverClick(track: TrackMetadata) {
             <div class="emptyDesc">Добавьте папки с треками в настройках, чтобы они появились здесь.</div>
             <RouterLink to="/settings" class="emptyBtn">Настройки</RouterLink>
         </div>
+        <CatalogContextMenu
+            v-if="catalogMenu"
+            :x="catalogMenu.x"
+            :y="catalogMenu.y"
+            centerX
+            @close="catalogMenu = null"
+        />
+        <TrackContextMenu
+            v-if="trackMenu"
+            :x="trackMenu.x"
+            :y="trackMenu.y"
+            :track="trackMenu.track"
+            alignRight
+            centerY
+            @close="trackMenu = null"
+            @moveToTop="moveTrackToTop"
+        />
     </div>
 </template>
 
@@ -254,11 +447,18 @@ function onCoverClick(track: TrackMetadata) {
     flex-direction: column;
     width: 100%;
     height: 100%;
-    background-color: #101010;
+    background-color: var(--light-bg);
+
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-repeat: no-repeat;
+    background-attachment: local;
+
+    transition: .24s ease;
+    
     overflow-y: scroll;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
-.pageRoot::-webkit-scrollbar-track { background: transparent; }
+.pageRoot::-webkit-scrollbar-track { background-color: var(--light-bg); }
 .pageRoot::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.12);
     border-radius: 3px;
@@ -271,9 +471,10 @@ function onCoverClick(track: TrackMetadata) {
     flex-shrink: 0;
 }
 .pageHat .cover {
+    user-select: none;
     width: 200px;
     height: 200px;
-    background-color: #202020;
+    background-color: transparent;
     border-radius: 10px;
     transition: .24s ease;
     transform-origin: center;
@@ -347,7 +548,7 @@ function onCoverClick(track: TrackMetadata) {
     padding: 11px 16px 11px 14px;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 1);
-    color: hsla(0, 0%, 0%, 1);
+    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     font-size: 12px;
     font-weight: 600;
     transition: .24s ease;
@@ -387,15 +588,15 @@ function onCoverClick(track: TrackMetadata) {
     top: 50%;
     left: 12px;
     transform: translateY(-50%);
-    color: #606060;
+    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
     transition: .24s ease;
 
     &:hover {
-        color: #909090;
+        color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
     }
 }
 .searchZone:hover .searchIcon {
-    color: #909090;
+    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
 }
 .searchClear {
     position: absolute;
@@ -432,8 +633,117 @@ function onCoverClick(track: TrackMetadata) {
     font-size: 13px;
     font-weight: 600;
 }
+.genreBarWrap {
+    position: relative;
+    margin-top: -6px;
+    padding: 20px 0;
+    flex-shrink: 0;
+}
+.genreArrow {
+    max-height: 30px;
+    height: 30px;
+    max-width: 30px;
+    min-width: 30px;
+    position: absolute;
+    top: 18px;
+    bottom: 0;
+    width: 28px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: hsla(0, 0%, 100%, 0.7);
+    transition: .2s ease;
+
+    &:hover {
+        color: hsla(0, 0%, 100%, 1);
+    }
+}
+.genreArrow.left {
+    left: 0;
+    background-color: hsla(var(--accent-h), var(--accent-s), 17%, 1);
+    border-radius: 9999px;
+    padding: 8px;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(var(--accent-h), var(--accent-s), 21%, 1);
+    }
+}
+.genreArrow.right {
+    right: 0;
+    background-color: hsla(var(--accent-h), var(--accent-s), 17%, 1);
+    border-radius: 9999px;
+    padding: 8px 7px 8px 9px;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(var(--accent-h), var(--accent-s), 21%, 1);
+    }
+}
+.genreBar {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-shrink: 0;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+}
+.genreBar::-webkit-scrollbar {
+    display: none;
+}
+.genreChip {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    line-height: 1;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.6);
+    font-size: 12px;
+    font-weight: 500;
+    transition: .24s ease;
+    flex-shrink: 0;
+
+    &:hover {
+        background-color: hsla(0, 0%, 100%, 0.1);
+        color: hsla(0, 0%, 100%, 0.8);
+    }
+}
+.genreChip.active {
+    background-color: hsla(0, 0%, 100%, 0.9);
+    color: hsla(0, 0%, 0%, 0.85);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &:hover {
+        background-color: hsla(0, 0%, 100%, 0.75);
+        color: hsla(0, 0%, 0%, 0.85);
+    }
+}
+.genreChipClose {
+    margin-top: 1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: hsla(0, 0%, 0%, 0.5);
+    transition: .2s ease;
+
+    &:hover {
+        color: hsla(0, 0%, 0%, 0.85);
+    }
+}
 .tracksList {
-    margin-top: 28px;
+    margin-top: 4px;
 }
 .vsPad {
     width: 100%;
@@ -527,8 +837,12 @@ function onCoverClick(track: TrackMetadata) {
         color: hsla(0, 0%, 100%, 0.7);
     }
 }
-.trackElem:hover .hoverOptionsBtn {
+.trackElem:hover .hoverOptionsBtn,
+.hoverOptionsBtn.menuOpen {
     opacity: 1;
+}
+.trackTime.hidden {
+    opacity: 0 !important;
 }
 .trackInfo {
     display: flex;
@@ -596,6 +910,53 @@ function onCoverClick(track: TrackMetadata) {
 }
 
 
+.stickyHeaderAnchor {
+    position: sticky;
+    top: -20px;
+    height: 0;
+    z-index: 10;
+    margin: 0 -28px;
+}
+.stickyHeader {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 14%, 0.3);
+    backdrop-filter: blur(12px);
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: hsla(0, 0%, 100%, 0.9);
+}
+.sticky-header-enter-active,
+.sticky-header-leave-active {
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.sticky-header-enter-from,
+.sticky-header-leave-to {
+    opacity: 0;
+    transform: translateY(-8px);
+}
+.toTopBtn {
+    cursor: pointer;
+    padding: 6px 16px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.07);
+    color: hsla(0, 0%, 100%, 1);
+    font-size: 14px;
+    font-weight: 500;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(0, 0%, 100%, 0.12);
+    }
+}
 .emptyState {
     flex: 1;
     display: flex;

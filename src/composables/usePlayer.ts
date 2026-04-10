@@ -1,8 +1,9 @@
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
+import { usePlaylists } from "./usePlaylists";
 import { useVirtualScroll } from "./useVirtualScroll";
 import { useCoverLoader } from "./useCoverLoader";
 import router from "../router";
@@ -17,8 +18,8 @@ export interface SavedPlayerState {
   volume: number;
   shuffled: boolean;
   repeat_mode: string;
-  queue: string[];
   active_playlist_source: string | null;
+  current_track_index: number | null;
   current_route: string | null;
 }
 
@@ -26,6 +27,7 @@ export interface TrackMetadata {
   title: string | null;
   artist: string | null;
   album: string | null;
+  genre: string | null;
   duration_secs: number | null;
   format: string;
   sample_rate: number | null;
@@ -85,8 +87,10 @@ const playbackOrder = ref<TrackMetadata[]>([]);
 // Состояние библиотеки / настроек
 const showSettings = ref(false);
 
-// Active playlist source (used to know if catalog playlist is active)
+// Источник воспроизведения: 'catalog' | 'playlist:ID' | null
 const activePlaylistSource = ref<string | null>(null);
+// Треки текущего активного источника (для плейлистов — отдельный список)
+const sourceTrackList = ref<TrackMetadata[]>([]);
 
 // Initialization flag
 let initialized = false;
@@ -103,6 +107,8 @@ export function usePlayer() {
     rescanLibrary: rescanLibraryRaw, folderDisplayName,
   } = useFolders();
 
+  const { loadPlaylists } = usePlaylists();
+
   // ── Track map для O(1) поиска по file_path ──────────────────────────────
 
   const trackMap = computed(() => new Map(trackList.value.map(t => [t.file_path, t])));
@@ -117,11 +123,20 @@ export function usePlayer() {
 
   // ── Shuffle/Repeat helpers ────────────────────────────────────────────────
 
+  /** Список треков текущего источника воспроизведения */
+  function getActiveSourceTracks(): TrackMetadata[] {
+    if (activePlaylistSource.value && activePlaylistSource.value !== 'catalog') {
+      return sourceTrackList.value;
+    }
+    return trackList.value;
+  }
+
   function buildShuffledOrder(excludeCurrentFromStart = false) {
     const current = currentTrack.value;
+    const source = getActiveSourceTracks();
     const arr = excludeCurrentFromStart
-      ? [...trackList.value]
-      : trackList.value.filter(t => t.file_path !== current?.file_path);
+      ? [...source]
+      : source.filter(t => t.file_path !== current?.file_path);
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [arr[i], arr[j]] = [arr[j], arr[i]];
@@ -137,8 +152,15 @@ export function usePlayer() {
     if (shuffled.value) {
       buildShuffledOrder();
     } else {
-      playbackOrder.value = trackList.value;
+      playbackOrder.value = getActiveSourceTracks();
     }
+  }
+
+  /** Установить треки плейлиста как источник воспроизведения */
+  function setPlaylistSource(sourceId: string, tracks: TrackMetadata[]) {
+    activePlaylistSource.value = sourceId;
+    sourceTrackList.value = tracks;
+    syncPlaybackOrder();
   }
 
   function toggleShuffle() {
@@ -160,10 +182,16 @@ export function usePlayer() {
   const trackArtist = computed(() => currentTrack.value?.artist || "Неизвестный исполнитель");
   const trackAlbum = computed(() => currentTrack.value?.album || "");
 
-  const trackInfo = computed(() => {
+  const codecDisplay = computed(() => {
+    if (!currentTrack.value) return "";
+    const fmt = currentTrack.value.format || "";
+    const match = fmt.match(/\(([^)]+)\)/);
+    return (match ? match[1] : fmt).toUpperCase();
+  });
+
+  const codecDetails = computed(() => {
     if (!currentTrack.value) return "";
     const parts: string[] = [];
-    parts.push(currentTrack.value.format);
     if (currentTrack.value.sample_rate)
       parts.push(`${(currentTrack.value.sample_rate / 1000).toFixed(1)} kHz`);
     if (currentTrack.value.bit_depth)
@@ -237,7 +265,7 @@ export function usePlayer() {
 
   // ── Cover loader ────────────────────────────────────────────────────────
 
-  const { setupPreloadWatch, loadCoversForTracks } = useCoverLoader({
+  const { setupPreloadWatch, loadCoversForTracks, clearQueue: clearCoverQueue } = useCoverLoader({
     trackList,
     getTrackByPath,
     getTrackIndex,
@@ -264,6 +292,7 @@ export function usePlayer() {
       trackList.value = await invoke<TrackMetadata[]>("library_get_tracks");
       shuffled.value = false;
       syncPlaybackOrder();
+      await loadPlaylists();
     } catch (e: any) {
       errorMessage.value = `Ошибка загрузки: ${e}`;
     } finally {
@@ -277,6 +306,7 @@ export function usePlayer() {
       const prevTrack = currentTrack.value;
       trackList.value = tracks;
       syncPlaybackOrder();
+      await loadPlaylists();
 
       if (prevTrack && !tracks.some(t => t.file_path === prevTrack.file_path)) {
         await invoke("player_stop");
@@ -507,14 +537,22 @@ export function usePlayer() {
   // ── Сохранение / восстановление состояния ─────────────────────────────────
 
   async function saveState() {
+    // Вычисляем индекс текущего трека в источнике
+    let trackIndex: number | null = null;
+    if (currentTrack.value) {
+      const source = getActiveSourceTracks();
+      const idx = source.findIndex(t => t.file_path === currentTrack.value!.file_path);
+      trackIndex = idx >= 0 ? idx : null;
+    }
+
     const state: SavedPlayerState = {
       current_track_path: currentTrack.value?.file_path ?? null,
       position_secs: positionSecs.value,
       volume: volume.value,
       shuffled: shuffled.value,
       repeat_mode: repeatMode.value,
-      queue: trackList.value.map(t => t.file_path),
       active_playlist_source: activePlaylistSource.value,
+      current_track_index: trackIndex,
       current_route: router.currentRoute.value.path,
     };
     try {
@@ -583,6 +621,18 @@ export function usePlayer() {
     await loadLibrary();
     await restoreState();
     statusInterval = setInterval(pollStatus, 250);
+
+    // Останавливаем поллинг когда плеер остановлен и нет трека
+    watch([playbackState, currentTrack] as const, ([state, track]: [string, TrackMetadata | null]) => {
+      if (state === 'Stopped' && !track) {
+        if (statusInterval) {
+          clearInterval(statusInterval);
+          statusInterval = null;
+        }
+      } else if (!statusInterval) {
+        statusInterval = setInterval(pollStatus, 250);
+      }
+    });
   }
 
   function destroy() {
@@ -610,6 +660,7 @@ export function usePlayer() {
     shuffled,
     repeatMode,
     activePlaylistSource,
+    sourceTrackList,
 
     // Состояние библиотеки / настроек
     showSettings,
@@ -622,7 +673,8 @@ export function usePlayer() {
     trackTitle,
     trackArtist,
     trackAlbum,
-    trackInfo,
+    codecDisplay,
+    codecDetails,
     durationSecs,
     durationFormatted,
     positionFormatted,
@@ -671,7 +723,10 @@ export function usePlayer() {
     toggleShuffle,
     toggleRepeat,
     syncPlaybackOrder,
+    setPlaylistSource,
+    getActiveSourceTracks,
     loadCoversForTracks,
+    clearCoverQueue,
     saveState,
     destroy,
   };

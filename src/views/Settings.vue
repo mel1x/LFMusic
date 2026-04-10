@@ -4,6 +4,7 @@ import DeleteIcon from '../components/Icons/DeleteIcon.vue';
 import FolderIcon from '../components/Icons/FolderIcon.vue';
 import { useSettings } from '../composables/useSettings';
 import { usePlayer } from '../composables/usePlayer';
+import { useEqualizer, EQ_PRESETS, EQ_BAND_LABELS } from '../composables/useEqualizer';
 import RefreshIcon from '../components/Icons/RefreshIcon.vue';
 import PlusIcon from '../components/Icons/PlusIcon.vue';
 
@@ -12,6 +13,11 @@ const {
     folders, isScanning, removingFolder, scanProgress,
     addFolder, removeFolder, rescanLibrary, folderDisplayName,
 } = usePlayer();
+const {
+    eqEnabled, eqBands, eqGain, activePreset,
+    load: loadEq, toggleEnabled: toggleEq,
+    setBand, setGain, applyPreset, resetBands,
+} = useEqualizer();
 
 const sortedFolders = computed(() =>
     [...folders.value].sort((a, b) => b.track_count - a.track_count)
@@ -19,11 +25,27 @@ const sortedFolders = computed(() =>
 
 onMounted(async () => {
     await load();
+    await loadEq();
 });
 
 async function toggle(key: keyof typeof settings.value) {
     settings.value[key] = !settings.value[key];
     await save();
+}
+
+function onBandInput(index: number, event: Event) {
+    const value = parseFloat((event.target as HTMLInputElement).value);
+    setBand(index, value);
+}
+
+function onGainInput(event: Event) {
+    const value = parseFloat((event.target as HTMLInputElement).value);
+    setGain(value);
+}
+
+function formatBandValue(value: number): string {
+    const v = value.toFixed(1);
+    return value > 0 ? `+${v}` : v;
 }
 </script>
 
@@ -42,6 +64,68 @@ async function toggle(key: keyof typeof settings.value) {
                 </label>
             </div>
         </div>
+        <div class="settingBlock">
+            <div class="settingTitle">Эквалайзер</div>
+            <div class="settingDesc">Настройка частотных полос аудио</div>
+
+            <div class="eqBlock">
+                <div class="eqHeader">
+                    <label class="settingElem" style="margin: 0; padding: 0;">
+                        <input type="checkbox" class="settingCheckbox"
+                            :checked="eqEnabled"
+                            @change="toggleEq">
+                        <span>Включить эквалайзер</span>
+                    </label>
+                    <button class="eqResetBtn" @click="resetBands" :disabled="!eqEnabled">Сбросить</button>
+                </div>
+
+                <div class="eqPresets">
+                    <button
+                        v-for="preset in EQ_PRESETS"
+                        :key="preset.name"
+                        class="eqPresetBtn"
+                        :class="{ active: activePreset === preset.name }"
+                        :disabled="!eqEnabled"
+                        @click="applyPreset(preset)"
+                    >{{ preset.name }}</button>
+                </div>
+
+                <div class="eqGainRow" :class="{ disabled: !eqEnabled }">
+                    <span class="eqGainLabel">Уровень</span>
+                    <input
+                        type="range"
+                        class="eqGainSlider"
+                        min="-12"
+                        max="12"
+                        step="0.1"
+                        :value="eqGain"
+                        :disabled="!eqEnabled"
+                        @input="onGainInput($event)"
+                    />
+                    <span class="eqGainValue">{{ formatBandValue(eqGain) }} dB</span>
+                </div>
+
+                <div class="eqSliders" :class="{ disabled: !eqEnabled }">
+                    <div class="eqBand" v-for="(label, i) in EQ_BAND_LABELS" :key="i">
+                        <span class="eqBandValue">{{ formatBandValue(eqBands[i]) }}</span>
+                        <div class="eqSliderWrap">
+                            <input
+                                type="range"
+                                class="eqSlider"
+                                min="-12"
+                                max="12"
+                                step="0.1"
+                                :value="eqBands[i]"
+                                :disabled="!eqEnabled"
+                                @input="onBandInput(i, $event)"
+                            />
+                        </div>
+                        <span class="eqBandLabel">{{ label }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="settingBlock">
             <div class="settingTitle">Локальные папки</div>
             <div class="settingDesc">Папки сканируемые на аудио файлы</div>
@@ -99,7 +183,9 @@ async function toggle(key: keyof typeof settings.value) {
     flex-direction: column;
     width: 100%;
     min-height: 100%;
-    background-color: #101010;
+    background-color: var(--light-bg);
+
+    transition: .24s ease;
 }
 .pageTitle {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -125,7 +211,7 @@ async function toggle(key: keyof typeof settings.value) {
     font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-weight: 600;
     font-size: 15px;
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
 }
 .settingsBlock {
     margin-top: 16px;
@@ -142,7 +228,7 @@ async function toggle(key: keyof typeof settings.value) {
     align-items: start;
     width: 100%;
     gap: 16px;
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
     font-weight: 600;
     font-size: 16px;
 }
@@ -151,14 +237,14 @@ async function toggle(key: keyof typeof settings.value) {
     transition: .24s ease-in-out;
 
     &:hover {
-        color: hsla(0, 0%, 60.1%, 1);
+        color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.62);
     }
 }
 .settingCheckbox {
     appearance: none;
     width: 32px;
     height: 19.2px;
-    background: #1f1f1f;
+    background: var(--dark-bg);
     border-radius: 31px;
     position: relative;
     cursor: pointer;
@@ -182,7 +268,7 @@ async function toggle(key: keyof typeof settings.value) {
 }
 .settingCheckbox:checked::after {
     transform: translateX(14px);
-    background: hsla(0, 0%, 10%, 1);
+    background: var(--dark-bg);
 }
 .foldersBlock {
     margin-top: 22px;
@@ -200,16 +286,21 @@ async function toggle(key: keyof typeof settings.value) {
     gap: 16px;
     border-radius: 8px;
     padding: 6px 8px 4px;
-    background-color: #1f1f1f;
+    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(var(--accent-h), var(--accent-s), 17%, 1);
+    }
 }
 .folderElem .icon {
     padding: 0px 6px 0px 8px;
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
 
     transition: .24s ease-in-out;
 
     &:hover {
-        color: hsla(0, 0%, 60.1%, 1);
+        color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.62);
     }
 }
 .folderInfo {
@@ -226,12 +317,12 @@ async function toggle(key: keyof typeof settings.value) {
     user-select: none;
     font-weight: 600;
     font-size: 12px;
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
 
     transition: .24s ease-in-out;
 
     &:hover {
-        color: hsla(0, 0%, 60.1%, 1);
+        color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.62);
     }
 }
 .removeBtn {
@@ -240,16 +331,16 @@ async function toggle(key: keyof typeof settings.value) {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
     border-radius: 4px;
     padding: 4px;
-    background-color: hsla(0, 0%, 100%, 0.08);
+    background-color: hsla(var(--accent-h), var(--accent-s), 21%, 1);
     margin-left: auto;
-    transition: .2s;
+    transition: .3s ease;
 
     &:hover {
         color: #ff6467;
-        background-color: #2b1617;
+        background-color: hsla(var(--accent-h), var(--accent-s), 13%, 1);
     }
 }
 .foldersHat {
@@ -268,11 +359,11 @@ async function toggle(key: keyof typeof settings.value) {
     padding: 6px 12px 6px 9px;
     border-radius: 8px;
     background-color: hsla(0, 0%, 100%, 0);
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
     font-weight: 500;
     font-size: 15px;
     cursor: pointer;
-    transition: .2s;
+    transition: .24s ease;
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.08);
@@ -288,7 +379,7 @@ async function toggle(key: keyof typeof settings.value) {
     padding: 6px 12px;
     border-radius: 8px;
     background-color: hsla(0, 0%, 100%, 0);
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
     font-weight: 500;
     font-size: 15px;
     cursor: pointer;
@@ -309,7 +400,7 @@ async function toggle(key: keyof typeof settings.value) {
     flex-direction: column;
     gap: 6px;
     padding: 10px 14px;
-    background-color: #1a1a1a;
+    background-color: var(--dark-bg);
     border-radius: 8px;
 }
 .scanProgressHeader {
@@ -320,7 +411,7 @@ async function toggle(key: keyof typeof settings.value) {
 .scanProgressLabel {
     font-size: 14px;
     font-weight: 500;
-    color: hsla(0, 0%, 44.1%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
 }
 .scanProgressPercent {
     font-size: 14px;
@@ -355,5 +446,183 @@ async function toggle(key: keyof typeof settings.value) {
     font-weight: 600;
     font-size: 14px;
     color: #ff6467;
+}
+.eqBlock {
+    margin-top: 16px;
+    max-width: 800px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.eqHeader {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+}
+.eqResetBtn {
+    user-select: none;
+    padding: 5px 14px;
+    border-radius: 6px;
+    background-color: hsla(0, 0%, 100%, 0);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+    font-weight: 500;
+    font-size: 13px;
+    cursor: pointer;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(0, 0%, 100%, 0.08);
+        color: #ffffff;
+    }
+    &:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+    }
+}
+.eqPresets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.eqPresetBtn {
+    user-select: none;
+    padding: 5px 12px;
+    border-radius: 6px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+    font-weight: 500;
+    font-size: 13px;
+    cursor: pointer;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
+        color: #ffffff;
+    }
+    &.active {
+        background-color: hsla(0, 0%, 100%, 0.15);
+        color: #ffffff;
+    }
+    &:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+    }
+}
+.eqGainRow {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    border-radius: 10px;
+    transition: .24s ease;
+
+    &.disabled {
+        opacity: 0.35;
+        pointer-events: none;
+    }
+}
+.eqGainLabel {
+    font-size: 13px;
+    font-weight: 600;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+    white-space: nowrap;
+}
+.eqGainSlider {
+    appearance: none;
+    flex: 1;
+    height: 4px;
+    background: hsla(0, 0%, 100%, 0.1);
+    border-radius: 999px;
+    cursor: pointer;
+}
+.eqGainSlider::-webkit-slider-thumb {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #ffffff;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+.eqGainSlider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+}
+.eqGainValue {
+    font-size: 12px;
+    font-weight: 600;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+    font-variant-numeric: tabular-nums;
+    min-width: 52px;
+    text-align: right;
+}
+.eqSliders {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    gap: 4px;
+    padding: 16px 12px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    border-radius: 10px;
+    transition: .24s ease;
+
+    &.disabled {
+        opacity: 0.35;
+        pointer-events: none;
+    }
+}
+.eqBand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+}
+.eqBandValue {
+    font-size: 11px;
+    font-weight: 600;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+    font-variant-numeric: tabular-nums;
+    min-width: 28px;
+    text-align: center;
+}
+.eqBandLabel {
+    font-size: 11px;
+    font-weight: 600;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+}
+.eqSliderWrap {
+    height: 120px;
+    width: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+.eqSlider {
+    appearance: none;
+    width: 120px;
+    height: 4px;
+    background: hsla(0, 0%, 100%, 0.1);
+    border-radius: 999px;
+    cursor: pointer;
+    transform: rotate(-90deg);
+    transform-origin: center center;
+}
+.eqSlider::-webkit-slider-thumb {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #ffffff;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+.eqSlider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
 }
 </style>

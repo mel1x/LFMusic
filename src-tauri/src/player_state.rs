@@ -14,10 +14,10 @@ pub struct SavedPlayerState {
     pub shuffled: bool,
     /// Режим повтора: "queue" или "track"
     pub repeat_mode: String,
-    /// Очередь воспроизведения (пути к файлам)
-    pub queue: Vec<String>,
-    /// Источник активного плейлиста
+    /// Источник активного плейлиста (catalog, catalog:genre:Rock, playlist:3, ...)
     pub active_playlist_source: Option<String>,
+    /// Индекс текущего трека в источнике
+    pub current_track_index: Option<usize>,
     /// Текущий маршрут (страница)
     pub current_route: Option<String>,
 }
@@ -30,8 +30,8 @@ impl Default for SavedPlayerState {
             volume: 1.0,
             shuffled: false,
             repeat_mode: "queue".to_string(),
-            queue: Vec::new(),
             active_playlist_source: None,
+            current_track_index: None,
             current_route: None,
         }
     }

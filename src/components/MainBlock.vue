@@ -18,13 +18,27 @@ import HomeIcon from './Icons/HomeIcon.vue';
     </aside>
     <div class="frameWrapper">
       <ViewFrame>
-        <RouterView />
+        <RouterView v-slot="{ Component }">
+          <Transition name="fade" mode="out-in">
+            <component :is="Component" />
+          </Transition>
+        </RouterView>
       </ViewFrame>
     </div>
   </div>
 </template>
 
 <style scoped>
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.24s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
 .mainWrapper {
   display: flex;
   flex-direction: row;
@@ -34,7 +48,7 @@ aside {
   flex-direction: column;
   padding: 32px 14px 20px;
   gap: 8px;
-  width: 260px;
+  width: 240px;
   height: calc(100vh - 38px - 104px);
 }
 .navLink {
@@ -43,11 +57,11 @@ aside {
   flex-direction: row;
   align-items: center;
   gap: 12px;
-  color: hsla(0, 0%, 80%, 0.5);
+  color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
   width: 100%;
   font-weight: 600;
   padding: 10px 14px;
-  font-size: 16px;
+  font-size: 14px;
 
   transition: .2s ease;
 
@@ -56,7 +70,7 @@ aside {
   }
 }
 .navLink svg {
-  color: #6d6d6d;
+  color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
   transition: .2s ease;
 
   .navLink:hover & {
@@ -70,7 +84,10 @@ aside {
   color: #fff;
 }
 .frameWrapper {
-  width: calc(100% - 260px - 12px);
+  border-radius: 16px;
+  background-color: var(--light-bg);
+  width: calc(100% - 240px - 12px);
   height: calc(100vh - 38px - 104px);
+  transition: .24s ease;
 }
 </style>

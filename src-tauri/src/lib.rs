@@ -3,10 +3,9 @@ mod library;
 mod player_state;
 mod settings;
 
-use audio_player::{AudioPlayer, PlayerStatus, TrackMetadata};
-use library::{FolderInfo, MusicLibrary};
+use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
+use library::{FolderInfo, MusicLibrary, PlaylistInfo};
 use player_state::SavedPlayerState;
-use settings::AppSettings;
 use std::path::PathBuf;
 use std::sync::{Mutex, RwLock};
 use tauri::{Emitter, Manager, State};
@@ -24,26 +23,59 @@ struct ScanProgress {
 
 pub struct PlayerState(pub RwLock<AudioPlayer>);
 pub struct LibraryState(pub Mutex<MusicLibrary>);
-pub struct SettingsState(pub Mutex<(AppSettings, PathBuf)>);
+pub struct SettingsState(pub Mutex<(settings::AppSettings, PathBuf)>);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Команды плеера (без изменений)
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn player_play(state: State<PlayerState>, file_path: String) -> Result<TrackMetadata, String> {
+fn player_play(
+    state: State<PlayerState>,
+    library: State<LibraryState>,
+    file_path: String,
+) -> Result<TrackMetadata, String> {
+    // Проверяем кэшированный accent_color в БД
+    let cached_accent = library.0.lock().ok().and_then(|lib| lib.get_accent_color(&file_path));
+
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
-    player.play(&file_path)
+    let mut metadata = player.play(&file_path)?;
+
+    // Используем кэшированный цвет или сохраняем новый
+    if let Some(cached) = cached_accent {
+        metadata.accent_color = Some(cached);
+    } else if let Some(ref color) = metadata.accent_color {
+        if let Ok(lib) = library.0.lock() {
+            let _ = lib.set_accent_color(&file_path, color);
+        }
+    }
+
+    Ok(metadata)
 }
 
 #[tauri::command]
 fn player_play_crossfade(
     state: State<PlayerState>,
+    library: State<LibraryState>,
     file_path: String,
     crossfade_secs: f64,
 ) -> Result<TrackMetadata, String> {
+    // Проверяем кэшированный accent_color в БД
+    let cached_accent = library.0.lock().ok().and_then(|lib| lib.get_accent_color(&file_path));
+
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
-    player.play_crossfade(&file_path, crossfade_secs)
+    let mut metadata = player.play_crossfade(&file_path, crossfade_secs)?;
+
+    // Используем кэшированный цвет или сохраняем новый
+    if let Some(cached) = cached_accent {
+        metadata.accent_color = Some(cached);
+    } else if let Some(ref color) = metadata.accent_color {
+        if let Ok(lib) = library.0.lock() {
+            let _ = lib.set_accent_color(&file_path, color);
+        }
+    }
+
+    Ok(metadata)
 }
 
 #[tauri::command]
@@ -163,6 +195,13 @@ fn library_get_tracks(state: State<LibraryState>) -> Result<Vec<TrackMetadata>, 
     Ok(library.get_all_tracks())
 }
 
+/// Поднять трек на первое место в каталоге (навсегда)
+#[tauri::command]
+fn library_move_track_to_top(file_path: String, state: State<LibraryState>) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.move_track_to_top(&file_path)
+}
+
 /// Удалить из кэша треки, файлы которых больше не существуют на диске
 #[tauri::command]
 fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
@@ -188,21 +227,164 @@ async fn library_rescan(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Команды настроек
+// Команды плейлистов
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Получить все плейлисты
 #[tauri::command]
-fn get_settings(state: State<SettingsState>) -> Result<AppSettings, String> {
-    let state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(state.0.clone())
+fn playlist_get_all(state: State<LibraryState>) -> Result<Vec<PlaylistInfo>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_playlists())
+}
+
+/// Получить треки плейлиста
+#[tauri::command]
+fn playlist_get_tracks(state: State<LibraryState>, playlist_id: i64) -> Result<Vec<TrackMetadata>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_playlist_tracks(playlist_id))
+}
+
+/// Создать пользовательский плейлист
+#[tauri::command]
+fn playlist_create(state: State<LibraryState>, name: String) -> Result<PlaylistInfo, String> {
+    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.create_playlist(name)
+}
+
+/// Переименовать плейлист
+#[tauri::command]
+fn playlist_rename(state: State<LibraryState>, playlist_id: i64, name: String) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.rename_playlist(playlist_id, name)
+}
+
+/// Удалить пользовательский плейлист
+#[tauri::command]
+fn playlist_delete(state: State<LibraryState>, playlist_id: i64) -> Result<(), String> {
+    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.delete_playlist(playlist_id)
+}
+
+/// Добавить трек в плейлист
+#[tauri::command]
+fn playlist_add_track(state: State<LibraryState>, playlist_id: i64, file_path: String) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.add_track_to_playlist(playlist_id, &file_path)
+}
+
+/// Удалить трек из плейлиста
+#[tauri::command]
+fn playlist_remove_track(state: State<LibraryState>, playlist_id: i64, file_path: String) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.remove_track_from_playlist(playlist_id, &file_path)
+}
+
+/// Поднять трек на первое место в плейлисте
+#[tauri::command]
+fn playlist_move_track_to_top(state: State<LibraryState>, playlist_id: i64, file_path: String) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.move_playlist_track_to_top(playlist_id, &file_path)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Команды эквалайзера
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Сохранить EQ в общий settings.json
+fn eq_persist(settings_state: &State<SettingsState>, eq: &EqSettings) -> Result<(), String> {
+    let mut state = settings_state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    state.0.eq_settings = eq.clone();
+    settings::save(&state.1, &state.0)
 }
 
 #[tauri::command]
-fn save_settings(state: State<SettingsState>, settings: AppSettings) -> Result<(), String> {
+fn eq_set_bands(
+    player_state: State<PlayerState>,
+    settings_state: State<SettingsState>,
+    bands: Vec<f32>,
+) -> Result<(), String> {
+    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    player.set_eq_bands(bands);
+    let eq = player.get_eq_settings();
+    eq_persist(&settings_state, &eq)
+}
+
+#[tauri::command]
+fn eq_get_bands(state: State<PlayerState>) -> Result<Vec<f32>, String> {
+    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(player.get_eq_bands())
+}
+
+#[tauri::command]
+fn eq_set_gain(
+    player_state: State<PlayerState>,
+    settings_state: State<SettingsState>,
+    gain: f32,
+) -> Result<(), String> {
+    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    player.set_eq_gain(gain);
+    let eq = player.get_eq_settings();
+    eq_persist(&settings_state, &eq)
+}
+
+#[tauri::command]
+fn eq_get_gain(state: State<PlayerState>) -> Result<f32, String> {
+    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(player.get_eq_gain())
+}
+
+#[tauri::command]
+fn eq_set_enabled(
+    player_state: State<PlayerState>,
+    settings_state: State<SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    player.set_eq_enabled(enabled);
+    let eq = player.get_eq_settings();
+    eq_persist(&settings_state, &eq)
+}
+
+#[tauri::command]
+fn eq_get_enabled(state: State<PlayerState>) -> Result<bool, String> {
+    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(player.get_eq_enabled())
+}
+
+#[tauri::command]
+fn eq_get_settings(state: State<PlayerState>) -> Result<EqSettings, String> {
+    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(player.get_eq_settings())
+}
+
+#[tauri::command]
+fn eq_set_settings(
+    player_state: State<PlayerState>,
+    settings_state: State<SettingsState>,
+    eq_settings: EqSettings,
+) -> Result<(), String> {
+    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    player.set_eq_settings(eq_settings);
+    let eq = player.get_eq_settings();
+    eq_persist(&settings_state, &eq)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Команды настроек
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Фронтенд работает только с булевыми опциями — отдаём/принимаем HashMap<String, bool>
+#[tauri::command]
+fn get_settings(state: State<SettingsState>) -> Result<std::collections::HashMap<String, bool>, String> {
+    let state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(state.0.get_options())
+}
+
+#[tauri::command]
+fn save_settings(state: State<SettingsState>, settings: std::collections::HashMap<String, bool>) -> Result<(), String> {
     let mut state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    settings::save(&state.1, &settings)?;
-    state.0 = settings;
-    Ok(())
+    state.0.set_options(settings);
+    settings::save(&state.1, &state.0)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -240,6 +422,13 @@ pub fn run() {
                 .expect("Не удалось получить директорию данных приложения");
 
             let app_settings = settings::load(&app_data_dir);
+
+            // Загружаем сохранённые настройки эквалайзера из settings.json
+            let player_state = app.state::<PlayerState>();
+            let player = player_state.0.read().expect("Lock error");
+            player.set_eq_settings(app_settings.eq_settings.clone());
+            drop(player);
+
             app.manage(SettingsState(Mutex::new((app_settings, app_data_dir.clone()))));
 
             let library =
@@ -271,8 +460,27 @@ pub fn run() {
             library_add_folder,
             library_remove_folder,
             library_get_tracks,
+            library_move_track_to_top,
             library_cleanup,
             library_rescan,
+            // Плейлисты
+            playlist_get_all,
+            playlist_get_tracks,
+            playlist_create,
+            playlist_rename,
+            playlist_delete,
+            playlist_add_track,
+            playlist_remove_track,
+            playlist_move_track_to_top,
+            // Эквалайзер
+            eq_set_bands,
+            eq_get_bands,
+            eq_set_gain,
+            eq_get_gain,
+            eq_set_enabled,
+            eq_get_enabled,
+            eq_get_settings,
+            eq_set_settings,
             // Настройки
             get_settings,
             save_settings,
