@@ -36,23 +36,23 @@ function onTogglePin() {
     gap: 10px;
     width: 100%;
     padding: 8px 12px;
-    border-radius: 8px;
     background: none;
     border: none;
     color: hsla(0, 0%, 100%, 0.8);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: background-color 0.15s ease;
+    transition: 0.24s ease;
     user-select: none;
     white-space: nowrap;
     text-align: left;
 }
 .ctx-item:hover {
-    background-color: hsla(0, 0%, 100%, 0.08);
+    background-color: hsla(0, 0%, 100%, 0.05);
     color: hsla(0, 0%, 100%, 1);
 }
 .ctx-item svg {
+    transition: 0.24s ease;
     flex-shrink: 0;
     color: hsla(0, 0%, 100%, 0.5);
 }

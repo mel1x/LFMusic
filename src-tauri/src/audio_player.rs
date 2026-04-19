@@ -6,9 +6,10 @@ use lofty::probe::Probe;
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{CodecType, DecoderOptions};
@@ -122,6 +123,21 @@ impl BiquadCoeffs {
 struct BiquadState {
     x1: f32, x2: f32,
     y1: f32, y2: f32,
+}
+
+/// Мягкий лимитер: линейный при |x| <= T, ниже — плавное насыщение через tanh.
+/// При |x| <= 0.97 эффекта нет; выше — плавно сжимается к ±1, никогда не превышая.
+#[inline(always)]
+fn soft_clip(x: f32) -> f32 {
+    const T: f32 = 0.97;
+    let a = x.abs();
+    if a <= T {
+        x
+    } else {
+        let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+        let over = (a - T) / (1.0 - T);
+        sign * (T + (1.0 - T) * over.tanh())
+    }
 }
 
 impl BiquadState {
@@ -248,7 +264,7 @@ impl<S: Source<Item = f32>> Iterator for EqSource<S> {
             out = self.states[band_idx][ch].process(coeffs, out);
         }
 
-        Some(out.clamp(-1.0, 1.0))
+        Some(soft_clip(out))
     }
 }
 
@@ -493,49 +509,58 @@ fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
 }
 
 /// Извлечь акцентный цвет из сырых байтов изображения.
-/// Использует auto-palette, затем выбирает наиболее подходящий для фона цвет:
-/// насыщенный, но не слишком яркий и не слишком тёмный (lightness 0.25–0.55).
-/// Если auto-palette не смог извлечь палитру — fallback на средний цвет.
+/// Использует auto-palette для получения доминантных цветов обложки,
+/// выбирает лучший по сочетанию доминантности, насыщенности и близости
+/// к оптимальной светлоте. Сохраняет исходный оттенок без сдвигов.
 fn extract_accent_color(image_data: &[u8]) -> Option<String> {
     let img = image::load_from_memory(image_data).ok()?;
-    let thumb = img.thumbnail(64, 64);
+    let thumb = img.thumbnail(96, 96);
     extract_via_palette(&thumb)
 }
 
 fn extract_via_palette(thumb: &image::DynamicImage) -> Option<String> {
-    use auto_palette::{ImageData, Palette, Swatch, Theme};
+    use auto_palette::{ImageData, Palette, Swatch};
 
     let image_data = ImageData::try_from(thumb).ok()?;
     let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
 
-    let mut candidates: Vec<Swatch<f64>> = Vec::new();
-    for theme in [Theme::Muted, Theme::Dark, Theme::Colorful] {
-        if let Ok(swatches) = palette.find_swatches_with_theme(5, theme) {
-            candidates.extend(swatches);
-        }
+    // Берём 12 самых представительных цветов (ранжируются по populations)
+    let swatches = palette.find_swatches(12).ok()?;
+    if swatches.is_empty() {
+        return None;
     }
 
-    let best = candidates.iter().max_by(|a, b| {
-        let score = |s: &Swatch<f64>| -> f64 {
-            let rgb = s.color().to_rgb();
-            let (hue, saturation, lightness) = rgb_to_hsl(rgb.r, rgb.g, rgb.b);
+    // Нормализуем популяции относительно самой массивной
+    let max_pop = swatches
+        .iter()
+        .map(|s| s.population())
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
 
-            let lightness_penalty = if lightness < 0.25 {
-                (0.25 - lightness) * 4.0
-            } else if lightness > 0.55 {
-                (lightness - 0.55) * 4.0
-            } else {
-                0.0
-            };
+    let score = |s: &Swatch<f64>| -> f64 {
+        let rgb = s.color().to_rgb();
+        let (hue, saturation, lightness) = rgb_to_hsl(rgb.r, rgb.g, rgb.b);
 
-            let yellow_penalty = if (30.0..=70.0).contains(&hue) {
-                0.6
-            } else {
-                0.0
-            };
+        // Доминантность (какую часть изображения занимает этот кластер)
+        let pop_norm = (s.population() as f64 / max_pop).clamp(0.0, 1.0);
 
-            saturation * 0.6 + (1.0 - lightness_penalty) * 0.4 - yellow_penalty
-        };
+        // Близость к оптимальной светлоте 0.42: 1.0 в центре, 0.0 при |Δ|≥0.5
+        let l_fit = (1.0 - (lightness - 0.42).abs() * 2.0).clamp(0.0, 1.0);
+
+        // Насыщенность сама по себе — предпочитаем выраженные цвета,
+        // но серые кластеры не наказываем в ноль (минимум 0.05).
+        let sat_fit = saturation.clamp(0.05, 0.9);
+
+        // Мягкий штраф на «кислотные» жёлтые — они часто плохо смотрятся как фон.
+        let yellow_penalty = if (40.0..=65.0).contains(&hue) { 0.12 } else { 0.0 };
+
+        // Слишком тёмные/светлые кластеры редко дают хороший акцент — отсекаем
+        // по l_fit, но не исключаем: доминантный тёмный всё ещё может победить.
+        pop_norm * 0.45 + sat_fit * 0.25 + l_fit * 0.30 - yellow_penalty
+    };
+
+    let best = swatches.iter().max_by(|a, b| {
         score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal)
     })?;
 
@@ -597,26 +622,22 @@ fn hsl_to_rgb(hue: f64, sat: f64, lightness: f64) -> (u8, u8, u8) {
     )
 }
 
-/// Подогнать цвет под фон: зажать яркость и насыщенность в комфортный диапазон.
+/// Подогнать цвет под фон: зажать яркость и насыщенность в предсказуемый
+/// диапазон, сохранив исходный оттенок для соответствия обложке.
 fn adjust_for_background(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
-    let (mut hue, mut sat, mut lightness) = rgb_to_hsl(r, g, b);
+    let (hue, mut sat, mut lightness) = rgb_to_hsl(r, g, b);
 
-    // Сдвигаем жёлтые оттенки (30°–70°) в сторону тёплого оранжевого (~25°)
-    if (30.0..=70.0).contains(&hue) {
-        hue = 25.0 + (hue - 30.0) * 0.1; // 30°–70° -> 25°–29°
+    // Единый узкий диапазон светлоты — чтобы акцент и производные фоны
+    // (--dark-bg/--light-bg) выглядели одинаково плотно на любой обложке.
+    lightness = lightness.clamp(0.32, 0.48);
+
+    // Мягкий кап насыщенности. До 0.55 оставляем как есть, выше — сжимаем
+    // с коэффициентом 0.35, жёсткий потолок 0.65. Это убирает «кислотность»,
+    // сохраняя характер цвета.
+    if sat > 0.55 {
+        sat = 0.55 + (sat - 0.55) * 0.35;
     }
-
-    // Зажимаем яркость в диапазон 0.22–0.50
-    lightness = lightness.clamp(0.22, 0.50);
-
-    // Ограничиваем максимальную насыщенность — убираем кислотность.
-    // Зелёный диапазон (80°–180°) склонен к токсичности.
-    let max_sat = if (80.0..=180.0).contains(&hue) {
-        0.45
-    } else {
-        0.55
-    };
-    sat = sat.min(max_sat);
+    sat = sat.min(0.65);
 
     hsl_to_rgb(hue, sat, lightness)
 }
@@ -669,14 +690,43 @@ fn extract_samples_into(buf: &AudioBufferRef, samples: &mut Vec<f32>) {
     }
 }
 
+/// Кэш результата probe_actual_codec по (path, mtime).
+/// M4A/MP4 — единственный формат, где нужен второй открытый файл для определения
+/// кодека (AAC vs ALAC). play() вызывается на один и тот же файл многократно,
+/// поэтому кэш убирает повторный парсинг контейнера.
+fn probe_cache() -> &'static Mutex<HashMap<(String, u64), CodecType>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, u64), CodecType>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn file_mtime_secs(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        })
+        .unwrap_or(0)
+}
+
 /// Определить кодек через symphonia (нужно только для M4A/MP4 контейнеров)
 fn probe_actual_codec(file_path: &str, extension: &str) -> Option<CodecType> {
+    let mtime = file_mtime_secs(std::path::Path::new(file_path));
+    let key = (file_path.to_string(), mtime);
+
+    if let Ok(cache) = probe_cache().lock() {
+        if let Some(&codec) = cache.get(&key) {
+            return Some(codec);
+        }
+    }
+
     let file = File::open(file_path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     hint.with_extension(extension);
 
-    symphonia::default::get_probe()
+    let codec = symphonia::default::get_probe()
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
         .ok()
         .and_then(|probed| {
@@ -686,7 +736,12 @@ fn probe_actual_codec(file_path: &str, extension: &str) -> Option<CodecType> {
                 .iter()
                 .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
                 .map(|t| t.codec_params.codec)
-        })
+        })?;
+
+    if let Ok(mut cache) = probe_cache().lock() {
+        cache.insert(key, codec);
+    }
+    Some(codec)
 }
 
 fn is_lossless_codec(codec: CodecType) -> bool {
@@ -947,7 +1002,7 @@ impl AudioPlayer {
 
     // ── Статические методы (метаданные) ─────────────────────────────────────
 
-    /// Извлечь обложку трека как data URL
+    /// Извлечь обложку трека как data URL (полного размера)
     pub fn extract_cover_art(file_path: &str) -> Option<String> {
         let tagged_file = Probe::open(PathBuf::from(file_path)).ok()?.read().ok()?;
         let tag = tagged_file
@@ -1077,6 +1132,13 @@ impl AudioPlayer {
     /// Загрузить и воспроизвести файл
     pub fn play(&mut self, file_path: &str) -> Result<TrackMetadata, String> {
         self.play_from(file_path, 0.0)
+    }
+
+    /// Загрузить файл, перемотать на позицию и сразу поставить на паузу (для восстановления сессии)
+    pub fn play_paused(&mut self, file_path: &str, position_secs: f64) -> Result<TrackMetadata, String> {
+        let metadata = self.play_from(file_path, position_secs)?;
+        self.pause();
+        Ok(metadata)
     }
 
     pub fn play_crossfade(&mut self, file_path: &str, crossfade_secs: f64) -> Result<TrackMetadata, String> {

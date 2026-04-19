@@ -26,8 +26,20 @@ pub struct LibraryState(pub Mutex<MusicLibrary>);
 pub struct SettingsState(pub Mutex<(settings::AppSettings, PathBuf)>);
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Команды плеера (без изменений)
+// Команды плеера
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Применить кэшированный accent_color из БД или сохранить новый
+fn apply_accent_color(library: &State<LibraryState>, file_path: &str, metadata: &mut TrackMetadata) {
+    let cached_accent = library.0.lock().ok().and_then(|lib| lib.get_accent_color(file_path));
+    if let Some(cached) = cached_accent {
+        metadata.accent_color = Some(cached);
+    } else if let Some(ref color) = metadata.accent_color {
+        if let Ok(lib) = library.0.lock() {
+            let _ = lib.set_accent_color(file_path, color);
+        }
+    }
+}
 
 #[tauri::command]
 fn player_play(
@@ -35,21 +47,10 @@ fn player_play(
     library: State<LibraryState>,
     file_path: String,
 ) -> Result<TrackMetadata, String> {
-    // Проверяем кэшированный accent_color в БД
-    let cached_accent = library.0.lock().ok().and_then(|lib| lib.get_accent_color(&file_path));
-
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     let mut metadata = player.play(&file_path)?;
-
-    // Используем кэшированный цвет или сохраняем новый
-    if let Some(cached) = cached_accent {
-        metadata.accent_color = Some(cached);
-    } else if let Some(ref color) = metadata.accent_color {
-        if let Ok(lib) = library.0.lock() {
-            let _ = lib.set_accent_color(&file_path, color);
-        }
-    }
-
+    drop(player);
+    apply_accent_color(&library, &file_path, &mut metadata);
     Ok(metadata)
 }
 
@@ -60,21 +61,24 @@ fn player_play_crossfade(
     file_path: String,
     crossfade_secs: f64,
 ) -> Result<TrackMetadata, String> {
-    // Проверяем кэшированный accent_color в БД
-    let cached_accent = library.0.lock().ok().and_then(|lib| lib.get_accent_color(&file_path));
-
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     let mut metadata = player.play_crossfade(&file_path, crossfade_secs)?;
+    drop(player);
+    apply_accent_color(&library, &file_path, &mut metadata);
+    Ok(metadata)
+}
 
-    // Используем кэшированный цвет или сохраняем новый
-    if let Some(cached) = cached_accent {
-        metadata.accent_color = Some(cached);
-    } else if let Some(ref color) = metadata.accent_color {
-        if let Ok(lib) = library.0.lock() {
-            let _ = lib.set_accent_color(&file_path, color);
-        }
-    }
-
+#[tauri::command]
+fn player_play_paused(
+    state: State<PlayerState>,
+    library: State<LibraryState>,
+    file_path: String,
+    position_secs: f64,
+) -> Result<TrackMetadata, String> {
+    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut metadata = player.play_paused(&file_path, position_secs)?;
+    drop(player);
+    apply_accent_color(&library, &file_path, &mut metadata);
     Ok(metadata)
 }
 
@@ -286,6 +290,13 @@ fn playlist_move_track_to_top(state: State<LibraryState>, playlist_id: i64, file
     library.move_playlist_track_to_top(playlist_id, &file_path)
 }
 
+/// Получить id пользовательских плейлистов, в которых уже есть указанный трек
+#[tauri::command]
+fn playlist_get_ids_for_track(state: State<LibraryState>, file_path: String) -> Result<Vec<i64>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_user_playlist_ids_for_track(&file_path))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Команды эквалайзера
 // ──────────────────────────────────────────────────────────────────────────────
@@ -444,6 +455,7 @@ pub fn run() {
             // Плеер
             player_play,
             player_play_crossfade,
+            player_play_paused,
             player_pause,
             player_resume,
             player_stop,
@@ -472,6 +484,7 @@ pub fn run() {
             playlist_add_track,
             playlist_remove_track,
             playlist_move_track_to_top,
+            playlist_get_ids_for_track,
             // Эквалайзер
             eq_set_bands,
             eq_get_bands,
@@ -488,6 +501,17 @@ pub fn run() {
             save_player_state,
             load_player_state,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<LibraryState>() {
+                    if let Ok(library) = state.0.lock() {
+                        if let Err(e) = library.shutdown() {
+                            eprintln!("Library shutdown error: {}", e);
+                        }
+                    }
+                }
+            }
+        });
 }

@@ -1,10 +1,15 @@
 <script setup lang="ts">
+import { computed } from 'vue';
+import { useRoute } from 'vue-router';
 import ViewFrame from './ViewFrame.vue';
 import SearchIcon from './Icons/SearchIcon.vue';
 import CatalogIcon from './Icons/CatalogIcon.vue';
 import CollectionIcon from './Icons/CollectionIcon.vue';
 import SettingsIcon from './Icons/SettingsIcon.vue';
 import HomeIcon from './Icons/HomeIcon.vue';
+
+const route = useRoute();
+const isCollectionsActive = computed(() => route.path.startsWith('/playlist'));
 </script>
 
 <template>
@@ -12,7 +17,7 @@ import HomeIcon from './Icons/HomeIcon.vue';
     <aside>
       <RouterLink to="/search" class="navLink"><SearchIcon width="24" height="24" stroke-width="2.25" />Поиск</RouterLink>
       <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" />Главная</RouterLink>
-      <RouterLink to="/collections" class="navLink"><CollectionIcon width="24" height="24" stroke-width="2.25" />Коллекция</RouterLink>
+      <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2.25" />Коллекция</RouterLink>
       <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2.25" />Каталог</RouterLink>
       <RouterLink to="/settings" class="navLink"><SettingsIcon width="24" height="24" stroke-width="2.25" />Настройки</RouterLink>
     </aside>
@@ -86,6 +91,9 @@ aside {
 .frameWrapper {
   border-radius: 16px;
   background-color: var(--light-bg);
+  background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+  background-repeat: no-repeat;
+  background-attachment: local;
   width: calc(100% - 240px - 12px);
   height: calc(100vh - 38px - 104px);
   transition: .24s ease;

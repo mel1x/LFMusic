@@ -55,7 +55,10 @@ impl MusicLibrary {
 
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA foreign_keys=ON;",
+             PRAGMA foreign_keys=ON;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-8000;
+             PRAGMA temp_store=MEMORY;",
         )
         .map_err(|e| format!("Ошибка PRAGMA: {}", e))?;
 
@@ -101,26 +104,59 @@ impl MusicLibrary {
         )
         .map_err(|e| format!("Ошибка создания таблиц: {}", e))?;
 
-        // Миграция: добавляем sort_order если таблица уже существовала без него
-        let _ = conn.execute_batch(
-            "ALTER TABLE tracks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;"
-        );
+        // Миграции: добавляем столбцы только если их ещё нет
+        let existing_columns: HashSet<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(tracks)")
+                .map_err(|e| format!("Ошибка PRAGMA table_info: {}", e))?;
+            let cols = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| format!("Ошибка чтения столбцов: {}", e))?;
+            cols.filter_map(|r| r.ok()).collect()
+        };
 
-        // Миграция: добавляем genre если таблица уже существовала без него
-        let _ = conn.execute_batch(
-            "ALTER TABLE tracks ADD COLUMN genre TEXT;"
-        );
-        // Сбрасываем modified_secs для треков без жанра, чтобы пересканировать
-        let _ = conn.execute_batch(
-            "UPDATE tracks SET modified_secs = 0 WHERE genre IS NULL;"
-        );
+        if !existing_columns.contains("sort_order") {
+            let _ = conn.execute_batch(
+                "ALTER TABLE tracks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;"
+            );
+        }
 
-        // Миграция: добавляем accent_color для кэширования
-        let _ = conn.execute_batch(
-            "ALTER TABLE tracks ADD COLUMN accent_color TEXT;"
-        );
+        if !existing_columns.contains("genre") {
+            conn.execute_batch(
+                "ALTER TABLE tracks ADD COLUMN genre TEXT;"
+            ).map_err(|e| format!("Ошибка миграции genre: {}", e))?;
+            // Сбрасываем modified_secs только один раз — при добавлении столбца
+            conn.execute_batch(
+                "UPDATE tracks SET modified_secs = 0;"
+            ).map_err(|e| format!("Ошибка сброса modified_secs: {}", e))?;
+        }
+
+        if !existing_columns.contains("accent_color") {
+            let _ = conn.execute_batch(
+                "ALTER TABLE tracks ADD COLUMN accent_color TEXT;"
+            );
+        }
+
+        // Версионированные миграции кэша через PRAGMA user_version.
+        // v1: пересчёт accent_color по обновлённому алгоритму извлечения.
+        let user_version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if user_version < 1 {
+            let _ = conn.execute_batch(
+                "UPDATE tracks SET accent_color = NULL; PRAGMA user_version = 1;",
+            );
+        }
 
         Ok(Self { conn })
+    }
+
+    /// Корректное закрытие БД перед выходом: сливаем WAL в основной файл,
+    /// обрезаем -wal/-shm и запускаем PRAGMA optimize.
+    pub fn shutdown(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;")
+            .map_err(|e| format!("Ошибка закрытия БД: {}", e))
     }
 
     // ── Вспомогательные ────────────────────────────────────────────────────
@@ -214,7 +250,7 @@ impl MusicLibrary {
         progress: F,
     ) -> Result<(), String>
     where
-        F: FnMut(usize, usize),
+        F: Fn(usize, usize) + Send + Sync,
     {
         let path = PathBuf::from(folder);
         if !path.is_dir() {
@@ -274,7 +310,7 @@ impl MusicLibrary {
         progress: F,
     ) -> Result<Vec<TrackMetadata>, String>
     where
-        F: FnMut(usize, usize),
+        F: Fn(usize, usize) + Send + Sync,
     {
         let path = PathBuf::from(&folder);
         if !path.is_dir() {
@@ -317,6 +353,11 @@ impl MusicLibrary {
 
     /// Удаляет из кэша треки, файлы которых больше не существуют на диске
     pub fn cleanup_missing_tracks(&mut self) -> Result<usize, String> {
+        self.delete_missing_tracks()
+    }
+
+    /// Внутренний метод: удаляет треки с несуществующими файлами, возвращает количество удалённых
+    fn delete_missing_tracks(&mut self) -> Result<usize, String> {
         let all_paths: Vec<String> = {
             let mut stmt = self
                 .conn
@@ -342,9 +383,17 @@ impl MusicLibrary {
                 .transaction()
                 .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-            for path in &dead {
-                tx.execute("DELETE FROM tracks WHERE file_path = ?1", params![path])
-                    .ok();
+            // Пакетный DELETE батчами по N — один prepared statement, N плейсхолдеров
+            const BATCH: usize = 256;
+            for chunk in dead.chunks(BATCH) {
+                let placeholders = (0..chunk.len())
+                    .map(|i| format!("?{}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!("DELETE FROM tracks WHERE file_path IN ({})", placeholders);
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                tx.execute(&sql, params.as_slice()).ok();
             }
 
             tx.commit()
@@ -396,9 +445,9 @@ impl MusicLibrary {
         Ok(())
     }
 
-    pub fn rescan_all<F>(&mut self, mut progress: F) -> Result<Vec<TrackMetadata>, String>
+    pub fn rescan_all<F>(&mut self, progress: F) -> Result<Vec<TrackMetadata>, String>
     where
-        F: FnMut(usize, usize),
+        F: Fn(usize, usize) + Send + Sync,
     {
         let folders: Vec<String> = {
             let mut stmt = self
@@ -440,38 +489,7 @@ impl MusicLibrary {
         }
 
         // Удаляем треки, файлы которых больше не существуют
-        let all_paths: Vec<String> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT file_path FROM tracks")
-                .map_err(|e| format!("Ошибка: {}", e))?;
-
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| format!("Ошибка: {}", e))?;
-
-            rows.filter_map(|r| r.ok()).collect()
-        };
-
-        let dead: Vec<String> = all_paths
-            .into_iter()
-            .filter(|p| !PathBuf::from(p).exists())
-            .collect();
-
-        if !dead.is_empty() {
-            let tx = self
-                .conn
-                .transaction()
-                .map_err(|e| format!("Ошибка транзакции: {}", e))?;
-
-            for path in &dead {
-                tx.execute("DELETE FROM tracks WHERE file_path = ?1", params![path])
-                    .ok();
-            }
-
-            tx.commit()
-                .map_err(|e| format!("Ошибка коммита: {}", e))?;
-        }
+        self.delete_missing_tracks()?;
 
         self.rebuild_album_playlists()?;
         Ok(self.get_all_tracks())
@@ -482,10 +500,10 @@ impl MusicLibrary {
         &mut self,
         folder: &str,
         files: &[PathBuf],
-        mut progress: F,
+        progress: F,
     ) -> Result<(), String>
     where
-        F: FnMut(usize, usize),
+        F: Fn(usize, usize) + Send + Sync,
     {
         let total = files.len();
         if total == 0 {
@@ -545,11 +563,9 @@ impl MusicLibrary {
             .filter_map(|(path_str, mtime)| {
                 let result = AudioPlayer::get_metadata_light(path_str).ok()?;
                 let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                // progress вызывается из разных потоков, но это лишь emit события —
-                // пропуск нескольких значений не критичен
-                if done % 50 == 0 || done == total {
-                    // progress нельзя вызвать из par_iter (не Send),
-                    // прогресс обновится после join
+                // Обновляем прогресс каждые 10 файлов или при завершении
+                if done % 10 == 0 || done == total {
+                    progress(done, total);
                 }
                 Some((path_str.clone(), result, *mtime))
             })
@@ -557,20 +573,38 @@ impl MusicLibrary {
 
         progress(total, total);
 
-        // 4. Пакетная вставка в одной транзакции
+        // 4. Пакетная вставка в одной транзакции, подготовленный statement
         if !batch.is_empty() {
             let tx = self
                 .conn
                 .transaction()
                 .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-            for (file_path, m, mtime) in &batch {
-                tx.execute(
-                    "INSERT OR REPLACE INTO tracks
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO tracks
                      (file_path, folder_path, title, artist, album, genre, duration_secs,
                       format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                    params![
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                     ON CONFLICT(file_path) DO UPDATE SET
+                        folder_path = excluded.folder_path,
+                        title = excluded.title,
+                        artist = excluded.artist,
+                        album = excluded.album,
+                        genre = excluded.genre,
+                        duration_secs = excluded.duration_secs,
+                        format = excluded.format,
+                        sample_rate = excluded.sample_rate,
+                        bit_depth = excluded.bit_depth,
+                        channels = excluded.channels,
+                        bitrate = excluded.bitrate,
+                        is_lossless = excluded.is_lossless,
+                        modified_secs = excluded.modified_secs,
+                        accent_color = NULL"
+                ).map_err(|e| format!("Ошибка подготовки INSERT: {}", e))?;
+
+                for (file_path, m, mtime) in &batch {
+                    stmt.execute(params![
                         file_path,
                         folder,
                         m.title,
@@ -585,9 +619,9 @@ impl MusicLibrary {
                         m.bitrate,
                         m.is_lossless as i32,
                         *mtime as i64,
-                    ],
-                )
-                .map_err(|e| format!("Ошибка вставки: {}", e))?;
+                    ])
+                    .map_err(|e| format!("Ошибка вставки: {}", e))?;
+                }
             }
 
             tx.commit()
@@ -637,8 +671,8 @@ impl MusicLibrary {
              FROM playlist_tracks pt
              JOIN tracks t ON t.file_path = pt.file_path
              WHERE pt.playlist_id = ?1
-             ORDER BY pt.sort_order DESC,
-                      LOWER(COALESCE(t.title, t.file_path))",
+             ORDER BY pt.sort_order ASC,
+                      pt.rowid ASC",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -720,10 +754,18 @@ impl MusicLibrary {
             return Err("Нельзя добавлять треки в системные плейлисты".into());
         }
 
+        let max_order: i64 = self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM playlist_tracks WHERE playlist_id = ?1",
+                params![playlist_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("Ошибка чтения sort_order: {}", e))?;
+
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO playlist_tracks (playlist_id, file_path, sort_order) VALUES (?1, ?2, 0)",
-                params![playlist_id, file_path],
+                "INSERT OR IGNORE INTO playlist_tracks (playlist_id, file_path, sort_order) VALUES (?1, ?2, ?3)",
+                params![playlist_id, file_path, max_order + 1],
             )
             .map_err(|e| format!("Ошибка добавления трека: {}", e))?;
         Ok(())
@@ -748,11 +790,31 @@ impl MusicLibrary {
         Ok(())
     }
 
+    /// Вернуть id пользовательских плейлистов, содержащих указанный трек
+    pub fn get_user_playlist_ids_for_track(&self, file_path: &str) -> Vec<i64> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT pt.playlist_id
+             FROM playlist_tracks pt
+             JOIN playlists p ON p.id = pt.playlist_id
+             WHERE pt.file_path = ?1 AND p.kind = 'user'",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = match stmt.query_map(params![file_path], |row| row.get::<_, i64>(0)) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
     /// Поднять трек на первое место в плейлисте
     pub fn move_playlist_track_to_top(&self, playlist_id: i64, file_path: &str) -> Result<(), String> {
-        let max_order: i64 = self.conn
+        let min_order: i64 = self.conn
             .query_row(
-                "SELECT COALESCE(MAX(sort_order), 0) FROM playlist_tracks WHERE playlist_id = ?1",
+                "SELECT COALESCE(MIN(sort_order), 0) FROM playlist_tracks WHERE playlist_id = ?1",
                 params![playlist_id],
                 |r| r.get(0),
             )
@@ -761,56 +823,124 @@ impl MusicLibrary {
         self.conn
             .execute(
                 "UPDATE playlist_tracks SET sort_order = ?1 WHERE playlist_id = ?2 AND file_path = ?3",
-                params![max_order + 1, playlist_id, file_path],
+                params![min_order - 1, playlist_id, file_path],
             )
             .map_err(|e| format!("Ошибка обновления sort_order: {}", e))?;
         Ok(())
     }
 
-    /// Пересоздать альбомные плейлисты из метаданных треков.
-    /// Альбом создаётся если в нём больше 1 трека.
+    /// Инкрементальное обновление альбомных плейлистов.
+    /// Для каждого существующего альбома вычисляет diff (added/removed)
+    /// и применяет только его — неизменившиеся альбомы не трогаются вообще.
     pub fn rebuild_album_playlists(&mut self) -> Result<(), String> {
+        // Собираем актуальные альбомы из tracks (с >1 треком)
+        let actual_albums: HashMap<String, HashSet<String>> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT album, file_path FROM tracks
+                 WHERE album IS NOT NULL AND album != ''"
+            ).map_err(|e| format!("Ошибка запроса альбомов: {}", e))?;
+
+            let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|e| format!("Ошибка: {}", e))?;
+
+            for row in rows.flatten() {
+                map.entry(row.0).or_default().insert(row.1);
+            }
+
+            map.retain(|_, tracks| tracks.len() > 1);
+            map
+        };
+
+        // Существующие альбомные плейлисты: name -> (id, Set<file_path>)
+        let existing_albums: HashMap<String, (i64, HashSet<String>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT p.id, p.name, pt.file_path
+                 FROM playlists p
+                 LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+                 WHERE p.kind = 'album'"
+            ).map_err(|e| format!("Ошибка запроса плейлистов: {}", e))?;
+
+            let mut map: HashMap<String, (i64, HashSet<String>)> = HashMap::new();
+            let rows = stmt
+                .query_map([], |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                )))
+                .map_err(|e| format!("Ошибка: {}", e))?;
+
+            for row in rows.flatten() {
+                let entry = map.entry(row.1).or_insert_with(|| (row.0, HashSet::new()));
+                if let Some(p) = row.2 { entry.1.insert(p); }
+            }
+            map
+        };
+
         let tx = self.conn
             .transaction()
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-        // Удаляем все старые альбомные плейлисты и их треки
-        tx.execute_batch(
-            "DELETE FROM playlist_tracks WHERE playlist_id IN (SELECT id FROM playlists WHERE kind = 'album');
-             DELETE FROM playlists WHERE kind = 'album';",
-        )
-        .map_err(|e| format!("Ошибка очистки альбомов: {}", e))?;
+        // Удаляем плейлисты альбомов, которых больше нет
+        for (name, (id, _)) in &existing_albums {
+            if !actual_albums.contains_key(name) {
+                tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![id]).ok();
+                tx.execute("DELETE FROM playlists WHERE id = ?1", params![id]).ok();
+            }
+        }
 
-        // Находим альбомы с >1 треком
-        {
-            let mut stmt = tx.prepare(
-                "SELECT album, COUNT(*) as cnt FROM tracks
-                 WHERE album IS NOT NULL AND album != ''
-                 GROUP BY album HAVING cnt > 1
-                 ORDER BY LOWER(album)"
-            ).map_err(|e| format!("Ошибка запроса альбомов: {}", e))?;
-
-            let albums: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| format!("Ошибка: {}", e))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            for album_name in &albums {
+        // Для каждого актуального альбома применяем только diff
+        for (album_name, new_set) in &actual_albums {
+            let playlist_id = if let Some((id, current_set)) = existing_albums.get(album_name) {
+                // Пропускаем неизменившиеся альбомы целиком
+                if current_set == new_set {
+                    continue;
+                }
+                // Удаляем треки, которых больше нет
+                let to_remove: Vec<&String> = current_set.difference(new_set).collect();
+                if !to_remove.is_empty() {
+                    const BATCH: usize = 256;
+                    for chunk in to_remove.chunks(BATCH) {
+                        let placeholders = (0..chunk.len())
+                            .map(|i| format!("?{}", i + 2))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let sql = format!(
+                            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND file_path IN ({})",
+                            placeholders
+                        );
+                        let mut ps: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+                        ps.push(id as &dyn rusqlite::ToSql);
+                        for p in chunk { ps.push(*p as &dyn rusqlite::ToSql); }
+                        tx.execute(&sql, ps.as_slice()).ok();
+                    }
+                }
+                *id
+            } else {
                 tx.execute(
                     "INSERT INTO playlists (name, kind) VALUES (?1, 'album')",
                     params![album_name],
                 )
                 .map_err(|e| format!("Ошибка создания альбома: {}", e))?;
+                tx.last_insert_rowid()
+            };
 
-                let playlist_id = tx.last_insert_rowid();
-
-                tx.execute(
-                    "INSERT INTO playlist_tracks (playlist_id, file_path, sort_order)
-                     SELECT ?1, file_path, 0 FROM tracks WHERE album = ?2",
-                    params![playlist_id, album_name],
-                )
-                .map_err(|e| format!("Ошибка добавления треков альбома: {}", e))?;
+            // Добавляем только новые треки
+            let current_set = existing_albums
+                .get(album_name)
+                .map(|(_, s)| s)
+                .cloned()
+                .unwrap_or_default();
+            let to_add: Vec<&String> = new_set.difference(&current_set).collect();
+            if !to_add.is_empty() {
+                let mut stmt = tx.prepare(
+                    "INSERT OR IGNORE INTO playlist_tracks (playlist_id, file_path, sort_order)
+                     VALUES (?1, ?2, 0)"
+                ).map_err(|e| format!("Ошибка подготовки INSERT playlist_tracks: {}", e))?;
+                for file_path in to_add {
+                    stmt.execute(params![playlist_id, file_path]).ok();
+                }
             }
         }
 

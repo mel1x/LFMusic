@@ -21,6 +21,7 @@ export interface PlaylistInfo {
 
 const playlists = ref<PlaylistInfo[]>([]);
 const loading = ref(false);
+const topOrder = ref<number[]>([]);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Composable
@@ -28,7 +29,23 @@ const loading = ref(false);
 
 export function usePlaylists() {
   const albums = computed(() => playlists.value.filter((p) => p.kind === "Album"));
-  const userPlaylists = computed(() => playlists.value.filter((p) => p.kind === "User"));
+  const userPlaylists = computed(() => {
+    const all = playlists.value.filter((p) => p.kind === "User");
+    const topSet = new Set(topOrder.value);
+    const top: PlaylistInfo[] = [];
+    for (const id of topOrder.value) {
+      const pl = all.find((p) => p.id === id);
+      if (pl) top.push(pl);
+    }
+    const rest = all.filter((p) => !topSet.has(p.id)).sort((a, b) => b.id - a.id);
+    return [...top, ...rest];
+  });
+
+  function movePlaylistToTop(playlistId: number) {
+    const idx = topOrder.value.indexOf(playlistId);
+    if (idx >= 0) topOrder.value.splice(idx, 1);
+    topOrder.value.unshift(playlistId);
+  }
 
   async function loadPlaylists() {
     try {
@@ -70,6 +87,8 @@ export function usePlaylists() {
     try {
       await invoke("playlist_delete", { playlistId });
       playlists.value = playlists.value.filter((p) => p.id !== playlistId);
+      const idx = topOrder.value.indexOf(playlistId);
+      if (idx >= 0) topOrder.value.splice(idx, 1);
     } catch (e) {
       console.error("Ошибка удаления плейлиста:", e);
     }
@@ -103,6 +122,15 @@ export function usePlaylists() {
     }
   }
 
+  async function getPlaylistIdsForTrack(filePath: string): Promise<number[]> {
+    try {
+      return await invoke<number[]>("playlist_get_ids_for_track", { filePath });
+    } catch (e) {
+      console.error("Ошибка получения плейлистов трека:", e);
+      return [];
+    }
+  }
+
   return {
     playlists,
     albums,
@@ -117,5 +145,7 @@ export function usePlaylists() {
     addTrackToPlaylist,
     removeTrackFromPlaylist,
     movePlaylistTrackToTop,
+    movePlaylistToTop,
+    getPlaylistIdsForTrack,
   };
 }

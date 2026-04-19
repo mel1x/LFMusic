@@ -5,8 +5,8 @@ import MoreIcon from '../components/Icons/MoreIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
 import SearchIcon from '../components/Icons/SearchIcon.vue';
-import defaultCover from '../assets/trackCover.png';
-import cover from '../assets/cover.png';
+import defaultCover from '../assets/trackCover.webp';
+import cover from '../assets/cover.webp';
 
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
@@ -187,9 +187,11 @@ watch(visibleTracks, (tracks) => {
 
 // ── Catalog play button ─────────────────────────────────────────────────────
 
-const isCatalogActive = computed(() =>
-    activePlaylistSource.value === catalogSourceId.value
-)
+const isCatalogActive = computed(() => {
+    const src = activePlaylistSource.value
+    if (!src || !src.startsWith('catalog')) return false
+    return src === catalogSourceId.value
+})
 
 function onPlayCatalog() {
     if (isCatalogActive.value) {
@@ -266,9 +268,12 @@ async function moveTrackToTop(track: TrackMetadata) {
 
 // ── Track click ─────────────────────────────────────────────────────────
 
-const catalogSourceId = computed(() =>
-    selectedGenre.value ? `catalog:genre:${selectedGenre.value}` : 'catalog'
-)
+const catalogSourceId = computed(() => {
+    let id = 'catalog'
+    if (selectedGenre.value) id += `:genre:${selectedGenre.value}`
+    if (debouncedSearch.value.trim()) id += `:search`
+    return id
+})
 
 function onCoverClick(track: TrackMetadata) {
     if (currentTrack.value?.file_path === track.file_path) {
@@ -429,6 +434,7 @@ function onCoverClick(track: TrackMetadata) {
         />
         <TrackContextMenu
             v-if="trackMenu"
+            :key="trackMenu.track.file_path"
             :x="trackMenu.x"
             :y="trackMenu.y"
             :track="trackMenu.track"
@@ -918,6 +924,7 @@ function onCoverClick(track: TrackMetadata) {
     margin: 0 -28px;
 }
 .stickyHeader {
+    user-select: none;
     display: flex;
     flex-direction: row;
     align-items: center;

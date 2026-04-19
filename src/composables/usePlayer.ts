@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
 import { usePlaylists } from "./usePlaylists";
-import { useVirtualScroll } from "./useVirtualScroll";
 import { useCoverLoader } from "./useCoverLoader";
 import router from "../router";
 
@@ -82,7 +81,15 @@ let isHandlingTrackEnd = false;
 // Shuffle / Repeat
 const shuffled = ref(false);
 const repeatMode = ref<"queue" | "track">("queue");
+// playbackOrder — плоская очередь воспроизведения.
+// В режиме shuffle хвост очереди дозаполняется заранее сгенерированными
+// решафл-проходами, чтобы всегда было видно не менее QUEUE_LOOKAHEAD
+// треков после текущего.
 const playbackOrder = ref<TrackMetadata[]>([]);
+// Явный указатель на позицию текущего трека в playbackOrder.
+// Нужен, потому что в shuffle-режиме тот же трек может встречаться
+// в нескольких проходах — findIndex не годится.
+const currentOrderIndex = ref<number>(-1);
 
 // Состояние библиотеки / настроек
 const showSettings = ref(false);
@@ -107,7 +114,7 @@ export function usePlayer() {
     rescanLibrary: rescanLibraryRaw, folderDisplayName,
   } = useFolders();
 
-  const { loadPlaylists } = usePlaylists();
+  const { loadPlaylists, getPlaylistTracks } = usePlaylists();
 
   // ── Track map для O(1) поиска по file_path ──────────────────────────────
 
@@ -131,29 +138,93 @@ export function usePlayer() {
     return trackList.value;
   }
 
-  function buildShuffledOrder(excludeCurrentFromStart = false) {
-    const current = currentTrack.value;
-    const source = getActiveSourceTracks();
-    const arr = excludeCurrentFromStart
-      ? [...source]
-      : source.filter(t => t.file_path !== current?.file_path);
+  /** Количество треков после текущего, которые всегда должны быть заранее
+   *  доступны в playbackOrder (для очереди из 1 текущего + 7 предстоящих = 8). */
+  const QUEUE_LOOKAHEAD = 7;
+
+  /** Возвращает количество треков после текущего в playbackOrder. */
+  function upcomingCount(): number {
+    const idx = currentOrderIndex.value;
+    if (idx < 0) return playbackOrder.value.length;
+    return Math.max(0, playbackOrder.value.length - idx - 1);
+  }
+
+  /** Случайная перестановка массива (Fisher–Yates), без мутации исходного. */
+  function shufflePermutation(source: TrackMetadata[]): TrackMetadata[] {
+    const arr = source.slice();
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [arr[i], arr[j]] = [arr[j], arr[i]];
     }
-    if (excludeCurrentFromStart && current && arr[0]?.file_path === current.file_path) {
-      const swapIdx = 1 + Math.floor(Math.random() * (arr.length - 1));
-      [arr[0], arr[swapIdx]] = [arr[swapIdx], arr[0]];
-    }
-    playbackOrder.value = (!excludeCurrentFromStart && current) ? [current, ...arr] : arr;
+    return arr;
   }
 
-  function syncPlaybackOrder() {
-    if (shuffled.value) {
-      buildShuffledOrder();
-    } else {
-      playbackOrder.value = getActiveSourceTracks();
+  /** Дозаполняет хвост playbackOrder свежими случайными перестановками
+   *  источника, чтобы после текущего было минимум QUEUE_LOOKAHEAD треков.
+   *  Каждый новый «проход» генерируется заново, поэтому порядок не повторяется.
+   *  На стыке проходов первый трек нового прохода не совпадает с последним
+   *  треком предыдущего (если в источнике > 1 трека). */
+  function ensureLookahead() {
+    if (!shuffled.value) return;
+    const source = getActiveSourceTracks();
+    if (source.length === 0) return;
+
+    while (upcomingCount() < QUEUE_LOOKAHEAD) {
+      const full = playbackOrder.value;
+      const lastPath = full.length > 0
+        ? full[full.length - 1].file_path
+        : currentTrack.value?.file_path ?? null;
+
+      const perm = shufflePermutation(source);
+      if (source.length > 1 && lastPath && perm[0].file_path === lastPath) {
+        const j = 1 + Math.floor(Math.random() * (perm.length - 1));
+        [perm[0], perm[j]] = [perm[j], perm[0]];
+      }
+      playbackOrder.value = [...full, ...perm];
     }
+  }
+
+  /** Подрезает историю playbackOrder, чтобы не росла бесконечно в shuffle-режиме. */
+  const HISTORY_KEEP = 20;
+  function trimHistory() {
+    if (!shuffled.value) return;
+    const idx = currentOrderIndex.value;
+    if (idx <= HISTORY_KEEP) return;
+    const cut = idx - HISTORY_KEEP;
+    playbackOrder.value = playbackOrder.value.slice(cut);
+    currentOrderIndex.value -= cut;
+  }
+
+  /** Находит позицию трека в playbackOrder ближайшую к текущей (forward-first). */
+  function locateInOrder(filePath: string): number {
+    const order = playbackOrder.value;
+    const from = Math.max(0, currentOrderIndex.value);
+    for (let i = from; i < order.length; i++) {
+      if (order[i].file_path === filePath) return i;
+    }
+    for (let i = 0; i < from; i++) {
+      if (order[i].file_path === filePath) return i;
+    }
+    return -1;
+  }
+
+  /** Полностью пересобирает playbackOrder из активного источника. */
+  function syncPlaybackOrder() {
+    if (!shuffled.value) {
+      playbackOrder.value = getActiveSourceTracks();
+      currentOrderIndex.value = currentTrack.value
+        ? playbackOrder.value.findIndex(t => t.file_path === currentTrack.value!.file_path)
+        : -1;
+      return;
+    }
+
+    const current = currentTrack.value;
+    const source = getActiveSourceTracks();
+    const currentInSource = !!current && source.some(t => t.file_path === current.file_path);
+    const head = currentInSource && current ? [current] : [];
+    playbackOrder.value = head;
+    currentOrderIndex.value = currentInSource ? 0 : -1;
+    ensureLookahead();
   }
 
   /** Установить треки плейлиста как источник воспроизведения */
@@ -217,13 +288,14 @@ export function usePlayer() {
   const isStopped = computed(() => playbackState.value === "Stopped");
   const volumePercent = computed(() => Math.round(volume.value * 100));
 
-  const currentTrackIndex = computed(() => {
-    if (!currentTrack.value) return -1;
-    return playbackOrder.value.findIndex(t => t.file_path === currentTrack.value!.file_path);
-  });
+  const currentTrackIndex = computed(() => currentOrderIndex.value);
 
-  const hasNext = computed(() => currentTrackIndex.value >= 0 && currentTrackIndex.value < playbackOrder.value.length - 1);
-  const hasPrev = computed(() => currentTrackIndex.value > 0);
+  const hasNext = computed(() => {
+    if (playbackOrder.value.length === 0) return false;
+    if (shuffled.value) return true; // всегда можем догенерировать следующий проход
+    return currentOrderIndex.value >= 0 && currentOrderIndex.value < playbackOrder.value.length - 1;
+  });
+  const hasPrev = computed(() => currentOrderIndex.value > 0);
 
   const currentCoverArt = computed(() => {
     if (!currentTrack.value) return null;
@@ -235,42 +307,13 @@ export function usePlayer() {
     return currentTrack.value?.accent_color ?? null;
   });
 
-  // ── Virtual scroll (для AudioPlayer view) ─────────────────────────────────
-
-  const ITEM_HEIGHT = 58;
-  const COVER_PRELOAD_BUFFER = 16;
-
-  const {
-    containerEl: trackListEl,
-    scrollTop: vsScrollTop,
-    containerHeight: vsContainerHeight,
-    onScroll: onTrackListScroll,
-    visibleItems: visibleTracks,
-    paddingTop: vsPaddingTop,
-    paddingBottom: vsPaddingBottom,
-  } = useVirtualScroll(trackList, { itemHeight: ITEM_HEIGHT, buffer: 5 });
-
-  const coverPreloadRange = computed(() => {
-    const start = Math.max(0, Math.floor(vsScrollTop.value / ITEM_HEIGHT) - COVER_PRELOAD_BUFFER);
-    const end = Math.min(
-      trackList.value.length,
-      Math.ceil((vsScrollTop.value + vsContainerHeight.value) / ITEM_HEIGHT) + COVER_PRELOAD_BUFFER
-    );
-    return { start, end };
-  });
-
-  const coverPreloadTracks = computed(() =>
-    trackList.value.slice(coverPreloadRange.value.start, coverPreloadRange.value.end)
-  );
-
   // ── Cover loader ────────────────────────────────────────────────────────
 
-  const { setupPreloadWatch, loadCoversForTracks, clearQueue: clearCoverQueue } = useCoverLoader({
+  const { loadCoversForTracks, clearQueue: clearCoverQueue } = useCoverLoader({
     trackList,
     getTrackByPath,
     getTrackIndex,
   });
-  setupPreloadWatch(coverPreloadTracks, visibleTracks);
 
   // ── Утилиты (публичные) ───────────────────────────────────────────────────
 
@@ -341,7 +384,7 @@ export function usePlayer() {
 
   // ── Управление плеером ────────────────────────────────────────────────────
 
-  async function playTrack(track: TrackMetadata, _skipAttempt = false) {
+  async function playTrack(track: TrackMetadata, _skipAttempt = false, orderIndex?: number) {
     try {
       isLoading.value = true;
       errorMessage.value = "";
@@ -368,6 +411,15 @@ export function usePlayer() {
       }
 
       currentTrack.value = metadata;
+      // Обновляем указатель на позицию в playbackOrder
+      if (orderIndex !== undefined && orderIndex >= 0 && orderIndex < playbackOrder.value.length) {
+        currentOrderIndex.value = orderIndex;
+      } else {
+        currentOrderIndex.value = locateInOrder(metadata.file_path);
+      }
+      // В shuffle-режиме гарантируем, что хвост очереди достаточно заполнен,
+      // чтобы всегда корректно показать 8 треков в UI.
+      if (shuffled.value) ensureLookahead();
       // Сохраняем accent_color в trackList, чтобы pollStatus не затирал его
       if (metadata.accent_color) {
         const idx = getTrackIndex(metadata.file_path);
@@ -425,15 +477,24 @@ export function usePlayer() {
 
   async function playNext(auto = false) {
     if (auto && repeatMode.value === "track" && currentTrack.value) {
-      await playTrack(currentTrack.value);
+      await playTrack(currentTrack.value, false, currentOrderIndex.value);
       return;
     }
+    if (shuffled.value) ensureLookahead();
     if (playbackOrder.value.length === 0) return;
-    if (hasNext.value) {
-      await playTrack(playbackOrder.value[currentTrackIndex.value + 1]);
+    const idx = currentOrderIndex.value;
+    if (idx >= 0 && idx < playbackOrder.value.length - 1) {
+      const nextIdx = idx + 1;
+      await playTrack(playbackOrder.value[nextIdx], false, nextIdx);
+      if (shuffled.value) {
+        ensureLookahead();
+        trimHistory();
+      }
     } else {
-      if (shuffled.value) buildShuffledOrder(true);
-      await playTrack(playbackOrder.value[0]);
+      // В unshuffled-режиме зацикливаемся в начало; в shuffled сюда попасть
+      // не должны (ensureLookahead гарантирует хвост), но на всякий случай.
+      await playTrack(playbackOrder.value[0], false, 0);
+      if (shuffled.value) ensureLookahead();
     }
   }
 
@@ -441,10 +502,15 @@ export function usePlayer() {
     if (playbackOrder.value.length === 0) return;
     if (positionSecs.value > 3) {
       await seekTo(0);
-    } else if (hasPrev.value) {
-      await playTrack(playbackOrder.value[currentTrackIndex.value - 1]);
+      return;
+    }
+    const idx = currentOrderIndex.value;
+    if (idx > 0) {
+      const prevIdx = idx - 1;
+      await playTrack(playbackOrder.value[prevIdx], false, prevIdx);
     } else {
-      await playTrack(playbackOrder.value[playbackOrder.value.length - 1]);
+      const lastIdx = playbackOrder.value.length - 1;
+      await playTrack(playbackOrder.value[lastIdx], false, lastIdx);
     }
   }
 
@@ -518,7 +584,7 @@ export function usePlayer() {
           }
         }
       } else if (status.state === "Stopped") {
-        if (currentTrack.value && !isHandlingTrackEnd) {
+        if (currentTrack.value && !isHandlingTrackEnd && !isLoading.value) {
           isHandlingTrackEnd = true;
           try {
             await playNext(true);
@@ -563,51 +629,117 @@ export function usePlayer() {
   }
 
   async function restoreState() {
+    let saved: SavedPlayerState;
     try {
-      const saved = await invoke<SavedPlayerState>("load_player_state");
+      saved = await invoke<SavedPlayerState>("load_player_state");
+    } catch (e) {
+      console.error("Ошибка загрузки сохранённого состояния:", e);
+      return;
+    }
 
-      // Восстанавливаем громкость
-      volume.value = saved.volume;
-      await invoke("player_set_volume", { volume: saved.volume });
+    try {
+      const v = Number.isFinite(saved.volume) ? Math.min(1, Math.max(0, saved.volume)) : 1;
+      volume.value = v;
+      await invoke("player_set_volume", { volume: v });
+    } catch (e) {
+      console.error("Ошибка восстановления громкости:", e);
+    }
 
-      // Восстанавливаем режимы
-      shuffled.value = saved.shuffled;
-      repeatMode.value = saved.repeat_mode as "queue" | "track";
-      activePlaylistSource.value = saved.active_playlist_source;
+    try {
+      shuffled.value = !!saved.shuffled;
+      repeatMode.value = (saved.repeat_mode === "track" ? "track" : "queue");
+      activePlaylistSource.value = saved.active_playlist_source ?? null;
 
-      // Восстанавливаем порядок воспроизведения
+      // Для плейлиста — дозагружаем его треки, чтобы playbackOrder не был пустым
+      const src = activePlaylistSource.value;
+      if (src && src.startsWith("playlist:")) {
+        const pid = Number(src.slice("playlist:".length));
+        if (Number.isFinite(pid)) {
+          try {
+            const pathOnly = await getPlaylistTracks(pid);
+            const map = new Map(trackList.value.map(t => [t.file_path, t]));
+            sourceTrackList.value = pathOnly
+              .map(t => map.get(t.file_path) ?? t)
+              .filter(Boolean) as TrackMetadata[];
+          } catch (err) {
+            console.error("Ошибка восстановления треков плейлиста:", err);
+            activePlaylistSource.value = null;
+            sourceTrackList.value = [];
+          }
+        }
+      } else {
+        sourceTrackList.value = [];
+      }
       syncPlaybackOrder();
+    } catch (e) {
+      console.error("Ошибка восстановления режимов:", e);
+    }
 
-      // Восстанавливаем маршрут
+    try {
       if (saved.current_route && saved.current_route !== router.currentRoute.value.path) {
         router.replace(saved.current_route);
       }
-
-      // Восстанавливаем текущий трек (без воспроизведения — на паузе)
-      if (saved.current_track_path) {
-        const track = getTrackByPath(saved.current_track_path);
-        if (track) {
-          // Загружаем трек, но сразу ставим на паузу и перематываем
-          const metadata = await invoke<TrackMetadata>("player_play", { filePath: track.file_path });
-          await invoke("player_pause");
-          if (saved.position_secs > 0) {
-            await invoke("player_seek", { positionSecs: saved.position_secs });
-          }
-          // Используем метаданные от player_play — они содержат accent_color
-          if (!metadata.cover_art && track.cover_art) {
-            metadata.cover_art = track.cover_art;
-          }
-          if (metadata.accent_color) {
-            const idx = getTrackIndex(metadata.file_path);
-            if (idx !== -1) trackList.value[idx].accent_color = metadata.accent_color;
-          }
-          currentTrack.value = metadata;
-          playbackState.value = "Paused";
-          positionSecs.value = saved.position_secs;
-        }
-      }
     } catch (e) {
-      console.error("Ошибка восстановления состояния плеера:", e);
+      console.error("Ошибка восстановления маршрута:", e);
+    }
+
+    if (!saved.current_track_path) return;
+    const track = getTrackByPath(saved.current_track_path);
+    if (!track) return;
+
+    const rawPos = saved.position_secs;
+    let pos = Number.isFinite(rawPos) && rawPos >= 0 ? rawPos : 0;
+    if (track.duration_secs && pos >= track.duration_secs - 1) pos = 0;
+
+    try {
+      const metadata = await invoke<TrackMetadata>("player_play_paused", {
+        filePath: track.file_path,
+        positionSecs: pos,
+      });
+      if (!metadata.cover_art && track.cover_art) {
+        metadata.cover_art = track.cover_art;
+      }
+      if (metadata.accent_color) {
+        const idx = getTrackIndex(metadata.file_path);
+        if (idx !== -1) trackList.value[idx].accent_color = metadata.accent_color;
+      }
+      currentTrack.value = metadata;
+      // В shuffle playbackOrder уже сгенерирован, но currentOrderIndex=-1.
+      // Ставим current первым и дозаполняем хвост, чтобы очередь была корректной.
+      if (shuffled.value) {
+        const source = getActiveSourceTracks();
+        const inSource = source.some(t => t.file_path === metadata.file_path);
+        if (inSource) {
+          playbackOrder.value = [metadata];
+          currentOrderIndex.value = 0;
+          ensureLookahead();
+        } else {
+          currentOrderIndex.value = locateInOrder(metadata.file_path);
+        }
+      } else {
+        currentOrderIndex.value = locateInOrder(metadata.file_path);
+      }
+      playbackState.value = "Paused";
+      positionSecs.value = pos;
+    } catch (e) {
+      console.error("Ошибка восстановления трека, сбрасываем сохранённое состояние:", e);
+      // Сбрасываем сломанное состояние, чтобы следующий запуск был чистым
+      try {
+        await invoke("save_player_state", {
+          playerState: {
+            current_track_path: null,
+            position_secs: 0,
+            volume: volume.value,
+            shuffled: shuffled.value,
+            repeat_mode: repeatMode.value,
+            active_playlist_source: null,
+            current_track_index: null,
+            current_route: router.currentRoute.value.path,
+          },
+        });
+      } catch (e2) {
+        console.error("Не удалось сбросить состояние плеера:", e2);
+      }
     }
   }
 
@@ -620,7 +752,7 @@ export function usePlayer() {
     await loadSettings();
     await loadLibrary();
     await restoreState();
-    statusInterval = setInterval(pollStatus, 250);
+    statusInterval = setInterval(pollStatus, 500);
 
     // Останавливаем поллинг когда плеер остановлен и нет трека
     watch([playbackState, currentTrack] as const, ([state, track]: [string, TrackMetadata | null]) => {
@@ -630,7 +762,7 @@ export function usePlayer() {
           statusInterval = null;
         }
       } else if (!statusInterval) {
-        statusInterval = setInterval(pollStatus, 250);
+        statusInterval = setInterval(pollStatus, 500);
       }
     });
   }
@@ -655,6 +787,7 @@ export function usePlayer() {
     isLoading,
     errorMessage,
     trackList,
+    playbackOrder,
     isSeeking,
     seekValue,
     shuffled,
@@ -688,19 +821,11 @@ export function usePlayer() {
     currentCoverArt,
     currentAccentColor,
 
-    // Virtual scroll
-    ITEM_HEIGHT,
-    trackListEl,
-    vsScrollTop,
-    vsContainerHeight,
-    onTrackListScroll,
-    visibleTracks,
-    vsPaddingTop,
-    vsPaddingBottom,
-
     // Утилиты
     formatTime,
     getTrackDisplayName,
+    getTrackByPath,
+    trackMap,
     folderDisplayName,
 
     // Действия

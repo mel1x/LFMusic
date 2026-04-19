@@ -185,6 +185,10 @@ function formatBandValue(value: number): string {
     min-height: 100%;
     background-color: var(--light-bg);
 
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-repeat: no-repeat;
+    background-attachment: local;
+
     transition: .24s ease;
 }
 .pageTitle {
@@ -286,7 +290,7 @@ function formatBandValue(value: number): string {
     gap: 16px;
     border-radius: 8px;
     padding: 6px 8px 4px;
-    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
     transition: .24s ease;
 
     &:hover {
@@ -490,7 +494,7 @@ function formatBandValue(value: number): string {
     user-select: none;
     padding: 5px 12px;
     border-radius: 6px;
-    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
     font-weight: 500;
     font-size: 13px;
@@ -516,7 +520,7 @@ function formatBandValue(value: number): string {
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
     border-radius: 10px;
     transition: .24s ease;
 
@@ -566,7 +570,7 @@ function formatBandValue(value: number): string {
     align-items: center;
     gap: 4px;
     padding: 16px 12px;
-    background-color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
     border-radius: 10px;
     transition: .24s ease;
 

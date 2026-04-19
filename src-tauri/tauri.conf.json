@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "lf-music",
-  "version": "0.1.0",
-  "identifier": "com.lf-music.app",
+  "version": "0.2.0",
+  "identifier": "lf-music",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -17,7 +17,8 @@
         "height": 860,
         "minWidth": 1144,
         "minHeight": 675,
-        "decorations": false
+        "decorations": false,
+        "backgroundColor": [0, 0, 0, 255]
       }
     ],
     "security": {

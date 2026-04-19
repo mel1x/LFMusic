@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
+let scrollLockCount = 0
+
 const props = defineProps<{
     x: number
     y: number
@@ -46,12 +48,36 @@ function adjustPosition() {
 }
 
 function onClickOutside(e: MouseEvent) {
-    if (menuEl.value && !menuEl.value.contains(e.target as Node)) {
-        emit('close')
+    const target = e.target as Node
+    if (menuEl.value && !menuEl.value.contains(target)) {
+        const submenu = (target as Element).closest?.('.ctx-submenu')
+        if (!submenu) emit('close')
+    }
+}
+
+function blockScroll(e: WheelEvent) {
+    const target = e.target as Element
+    if (target.closest?.('.ctx-submenu')) return
+    e.preventDefault()
+}
+
+function lockScroll() {
+    if (scrollLockCount === 0) {
+        document.addEventListener('wheel', blockScroll, { passive: false })
+    }
+    scrollLockCount++
+}
+
+function unlockScroll() {
+    scrollLockCount--
+    if (scrollLockCount <= 0) {
+        scrollLockCount = 0
+        document.removeEventListener('wheel', blockScroll)
     }
 }
 
 onMounted(async () => {
+    lockScroll()
     await nextTick()
     adjustPosition()
     setTimeout(() => {
@@ -60,6 +86,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+    unlockScroll()
     document.removeEventListener('mousedown', onClickOutside)
 })
 </script>
@@ -80,17 +107,16 @@ onUnmounted(() => {
 <style scoped>
 .ctx-menu {
     position: fixed;
-    z-index: 9999;
+    z-index: 1000000;
     min-width: 200px;
-    padding: 6px;
     border-radius: 12px;
-    background-color: hsla(0, 0%, 12%, 0.95);
-    backdrop-filter: blur(20px);
-    border: 1px solid hsla(0, 0%, 100%, 0.08);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+    backdrop-filter: blur(17px);
+    box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
     opacity: 0;
     left: -9999px;
     top: -9999px;
+    overflow: hidden;
 }
 .ctx-menu.visible {
     opacity: 1;

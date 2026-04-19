@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, watchEffect } from 'vue';
+import { ref, onMounted, onUnmounted, watchEffect } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import MaximizeIcon from './components/Icons/MaximizeIcon.vue';
 import MinimizeIcon from './components/Icons/MinimizeIcon.vue';
@@ -10,15 +10,32 @@ import Player from './components/Player.vue';
 import GithubIcon from './components/Icons/GithubIcon.vue';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
+import splashVideoWebm from './assets/splash_screen_dark.webm';
+import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
 const { saveState, currentTrack, currentAccentColor } = usePlayer();
 
+const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
+if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
+
+const showSplash = ref(!isReload);
+const splashFading = ref(false);
+
+function onSplashEnded() {
+  splashFading.value = true;
+  setTimeout(() => {
+    showSplash.value = false;
+    document.documentElement.style.overflow = '';
+  }, 600);
+}
+
 // Перехват F5 / Ctrl+R — сохраняем состояние перед перезагрузкой
 async function handleReloadKey(e: KeyboardEvent) {
   if (e.key === 'F5' || (e.ctrlKey && e.key === 'r')) {
     e.preventDefault();
+    sessionStorage.setItem('lfmusic_reloaded', '1');
     await saveState();
     location.reload();
   }
@@ -79,6 +96,12 @@ const closeWindow = async () => {
 </script>
 
 <template>
+  <div data-tauri-drag-region v-if="showSplash" class="splash-overlay" :class="{ 'splash-fading': splashFading }">
+    <video data-tauri-drag-region autoplay muted playsinline @ended="onSplashEnded" class="splash-video">
+      <source :src="splashVideoWebm" type="video/webm" />
+      <source :src="splashVideoMp4" type="video/mp4" />
+    </video>
+  </div>
   <div class="hat" data-tauri-drag-region>
     <div class="winTitle">
       <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
@@ -96,6 +119,25 @@ const closeWindow = async () => {
 </template>
 
 <style>
+.splash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 1;
+  transition: opacity 0.6s ease;
+}
+.splash-overlay.splash-fading {
+  opacity: 0;
+}
+.splash-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 .toast {
   display: flex;
   flex-direction: row;
@@ -124,11 +166,17 @@ svg {
   display: block;
 }
 html {
-  --dark-bg: hsl(var(--accent-h), var(--accent-s), 8%);
-  --light-bg: hsla(var(--accent-h), calc(var(--accent-s) * 1.25), 15%, 1);
+  /* Фоны используют ту же насыщенность что и акцент (с потолком),
+     чтобы все три тона --accent-color / --dark-bg / --light-bg стакались. */
+  --dark-bg: hsl(var(--accent-h), min(var(--accent-s), 50%), 8%);
+  --light-bg: hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 1);
 
   background-color: var(--dark-bg);
   transition: .24s ease;
+}
+html::selection {
+  color: #fff;
+  background-color: var(--dark-bg);
 }
 body {
   background-color: var(--dark-bg);
