@@ -17,6 +17,24 @@ const win = getCurrentWindow();
 const { settings, load } = useSettings();
 const { saveState, currentTrack, currentAccentColor } = usePlayer();
 
+const BASE_W = 1460;
+const BASE_H = 860;
+const MIN_SCALE = 0.78;
+const MAX_SCALE = 2.0;
+
+function applyUiScale() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const raw = Math.min(w / BASE_W, h / BASE_H);
+  const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, raw));
+  const body = document.body;
+  (body.style as any).zoom = String(scale);
+  body.style.width = (w / scale) + 'px';
+  body.style.height = (h / scale) + 'px';
+  document.documentElement.style.setProperty('--ui-scale', String(scale));
+  (window as any).__uiScale = scale;
+}
+
 const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
 if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
 
@@ -27,7 +45,6 @@ function onSplashEnded() {
   splashFading.value = true;
   setTimeout(() => {
     showSplash.value = false;
-    document.documentElement.style.overflow = '';
   }, 600);
 }
 
@@ -48,17 +65,22 @@ function handleContextMenu(e: MouseEvent) {
 
 onMounted(() => {
   load();
+  applyUiScale();
+  window.addEventListener('resize', applyUiScale);
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
 });
 
 onUnmounted(() => {
+  window.removeEventListener('resize', applyUiScale);
   document.removeEventListener('keydown', handleReloadKey);
   document.removeEventListener('contextmenu', handleContextMenu);
 });
 
 watchEffect(() => {
-  const hex = currentAccentColor.value ?? '#1a1a1a';
+  const hex = settings.value.dynamic_accent_color
+    ? (currentAccentColor.value ?? '#1a1a1a')
+    : settings.value.static_accent_color;
   const { h, s, l } = hexToHSL(hex);
   const root = document.documentElement.style;
   root.setProperty('--accent-h', `${h}`);
@@ -172,6 +194,7 @@ html {
   --light-bg: hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 1);
 
   background-color: var(--dark-bg);
+  overflow: hidden;
   transition: .24s ease;
 }
 html::selection {
@@ -180,6 +203,7 @@ html::selection {
 }
 body {
   background-color: var(--dark-bg);
+  overflow: hidden;
   transition: .24s ease;
 }
 .hat {
@@ -262,12 +286,24 @@ body {
     background-color: #f23f42;
   }
 }
+#app {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+}
+.hat {
+  flex-shrink: 0;
+}
 .mainFrame {
   width: 100%;
-  height: calc(100vh - 38px - 104px);
+  flex: 1;
+  min-height: 0;
 }
 .playerPart {
   width: 100%;
   height: 104px;
+  flex-shrink: 0;
 }
 </style>

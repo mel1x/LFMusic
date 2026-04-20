@@ -36,6 +36,7 @@ onMounted(async () => {
     if (!userPlaylists.value.length) await loadPlaylists()
     const ids = await getPlaylistIdsForTrack(props.track.file_path)
     trackPlaylistIds.value = new Set(ids)
+    window.addEventListener('resize', onWindowResize)
 })
 
 const showPlaylistSub = ref(false)
@@ -48,6 +49,7 @@ const pinnedSub = ref(false)
 function positionSubmenu() {
     const trigger = subTriggerEl.value
     if (!trigger) return
+    const scale = (window as any).__uiScale || 1
     const tr = trigger.getBoundingClientRect()
     const gap = 4
 
@@ -61,8 +63,8 @@ function positionSubmenu() {
     let top = tr.top - 6
 
     subStyle.value = {
-        left: left + 'px',
-        top: top + 'px',
+        left: (left / scale) + 'px',
+        top: (top / scale) + 'px',
     }
 }
 
@@ -70,14 +72,15 @@ async function clampSubmenu() {
     await nextTick()
     const el = subMenuEl.value
     if (!el) return
+    const scale = (window as any).__uiScale || 1
     const rect = el.getBoundingClientRect()
     const pad = 8
     const trigger = subTriggerEl.value
     if (!trigger) return
     const tr = trigger.getBoundingClientRect()
 
-    let left = parseFloat(subStyle.value.left)
-    let top = parseFloat(subStyle.value.top)
+    let left = parseFloat(subStyle.value.left) * scale
+    let top = parseFloat(subStyle.value.top) * scale
 
     if (!props.submenuRight) {
         if (left - rect.width < pad) {
@@ -98,8 +101,8 @@ async function clampSubmenu() {
     if (top < pad) top = pad
 
     subStyle.value = {
-        left: left + 'px',
-        top: top + 'px',
+        left: (left / scale) + 'px',
+        top: (top / scale) + 'px',
     }
     subReady.value = true
 }
@@ -162,8 +165,16 @@ function onSubMenuLeave() {
     scheduleClose()
 }
 
+function onWindowResize() {
+    if (showPlaylistSub.value) {
+        positionSubmenu()
+        clampSubmenu()
+    }
+}
+
 onBeforeUnmount(() => {
     cancelLeave()
+    window.removeEventListener('resize', onWindowResize)
 })
 
 function onEdit() {

@@ -384,17 +384,17 @@ fn eq_set_settings(
 // Команды настроек
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Фронтенд работает только с булевыми опциями — отдаём/принимаем HashMap<String, bool>
+/// Фронтенд может хранить опции разных типов (булевые, строковые и т.д.)
 #[tauri::command]
-fn get_settings(state: State<SettingsState>) -> Result<std::collections::HashMap<String, bool>, String> {
+fn get_settings(state: State<SettingsState>) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
     let state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(state.0.get_options())
+    Ok(state.0.options.clone())
 }
 
 #[tauri::command]
-fn save_settings(state: State<SettingsState>, settings: std::collections::HashMap<String, bool>) -> Result<(), String> {
+fn save_settings(state: State<SettingsState>, settings: std::collections::HashMap<String, serde_json::Value>) -> Result<(), String> {
     let mut state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    state.0.set_options(settings);
+    state.0.options = settings;
     settings::save(&state.1, &state.0)
 }
 

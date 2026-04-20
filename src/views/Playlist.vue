@@ -17,6 +17,7 @@ import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
+import ConfirmModal from '../components/ConfirmModal.vue';
 
 const route = useRoute()
 const router = useRouter()
@@ -265,7 +266,14 @@ function onTogglePin() {
     isPinned.value = !isPinned.value
 }
 
-async function onDeletePlaylist() {
+const deleteModalOpen = ref(false)
+
+function onDeletePlaylist() {
+    deleteModalOpen.value = true
+}
+
+async function onConfirmDeletePlaylist() {
+    deleteModalOpen.value = false
     const id = playlistId.value
     router.push('/collections')
     await deletePlaylist(id)
@@ -462,6 +470,15 @@ function onNameKeydown(e: KeyboardEvent) {
             @close="playlistMenu = null"
             @togglePin="onTogglePin"
             @delete="onDeletePlaylist"
+        />
+        <ConfirmModal
+            :open="deleteModalOpen"
+            title="Удалить плейлист?"
+            :message="playlist ? `Плейлист «${playlist.name}» будет удалён без возможности восстановления.` : ''"
+            confirmText="Удалить"
+            cancelText="Отмена"
+            @confirm="onConfirmDeletePlaylist"
+            @cancel="deleteModalOpen = false"
         />
     </div>
 </template>

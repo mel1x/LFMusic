@@ -22,6 +22,7 @@ const positioned = ref(false)
 function adjustPosition() {
     const el = menuEl.value
     if (!el) return
+    const scale = (window as any).__uiScale || 1
     const rect = el.getBoundingClientRect()
     const pad = 8
 
@@ -42,8 +43,8 @@ function adjustPosition() {
     }
     if (top < pad) top = pad
 
-    el.style.left = left + 'px'
-    el.style.top = top + 'px'
+    el.style.left = (left / scale) + 'px'
+    el.style.top = (top / scale) + 'px'
     positioned.value = true
 }
 
@@ -76,10 +77,15 @@ function unlockScroll() {
     }
 }
 
+function onWindowResize() {
+    adjustPosition()
+}
+
 onMounted(async () => {
     lockScroll()
     await nextTick()
     adjustPosition()
+    window.addEventListener('resize', onWindowResize)
     setTimeout(() => {
         document.addEventListener('mousedown', onClickOutside)
     }, 0)
@@ -87,6 +93,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     unlockScroll()
+    window.removeEventListener('resize', onWindowResize)
     document.removeEventListener('mousedown', onClickOutside)
 })
 </script>

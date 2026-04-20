@@ -9,7 +9,7 @@ import SettingsIcon from './Icons/SettingsIcon.vue';
 import HomeIcon from './Icons/HomeIcon.vue';
 
 const route = useRoute();
-const isCollectionsActive = computed(() => route.path.startsWith('/playlist'));
+const isCollectionsActive = computed(() => route.path.startsWith('/playlist') || route.path.startsWith('/album') || route.path.startsWith('/collections'));
 </script>
 
 <template>
@@ -47,6 +47,8 @@ const isCollectionsActive = computed(() => route.path.startsWith('/playlist'));
 .mainWrapper {
   display: flex;
   flex-direction: row;
+  width: 100%;
+  height: 100%;
 }
 aside {
   display: flex;
@@ -54,7 +56,7 @@ aside {
   padding: 32px 14px 20px;
   gap: 8px;
   width: 240px;
-  height: calc(100vh - 38px - 104px);
+  height: 100%;
 }
 .navLink {
   user-select: none;
@@ -95,7 +97,7 @@ aside {
   background-repeat: no-repeat;
   background-attachment: local;
   width: calc(100% - 240px - 12px);
-  height: calc(100vh - 38px - 104px);
+  height: 100%;
   transition: .24s ease;
 }
 </style>

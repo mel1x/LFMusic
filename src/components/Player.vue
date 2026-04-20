@@ -75,17 +75,29 @@ const {
 
 const { playlists, loadPlaylists } = usePlaylists();
 
-const queueSourceLabel = computed(() => {
+const queueSourcePrefix = computed(() => {
+    const src = activePlaylistSource.value;
+    if (!src) return 'Сейчас играет из';
+    if (src.startsWith('catalog')) return 'Сейчас играет из';
+    if (src.startsWith('album:')) return 'Сейчас играет из альбома';
+    if (src.startsWith('playlist:')) return 'Сейчас играет из плейлиста';
+    return 'Сейчас играет из';
+});
+
+const queueSourceName = computed(() => {
     const src = activePlaylistSource.value;
     if (!src) return 'Мой каталог';
     if (src.startsWith('catalog')) return 'Мой каталог';
+    if (src.startsWith('album:')) {
+        const name = src.slice('album:'.length);
+        return name || 'Без названия';
+    }
     if (src.startsWith('playlist:')) {
         const id = Number(src.slice('playlist:'.length));
         const pl = playlists.value.find(p => p.id === id);
-        if (pl) return pl.name;
-        return 'Плейлист';
+        return pl ? pl.name : 'Без названия';
     }
-    return 'Мой каталог';
+    return 'Моей каталог';
 });
 
 watch(
@@ -639,8 +651,8 @@ function openQfCoverMenu(e: MouseEvent) {
                     </div>
                     <div class="qf-right-wrap">
                         <div class="qf-right">
-                            <div class="qf-queue-header" style="color:#fff;margin-bottom:2px;margin-top:2px;">Сейчас играет из</div>
-                            <div class="qf-queue-header styled-header" style="color:#fff;margin-top:2px;">{{ queueSourceLabel }}</div>
+                            <div class="qf-queue-header" style="color:#fff;margin-bottom:2px;margin-top:2px;">{{ queueSourcePrefix }}</div>
+                            <div class="qf-queue-header styled-header" style="color:#fff;margin-top:2px;">{{ queueSourceName }}</div>
                             <div class="qf-queue-list">
                                 <div
                                     v-if="currentTrack"
@@ -1214,7 +1226,10 @@ function openQfCoverMenu(e: MouseEvent) {
 
 .fullscreen-overlay {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    width: calc(100vw / var(--ui-scale, 1));
+    height: calc(100vh / var(--ui-scale, 1));
     z-index: 999999;
     display: flex;
     align-items: center;

@@ -3,7 +3,7 @@ import ContextMenu from './ContextMenu.vue'
 import PinIcon from './Icons/PinIcon.vue'
 import DeleteIcon from './Icons/DeleteIcon.vue'
 
-defineProps<{
+withDefaults(defineProps<{
     x: number
     y: number
     alignRight?: boolean
@@ -12,7 +12,10 @@ defineProps<{
     centerY?: boolean
     isPinned?: boolean
     showMoveToTop?: boolean
-}>()
+    showDelete?: boolean
+}>(), {
+    showDelete: true,
+})
 
 const emit = defineEmits<{
     close: []
@@ -50,7 +53,7 @@ function onMoveToTop() {
             <PinIcon width="16" height="16" />
             <span>{{ isPinned ? 'Открепить' : 'Закрепить' }}</span>
         </button>
-        <button class="ctx-item" @click="onDelete">
+        <button v-if="showDelete" class="ctx-item" @click="onDelete">
             <DeleteIcon width="16" height="16" />
             <span>Удалить плейлист</span>
         </button>

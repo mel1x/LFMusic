@@ -667,6 +667,12 @@ export function usePlayer() {
             sourceTrackList.value = [];
           }
         }
+      } else if (src && src.startsWith("album:")) {
+        const name = src.slice("album:".length);
+        sourceTrackList.value = trackList.value.filter(t => (t.album || '').trim() === name);
+        if (sourceTrackList.value.length === 0) {
+          activePlaylistSource.value = null;
+        }
       } else {
         sourceTrackList.value = [];
       }
