@@ -1,4 +1,4 @@
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
 
@@ -6,13 +6,14 @@ import type { TrackMetadata } from "./usePlayer";
 // Типы
 // ──────────────────────────────────────────────────────────────────────────────
 
-export type PlaylistKind = "Album" | "User";
+export type PlaylistKind = "Album" | "Artist" | "User";
 
 export interface PlaylistInfo {
   id: number;
   name: string;
   kind: PlaylistKind;
   track_count: number;
+  first_file_path: string | null;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -22,6 +23,48 @@ export interface PlaylistInfo {
 const playlists = ref<PlaylistInfo[]>([]);
 const loading = ref(false);
 const topOrder = ref<number[]>([]);
+const albumTopOrder = ref<string[]>([]);
+const artistTopOrder = ref<string[]>([]);
+
+// ── Persistence (localStorage) ────────────────────────────────────────────
+const TOP_ORDER_STORAGE_KEY = "lfmusic.topOrder.v1";
+
+try {
+  const raw = localStorage.getItem(TOP_ORDER_STORAGE_KEY);
+  if (raw) {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed?.playlists)) {
+      topOrder.value = parsed.playlists.filter((v: unknown) => typeof v === "number");
+    }
+    if (Array.isArray(parsed?.albums)) {
+      albumTopOrder.value = parsed.albums.filter((v: unknown) => typeof v === "string");
+    }
+    if (Array.isArray(parsed?.artists)) {
+      artistTopOrder.value = parsed.artists.filter((v: unknown) => typeof v === "string");
+    }
+  }
+} catch (e) {
+  console.error("Ошибка загрузки top-order из localStorage:", e);
+}
+
+watch(
+  [topOrder, albumTopOrder, artistTopOrder],
+  () => {
+    try {
+      localStorage.setItem(
+        TOP_ORDER_STORAGE_KEY,
+        JSON.stringify({
+          playlists: topOrder.value,
+          albums: albumTopOrder.value,
+          artists: artistTopOrder.value,
+        }),
+      );
+    } catch (e) {
+      console.error("Ошибка сохранения top-order в localStorage:", e);
+    }
+  },
+  { deep: true },
+);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Composable
@@ -29,6 +72,7 @@ const topOrder = ref<number[]>([]);
 
 export function usePlaylists() {
   const albums = computed(() => playlists.value.filter((p) => p.kind === "Album"));
+  const artists = computed(() => playlists.value.filter((p) => p.kind === "Artist"));
   const userPlaylists = computed(() => {
     const all = playlists.value.filter((p) => p.kind === "User");
     const topSet = new Set(topOrder.value);
@@ -45,6 +89,18 @@ export function usePlaylists() {
     const idx = topOrder.value.indexOf(playlistId);
     if (idx >= 0) topOrder.value.splice(idx, 1);
     topOrder.value.unshift(playlistId);
+  }
+
+  function moveAlbumToTop(name: string) {
+    const idx = albumTopOrder.value.indexOf(name);
+    if (idx >= 0) albumTopOrder.value.splice(idx, 1);
+    albumTopOrder.value.unshift(name);
+  }
+
+  function moveArtistToTop(name: string) {
+    const idx = artistTopOrder.value.indexOf(name);
+    if (idx >= 0) artistTopOrder.value.splice(idx, 1);
+    artistTopOrder.value.unshift(name);
   }
 
   async function loadPlaylists() {
@@ -131,11 +187,25 @@ export function usePlaylists() {
     }
   }
 
+  async function rebuildArtists() {
+    try {
+      await invoke("library_rebuild_artists");
+      await loadPlaylists();
+    } catch (e) {
+      console.error("Ошибка пересборки исполнителей:", e);
+    }
+  }
+
   return {
     playlists,
     albums,
+    artists,
     userPlaylists,
     loading,
+    rebuildArtists,
+
+    albumTopOrder,
+    artistTopOrder,
 
     loadPlaylists,
     getPlaylistTracks,
@@ -146,6 +216,8 @@ export function usePlaylists() {
     removeTrackFromPlaylist,
     movePlaylistTrackToTop,
     movePlaylistToTop,
+    moveAlbumToTop,
+    moveArtistToTop,
     getPlaylistIdsForTrack,
   };
 }

@@ -80,6 +80,7 @@ const queueSourcePrefix = computed(() => {
     if (!src) return 'Сейчас играет из';
     if (src.startsWith('catalog')) return 'Сейчас играет из';
     if (src.startsWith('album:')) return 'Сейчас играет из альбома';
+    if (src.startsWith('artist:')) return 'Сейчас играет из подборки артиста';
     if (src.startsWith('playlist:')) return 'Сейчас играет из плейлиста';
     return 'Сейчас играет из';
 });
@@ -91,6 +92,10 @@ const queueSourceName = computed(() => {
     if (src.startsWith('album:')) {
         const name = src.slice('album:'.length);
         return name || 'Без названия';
+    }
+    if (src.startsWith('artist:')) {
+        const name = src.slice('artist:'.length);
+        return name || 'Неизвестный исполнитель';
     }
     if (src.startsWith('playlist:')) {
         const id = Number(src.slice('playlist:'.length));

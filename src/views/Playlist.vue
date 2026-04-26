@@ -15,6 +15,7 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
+import { searchRanked } from '../composables/useSearch';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import ConfirmModal from '../components/ConfirmModal.vue';
@@ -99,15 +100,17 @@ function clearSearch() {
 }
 
 const filteredTracks = computed(() => {
-    const q = debouncedSearch.value.toLowerCase().trim()
+    const q = debouncedSearch.value.trim()
     if (!q) return playlistTracks.value
-    return playlistTracks.value.filter(t => {
-        const title = (t.title || '').toLowerCase()
-        const artist = (t.artist || '').toLowerCase()
-        const album = (t.album || '').toLowerCase()
-        const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '').toLowerCase() || ''
-        return title.includes(q) || artist.includes(q) || album.includes(q) || fileName.includes(q)
-    })
+    return searchRanked(
+        playlistTracks.value,
+        q,
+        (t) => {
+            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
+            return [t.title || '', t.artist || '', t.album || '', fileName]
+        },
+        { formatPath: (t) => t.file_path },
+    )
 })
 
 // ── Header height ─────────────────────────────────────────────────────────
@@ -243,7 +246,7 @@ async function onRemoveFromPlaylist(track: TrackMetadata) {
 // ── Back ────────────────────────────────────────────────────────────────────
 
 function goBack() {
-    router.push('/collections')
+    router.back()
 }
 
 // ── Playlist context menu ───────────────────────────────────────────────────

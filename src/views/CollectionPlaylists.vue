@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import PlusIcon from '../components/Icons/PlusIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
@@ -12,12 +12,14 @@ import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import ConfirmModal from '../components/ConfirmModal.vue';
 import defaultCover from '../assets/playlistCover.webp';
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
-import { usePlayer } from '../composables/usePlayer';
+import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
+import { searchRanked } from '../composables/useSearch';
 
 const router = useRouter();
 const { userPlaylists, loadPlaylists, createPlaylist, getPlaylistTracks, deletePlaylist, movePlaylistToTop } = usePlaylists();
 const {
     trackList,
+    getTrackByPath,
     loadCoversForTracks,
     isPlaying,
     activePlaylistSource,
@@ -26,57 +28,14 @@ const {
     setPlaylistSource,
 } = usePlayer();
 
-const playlistCovers = ref<Record<number, string | null>>({});
-
-async function refreshCoverFor(pl: PlaylistInfo) {
-    if (pl.track_count === 0) {
-        playlistCovers.value[pl.id] = null;
-        return;
-    }
-    const tracks = await getPlaylistTracks(pl.id);
-    const first = tracks[0];
-    if (!first) {
-        playlistCovers.value[pl.id] = null;
-        return;
-    }
-    const inList = trackList.value.find(t => t.file_path === first.file_path);
-    if (inList) {
-        if (!inList.cover_art) loadCoversForTracks([inList]);
-        playlistCovers.value[pl.id] = inList.cover_art;
-    } else {
-        playlistCovers.value[pl.id] = first.cover_art;
-    }
-}
-
-async function refreshAllCovers() {
-    for (const pl of userPlaylists.value) {
-        await refreshCoverFor(pl);
-    }
+function coverFor(path: string | null): string | null {
+    if (!path) return null;
+    return getTrackByPath(path)?.cover_art ?? null;
 }
 
 onMounted(async () => {
     await loadPlaylists();
-    await refreshAllCovers();
 });
-
-watch(
-    () => userPlaylists.value.map(p => `${p.id}:${p.track_count}`).join(','),
-    async () => {
-        await refreshAllCovers();
-    },
-);
-
-watch(
-    () => trackList.value.map(t => t.cover_art ? '1' : '0').join(''),
-    () => {
-        for (const pl of userPlaylists.value) {
-            if (pl.track_count === 0) continue;
-            const current = playlistCovers.value[pl.id];
-            if (current) continue;
-            refreshCoverFor(pl);
-        }
-    },
-);
 
 // ── Search ──────────────────────────────────────────────────────────────────
 
@@ -106,9 +65,126 @@ function clearSearch() {
 }
 
 const filteredPlaylists = computed(() => {
-    const q = debouncedSearch.value.toLowerCase().trim();
+    const q = debouncedSearch.value.trim();
     if (!q) return userPlaylists.value;
-    return userPlaylists.value.filter(p => p.name.toLowerCase().includes(q));
+    return searchRanked(userPlaylists.value, q, (p) => [p.name]);
+});
+
+// ── Lazy cover loading ─────────────────────────────────────────────────────
+// Single IntersectionObserver whose `root` is the actual scroll container
+// (.pageRoot) and whose bottom rootMargin equals exactly 2 card rows.
+const gridEl = ref<HTMLElement | null>(null);
+let coverObs: IntersectionObserver | null = null;
+let resizeObs: ResizeObserver | null = null;
+let scrollRoot: HTMLElement | null = null;
+let lastBottomMargin = 600;
+const elPath = new WeakMap<HTMLElement, string>();
+const observedEls = new Set<HTMLElement>();
+
+function findScrollAncestor(el: HTMLElement): HTMLElement | null {
+    let node: HTMLElement | null = el.parentElement;
+    while (node) {
+        const oy = getComputedStyle(node).overflowY;
+        if (oy === 'auto' || oy === 'scroll') return node;
+        node = node.parentElement;
+    }
+    return null;
+}
+
+function onIntersect(entries: IntersectionObserverEntry[]) {
+    const pending: TrackMetadata[] = [];
+    for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const path = elPath.get(entry.target as HTMLElement);
+        if (!path) continue;
+        const t = getTrackByPath(path);
+        if (t && !t.cover_art) pending.push(t);
+    }
+    if (pending.length) loadCoversForTracks(pending);
+}
+
+function buildObserver() {
+    if (coverObs) coverObs.disconnect();
+    coverObs = new IntersectionObserver(onIntersect, {
+        root: scrollRoot,
+        rootMargin: `0px 0px ${lastBottomMargin}px 0px`,
+    });
+    for (const el of observedEls) coverObs.observe(el);
+}
+
+function ensureObserver() {
+    if (!coverObs) buildObserver();
+}
+
+// bindCard runs as a v-for function ref *during render*, before onMounted —
+// so the observer must be created lazily here, not in onMounted, otherwise
+// most cards never get registered.
+function bindCard(el: any, pl: PlaylistInfo) {
+    if (!el) return;
+    if (!pl.first_file_path) return;
+    ensureObserver();
+    const prev = elPath.get(el);
+    if (prev === pl.first_file_path) return;
+    if (prev) {
+        coverObs!.unobserve(el);
+        observedEls.delete(el);
+    }
+    elPath.set(el, pl.first_file_path);
+    coverObs!.observe(el);
+    observedEls.add(el);
+}
+
+function measureRowHeight(): number {
+    if (!gridEl.value) return 0;
+    const card = gridEl.value.querySelector<HTMLElement>('.playlistItem');
+    if (!card) return 0;
+    const cardH = card.getBoundingClientRect().height;
+    if (cardH <= 0) return 0;
+    const rowGap = parseFloat(getComputedStyle(gridEl.value).rowGap || '0') || 0;
+    return cardH + rowGap;
+}
+
+function refreshMargin() {
+    const rowH = measureRowHeight();
+    if (rowH <= 0) return;
+    const bottom = Math.max(1, Math.round(rowH * 2));
+    if (bottom === lastBottomMargin && coverObs) return;
+    lastBottomMargin = bottom;
+    buildObserver();
+}
+
+onMounted(() => {
+    if (gridEl.value) {
+        scrollRoot = findScrollAncestor(gridEl.value);
+    }
+    buildObserver();
+    requestAnimationFrame(refreshMargin);
+    if (gridEl.value) {
+        resizeObs = new ResizeObserver(() => refreshMargin());
+        resizeObs.observe(gridEl.value);
+    }
+});
+
+onUnmounted(() => {
+    coverObs?.disconnect();
+    coverObs = null;
+    resizeObs?.disconnect();
+    resizeObs = null;
+    scrollRoot = null;
+    observedEls.clear();
+});
+
+watch(() => trackList.value.length, () => {
+    if (!gridEl.value) return;
+    ensureObserver();
+    refreshMargin();
+    const cards = gridEl.value.querySelectorAll<HTMLElement>('.playlistItem');
+    for (const el of cards) {
+        if (!elPath.has(el)) continue;
+        coverObs!.unobserve(el);
+        coverObs!.observe(el);
+        observedEls.add(el);
+    }
 });
 
 // ── Create ──────────────────────────────────────────────────────────────────
@@ -221,12 +297,34 @@ function onMoveToTopFromMenu(pl: PlaylistInfo) {
 }
 
 function goBack() {
-    router.push('/collections');
+    router.back();
+}
+
+// ── Sticky header ───────────────────────────────────────────────────────────
+
+const pageRootEl = ref<HTMLElement | null>(null);
+const scrollY = ref(0);
+const showStickyHeader = computed(() => scrollY.value > 200);
+
+function handleScroll(e: Event) {
+    scrollY.value = (e.target as HTMLElement).scrollTop;
+}
+
+function scrollToTop() {
+    pageRootEl.value?.scrollTo({ top: 0, behavior: 'smooth' });
 }
 </script>
 
 <template>
-    <div class="pageRoot">
+    <div class="pageRoot" ref="pageRootEl" @scroll="handleScroll">
+        <div class="stickyHeaderAnchor">
+            <Transition name="sticky-header">
+                <div v-if="showStickyHeader" class="stickyHeader">
+                    <div>Мои плейлисты</div>
+                    <button class="toTopBtn" @click="scrollToTop">Вверх</button>
+                </div>
+            </Transition>
+        </div>
         <button class="backBtn" @click="goBack">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
             <span>Назад</span>
@@ -251,7 +349,7 @@ function goBack() {
                 </svg>
             </div>
         </div>
-        <div class="grid" v-if="filteredPlaylists.length > 0 || !debouncedSearch">
+        <div class="grid" v-if="filteredPlaylists.length > 0 || !debouncedSearch" ref="gridEl">
             <div v-if="!debouncedSearch" class="createPlaylistItem" @click="onCreatePlaylist">
                 <div class="cover"><PlusIcon width="64px" height="64px" stroke-width="1.1" /></div>
                 <div class="title">Новый плейлист</div>
@@ -259,6 +357,7 @@ function goBack() {
             <TransitionGroup name="playlist">
                 <div
                     v-for="pl in filteredPlaylists"
+                    :ref="(el: any) => bindCard(el, pl)"
                     :key="pl.id"
                     class="playlistItem"
                     @click="openPlaylist(pl)"
@@ -268,7 +367,7 @@ function goBack() {
                         :class="{ menuOpen: playlistMenu?.pl.id === pl.id }"
                         @contextmenu="openPlaylistMenuFromCover($event, pl)"
                     >
-                        <img class="cover" :src="playlistCovers[pl.id] || defaultCover" />
+                        <img class="cover" :src="coverFor(pl.first_file_path) || defaultCover" />
                         <button
                             class="overlayBtn pinBtn"
                             :class="{ active: isPinned(pl.id) }"
@@ -364,6 +463,50 @@ function goBack() {
 .pageRoot::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.12);
     border-radius: 3px;
+}
+.stickyHeaderAnchor {
+    position: sticky;
+    top: -20px;
+    height: 0;
+    z-index: 10;
+    margin: 0 -28px;
+}
+.stickyHeader {
+    user-select: none;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 14%, 0.3);
+    backdrop-filter: blur(12px);
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: hsla(0, 0%, 100%, 0.9);
+}
+.sticky-header-enter-active,
+.sticky-header-leave-active {
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.sticky-header-enter-from,
+.sticky-header-leave-to {
+    opacity: 0;
+    transform: translateY(-8px);
+}
+.toTopBtn {
+    cursor: pointer;
+    padding: 6px 16px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.07);
+    color: hsla(0, 0%, 100%, 1);
+    font-size: 14px;
+    font-weight: 500;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(0, 0%, 100%, 0.12);
+    }
 }
 .backBtn {
     display: flex;

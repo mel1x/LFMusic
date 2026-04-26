@@ -673,6 +673,12 @@ export function usePlayer() {
         if (sourceTrackList.value.length === 0) {
           activePlaylistSource.value = null;
         }
+      } else if (src && src.startsWith("artist:")) {
+        const name = src.slice("artist:".length);
+        sourceTrackList.value = trackList.value.filter(t => (t.artist || '').trim() === name);
+        if (sourceTrackList.value.length === 0) {
+          activePlaylistSource.value = null;
+        }
       } else {
         sourceTrackList.value = [];
       }

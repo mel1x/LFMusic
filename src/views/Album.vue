@@ -12,6 +12,7 @@ import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
+import { searchRanked } from '../composables/useSearch';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 
 const route = useRoute()
@@ -77,14 +78,17 @@ function clearSearch() {
 }
 
 const filteredTracks = computed(() => {
-    const q = debouncedSearch.value.toLowerCase().trim()
+    const q = debouncedSearch.value.trim()
     if (!q) return albumTracks.value
-    return albumTracks.value.filter(t => {
-        const title = (t.title || '').toLowerCase()
-        const artist = (t.artist || '').toLowerCase()
-        const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '').toLowerCase() || ''
-        return title.includes(q) || artist.includes(q) || fileName.includes(q)
-    })
+    return searchRanked(
+        albumTracks.value,
+        q,
+        (t) => {
+            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
+            return [t.title || '', t.artist || '', fileName]
+        },
+        { formatPath: (t) => t.file_path },
+    )
 })
 
 // ── Header height ─────────────────────────────────────────────────────────
@@ -200,7 +204,7 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 // ── Back ────────────────────────────────────────────────────────────────────
 
 function goBack() {
-    router.push('/collections')
+    router.back()
 }
 </script>
 

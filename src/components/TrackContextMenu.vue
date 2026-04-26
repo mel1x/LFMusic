@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import ContextMenu from './ContextMenu.vue'
 import EditIcon from './Icons/EditIcon.vue'
 import ArrowUpIcon from './Icons/ArrowUpIcon.vue'
@@ -9,6 +10,7 @@ import InfoIcon from './Icons/InfoIcon.vue'
 import DeleteIcon from './Icons/DeleteIcon.vue'
 import type { TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists } from '../composables/usePlaylists'
+import { useTrackInfoModal } from '../composables/useTrackInfoModal'
 
 const props = defineProps<{
     x: number
@@ -28,7 +30,19 @@ const emit = defineEmits<{
     removeFromPlaylist: [track: TrackMetadata]
 }>()
 
-const { userPlaylists, loadPlaylists, addTrackToPlaylist, getPlaylistIdsForTrack } = usePlaylists()
+const router = useRouter()
+const { userPlaylists, albums, loadPlaylists, addTrackToPlaylist, getPlaylistIdsForTrack } = usePlaylists()
+const { openTrackInfo } = useTrackInfoModal()
+
+// "Перейти к альбому" имеет смысл только если у трека есть альбом и в нём
+// больше одного трека. Бэкенд создаёт album-плейлист только при count > 1,
+// поэтому достаточно проверить наличие соответствующей записи.
+const trackAlbumName = computed(() => (props.track.album || '').trim())
+const hasAlbum = computed(() => {
+    const name = trackAlbumName.value
+    if (!name) return false
+    return albums.value.some(a => a.name === name)
+})
 
 const trackPlaylistIds = ref<Set<number>>(new Set())
 
@@ -199,11 +213,14 @@ function onRemoveFromPlaylist() {
 }
 
 function onGoToAlbum() {
-    // без функционала
+    if (!hasAlbum.value) return
+    router.push(`/album/${encodeURIComponent(trackAlbumName.value)}`)
+    emit('close')
 }
 
 function onAbout() {
-    // без функционала
+    openTrackInfo(props.track)
+    emit('close')
 }
 </script>
 
@@ -242,7 +259,7 @@ function onAbout() {
             <span>Удалить из плейлиста</span>
         </button>
         <div class="ctx-separator"></div>
-        <button class="ctx-item" @click="onGoToAlbum">
+        <button v-if="hasAlbum" class="ctx-item" @click="onGoToAlbum">
             <AlbumIcon width="16" height="16" />
             <span>Перейти к альбому</span>
         </button>

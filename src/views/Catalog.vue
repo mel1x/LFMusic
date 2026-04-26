@@ -12,6 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
+import { searchRanked } from '../composables/useSearch';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import CatalogContextMenu from '../components/CatalogContextMenu.vue';
@@ -114,15 +115,17 @@ const filteredTracks = computed(() => {
     if (selectedGenre.value) {
         list = list.filter(t => t.genre === selectedGenre.value)
     }
-    const q = debouncedSearch.value.toLowerCase().trim()
+    const q = debouncedSearch.value.trim()
     if (!q) return list
-    return list.filter(t => {
-        const title = (t.title || '').toLowerCase()
-        const artist = (t.artist || '').toLowerCase()
-        const album = (t.album || '').toLowerCase()
-        const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '').toLowerCase() || ''
-        return title.includes(q) || artist.includes(q) || album.includes(q) || fileName.includes(q)
-    })
+    return searchRanked(
+        list,
+        q,
+        (t) => {
+            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
+            return [t.title || '', t.artist || '', t.album || '', fileName]
+        },
+        { formatPath: (t) => t.file_path },
+    )
 })
 
 // ── Header height (for virtual scroll offset) ─────────────────────────────

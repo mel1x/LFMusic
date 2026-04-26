@@ -8,6 +8,7 @@ import CloseIcon from './components/Icons/CloseIcon.vue';
 import MainBlock from './components/MainBlock.vue';
 import Player from './components/Player.vue';
 import GithubIcon from './components/Icons/GithubIcon.vue';
+import TrackInfoModal from './components/TrackInfoModal.vue';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
@@ -138,6 +139,7 @@ const closeWindow = async () => {
   </div>
   <MainBlock class="mainFrame" />
   <Player class="playerPart" />
+  <TrackInfoModal />
 </template>
 
 <style>

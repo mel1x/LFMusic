@@ -2,13 +2,15 @@
 import { onMounted, onUnmounted, computed, ref, watch } from 'vue';
 import DeleteIcon from '../components/Icons/DeleteIcon.vue';
 import FolderIcon from '../components/Icons/FolderIcon.vue';
-import { useSettings } from '../composables/useSettings';
+import { useSettings, ARTIST_SEPARATORS_DEFAULT } from '../composables/useSettings';
 import { usePlayer } from '../composables/usePlayer';
+import { usePlaylists } from '../composables/usePlaylists';
 import { useEqualizer, EQ_PRESETS, EQ_BAND_LABELS } from '../composables/useEqualizer';
 import RefreshIcon from '../components/Icons/RefreshIcon.vue';
 import PlusIcon from '../components/Icons/PlusIcon.vue';
 
 const { settings, settingItems, load, save } = useSettings();
+const { rebuildArtists } = usePlaylists();
 const {
     folders, isScanning, removingFolder, scanProgress,
     addFolder, removeFolder, rescanLibrary, folderDisplayName,
@@ -246,6 +248,42 @@ function formatBandValue(value: number): string {
     const v = value.toFixed(1);
     return value > 0 ? `+${v}` : v;
 }
+
+// ── Artist separators ─────────────────────────────────────────────────────
+const newSeparator = ref('');
+const separatorInput = ref<HTMLInputElement | null>(null);
+
+function visibleSeparator(sep: string): string {
+    return `"${sep} "`;
+}
+
+async function addSeparator() {
+    const raw = newSeparator.value;
+    if (!raw) return;
+    const list = settings.value.artist_separators;
+    if (list.includes(raw)) {
+        newSeparator.value = '';
+        return;
+    }
+    settings.value.artist_separators = [...list, raw];
+    newSeparator.value = '';
+    await save();
+    await rebuildArtists();
+}
+
+async function removeSeparator(sep: string) {
+    const list = settings.value.artist_separators.filter(s => s !== sep);
+    settings.value.artist_separators = list.length > 0 ? list : [...ARTIST_SEPARATORS_DEFAULT];
+    await save();
+    await rebuildArtists();
+}
+
+function onSeparatorKey(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        addSeparator();
+    }
+}
 </script>
 
 <template>
@@ -370,6 +408,41 @@ function formatBandValue(value: number): string {
                             />
                         </div>
                         <span class="eqBandLabel">{{ label }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="settingBlock">
+            <div class="settingTitle">Разделители исполнителей</div>
+            <div class="settingDesc">Строки, по которым имена исполнителей разбиваются на несколько (например «; » или «, »)</div>
+            <div class="separatorsBlock">
+                <div class="separatorsList">
+                    <div
+                        v-for="sep in settings.artist_separators"
+                        :key="sep"
+                        class="separatorChip"
+                        :title="JSON.stringify(sep)"
+                    >
+                        <span class="separatorText">{{ visibleSeparator(sep) }}</span>
+                        <button class="separatorRemove" @click="removeSeparator(sep)" title="Удалить">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                    </div>
+                    <div class="separatorAddRow">
+                        <input
+                            ref="separatorInput"
+                            type="text"
+                            class="separatorInput"
+                            placeholder="Новый разделитель"
+                            v-model="newSeparator"
+                            @keydown="onSeparatorKey"
+                            spellcheck="false"
+                        />
+                        <button class="separatorAddBtn" :disabled="!newSeparator" @click="addSeparator">
+                            <PlusIcon width="14" height="14" />
+                            Добавить
+                        </button>
                     </div>
                 </div>
             </div>
@@ -702,6 +775,99 @@ function formatBandValue(value: number): string {
     &.active {
         box-shadow: inset 0 0 0 2px #ffffff, 0 0 0 2px hsla(0, 0%, 0%, 0.35);
     }
+}
+.separatorsBlock {
+    margin-top: 16px;
+    max-width: 800px;
+    width: 100%;
+}
+.separatorsList {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+.separatorChip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 6px 5px 12px;
+    border-radius: 999px;
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
+    color: hsla(0, 0%, 100%, 0.85);
+    font-family: "JetBrains Mono", "Consolas", monospace;
+    font-size: 13px;
+    font-weight: 500;
+    transition: .24s ease;
+}
+.separatorChip:hover {
+    background-color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
+}
+.separatorText {
+    user-select: text;
+    letter-spacing: 0.04em;
+}
+.separatorRemove {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    color: hsla(0, 0%, 100%, 0.45);
+    background-color: transparent;
+    transition: .2s ease;
+}
+.separatorRemove:hover {
+    color: #ff6467;
+    background-color: hsla(0, 0%, 0%, 0.25);
+}
+.separatorAddRow {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.separatorInput {
+    padding: 6px 10px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 0%, 0.25);
+    color: #ffffff;
+    font-family: "JetBrains Mono", "Consolas", monospace;
+    font-size: 13px;
+    font-weight: 500;
+    width: 160px;
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.04);
+    transition: .2s ease;
+}
+.separatorInput:focus {
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.18);
+    background-color: hsla(0, 0%, 0%, 0.35);
+}
+.separatorInput::placeholder {
+    color: hsla(0, 0%, 100%, 0.3);
+}
+.separatorAddBtn {
+    user-select: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px 6px 9px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.6);
+    font-weight: 500;
+    font-size: 13px;
+    cursor: pointer;
+    transition: .24s ease;
+}
+.separatorAddBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.08);
+    color: #ffffff;
+}
+.separatorAddBtn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
 }
 .foldersBlock {
     margin-top: 22px;

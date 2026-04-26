@@ -14,9 +14,23 @@ import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 
 const router = useRouter();
-const { userPlaylists, loadPlaylists, createPlaylist, getPlaylistTracks, deletePlaylist, movePlaylistToTop } = usePlaylists();
+const {
+    userPlaylists,
+    albums: albumPlaylists,
+    artists: artistPlaylists,
+    albumTopOrder,
+    artistTopOrder,
+    loadPlaylists,
+    createPlaylist,
+    getPlaylistTracks,
+    deletePlaylist,
+    movePlaylistToTop,
+    moveAlbumToTop,
+    moveArtistToTop,
+} = usePlaylists();
 const {
     trackList,
+    getTrackByPath,
     loadCoversForTracks,
     isPlaying,
     activePlaylistSource,
@@ -108,71 +122,95 @@ async function refreshAllCovers() {
     }
 }
 
-// ── Albums / Artists (auto-generated from trackList) ─────────────────────────
+// ── Albums / Artists (data from backend playlists) ───────────────────────────
 
 interface AlbumEntry {
+    id: number;
     name: string;
-    tracks: TrackMetadata[];
     cover: string | null;
     artist: string;
+    trackCount: number;
+    firstPath: string | null;
 }
 
 interface ArtistEntry {
+    id: number;
     name: string;
-    tracks: TrackMetadata[];
     cover: string | null;
+    firstPath: string | null;
+    trackCount: number;
 }
 
 const albums = computed<AlbumEntry[]>(() => {
-    const map = new Map<string, TrackMetadata[]>();
-    for (const t of trackList.value) {
-        const name = (t.album || '').trim();
-        if (!name) continue;
-        const arr = map.get(name);
-        if (arr) arr.push(t);
-        else map.set(name, [t]);
-    }
-    const out: AlbumEntry[] = [];
-    for (const [name, tracks] of map) {
-        if (tracks.length < 2) continue;
-        out.push({
-            name,
-            tracks,
-            cover: tracks.find(t => t.cover_art)?.cover_art ?? null,
-            artist: tracks[0].artist || 'Неизвестный исполнитель',
-        });
-    }
-    return out.sort((a, b) => a.name.localeCompare(b.name));
+    return albumPlaylists.value
+        .map(pl => {
+            const t = pl.first_file_path ? getTrackByPath(pl.first_file_path) : undefined;
+            return {
+                id: pl.id,
+                name: pl.name,
+                cover: t?.cover_art ?? null,
+                artist: t?.artist || 'Неизвестный исполнитель',
+                trackCount: pl.track_count,
+                firstPath: pl.first_file_path,
+            };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
 });
 
 const artists = computed<ArtistEntry[]>(() => {
-    const map = new Map<string, TrackMetadata[]>();
-    for (const t of trackList.value) {
-        const name = (t.artist || '').trim();
-        if (!name) continue;
-        const arr = map.get(name);
-        if (arr) arr.push(t);
-        else map.set(name, [t]);
-    }
-    const out: ArtistEntry[] = [];
-    for (const [name, tracks] of map) {
-        out.push({
-            name,
-            tracks,
-            cover: tracks.find(t => t.cover_art)?.cover_art ?? null,
-        });
-    }
-    return out.sort((a, b) => a.name.localeCompare(b.name));
+    return artistPlaylists.value
+        .map(pl => {
+            const t = pl.first_file_path ? getTrackByPath(pl.first_file_path) : undefined;
+            return {
+                id: pl.id,
+                name: pl.name,
+                cover: t?.cover_art ?? null,
+                firstPath: pl.first_file_path,
+                trackCount: pl.track_count,
+            };
+        })
+        .sort((a, b) => b.trackCount - a.trackCount || a.name.localeCompare(b.name));
 });
 
-// Lazy-load cover for the first track of an album/artist if it doesn't have one yet.
+// ── Incremental rendering for the horizontal scrollers ─────────────────────
+const VISIBLE_INITIAL = 18;
+const VISIBLE_STEP = 12;
+const visibleAlbumsCount = ref(VISIBLE_INITIAL);
+const visibleArtistsCount = ref(VISIBLE_INITIAL);
+
+function onAlbumsScroll() {
+    albumsLine.onScroll();
+    const node = albumsLine.el.value;
+    if (!node) return;
+    if (node.scrollLeft >= node.scrollWidth - node.clientWidth - 600) {
+        if (visibleAlbumsCount.value < albums.value.length) {
+            visibleAlbumsCount.value = Math.min(albums.value.length, visibleAlbumsCount.value + VISIBLE_STEP);
+        }
+    }
+}
+function onArtistsScroll() {
+    artistsLine.onScroll();
+    const node = artistsLine.el.value;
+    if (!node) return;
+    if (node.scrollLeft >= node.scrollWidth - node.clientWidth - 600) {
+        if (visibleArtistsCount.value < artists.value.length) {
+            visibleArtistsCount.value = Math.min(artists.value.length, visibleArtistsCount.value + VISIBLE_STEP);
+        }
+    }
+}
+
+// Cover requests only for currently rendered cards.
 function requestCoversForCards() {
     const pending: TrackMetadata[] = [];
-    for (const a of albums.value) {
-        if (!a.cover && a.tracks[0]) pending.push(a.tracks[0]);
+    for (const a of visibleSortedAlbums.value) {
+        if (!a.firstPath) continue;
+        const t = getTrackByPath(a.firstPath);
+        if (t && !t.cover_art) pending.push(t);
     }
-    for (const a of artists.value) {
-        if (!a.cover && a.tracks[0]) pending.push(a.tracks[0]);
+    for (const a of visibleArtists.value) {
+        if (!a.firstPath) continue;
+        const t = getTrackByPath(a.firstPath);
+        if (t && !t.cover_art) pending.push(t);
     }
     if (pending.length) loadCoversForTracks(pending);
 }
@@ -201,7 +239,7 @@ watch(
 );
 
 watch(
-    () => trackList.value.map(t => t.cover_art ? '1' : '0').join(''),
+    () => trackList.value.length,
     () => {
         for (const pl of userPlaylists.value) {
             if (pl.track_count === 0) continue;
@@ -209,6 +247,7 @@ watch(
             if (current) continue;
             refreshCoverFor(pl);
         }
+        requestCoversForCards();
     },
 );
 
@@ -331,7 +370,6 @@ async function onConfirmDelete() {
 
 function onMoveToTopFromMenu(pl: PlaylistInfo) {
     movePlaylistToTop(pl.id);
-    playlistsLine.el.value?.scrollTo({ left: 0, behavior: 'smooth' });
 }
 
 // ── Albums: hover actions ───────────────────────────────────────────────────
@@ -363,17 +401,13 @@ async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
         togglePlayPause();
         return;
     }
-    if (album.tracks.length === 0) return;
-    setPlaylistSource(`album:${album.name}`, album.tracks);
-    await playTrack(album.tracks[0]);
-}
-
-const albumTopOrder = ref<string[]>([]);
-
-function moveAlbumToTop(name: string) {
-    const i = albumTopOrder.value.indexOf(name);
-    if (i >= 0) albumTopOrder.value.splice(i, 1);
-    albumTopOrder.value.unshift(name);
+    if (album.trackCount === 0) return;
+    const tracks = await getPlaylistTracks(album.id);
+    if (tracks.length === 0) return;
+    const map = new Map(trackList.value.map(t => [t.file_path, t]));
+    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    setPlaylistSource(`album:${album.name}`, merged);
+    await playTrack(merged[0]);
 }
 
 const sortedAlbums = computed(() => {
@@ -387,6 +421,23 @@ const sortedAlbums = computed(() => {
     const rest = all.filter(a => !topSet.has(a.name));
     return [...top, ...rest];
 });
+
+const sortedArtists = computed(() => {
+    const all = artists.value;
+    const topSet = new Set(artistTopOrder.value);
+    const top: ArtistEntry[] = [];
+    for (const name of artistTopOrder.value) {
+        const a = all.find(ar => ar.name === name);
+        if (a) top.push(a);
+    }
+    const rest = all.filter(a => !topSet.has(a.name));
+    return [...top, ...rest];
+});
+
+const visibleSortedAlbums = computed(() => sortedAlbums.value.slice(0, visibleAlbumsCount.value));
+const visibleArtists = computed(() => sortedArtists.value.slice(0, visibleArtistsCount.value));
+
+watch([visibleSortedAlbums, visibleArtists], () => requestCoversForCards());
 
 const albumMenu = ref<{ x: number; y: number; album: AlbumEntry; centerX: boolean } | null>(null);
 
@@ -409,12 +460,98 @@ function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {
 
 function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
     moveAlbumToTop(album.name);
-    albumsLine.el.value?.scrollTo({ left: 0, behavior: 'smooth' });
+}
+
+// ── Artists: hover actions ──────────────────────────────────────────────────
+
+const pinnedArtists = ref<string[]>([]);
+
+function isArtistPinned(name: string) {
+    return pinnedArtists.value.includes(name);
+}
+
+function toggleArtistPin(name: string) {
+    const i = pinnedArtists.value.indexOf(name);
+    if (i >= 0) pinnedArtists.value.splice(i, 1);
+    else pinnedArtists.value.push(name);
+}
+
+function onToggleArtistPinClick(e: MouseEvent, artist: ArtistEntry) {
+    e.stopPropagation();
+    toggleArtistPin(artist.name);
+}
+
+function isArtistActive(artist: ArtistEntry) {
+    return activePlaylistSource.value === `artist:${artist.name}`;
+}
+
+async function onPlayArtist(e: MouseEvent, artist: ArtistEntry) {
+    e.stopPropagation();
+    if (isArtistActive(artist)) {
+        togglePlayPause();
+        return;
+    }
+    if (artist.trackCount === 0) return;
+    const tracks = await getPlaylistTracks(artist.id);
+    if (tracks.length === 0) return;
+    const map = new Map(trackList.value.map(t => [t.file_path, t]));
+    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    setPlaylistSource(`artist:${artist.name}`, merged);
+    await playTrack(merged[0]);
+}
+
+const artistMenu = ref<{ x: number; y: number; artist: ArtistEntry; centerX: boolean } | null>(null);
+
+function openArtistMenu(e: MouseEvent, artist: ArtistEntry) {
+    e.stopPropagation();
+    if (artistMenu.value?.artist.name === artist.name) {
+        artistMenu.value = null;
+        return;
+    }
+    const btn = e.currentTarget as HTMLElement;
+    const rect = btn.getBoundingClientRect();
+    artistMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, artist, centerX: true };
+}
+
+function openArtistMenuFromCover(e: MouseEvent, artist: ArtistEntry) {
+    e.preventDefault();
+    e.stopPropagation();
+    artistMenu.value = { x: e.clientX, y: e.clientY, artist, centerX: false };
+}
+
+function onMoveArtistToTopFromMenu(artist: ArtistEntry) {
+    moveArtistToTop(artist.name);
+}
+
+function openArtistPage(artist: ArtistEntry) {
+    router.push(`/artist/${encodeURIComponent(artist.name)}`);
+}
+
+// ── Sticky header ───────────────────────────────────────────────────────────
+
+const pageRootEl = ref<HTMLElement | null>(null);
+const scrollY = ref(0);
+const showStickyHeader = computed(() => scrollY.value > 200);
+
+function handleScroll(e: Event) {
+    scrollY.value = (e.target as HTMLElement).scrollTop;
+}
+
+function scrollToTop() {
+    pageRootEl.value?.scrollTo({ top: 0, behavior: 'smooth' });
 }
 </script>
 
 <template>
-    <div class="pageRoot">
+    <div class="pageRoot" ref="pageRootEl" @scroll="handleScroll">
+        <div class="stickyHeaderAnchor">
+            <Transition name="sticky-header">
+                <div v-if="showStickyHeader" class="stickyHeader">
+                    <div>Коллекция</div>
+                    <button class="toTopBtn" @click="scrollToTop">Вверх</button>
+                </div>
+            </Transition>
+        </div>
         <h1 class="pageTitle">Коллекция</h1>
         <div class="pageLine">
             <div class="lineHat">
@@ -492,10 +629,10 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
                 </div>
             </div>
             <div v-if="sortedAlbums.length === 0" class="emptyRow">Пока нет альбомов</div>
-            <div v-else class="lineList" :ref="(el: any) => { albumsLine.el.value = el as HTMLElement | null }" :style="{ '--card-w': albumsLine.itemWidth.value + 'px', visibility: albumsLine.measured.value ? 'visible' : 'hidden' }" @scroll="albumsLine.onScroll">
+            <div v-else class="lineList" :ref="(el: any) => { albumsLine.el.value = el as HTMLElement | null }" :style="{ '--card-w': albumsLine.itemWidth.value + 'px', visibility: albumsLine.measured.value ? 'visible' : 'hidden' }" @scroll="onAlbumsScroll">
                 <div
-                    v-for="album in sortedAlbums"
-                    :key="album.name"
+                    v-for="album in visibleSortedAlbums"
+                    :key="album.id"
                     class="playlistItem albumItem"
                     @click="openAlbum(album)"
                 >
@@ -516,7 +653,7 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
                         </button>
                         <button
                             class="overlayBtn playBtn"
-                            :disabled="album.tracks.length === 0"
+                            :disabled="album.trackCount === 0"
                             @click="onPlayAlbum($event, album)"
                             @contextmenu.stop
                             :title="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
@@ -552,14 +689,48 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
                 </div>
             </div>
             <div v-if="artists.length === 0" class="emptyRow">Пока нет исполнителей</div>
-            <div v-else class="lineList" :ref="(el: any) => { artistsLine.el.value = el as HTMLElement | null }" :style="{ '--card-w': artistsLine.itemWidth.value + 'px', visibility: artistsLine.measured.value ? 'visible' : 'hidden' }" @scroll="artistsLine.onScroll">
+            <div v-else class="lineList artistLineList" :ref="(el: any) => { artistsLine.el.value = el as HTMLElement | null }" :style="{ '--card-w': artistsLine.itemWidth.value + 'px', visibility: artistsLine.measured.value ? 'visible' : 'hidden' }" @scroll="onArtistsScroll">
                 <div
-                    v-for="artist in artists"
-                    :key="artist.name"
+                    v-for="artist in visibleArtists"
+                    :key="artist.id"
                     class="artistItem"
+                    @click="openArtistPage(artist)"
                 >
-                    <div class="artistCoverWrap">
+                    <div
+                        class="artistCoverWrap"
+                        :class="{ menuOpen: artistMenu?.artist.name === artist.name }"
+                        @contextmenu="openArtistMenuFromCover($event, artist)"
+                    >
                         <img class="artistCover" :src="artist.cover || defaultTrackCover" draggable="false" />
+                        <button
+                            class="overlayBtn pinBtn"
+                            :class="{ active: isArtistPinned(artist.name) }"
+                            @click="onToggleArtistPinClick($event, artist)"
+                            @contextmenu.stop
+                            :title="isArtistPinned(artist.name) ? 'Открепить' : 'Закрепить'"
+                        >
+                            <PinIcon width="16" height="16" />
+                        </button>
+                        <button
+                            class="overlayBtn playBtn"
+                            :disabled="artist.trackCount === 0"
+                            @click="onPlayArtist($event, artist)"
+                            @contextmenu.stop
+                            :title="isArtistActive(artist) && isPlaying ? 'Пауза' : 'Слушать'"
+                        >
+                            <PauseIcon v-if="isArtistActive(artist) && isPlaying" width="14" height="14" />
+                            <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
+                        </button>
+                        <button
+                            class="overlayBtn moreBtn"
+                            :class="{ active: artistMenu?.artist.name === artist.name }"
+                            @mousedown.stop="openArtistMenu($event, artist)"
+                            @click.stop
+                            @contextmenu.stop
+                            title="Меню"
+                        >
+                            <MoreIcon width="20" height="20" />
+                        </button>
                     </div>
                     <div class="artistTitle">{{ artist.name }}</div>
                 </div>
@@ -588,6 +759,18 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
             @close="albumMenu = null"
             @togglePin="toggleAlbumPin(albumMenu!.album.name)"
             @moveToTop="onMoveAlbumToTopFromMenu(albumMenu!.album)"
+        />
+        <PlaylistContextMenu
+            v-if="artistMenu"
+            :x="artistMenu.x"
+            :y="artistMenu.y"
+            :isPinned="isArtistPinned(artistMenu.artist.name)"
+            showMoveToTop
+            :showDelete="false"
+            :centerX="artistMenu.centerX"
+            @close="artistMenu = null"
+            @togglePin="toggleArtistPin(artistMenu!.artist.name)"
+            @moveToTop="onMoveArtistToTopFromMenu(artistMenu!.artist)"
         />
         <ConfirmModal
             :open="createModalOpen"
@@ -622,12 +805,58 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
     background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
+
+    overflow-y: scroll;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
 .pageRoot::-webkit-scrollbar-track { background: transparent; }
 .pageRoot::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.12);
     border-radius: 3px;
+}
+.stickyHeaderAnchor {
+    position: sticky;
+    top: -20px;
+    height: 0;
+    z-index: 10;
+    margin: 0 -28px;
+}
+.stickyHeader {
+    user-select: none;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 14%, 0.3);
+    backdrop-filter: blur(12px);
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: hsla(0, 0%, 100%, 0.9);
+}
+.sticky-header-enter-active,
+.sticky-header-leave-active {
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.sticky-header-enter-from,
+.sticky-header-leave-to {
+    opacity: 0;
+    transform: translateY(-8px);
+}
+.toTopBtn {
+    cursor: pointer;
+    padding: 6px 16px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.07);
+    color: hsla(0, 0%, 100%, 1);
+    font-size: 14px;
+    font-weight: 500;
+    transition: .24s ease;
+
+    &:hover {
+        background-color: hsla(0, 0%, 100%, 0.12);
+    }
 }
 .pageTitle {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -642,6 +871,9 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
     flex-direction: column;
     gap: 13px;
     margin-bottom: 36px;
+}
+.pageLine:last-child {
+    margin-bottom: 0px;
 }
 .lineHat {
     display: flex;
@@ -898,31 +1130,97 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
     text-overflow: ellipsis;
 }
 
-/* Artists ── circular covers, no hover overlay */
+/* Artists ── circular covers with hover overlay (mirrors album cards) */
+.artistLineList {
+    padding-bottom: 16px;
+}
 .artistItem {
     flex-shrink: 0;
+    cursor: pointer;
     display: flex;
     flex-direction: column;
     gap: 8px;
     user-select: none;
 }
 .artistCoverWrap {
+    position: relative;
     width: var(--card-w, 200px);
     height: var(--card-w, 200px);
-    border-radius: 9999px;
-    overflow: hidden;
-    background-color: #202020;
-    transition: transform .24s ease;
-}
-.artistItem:hover .artistCoverWrap {
-    transform: scale(1.015);
 }
 .artistCover {
     display: block;
     width: 100%;
     height: 100%;
+    border-radius: 9999px;
     object-fit: cover;
     user-select: none;
+    background-color: #202020;
+    transition: filter .24s ease;
+}
+.artistItem:hover .artistCover,
+.artistCoverWrap.menuOpen .artistCover {
+    filter: brightness(0.6);
+}
+.artistItem .overlayBtn {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 9999px;
+    color: hsla(0, 0%, 100%, 0.95);
+    background-color: hsla(0, 0%, 0%, 0.45);
+    backdrop-filter: blur(8px);
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    z-index: 2;
+}
+.artistItem .overlayBtn:hover {
+    background-color: hsla(0, 0%, 0%, 0.65);
+    color: hsla(0, 0%, 100%, 1);
+}
+.artistItem:hover .overlayBtn,
+.artistItem .artistCoverWrap.menuOpen .overlayBtn,
+.artistItem .overlayBtn.active {
+    opacity: 1;
+    transform: translateY(0);
+}
+.artistItem .playBtn {
+    left: 12px;
+    bottom: 12px;
+    padding: 12px;
+    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
+    background-color: hsla(0, 0%, 100%, 0.95);
+}
+.artistItem .playBtn:hover {
+    color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
+    background-color: hsla(0, 0%, 100%, 1);
+}
+.artistItem .playBtn:disabled {
+    cursor: default;
+    color: hsla(0, 0%, 100%, 0.5);
+    background-color: hsla(0, 0%, 100%, 0.18);
+}
+.artistItem .pinBtn {
+    top: 12px;
+    right: 12px;
+    padding: 8px;
+}
+.artistItem .pinBtn.active {
+    color: hsla(0, 0%, 100%, 1);
+}
+.artistItem .pinBtn.active :deep(svg path) {
+    fill: currentColor;
+}
+.artistItem .moreBtn {
+    right: 12px;
+    bottom: 12px;
+    padding: 8px;
+}
+.artistItem .moreBtn.active {
+    color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 0%, 0.65);
 }
 .artistTitle {
     text-align: center;

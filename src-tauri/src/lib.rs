@@ -171,9 +171,10 @@ async fn library_add_folder(
     folder_path: String,
 ) -> Result<Vec<TrackMetadata>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
         let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        library.add_folder(folder_path, |current, total| {
+        library.add_folder(folder_path, &separators, |current, total| {
             let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
             let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
         })
@@ -185,11 +186,13 @@ async fn library_add_folder(
 /// Удалить папку и все её треки из кэша
 #[tauri::command]
 fn library_remove_folder(
-    state: State<LibraryState>,
+    library_state: State<LibraryState>,
+    settings_state: State<SettingsState>,
     folder_path: String,
 ) -> Result<(), String> {
-    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    library.remove_folder(folder_path)
+    let separators = settings::get_artist_separators(&settings_state);
+    let mut library = library_state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.remove_folder(folder_path, &separators)
 }
 
 /// Получить все треки из кэша (без пересканирования)
@@ -219,15 +222,27 @@ async fn library_rescan(
     app: tauri::AppHandle,
 ) -> Result<Vec<TrackMetadata>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
         let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        library.rescan_all(|current, total| {
+        library.rescan_all(&separators, |current, total| {
             let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
             let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
         })
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Пересобрать плейлисты исполнителей (вызывать после смены разделителей)
+#[tauri::command]
+fn library_rebuild_artists(
+    library_state: State<LibraryState>,
+    settings_state: State<SettingsState>,
+) -> Result<(), String> {
+    let separators = settings::get_artist_separators(&settings_state);
+    let mut library = library_state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.rebuild_artist_playlists(&separators)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -442,8 +457,18 @@ pub fn run() {
 
             app.manage(SettingsState(Mutex::new((app_settings, app_data_dir.clone()))));
 
-            let library =
+            let mut library =
                 MusicLibrary::new(app_data_dir).expect("Не удалось инициализировать библиотеку");
+
+            // Один раз при запуске пересобираем плейлисты исполнителей,
+            // чтобы существующие библиотеки получили записи без ожидания рескана.
+            let separators = {
+                let s = app.state::<SettingsState>();
+                settings::get_artist_separators(&s)
+            };
+            if let Err(e) = library.rebuild_artist_playlists(&separators) {
+                eprintln!("Ошибка инициализации плейлистов исполнителей: {}", e);
+            }
 
             app.manage(LibraryState(Mutex::new(library)));
             Ok(())
@@ -475,6 +500,7 @@ pub fn run() {
             library_move_track_to_top,
             library_cleanup,
             library_rescan,
+            library_rebuild_artists,
             // Плейлисты
             playlist_get_all,
             playlist_get_tracks,
