@@ -13,9 +13,14 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
 import { searchRanked } from '../composables/useSearch';
+import { tracksCountText } from '../utils/format';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import CatalogContextMenu from '../components/CatalogContextMenu.vue';
+import TrackArtists from '../components/TrackArtists.vue';
+import CoverEditor from '../components/CoverEditor.vue';
+import AnimatedCover from '../components/AnimatedCover.vue';
+import { useCustomCovers } from '../composables/useCustomCovers';
 
 const {
     trackList,
@@ -29,6 +34,9 @@ const {
     loadCoversForTracks,
     clearCoverQueue,
 } = usePlayer();
+
+const { getCustomCover } = useCustomCovers();
+const catalogCustomCover = computed(() => getCustomCover('catalog', 'catalog'));
 
 // ── Search ──────────────────────────────────────────────────────────────────
 
@@ -302,12 +310,17 @@ function onCoverClick(track: TrackMetadata) {
         </div>
         <div ref="scrollHeaderRef" class="scrollHeader">
             <div class="pageHat">
-                <img alt="cover" :src="cover" class="cover"></img>
+                <div class="coverWrap cover-edit-host">
+                    <AnimatedCover :src="catalogCustomCover || cover" class="cover" alt="cover" />
+                    <CoverEditor kind="catalog" coverKey="catalog" size="large" />
+                </div>
                 <div class="dataZone">
                     <div class="info">
                         <div class="listType">Библиотека</div>
-                        <h2 class="listName">Мой каталог</h2>
-                        <div class="listCount" v-if="trackList.length > 0">{{ trackList.length }} треков</div>
+                        <h2 v-truncate class="listName">Мой каталог</h2>
+                        <div class="badges" v-if="trackList.length > 0">
+                            <div class="badge">{{ tracksCountText(trackList.length) }}</div>
+                        </div>
                     </div>
                     <div class="controls">
                         <button class="playListBtn" @click="onPlayCatalog">
@@ -409,8 +422,8 @@ function onCoverClick(track: TrackMetadata) {
                     />
                 </div>
                 <div class="trackInfo">
-                    <div class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
-                    <div class="trackArtist">{{ track.artist || 'Неизвестный исполнитель' }}</div>
+                    <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
+                    <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                 </div>
                 <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
                 <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
@@ -479,6 +492,13 @@ function onCoverClick(track: TrackMetadata) {
     width: 100%;
     flex-shrink: 0;
 }
+.pageHat .coverWrap {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    flex-shrink: 0;
+    border-radius: 10px;
+}
 .pageHat .cover {
     user-select: none;
     width: 200px;
@@ -489,10 +509,10 @@ function onCoverClick(track: TrackMetadata) {
     transform-origin: center;
     overflow: hidden;
     flex-shrink: 0;
-
-    &:hover {
-        transform: scale(1.02);
-    }
+    object-fit: cover;
+}
+.pageHat .coverWrap:hover .cover {
+    transform: scale(1.02);
 }
 .pageHat .dataZone {
     display: flex;
@@ -527,19 +547,31 @@ function onCoverClick(track: TrackMetadata) {
     font-weight: 900;
     color: hsla(0, 0%, 100%, 0.9);
 }
-.pageHat .dataZone .info .listCount {
-    user-select: none;
-    margin-left: 1px;
+.pageHat .dataZone .info .badges {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-top: 14px;
-    font-size: 13px;
+    max-width: 100%;
+}
+.badge {
+    user-select: none;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.7);
+    font-size: 12px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
     transition: .24s ease;
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.badge:hover {
+    background-color: hsla(0, 0%, 100%, 0.1);
+    color: hsla(0, 0%, 100%, 0.9);
 }
 .pageHat .dataZone .controls {
     margin-top: 0px;

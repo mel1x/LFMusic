@@ -13,7 +13,10 @@ import ConfirmModal from '../components/ConfirmModal.vue';
 import defaultCover from '../assets/playlistCover.webp';
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
+import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
+import AnimatedCover from '../components/AnimatedCover.vue';
+import { useCustomCovers } from '../composables/useCustomCovers';
 
 const router = useRouter();
 const { userPlaylists, loadPlaylists, createPlaylist, getPlaylistTracks, deletePlaylist, movePlaylistToTop } = usePlaylists();
@@ -28,9 +31,17 @@ const {
     setPlaylistSource,
 } = usePlayer();
 
+const { getCustomCover } = useCustomCovers();
+
 function coverFor(path: string | null): string | null {
     if (!path) return null;
     return getTrackByPath(path)?.cover_art ?? null;
+}
+
+function playlistCoverFor(pl: PlaylistInfo): string {
+    const custom = getCustomCover('playlist', pl.id);
+    if (custom) return custom;
+    return coverFor(pl.first_file_path) || defaultCover;
 }
 
 onMounted(async () => {
@@ -223,16 +234,16 @@ function openPlaylist(pl: PlaylistInfo) {
 
 // ── Hover overlay actions ───────────────────────────────────────────────────
 
-const pinnedIds = ref<number[]>([]);
+const { isPinned: isPinnedFn, togglePin, unpin } = usePins();
 
 function isPinned(id: number) {
-    return pinnedIds.value.includes(id);
+    return isPinnedFn('playlist', id);
 }
 
 function togglePinId(id: number) {
-    const i = pinnedIds.value.indexOf(id);
-    if (i >= 0) pinnedIds.value.splice(i, 1);
-    else pinnedIds.value.push(id);
+    const pl = userPlaylists.value.find(p => p.id === id);
+    if (!pl) return;
+    togglePin({ kind: 'playlist', key: id, name: pl.name });
 }
 
 function isPlaylistActive(pl: PlaylistInfo) {
@@ -287,8 +298,7 @@ async function onConfirmDelete() {
     const pl = deleteModalTarget.value;
     deleteModalTarget.value = null;
     if (!pl) return;
-    const i = pinnedIds.value.indexOf(pl.id);
-    if (i >= 0) pinnedIds.value.splice(i, 1);
+    unpin('playlist', pl.id);
     await deletePlaylist(pl.id);
 }
 
@@ -367,13 +377,13 @@ function scrollToTop() {
                         :class="{ menuOpen: playlistMenu?.pl.id === pl.id }"
                         @contextmenu="openPlaylistMenuFromCover($event, pl)"
                     >
-                        <img class="cover" :src="coverFor(pl.first_file_path) || defaultCover" />
+                        <AnimatedCover class="cover" :src="playlistCoverFor(pl)" />
                         <button
                             class="overlayBtn pinBtn"
                             :class="{ active: isPinned(pl.id) }"
                             @click="onTogglePinClick($event, pl)"
                             @contextmenu.stop
-                            :title="isPinned(pl.id) ? 'Открепить' : 'Закрепить'"
+                            v-tooltip="isPinned(pl.id) ? 'Открепить' : 'Закрепить'"
                         >
                             <PinIcon width="16" height="16" />
                         </button>
@@ -382,7 +392,7 @@ function scrollToTop() {
                             :disabled="pl.track_count === 0"
                             @click="onPlayPlaylist($event, pl)"
                             @contextmenu.stop
-                            :title="pl.track_count === 0 ? 'Плейлист пуст' : (isPlaylistActive(pl) && isPlaying ? 'Пауза' : 'Слушать')"
+                            v-tooltip="pl.track_count === 0 ? 'Плейлист пуст' : (isPlaylistActive(pl) && isPlaying ? 'Пауза' : 'Слушать')"
                         >
                             <PauseIcon v-if="isPlaylistActive(pl) && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
@@ -393,12 +403,12 @@ function scrollToTop() {
                             @mousedown.stop="openPlaylistMenu($event, pl)"
                             @click.stop
                             @contextmenu.stop
-                            title="Меню"
+                            v-tooltip="'Меню'"
                         >
                             <MoreIcon width="20" height="20" />
                         </button>
                     </div>
-                    <div class="title">{{ pl.name }}</div>
+                    <div v-truncate class="title">{{ pl.name }}</div>
                 </div>
             </TransitionGroup>
         </div>

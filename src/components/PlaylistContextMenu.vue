@@ -2,6 +2,7 @@
 import ContextMenu from './ContextMenu.vue'
 import PinIcon from './Icons/PinIcon.vue'
 import DeleteIcon from './Icons/DeleteIcon.vue'
+import ArrowUpIcon from './Icons/ArrowUpIcon.vue'
 
 withDefaults(defineProps<{
     x: number
@@ -13,8 +14,13 @@ withDefaults(defineProps<{
     isPinned?: boolean
     showMoveToTop?: boolean
     showDelete?: boolean
+    /** Использовать стрелку вверх и подпись «Поднять вверх»
+     *  (для закреплений в боковой панели). По умолчанию —
+     *  стрелка влево и подпись «Перенести в начало». */
+    moveToTopUp?: boolean
 }>(), {
     showDelete: true,
+    moveToTopUp: false,
 })
 
 const emit = defineEmits<{
@@ -43,11 +49,12 @@ function onMoveToTop() {
 <template>
     <ContextMenu :x="x" :y="y" :alignRight="alignRight" :anchorBottom="anchorBottom" :centerX="centerX" :centerY="centerY" @close="emit('close')">
         <button v-if="showMoveToTop" class="ctx-item" @click="onMoveToTop">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <ArrowUpIcon v-if="moveToTopUp" width="16" height="16" />
+            <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M19 12H5"/>
                 <path d="m12 19-7-7 7-7"/>
             </svg>
-            <span>Перенести в начало</span>
+            <span>{{ moveToTopUp ? 'Поднять вверх' : 'Перенести в начало' }}</span>
         </button>
         <button class="ctx-item" @click="onTogglePin">
             <PinIcon width="16" height="16" />

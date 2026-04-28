@@ -11,6 +11,7 @@ import DeleteIcon from './Icons/DeleteIcon.vue'
 import type { TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists } from '../composables/usePlaylists'
 import { useTrackInfoModal } from '../composables/useTrackInfoModal'
+import { useTrackEditModal } from '../composables/useTrackEditModal'
 
 const props = defineProps<{
     x: number
@@ -33,6 +34,7 @@ const emit = defineEmits<{
 const router = useRouter()
 const { userPlaylists, albums, loadPlaylists, addTrackToPlaylist, getPlaylistIdsForTrack } = usePlaylists()
 const { openTrackInfo } = useTrackInfoModal()
+const { openTrackEdit } = useTrackEditModal()
 
 // "Перейти к альбому" имеет смысл только если у трека есть альбом и в нём
 // больше одного трека. Бэкенд создаёт album-плейлист только при count > 1,
@@ -192,7 +194,8 @@ onBeforeUnmount(() => {
 })
 
 function onEdit() {
-    // без функционала
+    openTrackEdit(props.track)
+    emit('close')
 }
 
 function onMoveToTop() {

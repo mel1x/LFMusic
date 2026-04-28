@@ -16,9 +16,15 @@ import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
 import { searchRanked } from '../composables/useSearch';
+import { tracksCountText } from '../utils/format';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import ConfirmModal from '../components/ConfirmModal.vue';
+import TrackArtists from '../components/TrackArtists.vue';
+import { usePins } from '../composables/usePins';
+import CoverEditor from '../components/CoverEditor.vue';
+import AnimatedCover from '../components/AnimatedCover.vue';
+import { useCustomCovers } from '../composables/useCustomCovers';
 
 const route = useRoute()
 const router = useRouter()
@@ -67,7 +73,11 @@ const playlistTracks = computed<TrackMetadata[]>(() => {
 
 const sourceId = computed(() => `playlist:${playlistId.value}`)
 
+const { getCustomCover } = useCustomCovers()
+
 const playlistCover = computed(() => {
+    const custom = getCustomCover('playlist', playlistId.value)
+    if (custom) return custom
     const first = playlistTracks.value[0]
     return first?.cover_art || defaultPlaylistCover
 })
@@ -252,7 +262,8 @@ function goBack() {
 // ── Playlist context menu ───────────────────────────────────────────────────
 
 const playlistMenu = ref<{ x: number; y: number } | null>(null)
-const isPinned = ref(false)
+const { isPinned: isPinnedFn, togglePin, updatePinName, unpin } = usePins()
+const isPinned = computed(() => isPinnedFn('playlist', playlistId.value))
 
 function openPlaylistMenu(e: MouseEvent) {
     e.stopPropagation()
@@ -266,8 +277,16 @@ function openPlaylistMenu(e: MouseEvent) {
 }
 
 function onTogglePin() {
-    isPinned.value = !isPinned.value
+    if (!playlist.value) return
+    togglePin({ kind: 'playlist', key: playlistId.value, name: playlist.value.name })
 }
+
+watch(
+    () => playlist.value?.name,
+    (name) => {
+        if (name) updatePinName('playlist', playlistId.value, name)
+    },
+)
 
 const deleteModalOpen = ref(false)
 
@@ -278,6 +297,7 @@ function onDeletePlaylist() {
 async function onConfirmDeletePlaylist() {
     deleteModalOpen.value = false
     const id = playlistId.value
+    unpin('playlist', id)
     router.push('/collections')
     await deletePlaylist(id)
 }
@@ -336,12 +356,15 @@ function onNameKeydown(e: KeyboardEvent) {
                 <span>Назад</span>
             </button>
             <div class="pageHat">
-                <img alt="cover" :src="playlistCover" class="cover" draggable="false" />
+                <div class="coverWrap cover-edit-host">
+                    <AnimatedCover :src="playlistCover" class="cover" alt="cover" />
+                    <CoverEditor kind="playlist" :coverKey="playlistId" size="large" />
+                </div>
                 <div class="dataZone">
                     <div class="info">
                         <div class="listType">Плейлист</div>
                         <div class="listNameRow">
-                            <h2 v-if="!isEditingName" class="listName" @dblclick="startEditName">{{ playlist?.name || '' }}</h2>
+                            <h2 v-if="!isEditingName" v-truncate class="listName" @dblclick="startEditName">{{ playlist?.name || '' }}</h2>
                             <input
                                 v-else
                                 ref="nameInputEl"
@@ -353,12 +376,13 @@ function onNameKeydown(e: KeyboardEvent) {
                                 @blur="commitEditName"
                                 @keydown="onNameKeydown"
                             />
-                            <button v-if="!isEditingName" class="editNameBtn" @click="startEditName" title="Переименовать">
+                            <button v-if="!isEditingName" class="editNameBtn" @click="startEditName" v-tooltip="'Переименовать'">
                                 <EditIcon width="16" height="16" />
                             </button>
                         </div>
-                        <div class="listCount" v-if="playlistTracks.length > 0">{{ playlistTracks.length }} треков</div>
-                        <div class="listCount" v-else>Пусто</div>
+                        <div class="badges">
+                            <div class="badge">{{ playlistTracks.length > 0 ? tracksCountText(playlistTracks.length) : 'Пусто' }}</div>
+                        </div>
                     </div>
                     <div class="controls">
                         <button class="playListBtn" :disabled="playlistTracks.length === 0" @click="onPlayPlaylist">
@@ -432,8 +456,8 @@ function onNameKeydown(e: KeyboardEvent) {
                     />
                 </div>
                 <div class="trackInfo">
-                    <div class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
-                    <div class="trackArtist">{{ track.artist || 'Неизвестный исполнитель' }}</div>
+                    <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
+                    <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                 </div>
                 <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
                 <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
@@ -543,6 +567,13 @@ function onNameKeydown(e: KeyboardEvent) {
     width: 100%;
     flex-shrink: 0;
 }
+.pageHat .coverWrap {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    flex-shrink: 0;
+    border-radius: 10px;
+}
 .pageHat .cover {
     user-select: none;
     width: 200px;
@@ -554,10 +585,9 @@ function onNameKeydown(e: KeyboardEvent) {
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
-
-    &:hover {
-        transform: scale(1.02);
-    }
+}
+.pageHat .coverWrap:hover .cover {
+    transform: scale(1.02);
 }
 .pageHat .dataZone {
     display: flex;
@@ -641,19 +671,31 @@ function onNameKeydown(e: KeyboardEvent) {
     background-color: hsla(0, 0%, 100%, 0.08);
     color: hsla(0, 0%, 100%, 1);
 }
-.pageHat .dataZone .info .listCount {
-    user-select: none;
-    margin-left: 1px;
+.pageHat .dataZone .info .badges {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-top: 14px;
-    font-size: 13px;
+    max-width: 100%;
+}
+.badge {
+    user-select: none;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.7);
+    font-size: 12px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
     transition: .24s ease;
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.badge:hover {
+    background-color: hsla(0, 0%, 100%, 0.1);
+    color: hsla(0, 0%, 100%, 0.9);
 }
 .pageHat .dataZone .controls {
     margin-top: 0px;

@@ -11,10 +11,16 @@ import defaultTrackCover from '../assets/trackCover.webp'
 
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists } from '../composables/usePlaylists'
+import { useSettings } from '../composables/useSettings'
 import { createRipple } from '../composables/useRipple'
 import { useVirtualScroll } from '../composables/useVirtualScroll'
 import { searchRanked } from '../composables/useSearch'
+import { tracksCountText, splitArtistsList } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
+import TrackArtists from '../components/TrackArtists.vue'
+import CoverEditor from '../components/CoverEditor.vue'
+import AnimatedCover from '../components/AnimatedCover.vue'
+import { useCustomCovers } from '../composables/useCustomCovers'
 
 const route = useRoute()
 const router = useRouter()
@@ -37,9 +43,18 @@ const artistName = computed(() => {
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
-const artistTracks = computed<TrackMetadata[]>(() =>
-    trackList.value.filter(t => (t.artist || '').trim() === artistName.value)
-)
+const { settings } = useSettings()
+
+const artistTracks = computed<TrackMetadata[]>(() => {
+    const target = artistName.value
+    const seps = settings.value.artist_separators
+    return trackList.value.filter(t => {
+        const a = (t.artist || '').trim()
+        if (!a) return false
+        if (a === target) return true
+        return splitArtistsList(a, seps).includes(target)
+    })
+})
 
 const sourceId = computed(() => `artist:${artistName.value}`)
 
@@ -49,7 +64,11 @@ const artistPlaylist = computed(() =>
     artistPlaylists.value.find(p => p.name === artistName.value)
 )
 
+const { getCustomCover } = useCustomCovers()
+
 const artistCover = computed(() => {
+    const custom = getCustomCover('artist', artistName.value)
+    if (custom) return custom
     const path = artistPlaylist.value?.first_file_path
     if (!path) return defaultTrackCover
     const t = trackList.value.find(x => x.file_path === path)
@@ -236,15 +255,19 @@ function goBack() {
                 <span>Назад</span>
             </button>
             <div class="pageHat">
-                <img alt="cover" :src="artistCover" class="cover" draggable="false" />
+                <div class="coverWrap cover-edit-host">
+                    <AnimatedCover :src="artistCover" class="cover" alt="cover" />
+                    <CoverEditor kind="artist" :coverKey="artistName" size="large" />
+                </div>
                 <div class="dataZone">
                     <div class="info">
                         <div class="listType">Подборка артиста</div>
                         <div class="listNameRow">
-                            <h2 class="listName">{{ artistName }}</h2>
+                            <h2 v-truncate class="listName">{{ artistName }}</h2>
                         </div>
-                        <div class="listCount" v-if="artistTracks.length > 0">{{ artistTracks.length }} треков</div>
-                        <div class="listCount" v-else>Пусто</div>
+                        <div class="badges">
+                            <div class="badge">{{ artistTracks.length > 0 ? tracksCountText(artistTracks.length) : 'Пусто' }}</div>
+                        </div>
                     </div>
                     <div class="controls">
                         <button class="playListBtn" :disabled="artistTracks.length === 0" @click="onPlayArtist">
@@ -315,8 +338,8 @@ function goBack() {
                     />
                 </div>
                 <div class="trackInfo">
-                    <div class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
-                    <div class="trackArtist">{{ track.artist || 'Неизвестный исполнитель' }}</div>
+                    <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
+                    <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                 </div>
                 <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
                 <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
@@ -403,6 +426,13 @@ function goBack() {
     width: 100%;
     flex-shrink: 0;
 }
+.pageHat .coverWrap {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    flex-shrink: 0;
+    border-radius: 9999px;
+}
 .pageHat .cover {
     user-select: none;
     width: 200px;
@@ -414,10 +444,9 @@ function goBack() {
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
-
-    &:hover {
-        transform: scale(1.02);
-    }
+}
+.pageHat .coverWrap:hover .cover {
+    transform: scale(1.02);
 }
 .pageHat .dataZone {
     display: flex;
@@ -464,19 +493,31 @@ function goBack() {
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.pageHat .dataZone .info .listCount {
-    user-select: none;
-    margin-left: 1px;
+.pageHat .dataZone .info .badges {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-top: 14px;
-    font-size: 13px;
+    max-width: 100%;
+}
+.badge {
+    user-select: none;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.7);
+    font-size: 12px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
     transition: .24s ease;
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.badge:hover {
+    background-color: hsla(0, 0%, 100%, 0.1);
+    color: hsla(0, 0%, 100%, 0.9);
 }
 .pageHat .dataZone .controls {
     margin-top: 0px;

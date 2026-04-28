@@ -512,7 +512,7 @@ fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
 /// Использует auto-palette для получения доминантных цветов обложки,
 /// выбирает лучший по сочетанию доминантности, насыщенности и близости
 /// к оптимальной светлоте. Сохраняет исходный оттенок без сдвигов.
-fn extract_accent_color(image_data: &[u8]) -> Option<String> {
+pub fn extract_accent_color(image_data: &[u8]) -> Option<String> {
     let img = image::load_from_memory(image_data).ok()?;
     let thumb = img.thumbnail(96, 96);
     extract_via_palette(&thumb)

@@ -11,7 +11,10 @@ import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
+import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
+import AnimatedCover from '../components/AnimatedCover.vue';
+import { useCustomCovers } from '../composables/useCustomCovers';
 
 const router = useRouter();
 const {
@@ -47,9 +50,17 @@ const artists = computed<ArtistEntry[]>(() => {
         .sort((a, b) => b.trackCount - a.trackCount || a.name.localeCompare(b.name));
 });
 
+const { getCustomCover } = useCustomCovers();
+
 function coverFor(path: string | null): string | null {
     if (!path) return null;
     return getTrackByPath(path)?.cover_art ?? null;
+}
+
+function artistCoverFor(artist: ArtistEntry): string {
+    const custom = getCustomCover('artist', artist.name);
+    if (custom) return custom;
+    return coverFor(artist.firstPath) || defaultTrackCover;
 }
 
 onMounted(async () => {
@@ -103,16 +114,14 @@ const filteredArtists = computed(() => {
 
 // ── Pinned ─────────────────────────────────────────────────────────────────
 
-const pinnedArtists = ref<string[]>([]);
+const { isPinned: isPinnedFn, togglePin } = usePins();
 
 function isArtistPinned(name: string) {
-    return pinnedArtists.value.includes(name);
+    return isPinnedFn('artist', name);
 }
 
 function toggleArtistPin(name: string) {
-    const i = pinnedArtists.value.indexOf(name);
-    if (i >= 0) pinnedArtists.value.splice(i, 1);
-    else pinnedArtists.value.push(name);
+    togglePin({ kind: 'artist', key: name, name });
 }
 
 function onToggleArtistPinClick(e: MouseEvent, artist: ArtistEntry) {
@@ -349,13 +358,13 @@ function scrollToTop() {
                     :class="{ menuOpen: artistMenu?.artist.name === artist.name }"
                     @contextmenu="openArtistMenuFromCover($event, artist)"
                 >
-                    <img class="artistCover" :src="coverFor(artist.firstPath) || defaultTrackCover" draggable="false" />
+                    <AnimatedCover class="artistCover" :src="artistCoverFor(artist)" />
                     <button
                         class="overlayBtn pinBtn"
                         :class="{ active: isArtistPinned(artist.name) }"
                         @click="onToggleArtistPinClick($event, artist)"
                         @contextmenu.stop
-                        :title="isArtistPinned(artist.name) ? 'Открепить' : 'Закрепить'"
+                        v-tooltip="isArtistPinned(artist.name) ? 'Открепить' : 'Закрепить'"
                     >
                         <PinIcon width="16" height="16" />
                     </button>
@@ -364,7 +373,7 @@ function scrollToTop() {
                         :disabled="artist.trackCount === 0"
                         @click="onPlayArtist($event, artist)"
                         @contextmenu.stop
-                        :title="isArtistActive(artist) && isPlaying ? 'Пауза' : 'Слушать'"
+                        v-tooltip="isArtistActive(artist) && isPlaying ? 'Пауза' : 'Слушать'"
                     >
                         <PauseIcon v-if="isArtistActive(artist) && isPlaying" width="14" height="14" />
                         <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
@@ -375,12 +384,12 @@ function scrollToTop() {
                         @mousedown.stop="openArtistMenu($event, artist)"
                         @click.stop
                         @contextmenu.stop
-                        title="Меню"
+                        v-tooltip="'Меню'"
                     >
                         <MoreIcon width="20" height="20" />
                     </button>
                 </div>
-                <div class="artistTitle">{{ artist.name }}</div>
+                <div v-truncate class="artistTitle">{{ artist.name }}</div>
             </div>
         </div>
         <div class="emptyState" v-else-if="debouncedSearch">

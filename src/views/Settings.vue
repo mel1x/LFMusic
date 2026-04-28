@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import DeleteIcon from '../components/Icons/DeleteIcon.vue';
 import FolderIcon from '../components/Icons/FolderIcon.vue';
 import { useSettings, ARTIST_SEPARATORS_DEFAULT } from '../composables/useSettings';
@@ -8,13 +9,42 @@ import { usePlaylists } from '../composables/usePlaylists';
 import { useEqualizer, EQ_PRESETS, EQ_BAND_LABELS } from '../composables/useEqualizer';
 import RefreshIcon from '../components/Icons/RefreshIcon.vue';
 import PlusIcon from '../components/Icons/PlusIcon.vue';
+import ConfirmModal from '../components/ConfirmModal.vue';
 
 const { settings, settingItems, load, save } = useSettings();
 const { rebuildArtists } = usePlaylists();
 const {
     folders, isScanning, removingFolder, scanProgress,
     addFolder, removeFolder, rescanLibrary, folderDisplayName,
+    refreshLibrary,
 } = usePlayer();
+
+// ── Сброс редактирования треков ────────────────────────────────────────────
+const showResetEditsConfirm = ref(false);
+const resettingEdits = ref(false);
+
+function openResetEditsConfirm() {
+    if (resettingEdits.value || isScanning.value) return;
+    showResetEditsConfirm.value = true;
+}
+
+async function confirmResetEdits() {
+    showResetEditsConfirm.value = false;
+    if (resettingEdits.value) return;
+    resettingEdits.value = true;
+    try {
+        await invoke<number>('track_clear_all_overrides');
+        // После сброса плейлисты исполнителей всё ещё содержат переименованные
+        // имена — пересобираем их по оригинальному tracks.artist.
+        await rebuildArtists();
+        // Перезагружаем библиотеку — get_all_tracks теперь отдаст оригиналы.
+        await refreshLibrary();
+    } catch (e) {
+        console.error('Не удалось сбросить редактирование:', e);
+    } finally {
+        resettingEdits.value = false;
+    }
+}
 const {
     eqEnabled, eqBands, eqGain, activePreset,
     load: loadEq, toggleEnabled: toggleEq,
@@ -344,7 +374,7 @@ function onSeparatorKey(e: KeyboardEvent) {
                             class="accentPresetBtn"
                             :class="{ active: isPresetActive(color) }"
                             :style="{ backgroundColor: color }"
-                            :title="color"
+                            v-tooltip="color"
                             @click="selectPreset(color)">
                         </button>
                     </div>
@@ -422,10 +452,10 @@ function onSeparatorKey(e: KeyboardEvent) {
                         v-for="sep in settings.artist_separators"
                         :key="sep"
                         class="separatorChip"
-                        :title="JSON.stringify(sep)"
+                        v-tooltip="JSON.stringify(sep)"
                     >
                         <span class="separatorText">{{ visibleSeparator(sep) }}</span>
-                        <button class="separatorRemove" @click="removeSeparator(sep)" title="Удалить">
+                        <button class="separatorRemove" @click="removeSeparator(sep)" v-tooltip="'Удалить'">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                         </button>
                     </div>
@@ -455,6 +485,15 @@ function onSeparatorKey(e: KeyboardEvent) {
                 <div class="foldersHat">
                     <button class="addFolder" @click="addFolder" :disabled="isScanning"><PlusIcon />Добавить папку</button>
                     <button class="rescanFolders" @click="rescanLibrary" :disabled="isScanning"><RefreshIcon />Пересканировать</button>
+                    <button
+                        class="resetEditsBtn"
+                        @click="openResetEditsConfirm"
+                        :disabled="isScanning || resettingEdits"
+                        v-tooltip="'Вернуть всем трекам оригинальные название, исполнителя и обложку'"
+                    >
+                        <DeleteIcon width="16" height="16" />
+                        {{ resettingEdits ? 'Сброс…' : 'Сбросить редактирование' }}
+                    </button>
                 </div>
 
                 <div class="scanProgress" v-if="isScanning">
@@ -495,6 +534,16 @@ function onSeparatorKey(e: KeyboardEvent) {
                 </div>
             </div>
         </div>
+
+        <ConfirmModal
+            :open="showResetEditsConfirm"
+            title="Сбросить редактирование треков?"
+            message="Все пользовательские правки названий, исполнителей и обложек будут удалены. Треки вернутся к оригинальным значениям из файлов. Это действие нельзя отменить."
+            confirmText="Сбросить"
+            cancelText="Отмена"
+            @confirm="confirmResetEdits"
+            @cancel="showResetEditsConfirm = false"
+        />
     </div>
 </template>
 
@@ -990,9 +1039,32 @@ function onSeparatorKey(e: KeyboardEvent) {
     }
 }
 .addFolder:disabled,
-.rescanFolders:disabled {
+.rescanFolders:disabled,
+.resetEditsBtn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+}
+.resetEditsBtn {
+    user-select: none;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background-color: hsla(0, 0%, 100%, 0);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+    font-weight: 500;
+    font-size: 15px;
+    cursor: pointer;
+    transition: .2s;
+}
+.resetEditsBtn:hover:not(:disabled) {
+    background-color: hsla(0, 70%, 50%, 0.12);
+    color: hsl(0, 70%, 80%);
+}
+.resetEditsBtn svg {
+    flex-shrink: 0;
 }
 .scanProgress {
     display: flex;

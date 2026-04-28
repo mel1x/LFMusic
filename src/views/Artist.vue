@@ -11,9 +11,16 @@ import defaultTrackCover from '../assets/trackCover.webp'
 
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists } from '../composables/usePlaylists'
+import { useSettings } from '../composables/useSettings'
 import { createRipple } from '../composables/useRipple'
+import { tracksCountText, splitArtistsList } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue'
+import TrackArtists from '../components/TrackArtists.vue'
+import { usePins } from '../composables/usePins'
+import CoverEditor from '../components/CoverEditor.vue'
+import AnimatedCover from '../components/AnimatedCover.vue'
+import { useCustomCovers } from '../composables/useCustomCovers'
 
 const route = useRoute()
 const router = useRouter()
@@ -31,15 +38,23 @@ const {
 } = usePlayer()
 
 const { albums: albumPlaylists, artists: artistPlaylists, loadPlaylists, getPlaylistTracks } = usePlaylists()
+const { settings } = useSettings()
 
 const artistName = computed(() => {
     const raw = Array.isArray(route.params.name) ? route.params.name[0] : route.params.name
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
-const artistTracks = computed<TrackMetadata[]>(() =>
-    trackList.value.filter(t => (t.artist || '').trim() === artistName.value)
-)
+const artistTracks = computed<TrackMetadata[]>(() => {
+    const target = artistName.value
+    const seps = settings.value.artist_separators
+    return trackList.value.filter(t => {
+        const a = (t.artist || '').trim()
+        if (!a) return false
+        if (a === target) return true
+        return splitArtistsList(a, seps).includes(target)
+    })
+})
 
 const sourceId = computed(() => `artist:${artistName.value}`)
 
@@ -47,12 +62,22 @@ const artistPlaylist = computed(() =>
     artistPlaylists.value.find(p => p.name === artistName.value)
 )
 
+const { getCustomCover: getCustomCoverFn } = useCustomCovers()
+
 const artistCover = computed(() => {
+    const custom = getCustomCoverFn('artist', artistName.value)
+    if (custom) return custom
     const path = artistPlaylist.value?.first_file_path
     if (!path) return defaultTrackCover
     const t = trackList.value.find(x => x.file_path === path)
     return t?.cover_art || defaultTrackCover
 })
+
+function albumCoverFor(name: string, fallback: string | null): string {
+    const custom = getCustomCoverFn('album', name)
+    if (custom) return custom
+    return fallback || defaultTrackCover
+}
 
 const previewTracks = computed(() => artistTracks.value.slice(0, 6))
 
@@ -227,16 +252,14 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 
 // ── Album interactions ────────────────────────────────────────────────────
 
-const pinnedAlbums = ref<string[]>([])
+const { isPinned: isPinnedFn, togglePin } = usePins()
 
 function isAlbumPinned(name: string) {
-    return pinnedAlbums.value.includes(name)
+    return isPinnedFn('album', name)
 }
 
 function toggleAlbumPin(name: string) {
-    const i = pinnedAlbums.value.indexOf(name)
-    if (i >= 0) pinnedAlbums.value.splice(i, 1)
-    else pinnedAlbums.value.push(name)
+    togglePin({ kind: 'album', key: name, name })
 }
 
 function onToggleAlbumPinClick(e: MouseEvent, album: AlbumEntry) {
@@ -303,7 +326,7 @@ function openArtistAlbums() {
 // ── Artist page context menu (more button) ────────────────────────────────
 
 const artistMenu = ref<{ x: number; y: number } | null>(null)
-const isPinned = ref(false)
+const isPinned = computed(() => isPinnedFn('artist', artistName.value))
 
 function openArtistMenu(e: MouseEvent) {
     e.stopPropagation()
@@ -317,7 +340,7 @@ function openArtistMenu(e: MouseEvent) {
 }
 
 function onTogglePin() {
-    isPinned.value = !isPinned.value
+    togglePin({ kind: 'artist', key: artistName.value, name: artistName.value })
 }
 </script>
 
@@ -328,21 +351,18 @@ function onTogglePin() {
             <span>Назад</span>
         </button>
         <div class="pageHat">
-            <img alt="cover" :src="artistCover" class="cover" draggable="false" />
+            <div class="coverWrap cover-edit-host">
+                <AnimatedCover :src="artistCover" class="cover" alt="cover" />
+                <CoverEditor kind="artist" :coverKey="artistName" size="large" />
+            </div>
             <div class="dataZone">
                 <div class="info">
                     <div class="listType">Исполнитель</div>
                     <div class="listNameRow">
-                        <h2 class="listName">{{ artistName }}</h2>
+                        <h2 v-truncate class="listName">{{ artistName }}</h2>
                     </div>
                     <div class="badges">
-                        <div class="badge">{{ artistTracks.length }} {{
-                            artistTracks.length % 10 === 1 && artistTracks.length % 100 !== 11
-                                ? 'трек'
-                                : (artistTracks.length % 10 >= 2 && artistTracks.length % 10 <= 4 && (artistTracks.length % 100 < 10 || artistTracks.length % 100 >= 20))
-                                    ? 'трека'
-                                    : 'треков'
-                        }}</div>
+                        <div class="badge">{{ tracksCountText(artistTracks.length) }}</div>
                         <div class="badge">{{ listenCount }} раз прослушано</div>
                     </div>
                 </div>
@@ -402,8 +422,8 @@ function onTogglePin() {
                         />
                     </div>
                     <div class="trackInfo">
-                        <div class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
-                        <div class="trackArtist">{{ track.artist || 'Неизвестный исполнитель' }}</div>
+                        <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
+                        <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                     </div>
                     <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
                     <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
@@ -441,13 +461,13 @@ function onTogglePin() {
                         :class="{ menuOpen: albumMenu?.album.name === album.name }"
                         @contextmenu="openAlbumMenuFromCover($event, album)"
                     >
-                        <img class="cover" :src="album.cover || defaultTrackCover" draggable="false" />
+                        <AnimatedCover class="cover" :src="albumCoverFor(album.name, album.cover)" />
                         <button
                             class="overlayBtn pinBtn"
                             :class="{ active: isAlbumPinned(album.name) }"
                             @click="onToggleAlbumPinClick($event, album)"
                             @contextmenu.stop
-                            :title="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
+                            v-tooltip="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
                         >
                             <PinIcon width="16" height="16" />
                         </button>
@@ -456,7 +476,7 @@ function onTogglePin() {
                             :disabled="album.trackCount === 0"
                             @click="onPlayAlbum($event, album)"
                             @contextmenu.stop
-                            :title="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
+                            v-tooltip="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
                         >
                             <PauseIcon v-if="isAlbumActive(album) && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
@@ -467,13 +487,13 @@ function onTogglePin() {
                             @mousedown.stop="openAlbumMenu($event, album)"
                             @click.stop
                             @contextmenu.stop
-                            title="Меню"
+                            v-tooltip="'Меню'"
                         >
                             <MoreIcon width="20" height="20" />
                         </button>
                     </div>
-                    <div class="title">{{ album.name }}</div>
-                    <div class="subtitle">{{ artistName }}</div>
+                    <div v-truncate class="title">{{ album.name }}</div>
+                    <div v-truncate class="subtitle">{{ artistName }}</div>
                 </div>
             </div>
             <div v-else class="emptyAlbums">
@@ -574,6 +594,13 @@ function onTogglePin() {
     width: 100%;
     flex-shrink: 0;
 }
+.pageHat .coverWrap {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    flex-shrink: 0;
+    border-radius: 9999px;
+}
 .pageHat .cover {
     user-select: none;
     width: 200px;
@@ -585,10 +612,9 @@ function onTogglePin() {
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
-
-    &:hover {
-        transform: scale(1.02);
-    }
+}
+.pageHat .coverWrap:hover .cover {
+    transform: scale(1.02);
 }
 .pageHat .dataZone {
     display: flex;

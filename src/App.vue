@@ -9,14 +9,17 @@ import MainBlock from './components/MainBlock.vue';
 import Player from './components/Player.vue';
 import GithubIcon from './components/Icons/GithubIcon.vue';
 import TrackInfoModal from './components/TrackInfoModal.vue';
+import TrackEditModal from './components/TrackEditModal.vue';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
+import { useCustomCovers } from './composables/useCustomCovers';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
 const { saveState, currentTrack, currentAccentColor } = usePlayer();
+const { loadCustomCovers } = useCustomCovers();
 
 const BASE_W = 1460;
 const BASE_H = 860;
@@ -66,6 +69,7 @@ function handleContextMenu(e: MouseEvent) {
 
 onMounted(() => {
   load();
+  loadCustomCovers();
   applyUiScale();
   window.addEventListener('resize', applyUiScale);
   document.addEventListener('keydown', handleReloadKey);
@@ -140,6 +144,7 @@ const closeWindow = async () => {
   <MainBlock class="mainFrame" />
   <Player class="playerPart" />
   <TrackInfoModal />
+  <TrackEditModal />
 </template>
 
 <style>

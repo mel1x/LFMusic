@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed } from 'vue'
 import ContextMenu from './ContextMenu.vue'
 import PinIcon from './Icons/PinIcon.vue'
+import { usePins } from '../composables/usePins'
 
 defineProps<{
     x: number
@@ -13,10 +14,12 @@ const emit = defineEmits<{
     close: []
 }>()
 
-const isPinned = ref(false)
+const { isPinned, togglePin } = usePins()
+const pinned = computed(() => isPinned('catalog', 'catalog'))
 
 function onTogglePin() {
-    isPinned.value = !isPinned.value
+    togglePin({ kind: 'catalog', key: 'catalog', name: 'Мой каталог' })
+    emit('close')
 }
 </script>
 
@@ -24,7 +27,7 @@ function onTogglePin() {
     <ContextMenu :x="x" :y="y" :centerX="centerX" @close="emit('close')">
         <button class="ctx-item" @click="onTogglePin">
             <PinIcon width="16" height="16" />
-            <span>{{ isPinned ? 'Открепить' : 'Закрепить' }}</span>
+            <span>{{ pinned ? 'Открепить' : 'Закрепить' }}</span>
         </button>
     </ContextMenu>
 </template>

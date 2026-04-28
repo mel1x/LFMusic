@@ -12,6 +12,9 @@ import defaultCover from '../assets/playlistCover.webp';
 import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
+import { usePins } from '../composables/usePins';
+import AnimatedCover from '../components/AnimatedCover.vue';
+import { useCustomCovers } from '../composables/useCustomCovers';
 
 const router = useRouter();
 const {
@@ -40,6 +43,24 @@ const {
 } = usePlayer();
 
 const playlistCovers = ref<Record<number, string | null>>({});
+
+const { getCustomCover } = useCustomCovers();
+
+function playlistCoverFor(pl: PlaylistInfo): string {
+    const custom = getCustomCover('playlist', pl.id);
+    if (custom) return custom;
+    return playlistCovers.value[pl.id] || defaultCover;
+}
+function albumCoverFor(album: AlbumEntry): string {
+    const custom = getCustomCover('album', album.name);
+    if (custom) return custom;
+    return album.cover || defaultTrackCover;
+}
+function artistCoverFor(artist: ArtistEntry): string {
+    const custom = getCustomCover('artist', artist.name);
+    if (custom) return custom;
+    return artist.cover || defaultTrackCover;
+}
 
 // ── Reusable horizontal-scroll helper ─────────────────────────────────────────
 
@@ -299,16 +320,16 @@ function openAlbum(album: AlbumEntry) {
 
 // ── Hover overlay actions (playlists) ───────────────────────────────────────
 
-const pinnedIds = ref<number[]>([]);
+const { isPinned: isPinnedFn, togglePin, unpin } = usePins();
 
 function isPinned(id: number) {
-    return pinnedIds.value.includes(id);
+    return isPinnedFn('playlist', id);
 }
 
 function togglePinId(id: number) {
-    const i = pinnedIds.value.indexOf(id);
-    if (i >= 0) pinnedIds.value.splice(i, 1);
-    else pinnedIds.value.push(id);
+    const pl = userPlaylists.value.find(p => p.id === id);
+    if (!pl) return;
+    togglePin({ kind: 'playlist', key: id, name: pl.name });
 }
 
 function isPlaylistActive(pl: PlaylistInfo) {
@@ -363,8 +384,7 @@ async function onConfirmDelete() {
     const pl = deleteModalTarget.value;
     deleteModalTarget.value = null;
     if (!pl) return;
-    const i = pinnedIds.value.indexOf(pl.id);
-    if (i >= 0) pinnedIds.value.splice(i, 1);
+    unpin('playlist', pl.id);
     await deletePlaylist(pl.id);
 }
 
@@ -374,16 +394,12 @@ function onMoveToTopFromMenu(pl: PlaylistInfo) {
 
 // ── Albums: hover actions ───────────────────────────────────────────────────
 
-const pinnedAlbums = ref<string[]>([]);
-
 function isAlbumPinned(name: string) {
-    return pinnedAlbums.value.includes(name);
+    return isPinnedFn('album', name);
 }
 
 function toggleAlbumPin(name: string) {
-    const i = pinnedAlbums.value.indexOf(name);
-    if (i >= 0) pinnedAlbums.value.splice(i, 1);
-    else pinnedAlbums.value.push(name);
+    togglePin({ kind: 'album', key: name, name });
 }
 
 function onToggleAlbumPinClick(e: MouseEvent, album: AlbumEntry) {
@@ -464,16 +480,12 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
 
 // ── Artists: hover actions ──────────────────────────────────────────────────
 
-const pinnedArtists = ref<string[]>([]);
-
 function isArtistPinned(name: string) {
-    return pinnedArtists.value.includes(name);
+    return isPinnedFn('artist', name);
 }
 
 function toggleArtistPin(name: string) {
-    const i = pinnedArtists.value.indexOf(name);
-    if (i >= 0) pinnedArtists.value.splice(i, 1);
-    else pinnedArtists.value.push(name);
+    togglePin({ kind: 'artist', key: name, name });
 }
 
 function onToggleArtistPinClick(e: MouseEvent, artist: ArtistEntry) {
@@ -581,13 +593,13 @@ function scrollToTop() {
                             :class="{ menuOpen: playlistMenu?.pl.id === pl.id }"
                             @contextmenu="openPlaylistMenuFromCover($event, pl)"
                         >
-                            <img class="cover" :src="playlistCovers[pl.id] || defaultCover" />
+                            <AnimatedCover class="cover" :src="playlistCoverFor(pl)" />
                             <button
                                 class="overlayBtn pinBtn"
                                 :class="{ active: isPinned(pl.id) }"
                                 @click="onTogglePinClick($event, pl)"
                                 @contextmenu.stop
-                                :title="isPinned(pl.id) ? 'Открепить' : 'Закрепить'"
+                                v-tooltip="isPinned(pl.id) ? 'Открепить' : 'Закрепить'"
                             >
                                 <PinIcon width="16" height="16" />
                             </button>
@@ -596,7 +608,7 @@ function scrollToTop() {
                                 :disabled="pl.track_count === 0"
                                 @click="onPlayPlaylist($event, pl)"
                                 @contextmenu.stop
-                                :title="pl.track_count === 0 ? 'Плейлист пуст' : (isPlaylistActive(pl) && isPlaying ? 'Пауза' : 'Слушать')"
+                                v-tooltip="pl.track_count === 0 ? 'Плейлист пуст' : (isPlaylistActive(pl) && isPlaying ? 'Пауза' : 'Слушать')"
                             >
                                 <PauseIcon v-if="isPlaylistActive(pl) && isPlaying" width="14" height="14" />
                                 <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
@@ -607,12 +619,12 @@ function scrollToTop() {
                                 @mousedown.stop="openPlaylistMenu($event, pl)"
                                 @click.stop
                                 @contextmenu.stop
-                                title="Меню"
+                                v-tooltip="'Меню'"
                             >
                                 <MoreIcon width="20" height="20" />
                             </button>
                         </div>
-                        <div class="title">{{ pl.name }}</div>
+                        <div v-truncate class="title">{{ pl.name }}</div>
                     </div>
                 </TransitionGroup>
             </div>
@@ -641,13 +653,13 @@ function scrollToTop() {
                         :class="{ menuOpen: albumMenu?.album.name === album.name }"
                         @contextmenu="openAlbumMenuFromCover($event, album)"
                     >
-                        <img class="cover" :src="album.cover || defaultTrackCover" draggable="false" />
+                        <AnimatedCover class="cover" :src="albumCoverFor(album)" />
                         <button
                             class="overlayBtn pinBtn"
                             :class="{ active: isAlbumPinned(album.name) }"
                             @click="onToggleAlbumPinClick($event, album)"
                             @contextmenu.stop
-                            :title="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
+                            v-tooltip="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
                         >
                             <PinIcon width="16" height="16" />
                         </button>
@@ -656,7 +668,7 @@ function scrollToTop() {
                             :disabled="album.trackCount === 0"
                             @click="onPlayAlbum($event, album)"
                             @contextmenu.stop
-                            :title="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
+                            v-tooltip="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
                         >
                             <PauseIcon v-if="isAlbumActive(album) && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
@@ -667,13 +679,13 @@ function scrollToTop() {
                             @mousedown.stop="openAlbumMenu($event, album)"
                             @click.stop
                             @contextmenu.stop
-                            title="Меню"
+                            v-tooltip="'Меню'"
                         >
                             <MoreIcon width="20" height="20" />
                         </button>
                     </div>
-                    <div class="title">{{ album.name }}</div>
-                    <div class="subtitle">{{ album.artist }}</div>
+                    <div v-truncate class="title">{{ album.name }}</div>
+                    <div v-truncate class="subtitle">{{ album.artist }}</div>
                 </div>
             </div>
         </div>
@@ -701,13 +713,13 @@ function scrollToTop() {
                         :class="{ menuOpen: artistMenu?.artist.name === artist.name }"
                         @contextmenu="openArtistMenuFromCover($event, artist)"
                     >
-                        <img class="artistCover" :src="artist.cover || defaultTrackCover" draggable="false" />
+                        <AnimatedCover class="artistCover" :src="artistCoverFor(artist)" />
                         <button
                             class="overlayBtn pinBtn"
                             :class="{ active: isArtistPinned(artist.name) }"
                             @click="onToggleArtistPinClick($event, artist)"
                             @contextmenu.stop
-                            :title="isArtistPinned(artist.name) ? 'Открепить' : 'Закрепить'"
+                            v-tooltip="isArtistPinned(artist.name) ? 'Открепить' : 'Закрепить'"
                         >
                             <PinIcon width="16" height="16" />
                         </button>
@@ -716,7 +728,7 @@ function scrollToTop() {
                             :disabled="artist.trackCount === 0"
                             @click="onPlayArtist($event, artist)"
                             @contextmenu.stop
-                            :title="isArtistActive(artist) && isPlaying ? 'Пауза' : 'Слушать'"
+                            v-tooltip="isArtistActive(artist) && isPlaying ? 'Пауза' : 'Слушать'"
                         >
                             <PauseIcon v-if="isArtistActive(artist) && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
@@ -727,12 +739,12 @@ function scrollToTop() {
                             @mousedown.stop="openArtistMenu($event, artist)"
                             @click.stop
                             @contextmenu.stop
-                            title="Меню"
+                            v-tooltip="'Меню'"
                         >
                             <MoreIcon width="20" height="20" />
                         </button>
                     </div>
-                    <div class="artistTitle">{{ artist.name }}</div>
+                    <div v-truncate class="artistTitle">{{ artist.name }}</div>
                 </div>
             </div>
         </div>

@@ -11,7 +11,10 @@ import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
+import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
+import AnimatedCover from '../components/AnimatedCover.vue';
+import { useCustomCovers } from '../composables/useCustomCovers';
 
 const router = useRouter();
 const route = useRoute();
@@ -49,9 +52,17 @@ const albums = computed<AlbumEntry[]>(() => {
         .sort((a, b) => a.name.localeCompare(b.name));
 });
 
+const { getCustomCover } = useCustomCovers();
+
 function coverFor(path: string | null): string | null {
     if (!path) return null;
     return getTrackByPath(path)?.cover_art ?? null;
+}
+
+function albumCoverFor(album: AlbumEntry): string | null {
+    const custom = getCustomCover('album', album.name);
+    if (custom) return custom;
+    return coverFor(album.firstPath);
 }
 function artistFor(path: string | null): string {
     if (!path) return 'Неизвестный исполнитель';
@@ -104,16 +115,14 @@ function clearSearch() {
 
 // ── Pinned / top order ─────────────────────────────────────────────────────
 
-const pinnedAlbums = ref<string[]>([]);
+const { isPinned: isPinnedFn, togglePin } = usePins();
 
 function isAlbumPinned(name: string) {
-    return pinnedAlbums.value.includes(name);
+    return isPinnedFn('album', name);
 }
 
 function toggleAlbumPin(name: string) {
-    const i = pinnedAlbums.value.indexOf(name);
-    if (i >= 0) pinnedAlbums.value.splice(i, 1);
-    else pinnedAlbums.value.push(name);
+    togglePin({ kind: 'album', key: name, name });
 }
 
 function onToggleAlbumPinClick(e: MouseEvent, album: AlbumEntry) {
@@ -379,13 +388,13 @@ function scrollToTop() {
                     :class="{ menuOpen: albumMenu?.album.name === album.name }"
                     @contextmenu="openAlbumMenuFromCover($event, album)"
                 >
-                    <img class="cover" :src="coverFor(album.firstPath) || defaultTrackCover" draggable="false" />
+                    <AnimatedCover class="cover" :src="albumCoverFor(album) || defaultTrackCover" />
                     <button
                         class="overlayBtn pinBtn"
                         :class="{ active: isAlbumPinned(album.name) }"
                         @click="onToggleAlbumPinClick($event, album)"
                         @contextmenu.stop
-                        :title="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
+                        v-tooltip="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
                     >
                         <PinIcon width="16" height="16" />
                     </button>
@@ -394,7 +403,7 @@ function scrollToTop() {
                         :disabled="album.trackCount === 0"
                         @click="onPlayAlbum($event, album)"
                         @contextmenu.stop
-                        :title="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
+                        v-tooltip="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
                     >
                         <PauseIcon v-if="isAlbumActive(album) && isPlaying" width="14" height="14" />
                         <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
@@ -405,13 +414,13 @@ function scrollToTop() {
                         @mousedown.stop="openAlbumMenu($event, album)"
                         @click.stop
                         @contextmenu.stop
-                        title="Меню"
+                        v-tooltip="'Меню'"
                     >
                         <MoreIcon width="20" height="20" />
                     </button>
                 </div>
-                <div class="title">{{ album.name }}</div>
-                <div class="subtitle">{{ artistFor(album.firstPath) }}</div>
+                <div v-truncate class="title">{{ album.name }}</div>
+                <div v-truncate class="subtitle">{{ artistFor(album.firstPath) }}</div>
             </div>
         </div>
         <div class="emptyState" v-else-if="debouncedSearch">

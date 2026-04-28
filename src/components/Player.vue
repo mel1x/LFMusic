@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import trackCover from '../assets/trackCover.webp';
@@ -8,6 +9,7 @@ import 'vue-sonner/style.css'
 
 import MoreIcon from './Icons/MoreIcon.vue';
 import TrackContextMenu from './TrackContextMenu.vue';
+import TrackArtists from './TrackArtists.vue';
 import ShuffleIcon from './Icons/ShuffleIcon.vue';
 import PrevIcon from './Icons/PrevIcon.vue';
 import PlayIcon from './Icons/PlayIcon.vue';
@@ -49,7 +51,6 @@ const {
     shuffled,
     repeatMode,
     trackTitle,
-    trackArtist,
     trackAlbum,
     currentCoverArt,
     codecDisplay,
@@ -82,6 +83,7 @@ const queueSourcePrefix = computed(() => {
     if (src.startsWith('album:')) return 'Сейчас играет из альбома';
     if (src.startsWith('artist:')) return 'Сейчас играет из подборки артиста';
     if (src.startsWith('playlist:')) return 'Сейчас играет из плейлиста';
+    if (src.startsWith('search:')) return 'Сейчас играет из';
     return 'Сейчас играет из';
 });
 
@@ -102,6 +104,7 @@ const queueSourceName = computed(() => {
         const pl = playlists.value.find(p => p.id === id);
         return pl ? pl.name : 'Без названия';
     }
+    if (src.startsWith('search:')) return 'Поиска по каталогу';
     return 'Моей каталог';
 });
 
@@ -138,6 +141,11 @@ function toggleFsMode() {
     if (!currentTrack.value) return;
     fsMode.value = fsMode.value === 'queue' ? 'player' : 'queue';
 }
+
+const route = useRoute();
+watch(() => route.fullPath, () => {
+    if (fsMode.value !== null) fsMode.value = null;
+});
 
 // ── Fullscreen cover crossfade ─────────────────────────────────────────────
 
@@ -400,10 +408,10 @@ function openQfCoverMenu(e: MouseEvent) {
                     </div>
                     <div class="trackTitle" v-if="currentTrack">
                         <div class="topLine">
-                            <div class="trackName">{{ trackTitle }}</div>
+                            <div v-truncate class="trackName">{{ trackTitle }}</div>
                             <button class="moreBtn" @mousedown="openPlayerTrackMenu($event)"><MoreIcon /></button>
                         </div>
-                        <div class="artistName">{{ trackArtist }}</div>
+                        <div class="artistName"><TrackArtists :artist="currentTrack.artist" /></div>
                     </div>
                     <div class="trackTitle" v-else>
                         <div class="topLine">
@@ -628,9 +636,9 @@ function openQfCoverMenu(e: MouseEvent) {
                             </div>
                         </div>
                         <div class="fs-info">
-                            <div class="fs-title">{{ trackTitle }}</div>
-                            <div class="fs-artist">{{ trackArtist }}</div>
-                            <div v-if="trackAlbum" class="fs-album">{{ trackAlbum }}</div>
+                            <div v-truncate class="fs-title">{{ trackTitle }}</div>
+                            <div class="fs-artist"><TrackArtists :artist="currentTrack?.artist" /></div>
+                            <div v-if="trackAlbum" v-truncate class="fs-album">{{ trackAlbum }}</div>
                         </div>
                         <div class="fs-progress qf-progress-hover">
                             <input
@@ -657,7 +665,7 @@ function openQfCoverMenu(e: MouseEvent) {
                     <div class="qf-right-wrap">
                         <div class="qf-right">
                             <div class="qf-queue-header" style="color:#fff;margin-bottom:2px;margin-top:2px;">{{ queueSourcePrefix }}</div>
-                            <div class="qf-queue-header styled-header" style="color:#fff;margin-top:2px;">{{ queueSourceName }}</div>
+                            <div v-truncate class="qf-queue-header styled-header" style="color:#fff;margin-top:2px;">{{ queueSourceName }}</div>
                             <div class="qf-queue-list">
                                 <div
                                     v-if="currentTrack"
@@ -678,8 +686,8 @@ function openQfCoverMenu(e: MouseEvent) {
                                         />
                                     </div>
                                     <div class="qf-queue-info">
-                                        <div class="qf-queue-title">{{ trackTitle }}</div>
-                                        <div class="qf-queue-artist">{{ trackArtist }}</div>
+                                        <div v-truncate class="qf-queue-title">{{ trackTitle }}</div>
+                                        <div class="qf-queue-artist"><TrackArtists :artist="currentTrack.artist" /></div>
                                     </div>
                                     <div class="qf-queue-duration" :class="{ hidden: qfTrackMenu?.track.file_path === currentTrack.file_path }">{{ durationFormatted }}</div>
                                     <div class="qf-hover-options" :class="{ menuOpen: qfTrackMenu?.track.file_path === currentTrack.file_path }" @mousedown.stop="openQfTrackMenu($event, currentTrack)">
@@ -705,8 +713,8 @@ function openQfCoverMenu(e: MouseEvent) {
                                         />
                                     </div>
                                     <div class="qf-queue-info">
-                                        <div class="qf-queue-title">{{ track.title || track.file_path.split(/[/\\]/).pop() }}</div>
-                                        <div class="qf-queue-artist">{{ track.artist || 'Неизвестный исполнитель' }}</div>
+                                        <div v-truncate class="qf-queue-title">{{ track.title || track.file_path.split(/[/\\]/).pop() }}</div>
+                                        <div class="qf-queue-artist"><TrackArtists :artist="track.artist" /></div>
                                     </div>
                                     <div class="qf-queue-duration" :class="{ hidden: qfTrackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '--:--' }}</div>
                                     <div class="qf-hover-options" :class="{ menuOpen: qfTrackMenu?.track.file_path === track.file_path }" @mousedown.stop="openQfTrackMenu($event, track)">
@@ -1335,10 +1343,14 @@ function openQfCoverMenu(e: MouseEvent) {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    width: 100%;
     max-width: 100%;
+    min-width: 0;
 }
 .fs-title {
     cursor: default;
+    width: 100%;
+    max-width: 100%;
     font-size: 22px;
     font-weight: 700;
     color: hsla(0, 0%, 100%, 0.85);
@@ -1355,10 +1367,15 @@ function openQfCoverMenu(e: MouseEvent) {
 }
 .fs-artist {
     cursor: default;
+    width: 100%;
+    max-width: 100%;
     font-size: 16px;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.55);
-    
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+
     transition: .24s ease;
 
     &:hover {
@@ -1367,11 +1384,16 @@ function openQfCoverMenu(e: MouseEvent) {
 }
 .fs-album {
     cursor: default;
+    width: 100%;
+    max-width: 100%;
     font-size: 14px;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.35);
     margin-top: 2px;
-    
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+
     transition: .24s ease;
 
     &:hover {
@@ -1480,7 +1502,9 @@ function openQfCoverMenu(e: MouseEvent) {
     justify-content: center;
     align-self: center;
     gap: 24px;
-    flex: 0 0 auto;
+    flex: 0 0 440px;
+    width: 440px;
+    min-width: 0;
     position: relative;
     z-index: 2;
     transition: transform .48s cubic-bezier(0.22, 0.61, 0.36, 1);

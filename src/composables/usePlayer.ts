@@ -5,6 +5,7 @@ import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
 import { usePlaylists } from "./usePlaylists";
 import { useCoverLoader } from "./useCoverLoader";
+import { splitArtistsList } from "../utils/format";
 import router from "../router";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -675,7 +676,13 @@ export function usePlayer() {
         }
       } else if (src && src.startsWith("artist:")) {
         const name = src.slice("artist:".length);
-        sourceTrackList.value = trackList.value.filter(t => (t.artist || '').trim() === name);
+        const seps = settings.value.artist_separators;
+        sourceTrackList.value = trackList.value.filter(t => {
+          const a = (t.artist || '').trim();
+          if (!a) return false;
+          if (a === name) return true;
+          return splitArtistsList(a, seps).includes(name);
+        });
         if (sourceTrackList.value.length === 0) {
           activePlaylistSource.value = null;
         }

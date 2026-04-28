@@ -1,9 +1,12 @@
 mod audio_player;
+mod covers;
 mod library;
+mod pins;
 mod player_state;
 mod settings;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use library::{FolderInfo, MusicLibrary, PlaylistInfo};
 use player_state::SavedPlayerState;
 use std::path::PathBuf;
@@ -29,12 +32,34 @@ pub struct SettingsState(pub Mutex<(settings::AppSettings, PathBuf)>);
 // Команды плеера
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Применить кэшированный accent_color из БД или сохранить новый
+/// Применить кэшированный accent_color из БД или сохранить новый,
+/// а также наложить пользовательские переопределения трека
+/// (название, исполнитель, обложка) — чтобы при воспроизведении плеер
+/// показывал отредактированные пользователем значения.
 fn apply_accent_color(library: &State<LibraryState>, file_path: &str, metadata: &mut TrackMetadata) {
-    let cached_accent = library.0.lock().ok().and_then(|lib| lib.get_accent_color(file_path));
-    if let Some(cached) = cached_accent {
-        metadata.accent_color = Some(cached);
-    } else if let Some(ref color) = metadata.accent_color {
+    let lib_guard = library.0.lock().ok();
+
+    if let Some(ref lib) = lib_guard {
+        // Переопределения title/artist/cover/accent
+        if let Some(t) = lib.get_track(file_path) {
+            if t.title.is_some() {
+                metadata.title = t.title;
+            }
+            if t.artist.is_some() {
+                metadata.artist = t.artist;
+            }
+            if let Some(cover) = lib.get_override_cover(file_path) {
+                metadata.cover_art = Some(cover);
+            }
+        }
+
+        if let Some(cached) = lib.get_accent_color(file_path) {
+            metadata.accent_color = Some(cached);
+            return;
+        }
+    }
+
+    if let Some(ref color) = metadata.accent_color {
         if let Ok(lib) = library.0.lock() {
             let _ = lib.set_accent_color(file_path, color);
         }
@@ -139,13 +164,63 @@ fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> 
 }
 
 #[tauri::command]
-fn get_track_metadata(file_path: String) -> Result<TrackMetadata, String> {
-    AudioPlayer::get_metadata(&file_path)
+fn get_track_metadata(
+    library: State<LibraryState>,
+    file_path: String,
+) -> Result<TrackMetadata, String> {
+    let mut metadata = AudioPlayer::get_metadata(&file_path)?;
+    apply_accent_color(&library, &file_path, &mut metadata);
+    Ok(metadata)
 }
 
 #[tauri::command]
-fn get_cover_art(file_path: String) -> Result<Option<String>, String> {
+fn get_cover_art(library: State<LibraryState>, file_path: String) -> Result<Option<String>, String> {
+    if let Ok(lib) = library.0.lock() {
+        if let Some(cover) = lib.get_override_cover(&file_path) {
+            return Ok(Some(cover));
+        }
+    }
     Ok(AudioPlayer::extract_cover_art(&file_path))
+}
+
+/// Прочитать оригинальную обложку из файла, игнорируя пользовательские
+/// переопределения. Нужно для превью в модалке редактирования: при клике
+/// «сбросить обложку» показываем то, что лежит в тегах файла.
+#[tauri::command]
+fn get_original_cover_art(file_path: String) -> Result<Option<String>, String> {
+    Ok(AudioPlayer::extract_cover_art(&file_path))
+}
+
+/// Прочитать оригинальные метаданные трека (как они лежат в тегах файла),
+/// без применения пользовательских переопределений.
+/// Используется кнопкой «Сбросить» в модалке редактирования: туда подставляются
+/// оригинальные название/исполнитель/обложка для предпросмотра до сохранения.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OriginalTrack {
+    title: Option<String>,
+    artist: Option<String>,
+    cover_art: Option<String>,
+    has_override_cover: bool,
+}
+
+#[tauri::command]
+fn get_original_track(
+    library: State<LibraryState>,
+    file_path: String,
+) -> Result<OriginalTrack, String> {
+    let metadata = AudioPlayer::get_metadata(&file_path)?;
+    let has_override_cover = library
+        .0
+        .lock()
+        .map(|lib| lib.has_override_cover(&file_path))
+        .unwrap_or(false);
+    Ok(OriginalTrack {
+        title: metadata.title,
+        artist: metadata.artist,
+        cover_art: metadata.cover_art,
+        has_override_cover,
+    })
 }
 
 #[tauri::command]
@@ -433,6 +508,184 @@ fn load_player_state(state: State<SettingsState>) -> Result<SavedPlayerState, St
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Команды закреплений
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn pins_load(state: State<SettingsState>) -> Result<pins::PinsState, String> {
+    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(pins::load(&settings.1))
+}
+
+#[tauri::command]
+fn pins_save(state: State<SettingsState>, pins_state: pins::PinsState) -> Result<(), String> {
+    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    pins::save(&settings.1, &pins_state)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Команды переопределения метаданных трека
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoverInput {
+    /// Путь к выбранному файлу-изображению на диске пользователя
+    source_path: Option<String>,
+    /// Сбросить обложку и accent — вернуть оригинал из тегов файла
+    reset: Option<bool>,
+}
+
+fn read_cover_as_data_url(source_path: &str) -> Result<(String, Option<String>), String> {
+    let bytes = std::fs::read(source_path)
+        .map_err(|e| format!("Не удалось прочитать обложку: {}", e))?;
+    let mime = match std::path::Path::new(source_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "image/jpeg",
+    };
+    let data_url = format!("data:{};base64,{}", mime, STANDARD.encode(&bytes));
+    let accent = audio_player::extract_accent_color(&bytes);
+    Ok((data_url, accent))
+}
+
+/// Сохранить пользовательское переопределение трека (название, исполнитель, обложка).
+/// Параметры:
+///  - title/artist: пустая строка означает «вернуть оригинал»
+///  - cover.source_path: путь к новому изображению. Если задан — обложка обновится.
+///  - cover.reset = true: сбросить обложку (вернуть оригинал из тегов файла).
+///  - если cover не задан — текущая обложка не меняется.
+#[tauri::command]
+fn track_set_override(
+    library: State<LibraryState>,
+    file_path: String,
+    title: Option<String>,
+    artist: Option<String>,
+    cover: Option<CoverInput>,
+) -> Result<TrackMetadata, String> {
+    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+
+    let (cover_data, accent_color, keep_existing_cover) = match cover {
+        Some(c) if c.reset.unwrap_or(false) => (None, None, false),
+        Some(c) if c.source_path.as_deref().is_some() => {
+            let (url, accent) = read_cover_as_data_url(c.source_path.as_deref().unwrap())?;
+            (Some(url), accent, false)
+        }
+        _ => (None, None, true),
+    };
+
+    lib.set_track_override(
+        &file_path,
+        title.as_deref(),
+        artist.as_deref(),
+        cover_data.as_deref(),
+        accent_color.as_deref(),
+        keep_existing_cover,
+    )?;
+    drop(lib);
+
+    // Возвращаем актуальные метаданные трека (с применёнными переопределениями)
+    fetch_track_with_override(&library, &file_path)
+}
+
+/// Прочитать локальный файл изображения и вернуть data URL
+/// (нужно фронту, чтобы показать превью выбранной обложки до сохранения).
+#[tauri::command]
+fn read_image_as_data_url(source_path: String) -> Result<String, String> {
+    let (data_url, _) = read_cover_as_data_url(&source_path)?;
+    Ok(data_url)
+}
+
+/// Полностью сбросить ВСЕ пользовательские переопределения треков сразу.
+/// Используется кнопкой «Сбросить редактирование» в настройках.
+#[tauri::command]
+fn track_clear_all_overrides(library: State<LibraryState>) -> Result<usize, String> {
+    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    lib.clear_all_track_overrides()
+}
+
+/// Полностью сбросить пользовательское переопределение трека
+#[tauri::command]
+fn track_clear_override(
+    library: State<LibraryState>,
+    file_path: String,
+) -> Result<TrackMetadata, String> {
+    {
+        let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        lib.clear_track_override(&file_path)?;
+    }
+    fetch_track_with_override(&library, &file_path)
+}
+
+fn fetch_track_with_override(
+    library: &State<LibraryState>,
+    file_path: &str,
+) -> Result<TrackMetadata, String> {
+    // Сначала пытаемся отдать трек из библиотеки (он содержит COALESCE-применённые
+    // переопределения). Если трека нет в библиотеке (редко — например, играем файл
+    // вне сохранённых папок), фолбэчимся на чтение тегов с диска.
+    let from_lib = {
+        let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        lib.get_track(file_path)
+    };
+    if let Some(mut t) = from_lib {
+        if t.cover_art.is_none() {
+            t.cover_art = AudioPlayer::extract_cover_art(file_path);
+        }
+        return Ok(t);
+    }
+
+    let mut metadata = AudioPlayer::get_metadata(file_path)?;
+    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    if let Some(cover) = lib.get_override_cover(file_path) {
+        metadata.cover_art = Some(cover);
+    }
+    if let Some(accent) = lib.get_accent_color(file_path) {
+        metadata.accent_color = Some(accent);
+    }
+    Ok(metadata)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Команды кастомных обложек
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn cover_set_custom(
+    state: State<SettingsState>,
+    kind: String,
+    key: String,
+    source_path: String,
+) -> Result<String, String> {
+    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    covers::set_custom_cover(&settings.1, &kind, &key, &source_path)
+}
+
+#[tauri::command]
+fn cover_remove_custom(
+    state: State<SettingsState>,
+    kind: String,
+    key: String,
+) -> Result<(), String> {
+    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    covers::remove_custom_cover(&settings.1, &kind, &key)
+}
+
+#[tauri::command]
+fn cover_load_all(state: State<SettingsState>) -> Result<Vec<covers::CustomCoverEntry>, String> {
+    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(covers::load_all(&settings.1))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Точка входа
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -491,6 +744,7 @@ pub fn run() {
             player_get_status,
             get_track_metadata,
             get_cover_art,
+            get_original_cover_art,
             get_supported_formats,
             // Библиотека
             library_get_folders,
@@ -526,6 +780,19 @@ pub fn run() {
             // Состояние плеера
             save_player_state,
             load_player_state,
+            // Закрепления
+            pins_load,
+            pins_save,
+            // Кастомные обложки
+            cover_set_custom,
+            cover_remove_custom,
+            cover_load_all,
+            // Переопределения метаданных трека
+            track_set_override,
+            track_clear_override,
+            track_clear_all_overrides,
+            get_original_track,
+            read_image_as_data_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

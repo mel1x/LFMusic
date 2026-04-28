@@ -123,7 +123,15 @@ impl MusicLibrary {
                  FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
                  FOREIGN KEY (file_path) REFERENCES tracks(file_path) ON DELETE CASCADE
              );
-             CREATE INDEX IF NOT EXISTS idx_pt_playlist ON playlist_tracks(playlist_id);",
+             CREATE INDEX IF NOT EXISTS idx_pt_playlist ON playlist_tracks(playlist_id);
+
+             CREATE TABLE IF NOT EXISTS track_overrides (
+                 file_path     TEXT PRIMARY KEY NOT NULL,
+                 title         TEXT,
+                 artist        TEXT,
+                 cover_data    TEXT,
+                 accent_color  TEXT
+             );",
         )
         .map_err(|e| format!("Ошибка создания таблиц: {}", e))?;
 
@@ -198,25 +206,6 @@ impl MusicLibrary {
                     .as_secs()
             })
             .unwrap_or(0)
-    }
-
-    fn row_to_metadata(row: &rusqlite::Row) -> rusqlite::Result<TrackMetadata> {
-        Ok(TrackMetadata {
-            file_path: row.get(0)?,
-            title: row.get(1)?,
-            artist: row.get(2)?,
-            album: row.get(3)?,
-            genre: row.get(4)?,
-            duration_secs: row.get(5)?,
-            format: row.get(6)?,
-            sample_rate: row.get(7)?,
-            bit_depth: row.get::<_, Option<i32>>(8)?.map(|v| v as u8),
-            channels: row.get::<_, Option<i32>>(9)?.map(|v| v as u8),
-            bitrate: row.get(10)?,
-            is_lossless: row.get::<_, i32>(11)? != 0,
-            cover_art: None,
-            accent_color: row.get(12)?,
-        })
     }
 
     /// Быстрый первый проход: собирает пути всех аудиофайлов без чтения метаданных
@@ -365,6 +354,15 @@ impl MusicLibrary {
             .transaction()
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
+        // Сбрасываем все пользовательские правки только при удалении папки
+        // из скоупа приложения — переопределения треков в этой папке исчезают.
+        tx.execute(
+            "DELETE FROM track_overrides
+             WHERE file_path IN (SELECT file_path FROM tracks WHERE folder_path = ?1)",
+            params![folder],
+        )
+        .map_err(|e| format!("Ошибка удаления переопределений: {}", e))?;
+
         tx.execute(
             "DELETE FROM tracks WHERE folder_path = ?1",
             params![folder],
@@ -436,26 +434,73 @@ impl MusicLibrary {
 
     pub fn get_all_tracks(&self) -> Vec<TrackMetadata> {
         let mut stmt = match self.conn.prepare(
-            "SELECT file_path, title, artist, album, genre, duration_secs,
-                    format, sample_rate, bit_depth, channels, bitrate, is_lossless, accent_color
-             FROM tracks
+            "SELECT t.file_path,
+                    COALESCE(o.title, t.title),
+                    COALESCE(o.artist, t.artist),
+                    t.album, t.genre, t.duration_secs,
+                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                    COALESCE(o.accent_color, t.accent_color),
+                    o.cover_data
+             FROM tracks t
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path
              ORDER BY
-                 sort_order DESC,
-                 CASE WHEN artist IS NULL THEN 1 ELSE 0 END,
-                 LOWER(artist),
-                 LOWER(COALESCE(album, '')),
-                 LOWER(COALESCE(title, file_path))",
+                 t.sort_order DESC,
+                 CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
+                 LOWER(COALESCE(o.artist, t.artist)),
+                 LOWER(COALESCE(t.album, '')),
+                 LOWER(COALESCE(o.title, t.title, t.file_path))",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
 
-        let rows = match stmt.query_map([], |row| Self::row_to_metadata(row)) {
+        let rows = match stmt.query_map([], |row| Self::row_to_metadata_with_override(row)) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
 
         rows.filter_map(|r| r.ok()).collect()
+    }
+
+    fn row_to_metadata_with_override(row: &rusqlite::Row) -> rusqlite::Result<TrackMetadata> {
+        let cover_override: Option<String> = row.get(13)?;
+        Ok(TrackMetadata {
+            file_path: row.get(0)?,
+            title: row.get(1)?,
+            artist: row.get(2)?,
+            album: row.get(3)?,
+            genre: row.get(4)?,
+            duration_secs: row.get(5)?,
+            format: row.get(6)?,
+            sample_rate: row.get(7)?,
+            bit_depth: row.get::<_, Option<i32>>(8)?.map(|v| v as u8),
+            channels: row.get::<_, Option<i32>>(9)?.map(|v| v as u8),
+            bitrate: row.get(10)?,
+            is_lossless: row.get::<_, i32>(11)? != 0,
+            cover_art: cover_override,
+            accent_color: row.get(12)?,
+        })
+    }
+
+    /// Получить один трек по пути с применением переопределений
+    pub fn get_track(&self, file_path: &str) -> Option<TrackMetadata> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT t.file_path,
+                        COALESCE(o.title, t.title),
+                        COALESCE(o.artist, t.artist),
+                        t.album, t.genre, t.duration_secs,
+                        t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                        COALESCE(o.accent_color, t.accent_color),
+                        o.cover_data
+                 FROM tracks t
+                 LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                 WHERE t.file_path = ?1",
+            )
+            .ok()?;
+        stmt.query_row(params![file_path], |row| Self::row_to_metadata_with_override(row))
+            .ok()
     }
 
     /// Поднимает трек на первое место в каталоге
@@ -706,10 +751,16 @@ impl MusicLibrary {
     /// Получить треки плейлиста
     pub fn get_playlist_tracks(&self, playlist_id: i64) -> Vec<TrackMetadata> {
         let mut stmt = match self.conn.prepare(
-            "SELECT t.file_path, t.title, t.artist, t.album, t.genre, t.duration_secs,
-                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless, t.accent_color
+            "SELECT t.file_path,
+                    COALESCE(o.title, t.title),
+                    COALESCE(o.artist, t.artist),
+                    t.album, t.genre, t.duration_secs,
+                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                    COALESCE(o.accent_color, t.accent_color),
+                    o.cover_data
              FROM playlist_tracks pt
              JOIN tracks t ON t.file_path = pt.file_path
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path
              WHERE pt.playlist_id = ?1
              ORDER BY pt.sort_order ASC,
                       pt.rowid ASC",
@@ -718,7 +769,7 @@ impl MusicLibrary {
             Err(_) => return Vec::new(),
         };
 
-        let rows = match stmt.query_map(params![playlist_id], |row| Self::row_to_metadata(row)) {
+        let rows = match stmt.query_map(params![playlist_id], |row| Self::row_to_metadata_with_override(row)) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
@@ -993,11 +1044,15 @@ impl MusicLibrary {
     /// Каждый трек разбивается по списку разделителей, и для каждого имени
     /// создаётся/обновляется плейлист с kind='artist'.
     pub fn rebuild_artist_playlists(&mut self, separators: &[String]) -> Result<(), String> {
-        // Собираем актуальные плейлисты исполнителей из tracks
+        // Собираем актуальные плейлисты исполнителей из tracks с учётом
+        // переопределений (track_overrides.artist имеет приоритет).
         let actual_artists: HashMap<String, HashSet<String>> = {
             let mut stmt = self.conn.prepare(
-                "SELECT artist, file_path FROM tracks
-                 WHERE artist IS NOT NULL AND artist != ''"
+                "SELECT COALESCE(o.artist, t.artist) AS effective_artist, t.file_path
+                 FROM tracks t
+                 LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                 WHERE COALESCE(o.artist, t.artist) IS NOT NULL
+                   AND COALESCE(o.artist, t.artist) != ''"
             ).map_err(|e| format!("Ошибка запроса исполнителей: {}", e))?;
 
             let mut map: HashMap<String, HashSet<String>> = HashMap::new();
@@ -1105,11 +1160,124 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Получить кэшированный accent_color для трека
+    /// Сохранить пользовательское переопределение метаданных трека.
+    /// Переопределения переживают пересканирование и сбрасываются только
+    /// при удалении папки трека из скоупа приложения.
+    /// `keep_existing_cover = true` означает «не трогать обложку и accent»,
+    /// иначе оба поля заменяются переданными значениями (None → очистка).
+    pub fn set_track_override(
+        &self,
+        file_path: &str,
+        title: Option<&str>,
+        artist: Option<&str>,
+        cover_data: Option<&str>,
+        accent_color: Option<&str>,
+        keep_existing_cover: bool,
+    ) -> Result<(), String> {
+        // Нормализуем пустые строки в None — пустое поле = «использовать оригинал».
+        let title = title.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
+        let artist = artist.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
+
+        let existing: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT cover_data, accent_color FROM track_overrides WHERE file_path = ?1",
+                params![file_path],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .ok();
+
+        let (final_cover, final_accent) = if keep_existing_cover {
+            existing.unwrap_or((None, None))
+        } else {
+            (cover_data.map(|s| s.to_string()), accent_color.map(|s| s.to_string()))
+        };
+
+        // Если все поля пусты — удаляем запись, чтобы LEFT JOIN отдал оригинал
+        if title.is_none() && artist.is_none() && final_cover.is_none() && final_accent.is_none() {
+            self.conn
+                .execute(
+                    "DELETE FROM track_overrides WHERE file_path = ?1",
+                    params![file_path],
+                )
+                .map_err(|e| format!("Ошибка удаления переопределения: {}", e))?;
+            return Ok(());
+        }
+
+        self.conn
+            .execute(
+                "INSERT INTO track_overrides (file_path, title, artist, cover_data, accent_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    title = excluded.title,
+                    artist = excluded.artist,
+                    cover_data = excluded.cover_data,
+                    accent_color = excluded.accent_color",
+                params![file_path, title, artist, final_cover, final_accent],
+            )
+            .map_err(|e| format!("Ошибка сохранения переопределения: {}", e))?;
+        Ok(())
+    }
+
+    /// Полностью удалить переопределение для трека (вернуть оригинальные значения)
+    pub fn clear_track_override(&self, file_path: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM track_overrides WHERE file_path = ?1",
+                params![file_path],
+            )
+            .map_err(|e| format!("Ошибка удаления переопределения: {}", e))?;
+        Ok(())
+    }
+
+    /// Удалить ВСЕ переопределения треков. Возвращает количество сброшенных треков.
+    /// Также сбрасывает кэшированный accent_color, чтобы следующее воспроизведение
+    /// пересчитало его из оригинальной обложки файла.
+    pub fn clear_all_track_overrides(&self) -> Result<usize, String> {
+        let count = self
+            .conn
+            .execute("DELETE FROM track_overrides", [])
+            .map_err(|e| format!("Ошибка сброса переопределений: {}", e))?;
+        let _ = self
+            .conn
+            .execute("UPDATE tracks SET accent_color = NULL", []);
+        Ok(count)
+    }
+
+    /// Проверить, есть ли пользовательская обложка у трека.
+    pub fn has_override_cover(&self, file_path: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT cover_data IS NOT NULL FROM track_overrides WHERE file_path = ?1",
+                params![file_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap_or(false)
+    }
+
+    /// Получить кэшированный accent_color для трека.
+    /// Если у трека есть пользовательское переопределение обложки — возвращаем
+    /// его accent, иначе фолбэчимся на тот, что вычислен из оригинальной обложки.
     pub fn get_accent_color(&self, file_path: &str) -> Option<String> {
         self.conn
             .query_row(
-                "SELECT accent_color FROM tracks WHERE file_path = ?1",
+                "SELECT COALESCE(o.accent_color, t.accent_color)
+                 FROM tracks t
+                 LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                 WHERE t.file_path = ?1",
+                params![file_path],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Получить data-URL пользовательской обложки (если установлена)
+    pub fn get_override_cover(&self, file_path: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT cover_data FROM track_overrides WHERE file_path = ?1",
                 params![file_path],
                 |row| row.get::<_, Option<String>>(0),
             )
