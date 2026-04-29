@@ -37,31 +37,34 @@ pub struct SettingsState(pub Mutex<(settings::AppSettings, PathBuf)>);
 /// (название, исполнитель, обложка) — чтобы при воспроизведении плеер
 /// показывал отредактированные пользователем значения.
 fn apply_accent_color(library: &State<LibraryState>, file_path: &str, metadata: &mut TrackMetadata) {
-    let lib_guard = library.0.lock().ok();
+    let lib = match library.0.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
 
-    if let Some(ref lib) = lib_guard {
-        // Переопределения title/artist/cover/accent
-        if let Some(t) = lib.get_track(file_path) {
-            if t.title.is_some() {
-                metadata.title = t.title;
-            }
-            if t.artist.is_some() {
-                metadata.artist = t.artist;
-            }
-            if let Some(cover) = lib.get_override_cover(file_path) {
-                metadata.cover_art = Some(cover);
-            }
+    // Переопределения title/artist/cover
+    if let Some(t) = lib.get_track(file_path) {
+        if let Some(ref title) = t.title {
+            metadata.title = Some(title.clone());
         }
-
-        if let Some(cached) = lib.get_accent_color(file_path) {
-            metadata.accent_color = Some(cached);
-            return;
+        if let Some(ref artist) = t.artist {
+            metadata.artist = Some(artist.clone());
+        }
+        if let Some(cover) = lib.get_override_cover(file_path) {
+            metadata.cover_art = Some(cover);
         }
     }
 
-    if let Some(ref color) = metadata.accent_color {
-        if let Ok(lib) = library.0.lock() {
-            let _ = lib.set_accent_color(file_path, color);
+    // Проверяем кэшированный accent_color
+    match lib.get_accent_color(file_path) {
+        Some(cached) => {
+            metadata.accent_color = Some(cached);
+        }
+        None => {
+            // Сохраняем accent_color из метаданных, если он есть
+            if let Some(ref color) = metadata.accent_color {
+                let _ = lib.set_accent_color(file_path, color);
+            }
         }
     }
 }
