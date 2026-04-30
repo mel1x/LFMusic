@@ -22,38 +22,61 @@ import { useCustomCovers } from '../composables/useCustomCovers'
 
 const router = useRouter()
 
-const {
-    trackList,
-    currentTrack,
-    isPlaying,
-    activePlaylistSource,
-    playTrack,
-    togglePlayPause,
-    setPlaylistSource,
-    formatTime,
-    loadCoversForTracks,
-    getTrackByPath,
-} = usePlayer()
+// ── Past search queries ─────────────────────────────────────────────────
+const PAST_SEARCHES_KEY = 'lfmusic_past_searches'
+const MAX_PAST_SEARCHES = 15
 
-const {
-    userPlaylists,
-    albums: albumPlaylists,
-    artists: artistPlaylists,
-    loadPlaylists,
-    getPlaylistTracks,
-} = usePlaylists()
+const pastSearches = ref<string[]>([])
 
-const { getCustomCover } = useCustomCovers()
+function loadPastSearches() {
+    try {
+        const raw = localStorage.getItem(PAST_SEARCHES_KEY)
+        if (raw) pastSearches.value = JSON.parse(raw)
+    } catch { /* ignore */ }
+}
 
-function albumCoverFor(name: string, fallback: string | null): string {
-    return getCustomCover('album', name) || fallback || defaultTrackCover
+function savePastSearches() {
+    localStorage.setItem(PAST_SEARCHES_KEY, JSON.stringify(pastSearches.value))
 }
-function playlistCoverFor(id: number, fallback: string | null): string {
-    return getCustomCover('playlist', id) || fallback || defaultPlaylistCover
+
+function addPastSearch(queryStr: string) {
+    const trimmed = queryStr.trim()
+    if (!trimmed) return
+    pastSearches.value = pastSearches.value.filter(q => q !== trimmed)
+    pastSearches.value.unshift(trimmed)
+    if (pastSearches.value.length > MAX_PAST_SEARCHES) {
+        pastSearches.value = pastSearches.value.slice(0, MAX_PAST_SEARCHES)
+    }
+    savePastSearches()
 }
-function artistCoverFor(name: string, fallback: string | null): string {
-    return getCustomCover('artist', name) || fallback || defaultTrackCover
+
+const filteredPastSearches = computed(() => {
+    const q = rawSearch.value.trim().toLowerCase()
+    if (!q) return pastSearches.value.slice(0, 15)
+    return pastSearches.value.filter(p =>
+        p.toLowerCase().includes(q)
+    ).slice(0, 15)
+})
+
+function onPastSearchClick(query: string) {
+    rawSearch.value = query
+    debouncedSearch.value = query
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+    searchInput.value?.focus()
 }
+
+function onSearchKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+        const trimmed = rawSearch.value.trim()
+        if (trimmed) {
+            addPastSearch(trimmed)
+        }
+    }
+}
+
+onMounted(() => {
+    loadPastSearches()
+})
 
 // ── Search input ───────────────────────────────────────────────────────────
 
@@ -87,6 +110,39 @@ onMounted(() => {
     nextTick(() => searchInput.value?.focus())
     loadPlaylists()
 })
+
+const {
+    trackList,
+    currentTrack,
+    isPlaying,
+    activePlaylistSource,
+    playTrack,
+    togglePlayPause,
+    setPlaylistSource,
+    formatTime,
+    loadCoversForTracks,
+    getTrackByPath,
+} = usePlayer()
+
+const {
+    userPlaylists,
+    albums: albumPlaylists,
+    artists: artistPlaylists,
+    loadPlaylists,
+    getPlaylistTracks,
+} = usePlaylists()
+
+const { getCustomCover } = useCustomCovers()
+
+function albumCoverFor(name: string, fallback: string | null): string {
+    return getCustomCover('album', name) || fallback || defaultTrackCover
+}
+function playlistCoverFor(id: number, fallback: string | null): string {
+    return getCustomCover('playlist', id) || fallback || defaultPlaylistCover
+}
+function artistCoverFor(name: string, fallback: string | null): string {
+    return getCustomCover('artist', name) || fallback || defaultTrackCover
+}
 
 // ── Artists ────────────────────────────────────────────────────────────────
 
@@ -135,7 +191,6 @@ function recomputeArtistsOverflow() {
     const rowH = item.offsetHeight
     const collapsedH = rowH * 3 + rowGap * 2
     artistsCollapsedMaxHeight.value = collapsedH
-    // scrollHeight when not constrained reflects full content height
     const wasCollapsed = el.style.maxHeight !== ''
     if (wasCollapsed) {
         el.style.maxHeight = ''
@@ -465,12 +520,25 @@ function scrollToTop() {
                 autocomplete="off"
                 :value="rawSearch"
                 @input="onSearchInput"
+                @keydown="onSearchKeydown"
             />
             <div class="searchClear" v-if="rawSearch" @click="clearSearch">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                 </svg>
             </div>
+        </div>
+
+        <!-- Past search queries -->
+        <div class="pastSearchesBar" v-if="pastSearches.length > 0 && !rawSearch.trim()">
+            <button
+                v-for="(pq, idx) in filteredPastSearches"
+                :key="idx"
+                class="pastSearchChip"
+                @click="onPastSearchClick(pq)"
+            >
+                {{ pq }}
+            </button>
         </div>
 
         <div v-if="!hasQuery" class="emptyState">
@@ -486,7 +554,7 @@ function scrollToTop() {
         </div>
 
         <template v-else>
-            <!-- Artists ─────────────────────────────────────────────────── -->
+            <!-- Artists -->
             <section v-if="artistResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Исполнители</div>
@@ -503,6 +571,7 @@ function scrollToTop() {
                             :key="a.id"
                             class="artistBadge"
                             @click="openArtist(a)"
+                            v-tooltip="'Открыть подборку исполнителя'"
                         >
                             <AnimatedCover class="artistAvatar" :src="artistCoverFor(a.name, a.cover)" />
                             <span v-truncate class="artistBadgeName">{{ a.name }}</span>
@@ -525,7 +594,7 @@ function scrollToTop() {
                 </div>
             </section>
 
-            <!-- Albums ──────────────────────────────────────────────────── -->
+            <!-- Albums -->
             <section v-if="albumResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Альбомы</div>
@@ -542,10 +611,11 @@ function scrollToTop() {
                 >
                     <div
                         v-for="album in albumResults"
-                        :key="album.id"
-                        class="playlistItem albumItem"
-                        @click="openAlbum(album)"
-                    >
+                            :key="album.id"
+                            class="playlistItem albumItem"
+                            @click="openAlbum(album)"
+                            v-tooltip="'Открыть альбом'"
+                        >
                         <div class="coverWrap">
                             <AnimatedCover class="cover" :src="albumCoverFor(album.name, album.cover)" />
                             <button
@@ -564,7 +634,7 @@ function scrollToTop() {
                 </div>
             </section>
 
-            <!-- Tracks ──────────────────────────────────────────────────── -->
+            <!-- Tracks -->
             <section v-if="trackResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Треки</div>
@@ -621,7 +691,7 @@ function scrollToTop() {
                 </button>
             </section>
 
-            <!-- Playlists ───────────────────────────────────────────────── -->
+            <!-- Playlists -->
             <section v-if="playlistResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Плейлисты</div>
@@ -693,7 +763,7 @@ function scrollToTop() {
     border-radius: 3px;
 }
 
-/* ── Sticky header ────────────────────────────────────────────────────── */
+/* ── Sticky header ────────────────────────────────────────────── */
 .stickyHeaderAnchor {
     position: sticky;
     top: -20px;
@@ -738,12 +808,12 @@ function scrollToTop() {
     background-color: hsla(0, 0%, 100%, 0.12);
 }
 
-/* ── Search input ─────────────────────────────────────────────────────── */
+/* ── Search input ─────────────────────────────────────────────── */
 .searchZone {
     position: relative;
     width: 100%;
     flex-shrink: 0;
-    margin-bottom: 28px;
+    margin-bottom: 12px;
 }
 .searchIcon {
     cursor: text;
@@ -792,7 +862,45 @@ function scrollToTop() {
     font-weight: 600;
 }
 
-/* ── Section ──────────────────────────────────────────────────────────── */
+/* ── Past search queries ─────────────────────────────────────── */
+.pastSearchesBar {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+    margin-bottom: 28px;
+}
+.pastSearchesBar::-webkit-scrollbar {
+    display: none;
+}
+.pastSearchChip {
+    display: block;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    line-height: 1;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.6);
+    font-size: 12px;
+    font-weight: 500;
+    transition: .24s ease;
+    flex-shrink: 0;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pastSearchChip:hover {
+    background-color: hsla(0, 0%, 100%, 0.1);
+    color: hsla(0, 0%, 100%, 0.8);
+}
+
+/* ── Section ──────────────────────────────────────────────────── */
 .pageLine {
     width: 100%;
     display: flex;
@@ -853,7 +961,7 @@ function scrollToTop() {
     opacity: 0.65;
 }
 
-/* ── Artists row (badges) ─────────────────────────────────────────────── */
+/* ── Artists row (badges) ─────────────────────────────────────── */
 .artistsBlockWrap {
     position: relative;
 }
@@ -985,7 +1093,7 @@ function scrollToTop() {
     transform: rotate(180deg);
 }
 
-/* ── Horizontal lines (albums / playlists) ────────────────────────────── */
+/* ── Horizontal lines (albums / playlists) ────────────────────── */
 .lineList {
     position: relative;
     display: flex;
@@ -1088,7 +1196,7 @@ function scrollToTop() {
     text-overflow: ellipsis;
 }
 
-/* ── Tracks list (mirrors Catalog) ────────────────────────────────────── */
+/* ── Tracks list (mirrors Catalog) ────────────────────────────── */
 .tracksList {
     display: flex;
     flex-direction: column;
@@ -1265,7 +1373,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 1);
 }
 
-/* ── Empty state ──────────────────────────────────────────────────────── */
+/* ── Empty state ──────────────────────────────────────────────── */
 .emptyState {
     flex: 1;
     display: flex;

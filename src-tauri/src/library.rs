@@ -345,7 +345,7 @@ impl MusicLibrary {
         self.scan_folder_internal(&folder, progress)?;
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
-        Ok(self.get_all_tracks())
+        Ok(self.get_all_tracks_light())
     }
 
     pub fn remove_folder(&mut self, folder: String, artist_separators: &[String]) -> Result<(), String> {
@@ -433,7 +433,32 @@ impl MusicLibrary {
     }
 
     pub fn get_all_tracks(&self) -> Vec<TrackMetadata> {
-        let mut stmt = match self.conn.prepare(
+        self.get_all_tracks_inner(false)
+    }
+
+    /// Получить все треки без обложек (для экономии памяти при больших библиотеках)
+    pub fn get_all_tracks_light(&self) -> Vec<TrackMetadata> {
+        self.get_all_tracks_inner(true)
+    }
+
+    fn get_all_tracks_inner(&self, light: bool) -> Vec<TrackMetadata> {
+        let sql = if light {
+            "SELECT t.file_path,
+                    COALESCE(o.title, t.title),
+                    COALESCE(o.artist, t.artist),
+                    t.album, t.genre, t.duration_secs,
+                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                    COALESCE(o.accent_color, t.accent_color),
+                    NULL
+             FROM tracks t
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             ORDER BY
+                 t.sort_order DESC,
+                 CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
+                 LOWER(COALESCE(o.artist, t.artist)),
+                 LOWER(COALESCE(t.album, '')),
+                 LOWER(COALESCE(o.title, t.title, t.file_path))"
+        } else {
             "SELECT t.file_path,
                     COALESCE(o.title, t.title),
                     COALESCE(o.artist, t.artist),
@@ -448,8 +473,10 @@ impl MusicLibrary {
                  CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
                  LOWER(COALESCE(o.artist, t.artist)),
                  LOWER(COALESCE(t.album, '')),
-                 LOWER(COALESCE(o.title, t.title, t.file_path))",
-        ) {
+                 LOWER(COALESCE(o.title, t.title, t.file_path))"
+        };
+
+        let mut stmt = match self.conn.prepare(sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -750,7 +777,30 @@ impl MusicLibrary {
 
     /// Получить треки плейлиста
     pub fn get_playlist_tracks(&self, playlist_id: i64) -> Vec<TrackMetadata> {
-        let mut stmt = match self.conn.prepare(
+        self.get_playlist_tracks_inner(playlist_id, false)
+    }
+
+    /// Получить треки плейлиста без обложек (для экономии памяти)
+    pub fn get_playlist_tracks_light(&self, playlist_id: i64) -> Vec<TrackMetadata> {
+        self.get_playlist_tracks_inner(playlist_id, true)
+    }
+
+    fn get_playlist_tracks_inner(&self, playlist_id: i64, light: bool) -> Vec<TrackMetadata> {
+        let sql = if light {
+            "SELECT t.file_path,
+                    COALESCE(o.title, t.title),
+                    COALESCE(o.artist, t.artist),
+                    t.album, t.genre, t.duration_secs,
+                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                    COALESCE(o.accent_color, t.accent_color),
+                    NULL
+             FROM playlist_tracks pt
+             JOIN tracks t ON t.file_path = pt.file_path
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             WHERE pt.playlist_id = ?1
+             ORDER BY pt.sort_order ASC,
+                      pt.rowid ASC"
+        } else {
             "SELECT t.file_path,
                     COALESCE(o.title, t.title),
                     COALESCE(o.artist, t.artist),
@@ -763,8 +813,10 @@ impl MusicLibrary {
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
              WHERE pt.playlist_id = ?1
              ORDER BY pt.sort_order ASC,
-                      pt.rowid ASC",
-        ) {
+                      pt.rowid ASC"
+        };
+
+        let mut stmt = match self.conn.prepare(sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };

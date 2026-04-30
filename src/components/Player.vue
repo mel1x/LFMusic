@@ -468,7 +468,8 @@ function openQfCoverMenu(e: MouseEvent) {
                 </div>
                 <div class="additionalControls">
                     <div v-if="currentTrack" class="queueList" @click="openQueueFullscreen"><ListIcon /></div>
-                    <div class="codecInfo" v-if="currentTrack && codecDisplay">
+                    <div class="codecInfo" v-if="currentTrack && codecDisplay"
+                        v-tooltip="'Формат и параметры аудио — нажмите для подробностей'">
                         {{ codecDisplay }}
                         <div class="codecTooltip">
                             <span class="codecTooltip-title">Качество трека</span>

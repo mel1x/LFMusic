@@ -362,8 +362,8 @@ function onTogglePin() {
                         <h2 v-truncate class="listName">{{ artistName }}</h2>
                     </div>
                     <div class="badges">
-                        <div class="badge">{{ tracksCountText(artistTracks.length) }}</div>
-                        <div class="badge">{{ listenCount }} раз прослушано</div>
+                        <div class="badge" v-tooltip="'Количество треков исполнителя'">{{ tracksCountText(artistTracks.length) }}</div>
+                        <div class="badge" v-tooltip="'Сколько раз была прослушана музыка этого исполнителя'">{{ listenCount }} раз прослушано</div>
                     </div>
                 </div>
                 <div class="controls">

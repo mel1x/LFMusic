@@ -266,7 +266,7 @@ function goBack() {
                             <h2 v-truncate class="listName">{{ artistName }}</h2>
                         </div>
                         <div class="badges">
-                            <div class="badge">{{ artistTracks.length > 0 ? tracksCountText(artistTracks.length) : 'Пусто' }}</div>
+                            <div class="badge" v-tooltip="artistTracks.length > 0 ? 'Количество треков исполнителя' : 'У исполнителя нет треков'">{{ artistTracks.length > 0 ? tracksCountText(artistTracks.length) : 'Пусто' }}</div>
                         </div>
                     </div>
                     <div class="controls">

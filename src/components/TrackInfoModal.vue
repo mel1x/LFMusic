@@ -148,12 +148,12 @@ onUnmounted(() => {
                             <div class="overline">О треке</div>
                             <div class="trackTitle">{{ currentTrack.title || fileName }}</div>
                             <div class="trackArtist">{{ currentTrack.artist || 'Неизвестный исполнитель' }}</div>
-                            <div class="badges">
-                                <span class="chip chipFormat">{{ (currentTrack.format || '—').toUpperCase() }}</span>
-                                <span class="chip" :class="currentTrack.is_lossless ? 'chipLossless' : 'chipLossy'">
-                                    {{ currentTrack.is_lossless ? 'Lossless' : 'Lossy' }}
-                                </span>
-                            </div>
+                        <div class="badges">
+                            <span class="chip chipFormat" v-tooltip="'Аудио формат файла — определяет тип сжатия и совместимость'">{{ (currentTrack.format || '—').toUpperCase() }}</span>
+                            <span class="chip" :class="currentTrack.is_lossless ? 'chipLossless' : 'chipLossy'" v-tooltip="currentTrack.is_lossless ? 'Lossless — сжатие без потери качества (FLAC, ALAC, WAV)' : 'Lossy — меньший размер файла с некоторой потерей качества (MP3, AAC)'">
+                                {{ currentTrack.is_lossless ? 'Lossless' : 'Lossy' }}
+                            </span>
+                        </div>
                         </div>
                     </div>
 
@@ -163,12 +163,12 @@ onUnmounted(() => {
                             <div class="fieldsList">
                                 <div v-if="hasAlbum" class="fieldRow">
                                     <span class="fieldLabel">Альбом</span>
-                                    <span class="fieldValue albumValue" v-tooltip="trackAlbumName">{{ trackAlbumName }}</span>
+                                    <span class="fieldValue albumValue">{{ trackAlbumName }}</span>
                                     <button class="openBtn" @click="openAlbum">Открыть</button>
                                 </div>
                                 <div v-for="f in generalFields" :key="f.label" class="fieldRow">
                                     <span class="fieldLabel">{{ f.label }}</span>
-                                    <span class="fieldValue" v-tooltip="String(f.value)">{{ f.value }}</span>
+                                    <span class="fieldValue">{{ f.value }}</span>
                                 </div>
                             </div>
                         </section>
@@ -178,14 +178,14 @@ onUnmounted(() => {
                             <div class="fieldsList">
                                 <div v-for="f in audioFields" :key="f.label" class="fieldRow">
                                     <span class="fieldLabel">{{ f.label }}</span>
-                                    <span class="fieldValue" v-tooltip="String(f.value)">{{ f.value }}</span>
+                                    <span class="fieldValue">{{ f.value }}</span>
                                 </div>
                             </div>
                         </section>
 
                         <section class="section">
                             <div class="sectionTitle">Файл</div>
-                            <div class="pathBlock" @click="copyPath" v-tooltip="currentTrack.file_path">
+                                <div class="pathBlock" @click="copyPath">
                                 <div class="pathText">
                                     <div class="pathName">{{ fileName }}</div>
                                     <div v-if="fileFolder" class="pathFolder">{{ fileFolder }}</div>

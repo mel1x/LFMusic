@@ -277,11 +277,11 @@ function goBack() {
                             <h2 v-truncate class="listName">{{ albumName }}</h2>
                         </div>
                         <div class="badges" v-if="albumTracks.length > 0">
-                            <div v-truncate class="badge">{{ albumArtist }}</div>
-                            <div class="badge">{{ tracksCountText(albumTracks.length) }}</div>
+                            <div v-truncate class="badge" v-tooltip="albumArtist">{{ albumArtist }}</div>
+                            <div class="badge" v-tooltip="'Количество треков в альбоме'">{{ tracksCountText(albumTracks.length) }}</div>
                         </div>
                         <div class="badges" v-else>
-                            <div class="badge">Пусто</div>
+                            <div class="badge" v-tooltip="'Альбом пуст — добавте треки'">Пусто</div>
                         </div>
                     </div>
                     <div class="controls">

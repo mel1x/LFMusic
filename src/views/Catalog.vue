@@ -319,7 +319,7 @@ function onCoverClick(track: TrackMetadata) {
                         <div class="listType">Библиотека</div>
                         <h2 v-truncate class="listName">Мой каталог</h2>
                         <div class="badges" v-if="trackList.length > 0">
-                            <div class="badge">{{ tracksCountText(trackList.length) }}</div>
+                            <div class="badge" v-tooltip="'Количество треков в каталоге'">{{ tracksCountText(trackList.length) }}</div>
                         </div>
                     </div>
                     <div class="controls">

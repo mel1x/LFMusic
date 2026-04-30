@@ -381,7 +381,7 @@ function onNameKeydown(e: KeyboardEvent) {
                             </button>
                         </div>
                         <div class="badges">
-                            <div class="badge">{{ playlistTracks.length > 0 ? tracksCountText(playlistTracks.length) : 'Пусто' }}</div>
+                            <div class="badge" v-tooltip="playlistTracks.length > 0 ? 'Количество треков в плейлисте' : 'Плейлист пуст — добавте треки'">{{ playlistTracks.length > 0 ? tracksCountText(playlistTracks.length) : 'Пусто' }}</div>
                         </div>
                     </div>
                     <div class="controls">

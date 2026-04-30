@@ -24,9 +24,12 @@ const STYLE = `
     line-height: 1.35;
     color: hsla(0, 0%, 100%, 0.85);
     max-width: min(360px, calc(100vw - 24px));
-    white-space: nowrap;
+    white-space: normal;
     overflow: hidden;
-    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    word-break: break-word;
     backdrop-filter: blur(12px);
     z-index: 1000001;
     transition: opacity 0.2s ease, visibility 0.2s ease, transform 0.2s ease;
@@ -78,7 +81,7 @@ function position(el: HTMLElement, tt: HTMLElement) {
 function show(el: HTMLElement, text: string) {
     if (!text) return
     const tt = getTooltip()
-    tt.textContent = text
+    tt.textContent = text.trim()
     activeTarget = el
     tt.style.left = '-9999px'
     tt.style.top = '-9999px'
