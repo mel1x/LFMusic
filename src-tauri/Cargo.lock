@@ -2212,7 +2212,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lf-music"
+name = "lfmusic"
 version = "0.1.0"
 dependencies = [
  "auto-palette",

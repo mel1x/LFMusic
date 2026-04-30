@@ -1,5 +1,5 @@
 [package]
-name = "lf-music"
+name = "lfmusic"
 version = "0.1.0"
 description = "Desktop Music App for local saved library"
 authors = ["melix"]
