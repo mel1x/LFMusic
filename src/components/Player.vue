@@ -31,10 +31,12 @@ import { useSettings } from '../composables/useSettings';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
+import { useI18n } from '../composables/useI18n';
 
 const win = getCurrentWindow();
 
 const { settings } = useSettings();
+const { t } = useI18n();
 
 const {
     currentTrack,
@@ -198,11 +200,40 @@ const queueUpcoming = computed(() => {
     return result;
 });
 
+const nextTrack = computed(() => queueUpcoming.value[0] ?? null);
+
+const nextTrackTitle = computed(() => {
+    const track = nextTrack.value;
+    if (!track) return t('player.noTrack');
+    return track.title || track.file_path.split(/[/\\]/).pop()?.replace(/\.[^/.]+$/, '') || t('player.untitled');
+});
+
+const VISUALIZER_BARS = Array.from({ length: 16 }, (_, i) => {
+    const wave = Math.sin((i + 1) * 1.37);
+    const height = 20 + Math.round(((wave + 1) / 2) * 54);
+    return {
+        id: i,
+        height,
+        speed: 0.72 + (i % 5) * 0.08,
+        delay: -i * 0.055,
+    };
+});
+
 // ── Queue cover loading ───────────────────────────────────────────────
 
 watch([isQueueMode, queueUpcoming], ([show, tracks]) => {
     if (show && tracks.length > 0) {
         loadCoversForTracks(tracks);
+    }
+}, { immediate: true });
+
+const shouldLoadAsideNextCover = computed(() =>
+    settings.value.show_player_extra_block && settings.value.player_extra_block_mode === 'next_track'
+);
+
+watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
+    if (show && track && !track.cover_art) {
+        loadCoversForTracks([track]);
     }
 }, { immediate: true });
 
@@ -371,6 +402,75 @@ function openQfCoverMenu(e: MouseEvent) {
     <div class="player">
         <div class="asideWrapper">
             <div v-if="settings.show_player_extra_block" class="aside">
+                <div
+                    v-if="settings.player_extra_block_mode === 'visualizer'"
+                    class="asideVisualizer"
+                    :class="{ playing: isPlaying, idle: !currentTrack }"
+                    :style="{
+                        backgroundImage: currentCoverArt
+                            ? `linear-gradient(90deg, hsla(var(--accent-h), min(var(--accent-s), 45%), 14%, 0.96) 0%, hsla(var(--accent-h), min(var(--accent-s), 45%), 16%, 0.86) 54%, hsla(var(--accent-h), min(var(--accent-s), 45%), 18%, 0.72) 100%), url(${currentCoverArt})`
+                            : undefined,
+                    }"
+                >
+                    <div class="asideMiniTrack">
+                        <img
+                            :src="currentCoverArt || trackCover"
+                            alt=""
+                            class="asideMiniCover"
+                            draggable="false"
+                        />
+                        <div class="asideMiniInfo">
+                            <span class="asideVisualLabel">{{ t('player.now') }}</span>
+                            <span v-truncate class="asideVisualTitle">{{ trackTitle }}</span>
+                            <span class="asideVisualArtist">
+                                <TrackArtists :artist="currentTrack?.artist" />
+                            </span>
+                        </div>
+                    </div>
+                    <div class="asideVisualBottom">
+                        <div class="asideBars" aria-hidden="true">
+                            <span
+                                v-for="bar in VISUALIZER_BARS"
+                                :key="bar.id"
+                                class="asideBar"
+                                :style="{
+                                    '--bar-scale': bar.height / 100,
+                                    '--bar-speed': `${bar.speed}s`,
+                                    '--bar-delay': `${bar.delay}s`,
+                                }"
+                            ></span>
+                        </div>
+                        <!-- <div class="asideProgressTrack">
+                            <div class="asideProgressFill" :style="{ width: progressFillPercent + '%' }"></div>
+                        </div> -->
+                    </div>
+                </div>
+                <button
+                    v-else
+                    type="button"
+                    class="asideNextTrack"
+                    :disabled="!nextTrack"
+                    :style="{
+                        backgroundImage: nextTrack?.cover_art
+                            ? `linear-gradient(90deg, hsla(var(--accent-h), min(var(--accent-s), 45%), 14%, 0.96) 0%, hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 0.84) 55%, hsla(var(--accent-h), min(var(--accent-s), 45%), 18%, 0.7) 100%), url(${nextTrack.cover_art})`
+                            : undefined,
+                    }"
+                    @click="playNext()"
+                >
+                    <img
+                        :src="nextTrack?.cover_art || trackCover"
+                        alt=""
+                        class="asideNextCover"
+                        draggable="false"
+                    />
+                    <div class="asideNextInfo">
+                        <span class="asideNextLabel">{{ t('player.nextTrack') }}</span>
+                        <span v-truncate class="asideNextTitle">{{ nextTrackTitle }}</span>
+                        <span class="asideNextArtist">
+                            <TrackArtists :artist="nextTrack?.artist" />
+                        </span>
+                    </div>
+                </button>
             </div>
         </div>
         <div class="playerControlsWrapper">
@@ -774,8 +874,177 @@ function openQfCoverMenu(e: MouseEvent) {
     width: 100%;
     height: 100%;
     border-radius: 14px;
-    background-color: #1a1a1a;
+    background-color: var(--light-bg);
     border: 1px solid #ffffff04;
+    overflow: hidden;
+}
+.asideVisualizer,
+.asideNextTrack {
+    width: 100%;
+    height: 100%;
+    border-radius: 13px;
+    background-color: var(--light-bg);
+    background-size: cover;
+    background-position: center;
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
+}
+.asideVisualizer {
+    display: grid;
+    grid-template-rows: 44px 1fr;
+    gap: 6px;
+    padding: 9px;
+}
+.asideMiniTrack {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.asideMiniCover {
+    width: 44px;
+    height: 44px;
+    border-radius: 7px;
+    object-fit: cover;
+    background-color: #202020;
+}
+.asideMiniInfo,
+.asideNextInfo {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    min-width: 0;
+}
+.asideVisualLabel,
+.asideNextLabel {
+    flex-shrink: 0;
+    user-select: none;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.1;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.35), 82%, 0.52);
+}
+.asideVisualTitle,
+.asideNextTitle {
+    user-select: none;
+    min-width: 0;
+    color: hsla(0, 0%, 100%, 0.88);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.asideVisualArtist,
+.asideNextArtist {
+    min-width: 0;
+    color: hsla(0, 0%, 100%, 0.42);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.asideVisualBottom {
+    display: grid;
+    grid-template-rows: 1fr;
+    gap: 5px;
+    min-height: 0;
+}
+.asideBars {
+    display: grid;
+    grid-template-columns: repeat(16, minmax(2px, 1fr));
+    align-items: end;
+    gap: 3px;
+    min-height: 0;
+}
+.asideBar {
+    height: 100%;
+    min-height: 4px;
+    border-radius: 3px;
+    background-color: hsla(0, 0%, 100%, 0.62);
+    transform: scaleY(var(--bar-scale));
+    transform-origin: bottom;
+    animation: aside-eq var(--bar-speed) ease-in-out var(--bar-delay) infinite alternate;
+    animation-play-state: paused;
+    opacity: 0.56;
+    will-change: transform;
+}
+.asideVisualizer.playing .asideBar {
+    animation-play-state: running;
+}
+.asideVisualizer.idle .asideBar {
+    opacity: 0.18;
+    transform: scaleY(0.18);
+}
+.asideProgressTrack {
+    height: 3px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.08);
+    overflow: hidden;
+}
+.asideProgressFill {
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    background-color: hsla(0, 0%, 100%, 0.56);
+    transition: width 0.5s linear;
+}
+.asideNextTrack {
+    display: grid;
+    grid-template-columns: 60px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    text-align: left;
+    color: hsla(0, 0%, 100%, 0.82);
+    cursor: pointer;
+    transition: background-color .18s ease, color .18s ease, opacity .18s ease, box-shadow .18s ease;
+}
+.asideNextTrack:hover:not(:disabled) {
+    color: hsla(0, 0%, 100%, 0.95);
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.09), inset 0 0 0 999px hsla(0, 0%, 100%, 0.035);
+}
+.asideNextTrack:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+.asideNextCover {
+    width: 60px;
+    height: 60px;
+    border-radius: 7px;
+    object-fit: cover;
+    background-color: #202020;
+}
+.asideNextIcon {
+    color: hsla(0, 0%, 100%, 0.42);
+    transition: color .18s ease, transform .18s ease;
+}
+.asideNextTrack:hover:not(:disabled) .asideNextIcon {
+    color: hsla(0, 0%, 100%, 0.72);
+    transform: translateX(1px);
+}
+@keyframes aside-eq {
+    0% {
+        transform: scaleY(calc(var(--bar-scale) * 0.42));
+    }
+    45% {
+        transform: scaleY(var(--bar-scale));
+    }
+    100% {
+        transform: scaleY(calc(var(--bar-scale) * 0.62 + 0.08));
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .asideBar {
+        animation: none;
+    }
+    .asideProgressFill {
+        transition: none;
+    }
 }
 .playerControlsWrapper {
     display: flex;

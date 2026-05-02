@@ -3,9 +3,11 @@ import { invoke } from '@tauri-apps/api/core'
 
 export const STATIC_ACCENT_COLOR_DEFAULT = '#3D3D3D'
 export const ARTIST_SEPARATORS_DEFAULT: string[] = ['; ']
+export const PLAYER_EXTRA_BLOCK_MODE_DEFAULT: PlayerExtraBlockMode = 'visualizer'
 
 export type Language = 'ru' | 'en'
 export const LANGUAGE_DEFAULT: Language = 'en'
+export type PlayerExtraBlockMode = 'visualizer' | 'next_track'
 
 function detectInitialLanguage(): Language {
     const browserLanguage = globalThis.navigator?.languages?.[0] ?? globalThis.navigator?.language ?? ''
@@ -15,7 +17,7 @@ function detectInitialLanguage(): Language {
 export const settingItems = [
     { key: 'crossfade_on_seek',        label: 'Плавная перемотка трека',                    default: true },
     { key: 'crossfade_between_tracks', label: 'Плавный переход между треками',              default: true },
-    { key: 'show_player_extra_block',  label: 'Отображение дополнительного блока у плеера', default: true },
+    { key: 'show_player_extra_block',  label: 'Отображение дополнительного блока у плеера', default: false },
     { key: 'show_github_badge',        label: 'Бейдж github в шапке',                       default: true },
     { key: 'dynamic_accent_color',     label: 'Динамический акцентный цвет',                default: true },
 ] as const
@@ -26,6 +28,7 @@ export type AppSettings = { [K in SettingKey]: boolean } & {
     static_accent_color: string
     artist_separators: string[]
     language: Language
+    player_extra_block_mode: PlayerExtraBlockMode
 }
 
 const boolDefaults = Object.fromEntries(
@@ -37,6 +40,7 @@ const defaults: AppSettings = {
     static_accent_color: STATIC_ACCENT_COLOR_DEFAULT,
     artist_separators: [...ARTIST_SEPARATORS_DEFAULT],
     language: detectInitialLanguage(),
+    player_extra_block_mode: PLAYER_EXTRA_BLOCK_MODE_DEFAULT,
 }
 
 const settings = ref<AppSettings>({ ...defaults, artist_separators: [...ARTIST_SEPARATORS_DEFAULT] })
@@ -51,7 +55,7 @@ export function useSettings() {
 
         const saved = await invoke<RawSettings>('get_settings')
         const knownKeys = settingItems.map(s => s.key as string)
-        knownKeys.push('static_accent_color', 'artist_separators', 'language')
+        knownKeys.push('static_accent_color', 'artist_separators', 'language', 'player_extra_block_mode')
 
         const next: AppSettings = { ...defaults, artist_separators: [...ARTIST_SEPARATORS_DEFAULT] }
         for (const item of settingItems) {
@@ -71,6 +75,11 @@ export function useSettings() {
 
         const lang = saved.language
         next.language = lang === 'en' || lang === 'ru' ? lang : detectInitialLanguage()
+
+        const extraBlockMode = saved.player_extra_block_mode
+        next.player_extra_block_mode = extraBlockMode === 'visualizer' || extraBlockMode === 'next_track'
+            ? extraBlockMode
+            : PLAYER_EXTRA_BLOCK_MODE_DEFAULT
 
         const hasNew     = knownKeys.some(k => !(k in saved))
         const hasRemoved = Object.keys(saved).some(k => !knownKeys.includes(k))

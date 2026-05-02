@@ -8,7 +8,20 @@
     "crossfadeBetweenTracks": "Smooth transition between tracks",
     "showPlayerExtraBlock": "Show the player's extra block",
     "showGithubBadge": "GitHub badge in the header",
-    "dynamicAccentColor": "Dynamic accent color"
+    "dynamicAccentColor": "Dynamic accent color",
+    "extraBlockCpuWarning": "Increases CPU usage by about x1.5-x4",
+    "extraBlockCpuWarningAria": "CPU usage warning",
+    "extraBlockMode": "Block mode",
+    "extraBlockModeAria": "Extra block mode",
+    "extraBlockVisualizer": "Visualizer",
+    "extraBlockVisualizerTooltip": "Current track visualizer",
+    "extraBlockNextTrack": "Next track"
+  },
+  "player": {
+    "now": "Now",
+    "nextTrack": "Next track",
+    "noTrack": "No track",
+    "untitled": "Untitled"
   },
   "source": {
     "Поиск": "Search",

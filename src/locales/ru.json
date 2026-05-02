@@ -8,6 +8,19 @@
     "crossfadeBetweenTracks": "Плавный переход между треками",
     "showPlayerExtraBlock": "Отображение дополнительного блока у плеера",
     "showGithubBadge": "Бейдж github в шапке",
-    "dynamicAccentColor": "Динамический акцентный цвет"
+    "dynamicAccentColor": "Динамический акцентный цвет",
+    "extraBlockCpuWarning": "Увеличивает потребление CPU примерно в x1.5-x4 раза",
+    "extraBlockCpuWarningAria": "Предупреждение о нагрузке CPU",
+    "extraBlockMode": "Режим блока",
+    "extraBlockModeAria": "Режим дополнительного блока",
+    "extraBlockVisualizer": "Визуализатор",
+    "extraBlockVisualizerTooltip": "Визуализатор текущего трека",
+    "extraBlockNextTrack": "Следующий трек"
+  },
+  "player": {
+    "now": "Сейчас",
+    "nextTrack": "Следующий трек",
+    "noTrack": "Нет трека",
+    "untitled": "Без названия"
   }
 }

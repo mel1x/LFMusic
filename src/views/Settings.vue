@@ -3,7 +3,7 @@ import { onMounted, onUnmounted, computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import DeleteIcon from '../components/Icons/DeleteIcon.vue';
 import FolderIcon from '../components/Icons/FolderIcon.vue';
-import { useSettings, ARTIST_SEPARATORS_DEFAULT, type Language } from '../composables/useSettings';
+import { useSettings, ARTIST_SEPARATORS_DEFAULT, type Language, type PlayerExtraBlockMode } from '../composables/useSettings';
 import { usePlayer } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
 import { useEqualizer, EQ_PRESETS, EQ_BAND_LABELS } from '../composables/useEqualizer';
@@ -65,6 +65,16 @@ onMounted(async () => {
 async function toggle(key: keyof typeof settings.value) {
     if (typeof settings.value[key] !== 'boolean') return;
     (settings.value[key] as boolean) = !(settings.value[key] as boolean);
+    await save();
+}
+
+const extraBlockModeOptions: { value: PlayerExtraBlockMode; labelKey: string; tooltipKey: string }[] = [
+    { value: 'visualizer', labelKey: 'settings.extraBlockVisualizer', tooltipKey: 'settings.extraBlockVisualizerTooltip' },
+    { value: 'next_track', labelKey: 'settings.extraBlockNextTrack', tooltipKey: 'settings.extraBlockNextTrack' },
+];
+
+async function chooseExtraBlockMode(mode: PlayerExtraBlockMode) {
+    settings.value.player_extra_block_mode = mode;
     await save();
 }
 
@@ -357,12 +367,50 @@ function onSeparatorKey(e: KeyboardEvent) {
             <div class="settingTitle">Настройки приложения</div>
             <div class="settingDesc">Кастомизация дополнительного функционала приложения</div>
             <div class="settingsBlock">
-                <label v-for="item in settingItems" :key="item.key" class="settingElem">
-                    <input type="checkbox" class="settingCheckbox"
-                        :checked="settings[item.key]"
-                        @change="toggle(item.key)">
-                    <span>{{ item.label }}</span>
-                </label>
+                <template v-for="item in settingItems" :key="item.key">
+                    <label class="settingElem">
+                        <input type="checkbox" class="settingCheckbox"
+                            :checked="settings[item.key]"
+                            @change="toggle(item.key)">
+                        <span class="settingLabelText">
+                            <span>{{ item.label }}</span>
+                            <span
+                                v-if="item.key === 'show_player_extra_block'"
+                                class="settingWarningIcon"
+                                v-tooltip="t('settings.extraBlockCpuWarning')"
+                                :aria-label="t('settings.extraBlockCpuWarningAria')"
+                            >
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                                    <path d="M12 9v4" />
+                                    <path d="M12 17h.01" />
+                                </svg>
+                            </span>
+                        </span>
+                    </label>
+                    <transition name="extraModePanel">
+                        <div
+                            v-if="item.key === 'show_player_extra_block' && settings.show_player_extra_block"
+                            class="extraModePanel"
+                        >
+                            <span class="extraModeTitle">{{ t('settings.extraBlockMode') }}</span>
+                            <div class="extraModeOptions" role="radiogroup" :aria-label="t('settings.extraBlockModeAria')">
+                                <button
+                                    v-for="option in extraBlockModeOptions"
+                                    :key="option.value"
+                                    type="button"
+                                    class="extraModeBtn"
+                                    :class="{ active: settings.player_extra_block_mode === option.value }"
+                                    :aria-pressed="settings.player_extra_block_mode === option.value"
+                                    v-tooltip="option.value === 'visualizer' ? t(option.tooltipKey) : undefined"
+                                    @click="chooseExtraBlockMode(option.value)"
+                                >
+                                    <span>{{ t(option.labelKey) }}</span>
+                                </button>
+                            </div>
+                        </div>
+                    </transition>
+                </template>
                 <div v-if="!settings.dynamic_accent_color" class="accentPicker" ref="pickerRoot">
                     <div class="accentPickerHead">
                         <button type="button"
@@ -688,6 +736,25 @@ function onSeparatorKey(e: KeyboardEvent) {
         color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.62);
     }
 }
+.settingLabelText {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+}
+.settingWarningIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 82%, 0.42);
+    cursor: help;
+    transition: color .18s ease, background-color .18s ease;
+}
+.settingWarningIcon:hover {
+    color: hsla(0, 0%, 100%, 0.78) !important;
+}
 .settingCheckbox {
     appearance: none;
     width: 32px;
@@ -717,6 +784,69 @@ function onSeparatorKey(e: KeyboardEvent) {
 .settingCheckbox:checked::after {
     transform: translateX(14px);
     background: var(--dark-bg);
+}
+.extraModePanel {
+    margin: -4px 0 8px 48px;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    width: fit-content;
+    max-width: calc(100% - 48px);
+    overflow: hidden;
+}
+.extraModeTitle {
+    user-select: none;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.48);
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.extraModeOptions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 16px;
+    background-color: var(--dark-bg);
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
+}
+.extraModeBtn {
+    user-select: none;
+    position: relative;
+    min-width: 118px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 12px;
+    border-radius: 13px;
+    background-color: transparent;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.35), 84%, 0.58);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color .18s ease, color .18s ease;
+}
+.extraModeBtn:hover {
+    color: hsla(0, 0%, 100%, 0.82);
+}
+.extraModeBtn.active {
+    background-color: hsla(0, 0%, 100%, 0.09);
+    color: #ffffff;
+}
+.extraModePanel-enter-active,
+.extraModePanel-leave-active {
+    transition: opacity .18s ease, transform .18s ease, max-height .18s ease;
+    max-height: 36px;
+}
+.extraModePanel-enter-from,
+.extraModePanel-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
+    margin-top: -10px;
+    margin-bottom: -4px;
 }
 .languageSetting {
     align-items: center;

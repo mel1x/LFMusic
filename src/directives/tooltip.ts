@@ -32,7 +32,7 @@ const STYLE = `
     -webkit-box-orient: vertical;
     word-break: break-word;
     backdrop-filter: blur(12px);
-    z-index: 1000001;
+    z-index: 1000010;
     transition: opacity 0.2s ease, visibility 0.2s ease, transform 0.2s ease;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
     transform: translateY(2px);
