@@ -13,11 +13,14 @@ import TrackEditModal from './components/TrackEditModal.vue';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
 import { useCustomCovers } from './composables/useCustomCovers';
+import { startDomI18n } from './composables/useDomI18n';
+import { useI18n } from './composables/useI18n';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
+const { language } = useI18n();
 const { saveState, currentTrack, currentAccentColor } = usePlayer();
 const { loadCustomCovers } = useCustomCovers();
 
@@ -25,8 +28,10 @@ const BASE_W = 1460;
 const BASE_H = 860;
 const MIN_SCALE = 0.78;
 const MAX_SCALE = 2.0;
+let resizeRaf: number | null = null;
 
 function applyUiScale() {
+  resizeRaf = null;
   const w = window.innerWidth;
   const h = window.innerHeight;
   const raw = Math.min(w / BASE_W, h / BASE_H);
@@ -37,6 +42,11 @@ function applyUiScale() {
   body.style.height = (h / scale) + 'px';
   document.documentElement.style.setProperty('--ui-scale', String(scale));
   (window as any).__uiScale = scale;
+}
+
+function scheduleUiScale() {
+  if (resizeRaf !== null) return;
+  resizeRaf = requestAnimationFrame(applyUiScale);
 }
 
 const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
@@ -69,15 +79,20 @@ function handleContextMenu(e: MouseEvent) {
 
 onMounted(() => {
   load();
+  startDomI18n();
   loadCustomCovers();
   applyUiScale();
-  window.addEventListener('resize', applyUiScale);
+  window.addEventListener('resize', scheduleUiScale);
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
 });
 
 onUnmounted(() => {
-  window.removeEventListener('resize', applyUiScale);
+  window.removeEventListener('resize', scheduleUiScale);
+  if (resizeRaf !== null) {
+    cancelAnimationFrame(resizeRaf);
+    resizeRaf = null;
+  }
   document.removeEventListener('keydown', handleReloadKey);
   document.removeEventListener('contextmenu', handleContextMenu);
 });
@@ -141,10 +156,10 @@ const closeWindow = async () => {
       <button class="controlsButton close" @click="closeWindow"><CloseIcon /></button>
     </div>
   </div>
-  <MainBlock class="mainFrame" />
-  <Player class="playerPart" />
-  <TrackInfoModal />
-  <TrackEditModal />
+  <MainBlock :key="`main-${language}`" class="mainFrame" />
+  <Player :key="`player-${language}`" class="playerPart" />
+  <TrackInfoModal :key="`info-${language}`" />
+  <TrackEditModal :key="`edit-${language}`" />
 </template>
 
 <style>

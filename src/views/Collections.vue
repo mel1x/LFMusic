@@ -42,13 +42,15 @@ const {
     setPlaylistSource,
 } = usePlayer();
 
-const playlistCovers = ref<Record<number, string | null>>({});
+const playlistCovers = ref<Record<number, string>>({});
 
 const { getCustomCover } = useCustomCovers();
 
 function playlistCoverFor(pl: PlaylistInfo): string {
     const custom = getCustomCover('playlist', pl.id);
     if (custom) return custom;
+    const first = pl.first_file_path ? getTrackByPath(pl.first_file_path) : undefined;
+    if (first?.cover_art) return first.cover_art;
     return playlistCovers.value[pl.id] || defaultCover;
 }
 function albumCoverFor(album: AlbumEntry): string {
@@ -117,29 +119,24 @@ const playlistsLine = useScrollLine(210, 16);
 const albumsLine = useScrollLine(210, 16);
 const artistsLine = useScrollLine(190, 16);
 
-async function refreshCoverFor(pl: PlaylistInfo) {
-    if (pl.track_count === 0) {
-        playlistCovers.value[pl.id] = null;
+function refreshCoverFor(pl: PlaylistInfo) {
+    if (pl.track_count === 0 || !pl.first_file_path) {
+        delete playlistCovers.value[pl.id];
         return;
     }
-    const tracks = await getPlaylistTracks(pl.id);
-    const first = tracks[0];
-    if (!first) {
-        playlistCovers.value[pl.id] = null;
-        return;
-    }
-    const inList = trackList.value.find(t => t.file_path === first.file_path);
+    const inList = getTrackByPath(pl.first_file_path);
     if (inList) {
-        if (!inList.cover_art) loadCoversForTracks([inList]);
-        playlistCovers.value[pl.id] = inList.cover_art;
-    } else {
-        playlistCovers.value[pl.id] = first.cover_art;
+        if (inList.cover_art) {
+            playlistCovers.value[pl.id] = inList.cover_art;
+        } else {
+            loadCoversForTracks([inList]);
+        }
     }
 }
 
-async function refreshAllCovers() {
+function refreshAllCovers() {
     for (const pl of userPlaylists.value) {
-        await refreshCoverFor(pl);
+        refreshCoverFor(pl);
     }
 }
 
@@ -241,7 +238,7 @@ onMounted(async () => {
     albumsLine.observe();
     artistsLine.observe();
     await loadPlaylists();
-    await refreshAllCovers();
+    refreshAllCovers();
     requestCoversForCards();
 });
 
@@ -253,8 +250,8 @@ onUnmounted(() => {
 
 watch(
     () => userPlaylists.value.map(p => `${p.id}:${p.track_count}`).join(','),
-    async () => {
-        await refreshAllCovers();
+    () => {
+        refreshAllCovers();
         playlistsLine.update();
     },
 );
@@ -428,10 +425,11 @@ async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
 
 const sortedAlbums = computed(() => {
     const all = albums.value;
+    const byName = new Map(all.map(a => [a.name, a]));
     const topSet = new Set(albumTopOrder.value);
     const top: AlbumEntry[] = [];
     for (const name of albumTopOrder.value) {
-        const a = all.find(al => al.name === name);
+        const a = byName.get(name);
         if (a) top.push(a);
     }
     const rest = all.filter(a => !topSet.has(a.name));
@@ -440,10 +438,11 @@ const sortedAlbums = computed(() => {
 
 const sortedArtists = computed(() => {
     const all = artists.value;
+    const byName = new Map(all.map(a => [a.name, a]));
     const topSet = new Set(artistTopOrder.value);
     const top: ArtistEntry[] = [];
     for (const name of artistTopOrder.value) {
-        const a = all.find(ar => ar.name === name);
+        const a = byName.get(name);
         if (a) top.push(a);
     }
     const rest = all.filter(a => !topSet.has(a.name));

@@ -68,6 +68,12 @@ pub struct MusicLibrary {
 }
 
 impl MusicLibrary {
+    fn scan_thread_count() -> usize {
+        std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1).clamp(1, 4))
+            .unwrap_or(2)
+    }
+
     pub fn new(app_data_dir: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&app_data_dir)
             .map_err(|e| format!("Не удалось создать директорию данных: {}", e))?;
@@ -662,18 +668,25 @@ impl MusicLibrary {
 
         // 3. Параллельное чтение метаданных (без обложек)
         let counter = AtomicUsize::new(cached_count);
-        let batch: Vec<(String, TrackMetadata, u64)> = to_scan
-            .par_iter()
-            .filter_map(|(path_str, mtime)| {
-                let result = AudioPlayer::get_metadata_light(path_str).ok()?;
-                let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                // Обновляем прогресс каждые 10 файлов или при завершении
-                if done % 10 == 0 || done == total {
-                    progress(done, total);
-                }
-                Some((path_str.clone(), result, *mtime))
-            })
-            .collect();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(Self::scan_thread_count())
+            .build()
+            .map_err(|e| format!("scan thread pool error: {}", e))?;
+
+        let batch: Vec<(String, TrackMetadata, u64)> = pool.install(|| {
+            to_scan
+                .par_iter()
+                .filter_map(|(path_str, mtime)| {
+                    let result = AudioPlayer::get_metadata_light(path_str).ok()?;
+                    let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Обновляем прогресс каждые 10 файлов или при завершении
+                    if done % 10 == 0 || done == total {
+                        progress(done, total);
+                    }
+                    Some((path_str.clone(), result, *mtime))
+                })
+                .collect()
+        });
 
         progress(total, total);
 

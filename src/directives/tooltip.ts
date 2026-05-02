@@ -1,4 +1,5 @@
 import type { Directive, DirectiveBinding } from 'vue'
+import { translateText } from '../composables/useI18n'
 
 let tooltipEl: HTMLElement | null = null
 let styleInjected = false
@@ -81,7 +82,7 @@ function position(el: HTMLElement, tt: HTMLElement) {
 function show(el: HTMLElement, text: string) {
     if (!text) return
     const tt = getTooltip()
-    tt.textContent = text.trim()
+    tt.textContent = translateText(text).trim()
     activeTarget = el
     tt.style.left = '-9999px'
     tt.style.top = '-9999px'
@@ -158,7 +159,7 @@ export const vTooltip: Directive<HTMLElement, unknown> = {
             if (!text) {
                 hide(el)
             } else {
-                tooltipEl.textContent = text
+                tooltipEl.textContent = translateText(text)
                 position(el, tooltipEl)
             }
         }

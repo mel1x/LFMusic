@@ -54,8 +54,9 @@ export function useCoverLoader(options: CoverLoaderOptions) {
             if (coverDebounceTimer) clearTimeout(coverDebounceTimer);
             coverDebounceTimer = setTimeout(() => {
                 const visible = visibleTracks.value.map(t => t.file_path);
+                const visibleSet = new Set(visible);
                 const all = tracks.map(t => t.file_path);
-                const preloadOnly = all.filter(p => !visible.includes(p));
+                const preloadOnly = all.filter(p => !visibleSet.has(p));
                 const ordered = [...visible, ...preloadOnly];
 
                 for (const filePath of coverQueue) {
@@ -74,7 +75,10 @@ export function useCoverLoader(options: CoverLoaderOptions) {
     }
 
     function loadCoversForTracks(tracks: TrackMetadata[]) {
+        const seen = new Set<string>();
         for (const track of tracks) {
+            if (seen.has(track.file_path)) continue;
+            seen.add(track.file_path);
             if (track.cover_art || loadingCovers.has(track.file_path)) continue;
             loadingCovers.add(track.file_path);
             coverQueue.push(track.file_path);

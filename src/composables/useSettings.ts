@@ -4,6 +4,14 @@ import { invoke } from '@tauri-apps/api/core'
 export const STATIC_ACCENT_COLOR_DEFAULT = '#3D3D3D'
 export const ARTIST_SEPARATORS_DEFAULT: string[] = ['; ']
 
+export type Language = 'ru' | 'en'
+export const LANGUAGE_DEFAULT: Language = 'en'
+
+function detectInitialLanguage(): Language {
+    const browserLanguage = globalThis.navigator?.languages?.[0] ?? globalThis.navigator?.language ?? ''
+    return browserLanguage.toLowerCase().startsWith('ru') ? 'ru' : LANGUAGE_DEFAULT
+}
+
 export const settingItems = [
     { key: 'crossfade_on_seek',        label: 'Плавная перемотка трека',                    default: true },
     { key: 'crossfade_between_tracks', label: 'Плавный переход между треками',              default: true },
@@ -17,6 +25,7 @@ export type SettingItem = typeof settingItems[number]
 export type AppSettings = { [K in SettingKey]: boolean } & {
     static_accent_color: string
     artist_separators: string[]
+    language: Language
 }
 
 const boolDefaults = Object.fromEntries(
@@ -27,6 +36,7 @@ const defaults: AppSettings = {
     ...boolDefaults,
     static_accent_color: STATIC_ACCENT_COLOR_DEFAULT,
     artist_separators: [...ARTIST_SEPARATORS_DEFAULT],
+    language: detectInitialLanguage(),
 }
 
 const settings = ref<AppSettings>({ ...defaults, artist_separators: [...ARTIST_SEPARATORS_DEFAULT] })
@@ -41,7 +51,7 @@ export function useSettings() {
 
         const saved = await invoke<RawSettings>('get_settings')
         const knownKeys = settingItems.map(s => s.key as string)
-        knownKeys.push('static_accent_color', 'artist_separators')
+        knownKeys.push('static_accent_color', 'artist_separators', 'language')
 
         const next: AppSettings = { ...defaults, artist_separators: [...ARTIST_SEPARATORS_DEFAULT] }
         for (const item of settingItems) {
@@ -58,6 +68,9 @@ export function useSettings() {
             const cleaned = seps.filter((s): s is string => typeof s === 'string' && s.length > 0)
             next.artist_separators = cleaned.length > 0 ? cleaned : [...ARTIST_SEPARATORS_DEFAULT]
         }
+
+        const lang = saved.language
+        next.language = lang === 'en' || lang === 'ru' ? lang : detectInitialLanguage()
 
         const hasNew     = knownKeys.some(k => !(k in saved))
         const hasRemoved = Object.keys(saved).some(k => !knownKeys.includes(k))

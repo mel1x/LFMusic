@@ -1,0 +1,13 @@
+{
+  "settings": {
+    "language": "Язык интерфейса",
+    "languageDescription": "Переключение языка приложения",
+    "russian": "Русский",
+    "english": "English",
+    "crossfadeOnSeek": "Плавная перемотка трека",
+    "crossfadeBetweenTracks": "Плавный переход между треками",
+    "showPlayerExtraBlock": "Отображение дополнительного блока у плеера",
+    "showGithubBadge": "Бейдж github в шапке",
+    "dynamicAccentColor": "Динамический акцентный цвет"
+  }
+}

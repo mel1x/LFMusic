@@ -231,10 +231,9 @@ watch(resolvedPins, () => requestPinCovers());
 .navLink svg {
   color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
   transition: .2s ease;
-
-  .navLink:hover & {
-    color: #fff;
-  }
+}
+.navLink:hover svg {
+  color: #fff;
 }
 .navLink.router-link-active {
   color: hsla(0, 0%, 100%, 0.95);

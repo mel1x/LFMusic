@@ -1,3 +1,5 @@
+import { useSettings } from '../composables/useSettings'
+
 export function pluralizeRu(n: number, forms: [string, string, string]): string {
     const abs = Math.abs(n) % 100
     const rem = abs % 10
@@ -7,11 +9,21 @@ export function pluralizeRu(n: number, forms: [string, string, string]): string 
     return forms[2]
 }
 
+function isEnglish(): boolean {
+    return useSettings().settings.value.language === 'en'
+}
+
+function pluralizeEn(n: number, one: string, many: string): string {
+    return Math.abs(n) === 1 ? one : many
+}
+
 export function tracksCountText(n: number): string {
+    if (isEnglish()) return `${n} ${pluralizeEn(n, 'track', 'tracks')}`
     return `${n} ${pluralizeRu(n, ['трек', 'трека', 'треков'])}`
 }
 
 export function albumsCountText(n: number): string {
+    if (isEnglish()) return `${n} ${pluralizeEn(n, 'album', 'albums')}`
     return `${n} ${pluralizeRu(n, ['альбом', 'альбома', 'альбомов'])}`
 }
 
@@ -52,6 +64,10 @@ export function formatTotalDuration(secs: number): string {
     const total = Math.max(0, Math.floor(secs))
     const h = Math.floor(total / 3600)
     const m = Math.floor((total % 3600) / 60)
+    if (isEnglish()) {
+        if (h > 0) return `${h} ${pluralizeEn(h, 'hour', 'hours')} ${m} min`
+        return `${m} min`
+    }
     if (h > 0) {
         return `${h} ${pluralizeRu(h, ['час', 'часа', 'часов'])} ${m} мин`
     }

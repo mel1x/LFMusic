@@ -10,7 +10,10 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use library::{FolderInfo, MusicLibrary, PlaylistInfo};
 use player_state::SavedPlayerState;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
+use std::time::Instant;
 use tauri::{Emitter, Manager, State};
 
 #[derive(Clone, serde::Serialize)]
@@ -18,6 +21,35 @@ struct ScanProgress {
     current: usize,
     total: usize,
     percent: f64,
+}
+
+const SCAN_PROGRESS_EMIT_MS: u64 = 120;
+
+fn emit_scan_progress(app: &tauri::AppHandle, current: usize, total: usize) {
+    let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
+    let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
+}
+
+fn scan_progress_emitter(app: tauri::AppHandle) -> impl Fn(usize, usize) + Send + Sync {
+    let started = Instant::now();
+    let last_emit_ms = Arc::new(AtomicU64::new(0));
+
+    move |current, total| {
+        let done = total == 0 || current >= total;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let last = last_emit_ms.load(Ordering::Relaxed);
+        if !done && elapsed_ms.saturating_sub(last) < SCAN_PROGRESS_EMIT_MS {
+            return;
+        }
+
+        if done
+            || last_emit_ms
+                .compare_exchange(last, elapsed_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            emit_scan_progress(&app, current, total);
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -252,10 +284,7 @@ async fn library_add_folder(
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
         let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        library.add_folder(folder_path, &separators, |current, total| {
-            let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
-            let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
-        })
+        library.add_folder(folder_path, &separators, scan_progress_emitter(app.clone()))
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -303,10 +332,7 @@ async fn library_rescan(
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
         let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        library.rescan_all(&separators, |current, total| {
-            let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
-            let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
-        })
+        library.rescan_all(&separators, scan_progress_emitter(app.clone()))
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?

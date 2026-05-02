@@ -77,7 +77,9 @@ const trackList = ref<TrackMetadata[]>([]);
 const isSeeking = ref(false);
 const seekValue = ref(0);
 let statusInterval: ReturnType<typeof setInterval> | null = null;
+let stopStatusWatcher: (() => void) | null = null;
 let isHandlingTrackEnd = false;
+const STATUS_POLL_MS = 500;
 
 // Shuffle / Repeat
 const shuffled = ref(false);
@@ -120,13 +122,14 @@ export function usePlayer() {
   // ── Track map для O(1) поиска по file_path ──────────────────────────────
 
   const trackMap = computed(() => new Map(trackList.value.map(t => [t.file_path, t])));
+  const trackIndexMap = computed(() => new Map(trackList.value.map((t, index) => [t.file_path, index])));
 
   function getTrackByPath(filePath: string): TrackMetadata | undefined {
     return trackMap.value.get(filePath);
   }
 
   function getTrackIndex(filePath: string): number {
-    return trackList.value.findIndex(t => t.file_path === filePath);
+    return trackIndexMap.value.get(filePath) ?? -1;
   }
 
   // ── Shuffle/Repeat helpers ────────────────────────────────────────────────
@@ -603,6 +606,19 @@ export function usePlayer() {
 
   // ── Сохранение / восстановление состояния ─────────────────────────────────
 
+  function startStatusPolling() {
+    if (!statusInterval) {
+      statusInterval = setInterval(pollStatus, STATUS_POLL_MS);
+    }
+  }
+
+  function stopStatusPolling() {
+    if (statusInterval) {
+      clearInterval(statusInterval);
+      statusInterval = null;
+    }
+  }
+
   async function saveState() {
     // Вычисляем индекс текущего трека в источнике
     let trackIndex: number | null = null;
@@ -771,25 +787,25 @@ export function usePlayer() {
     await loadSettings();
     await loadLibrary();
     await restoreState();
-    statusInterval = setInterval(pollStatus, 500);
+    if (playbackState.value === "Playing") {
+      startStatusPolling();
+    }
 
-    // Останавливаем поллинг когда плеер остановлен и нет трека
-    watch([playbackState, currentTrack] as const, ([state, track]: [string, TrackMetadata | null]) => {
-      if (state === 'Stopped' && !track) {
-        if (statusInterval) {
-          clearInterval(statusInterval);
-          statusInterval = null;
-        }
-      } else if (!statusInterval) {
-        statusInterval = setInterval(pollStatus, 500);
+    // Останавливаем поллинг, когда плеер не воспроизводит звук.
+    stopStatusWatcher = watch(playbackState, (state: string) => {
+      if (state === 'Playing') {
+        startStatusPolling();
+      } else {
+        stopStatusPolling();
       }
     });
   }
 
   function destroy() {
-    if (statusInterval) {
-      clearInterval(statusInterval);
-      statusInterval = null;
+    stopStatusPolling();
+    if (stopStatusWatcher) {
+      stopStatusWatcher();
+      stopStatusWatcher = null;
     }
     initialized = false;
   }

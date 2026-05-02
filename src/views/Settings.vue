@@ -3,15 +3,17 @@ import { onMounted, onUnmounted, computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import DeleteIcon from '../components/Icons/DeleteIcon.vue';
 import FolderIcon from '../components/Icons/FolderIcon.vue';
-import { useSettings, ARTIST_SEPARATORS_DEFAULT } from '../composables/useSettings';
+import { useSettings, ARTIST_SEPARATORS_DEFAULT, type Language } from '../composables/useSettings';
 import { usePlayer } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
 import { useEqualizer, EQ_PRESETS, EQ_BAND_LABELS } from '../composables/useEqualizer';
 import RefreshIcon from '../components/Icons/RefreshIcon.vue';
 import PlusIcon from '../components/Icons/PlusIcon.vue';
 import ConfirmModal from '../components/ConfirmModal.vue';
+import { useI18n } from '../composables/useI18n';
 
 const { settings, settingItems, load, save } = useSettings();
+const { t, setLanguage } = useI18n();
 const { rebuildArtists } = usePlaylists();
 const {
     folders, isScanning, removingFolder, scanProgress,
@@ -64,6 +66,26 @@ async function toggle(key: keyof typeof settings.value) {
     if (typeof settings.value[key] !== 'boolean') return;
     (settings.value[key] as boolean) = !(settings.value[key] as boolean);
     await save();
+}
+
+const languageDropdownOpen = ref(false);
+const languageDropdownRoot = ref<HTMLElement | null>(null);
+const languageOptions: { value: Language; labelKey: string; short: string }[] = [
+    { value: 'ru', labelKey: 'settings.russian', short: 'RU' },
+    { value: 'en', labelKey: 'settings.english', short: 'EN' },
+];
+
+const selectedLanguage = computed(() =>
+    languageOptions.find(option => option.value === settings.value.language) ?? languageOptions[0]
+);
+
+function toggleLanguageDropdown() {
+    languageDropdownOpen.value = !languageDropdownOpen.value;
+}
+
+async function chooseLanguage(language: Language) {
+    languageDropdownOpen.value = false;
+    await setLanguage(language);
 }
 
 const ACCENT_PRESETS = [
@@ -199,13 +221,21 @@ function startHueDrag(e: PointerEvent) {
 }
 
 function onDocMouseDown(e: MouseEvent) {
-    if (!pickerOpen.value) return;
+    const target = e.target as Node;
+
     const root = pickerRoot.value;
-    if (root && root.contains(e.target as Node)) return;
-    pickerOpen.value = false;
+    if (pickerOpen.value && (!root || !root.contains(target))) {
+        pickerOpen.value = false;
+    }
+
+    const langRoot = languageDropdownRoot.value;
+    if (languageDropdownOpen.value && (!langRoot || !langRoot.contains(target))) {
+        languageDropdownOpen.value = false;
+    }
 }
 function onDocKey(e: KeyboardEvent) {
     if (e.key === 'Escape' && pickerOpen.value) pickerOpen.value = false;
+    if (e.key === 'Escape' && languageDropdownOpen.value) languageDropdownOpen.value = false;
 }
 
 onMounted(() => {
@@ -228,6 +258,10 @@ watch(() => settings.value.static_accent_color, (newHex) => {
 // Закрываем попап, если выключили статичный режим
 watch(() => settings.value.dynamic_accent_color, (isDynamic) => {
     if (isDynamic) pickerOpen.value = false;
+});
+
+watch(() => settings.value.language, () => {
+    languageDropdownOpen.value = false;
 });
 
 const hueBase = computed(() => `hsl(${hue.value}, 100%, 50%)`);
@@ -377,6 +411,45 @@ function onSeparatorKey(e: KeyboardEvent) {
                             v-tooltip="color"
                             @click="selectPreset(color)">
                         </button>
+                    </div>
+                </div>
+                <div class="settingElem languageSetting">
+                    <span class="languageText">
+                        <span>{{ t('settings.language') }}</span>
+                        <small>{{ t('settings.languageDescription') }}</small>
+                    </span>
+                    <div class="languageDropdown" ref="languageDropdownRoot">
+                        <button
+                            type="button"
+                            class="languageTrigger"
+                            :class="{ open: languageDropdownOpen }"
+                            @click="toggleLanguageDropdown"
+                            :aria-expanded="languageDropdownOpen"
+                            aria-haspopup="listbox"
+                        >
+                            <span class="languageCode">{{ selectedLanguage.short }}</span>
+                            <span class="languageCurrent">{{ t(selectedLanguage.labelKey) }}</span>
+                            <svg class="languageChevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="m6 9 6 6 6-6" />
+                            </svg>
+                        </button>
+                        <transition name="languageMenu">
+                            <div v-if="languageDropdownOpen" class="languageMenu" role="listbox">
+                                <button
+                                    v-for="option in languageOptions"
+                                    :key="option.value"
+                                    type="button"
+                                    class="languageOption"
+                                    :class="{ active: settings.language === option.value }"
+                                    role="option"
+                                    :aria-selected="settings.language === option.value"
+                                    @click="chooseLanguage(option.value)"
+                                >
+                                    <span class="languageCode">{{ option.short }}</span>
+                                    <span>{{ t(option.labelKey) }}</span>
+                                </button>
+                            </div>
+                        </transition>
                     </div>
                 </div>
             </div>
@@ -644,6 +717,129 @@ function onSeparatorKey(e: KeyboardEvent) {
 .settingCheckbox:checked::after {
     transform: translateX(14px);
     background: var(--dark-bg);
+}
+.languageSetting {
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+}
+.languageText {
+    color: #ffffff;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+
+    &:hover {
+        color: #ffffff !important;
+    }
+}
+.languageText span:hover {
+    color: #ffffff !important;
+}
+.languageText small {
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.42);
+    font-size: 13px;
+    font-weight: 500;
+}
+.languageDropdown {
+    position: relative;
+    min-width: 168px;
+}
+.languageTrigger {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    border-radius: 36px;
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color .2s ease, box-shadow .2s ease;
+}
+.languageTrigger:hover,
+.languageTrigger.open {
+    background-color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
+}
+.languageCode {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    height: 22px;
+    border-radius: 16px;
+    background-color: hsla(0, 0%, 100%, 0.11);
+    color: hsla(0, 0%, 100%, 0.86);
+    font-size: 12px;
+    font-weight: 800;
+
+    &:hover {
+        color: hsla(0, 0%, 100%, 0.86) !important;
+    }
+}
+.languageCurrent {
+    flex: 1;
+    text-align: left;
+
+    &:hover {
+        color: hsla(0, 0%, 100%, 1) !important;
+    }
+}
+.languageChevron {
+    flex-shrink: 0;
+    color: hsla(0, 0%, 100%, 0.48);
+    transition: transform .18s ease;
+}
+.languageTrigger.open .languageChevron {
+    transform: rotate(180deg);
+}
+.languageMenu {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    position: absolute;
+    top: calc(100% + 7px);
+    right: 0;
+    z-index: 20;
+    width: 100%;
+    padding: 5px;
+    border-radius: 24px;
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 12%, 0.98);
+    box-shadow: 0 14px 32px hsla(0, 0%, 0%, 0.34), inset 0 0 0 1px hsla(0, 0%, 100%, 0.08);
+    backdrop-filter: blur(14px);
+}
+.languageOption {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 8px 9px;
+    border-radius: 20px;
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.68);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color .18s ease, color .18s ease;
+}
+.languageOption:hover,
+.languageOption.active {
+    background-color: hsla(0, 0%, 100%, 0.09);
+    color: #ffffff;
+}
+.languageMenu-enter-active,
+.languageMenu-leave-active {
+    transition: opacity .16s ease, transform .16s ease;
+    transform-origin: top right;
+}
+.languageMenu-enter-from,
+.languageMenu-leave-to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
 }
 .accentPicker {
     margin-top: 8px;

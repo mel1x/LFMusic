@@ -75,11 +75,15 @@ const sourceId = computed(() => `playlist:${playlistId.value}`)
 
 const { getCustomCover } = useCustomCovers()
 
+const firstCoverTrack = computed(() => {
+    const firstPath = playlistTrackPaths.value[0] ?? playlist.value?.first_file_path
+    return firstPath ? trackMap.value.get(firstPath) : undefined
+})
+
 const playlistCover = computed(() => {
     const custom = getCustomCover('playlist', playlistId.value)
     if (custom) return custom
-    const first = playlistTracks.value[0]
-    return first?.cover_art || defaultPlaylistCover
+    return firstCoverTrack.value?.cover_art || defaultPlaylistCover
 })
 
 // ── Search ──────────────────────────────────────────────────────────────────
@@ -150,6 +154,12 @@ onUnmounted(() => {
 watch(playlistId, async () => {
     await reloadPlaylistTracks()
 })
+
+watch(firstCoverTrack, (track) => {
+    if (track && !track.cover_art) {
+        loadCoversForTracks([track])
+    }
+}, { immediate: true })
 
 // ── Virtual scroll ──────────────────────────────────────────────────────────
 
