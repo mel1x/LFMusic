@@ -54,6 +54,55 @@ export interface PlayerStatus {
   current_file_path: string | null;
 }
 
+export interface PlayTrackOptions {
+  skipAttempt?: boolean;
+  orderIndex?: number;
+  finishPrevious?: boolean;
+  manualListStart?: boolean;
+  searchStart?: boolean;
+}
+
+interface TrackStatisticsDelta {
+  filePath: string;
+  earlySkipCountDelta?: number;
+  skipCountDelta?: number;
+  listenCountDelta?: number;
+  fullListenCountDelta?: number;
+  playlistAddCountDelta?: number;
+  searchStartCountDelta?: number;
+  manualStartCountDelta?: number;
+  repeatEnabledCountDelta?: number;
+  morningListenCountDelta?: number;
+  dayListenCountDelta?: number;
+  eveningListenCountDelta?: number;
+  nightListenCountDelta?: number;
+  totalListenedSecsDelta?: number;
+}
+
+interface PlaybackStatsSession {
+  filePath: string;
+  durationSecs: number;
+  startedAtPositionSecs: number;
+  lastPositionSecs: number;
+  maxPositionSecs: number;
+  listenedSecs: number;
+  reportedListenedSecs: number;
+  listenThresholdSecs: number;
+  listenRecorded: boolean;
+  fullRecorded: boolean;
+  lastWallClockMs: number | null;
+}
+
+type CollectionStatsKind = "album" | "playlist";
+
+interface CollectionStatsSession {
+  kind: CollectionStatsKind;
+  key: string;
+  signature: string;
+  trackPaths: Set<string>;
+  completedPaths: Set<string>;
+}
+
 interface AudioFeatureProgressStatus {
   current: number;
   total: number;
@@ -74,6 +123,34 @@ function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function listenThresholdSecs(durationSecs: number | null | undefined): number {
+  return typeof durationSecs === "number" && Number.isFinite(durationSecs) && durationSecs > 0
+    ? Math.min(90, durationSecs / 3)
+    : 90;
+}
+
+function dayPartListenDelta(): Partial<TrackStatisticsDelta> {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return { morningListenCountDelta: 1 };
+  if (hour >= 12 && hour < 18) return { dayListenCountDelta: 1 };
+  if (hour >= 18 && hour < 23) return { eveningListenCountDelta: 1 };
+  return { nightListenCountDelta: 1 };
+}
+
+function createTrackDelta(filePath: string): TrackStatisticsDelta {
+  return { filePath };
+}
+
+function hasTrackDelta(delta: TrackStatisticsDelta): boolean {
+  return Object.entries(delta).some(([key, value]) =>
+    key !== "filePath" && typeof value === "number" && value !== 0
+  );
+}
+
+function roundedSeconds(seconds: number): number {
+  return Math.round(Math.max(0, seconds) * 1000) / 1000;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -117,6 +194,8 @@ const sourceTrackList = ref<TrackMetadata[]>([]);
 
 // Initialization flag
 let initialized = false;
+let statsSession: PlaybackStatsSession | null = null;
+let collectionStatsSession: CollectionStatsSession | null = null;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Composable
@@ -153,6 +232,173 @@ export function usePlayer() {
       return sourceTrackList.value;
     }
     return trackList.value;
+  }
+
+  function sendTrackStatisticsDelta(delta: TrackStatisticsDelta): Promise<void> {
+    if (!hasTrackDelta(delta)) return Promise.resolve();
+    return invoke("statistics_add_track_delta", { delta })
+      .then(() => undefined)
+      .catch((e) => {
+        console.error("Ошибка записи статистики трека:", e);
+      });
+  }
+
+  function beginStatsSession(track: TrackMetadata, startPositionSecs = 0, state: PlayerStatus["state"] = "Playing") {
+    const duration = track.duration_secs ?? 0;
+    statsSession = {
+      filePath: track.file_path,
+      durationSecs: duration,
+      startedAtPositionSecs: startPositionSecs,
+      lastPositionSecs: startPositionSecs,
+      maxPositionSecs: startPositionSecs,
+      listenedSecs: 0,
+      reportedListenedSecs: 0,
+      listenThresholdSecs: listenThresholdSecs(duration),
+      listenRecorded: false,
+      fullRecorded: false,
+      lastWallClockMs: state === "Playing" ? performance.now() : null,
+    };
+  }
+
+  function updateStatsProgress(position: number, state: PlayerStatus["state"]) {
+    const session = statsSession;
+    if (!session) return;
+
+    const safePosition = Number.isFinite(position) ? Math.max(0, position) : session.lastPositionSecs;
+    session.lastPositionSecs = safePosition;
+    session.maxPositionSecs = Math.max(session.maxPositionSecs, safePosition);
+
+    const now = performance.now();
+    if (state === "Playing") {
+      if (session.lastWallClockMs !== null) {
+        const elapsed = (now - session.lastWallClockMs) / 1000;
+        if (elapsed > 0 && elapsed < 5) {
+          session.listenedSecs += elapsed;
+        }
+      }
+      session.lastWallClockMs = now;
+    } else {
+      session.lastWallClockMs = null;
+    }
+
+    if (!session.listenRecorded && session.listenedSecs >= session.listenThresholdSecs) {
+      session.listenRecorded = true;
+      void sendTrackStatisticsDelta({
+        ...createTrackDelta(session.filePath),
+        listenCountDelta: 1,
+        ...dayPartListenDelta(),
+      });
+    }
+  }
+
+  function addUnreportedListenedTime(delta: TrackStatisticsDelta, fullListen: boolean) {
+    const session = statsSession;
+    if (!session) return;
+    const target = fullListen && session.durationSecs > 0
+      ? session.durationSecs
+      : session.listenedSecs;
+    const unreported = roundedSeconds(target - session.reportedListenedSecs);
+    if (unreported > 0) {
+      delta.totalListenedSecsDelta = (delta.totalListenedSecsDelta ?? 0) + unreported;
+      session.reportedListenedSecs += unreported;
+    }
+  }
+
+  async function flushCurrentStatisticsProgress() {
+    const session = statsSession;
+    if (!session) return;
+    updateStatsProgress(positionSecs.value, playbackState.value);
+    const delta = createTrackDelta(session.filePath);
+    addUnreportedListenedTime(delta, false);
+    await sendTrackStatisticsDelta(delta);
+  }
+
+  async function finishCurrentStatsSession(options: { fullListen?: boolean; forwardSkip?: boolean } = {}) {
+    const session = statsSession;
+    if (!session) return;
+
+    updateStatsProgress(positionSecs.value, playbackState.value);
+    const delta = createTrackDelta(session.filePath);
+
+    if (options.forwardSkip) {
+      delta.skipCountDelta = 1;
+      if (session.lastPositionSecs <= 15) {
+        delta.earlySkipCountDelta = 1;
+      }
+    }
+
+    if (options.fullListen && !session.fullRecorded) {
+      session.fullRecorded = true;
+      delta.fullListenCountDelta = 1;
+    }
+
+    if (options.fullListen && !session.listenRecorded) {
+      session.listenRecorded = true;
+      delta.listenCountDelta = (delta.listenCountDelta ?? 0) + 1;
+      Object.assign(delta, dayPartListenDelta());
+    }
+
+    addUnreportedListenedTime(delta, !!options.fullListen);
+    await sendTrackStatisticsDelta(delta);
+
+    if (options.fullListen) {
+      await markCollectionTrackCompleted(session.filePath);
+    }
+
+    statsSession = null;
+  }
+
+  function recordTrackStartStatistics(filePath: string, options: PlayTrackOptions) {
+    const delta = createTrackDelta(filePath);
+    if (options.searchStart) delta.searchStartCountDelta = 1;
+    if (options.manualListStart) delta.manualStartCountDelta = 1;
+    void sendTrackStatisticsDelta(delta);
+  }
+
+  function collectionRefFromSource(sourceId: string | null): { kind: CollectionStatsKind; key: string } | null {
+    if (!sourceId) return null;
+    if (sourceId.startsWith("album:")) {
+      return { kind: "album", key: sourceId.slice("album:".length) };
+    }
+    if (sourceId.startsWith("playlist:")) {
+      return { kind: "playlist", key: sourceId.slice("playlist:".length) };
+    }
+    return null;
+  }
+
+  function syncCollectionStatsSource(sourceId: string | null, tracks: TrackMetadata[]) {
+    const ref = collectionRefFromSource(sourceId);
+    const trackPaths = Array.from(new Set(tracks.map(t => t.file_path).filter(Boolean)));
+    if (!ref || trackPaths.length === 0) {
+      collectionStatsSession = null;
+      return;
+    }
+
+    const signature = `${ref.kind}:${ref.key}:${trackPaths.slice().sort().join("\n")}`;
+    if (collectionStatsSession?.signature === signature) return;
+
+    collectionStatsSession = {
+      ...ref,
+      signature,
+      trackPaths: new Set(trackPaths),
+      completedPaths: new Set(),
+    };
+  }
+
+  async function markCollectionTrackCompleted(filePath: string) {
+    const session = collectionStatsSession;
+    if (!session || !session.trackPaths.has(filePath)) return;
+
+    session.completedPaths.add(filePath);
+    if (session.completedPaths.size < session.trackPaths.size) return;
+
+    await invoke("statistics_add_collection_full_listen", {
+      kind: session.kind,
+      key: session.key,
+    }).catch((e) => {
+      console.error("Ошибка записи статистики подборки:", e);
+    });
+    session.completedPaths.clear();
   }
 
   /** Количество треков после текущего, которые всегда должны быть заранее
@@ -232,6 +478,7 @@ export function usePlayer() {
       currentOrderIndex.value = currentTrack.value
         ? playbackOrder.value.findIndex(t => t.file_path === currentTrack.value!.file_path)
         : -1;
+      syncCollectionStatsSource(activePlaylistSource.value, getActiveSourceTracks());
       return;
     }
 
@@ -242,6 +489,7 @@ export function usePlayer() {
     playbackOrder.value = head;
     currentOrderIndex.value = currentInSource ? 0 : -1;
     ensureLookahead();
+    syncCollectionStatsSource(activePlaylistSource.value, source);
   }
 
   /** Установить треки плейлиста как источник воспроизведения */
@@ -258,6 +506,12 @@ export function usePlayer() {
 
   function toggleRepeat() {
     repeatMode.value = repeatMode.value === "queue" ? "track" : "queue";
+    if (repeatMode.value === "track" && currentTrack.value) {
+      void sendTrackStatisticsDelta({
+        ...createTrackDelta(currentTrack.value.file_path),
+        repeatEnabledCountDelta: 1,
+      });
+    }
   }
 
   // ── Computed ──────────────────────────────────────────────────────────────
@@ -408,10 +662,13 @@ export function usePlayer() {
 
   // ── Управление плеером ────────────────────────────────────────────────────
 
-  async function playTrack(track: TrackMetadata, _skipAttempt = false, orderIndex?: number) {
+  async function playTrack(track: TrackMetadata, options: PlayTrackOptions = {}) {
     try {
       isLoading.value = true;
       errorMessage.value = "";
+      if (options.finishPrevious !== false) {
+        await finishCurrentStatsSession();
+      }
       const useCrossfade = settings.value.crossfade_between_tracks && playbackState.value === "Playing";
       const metadata = useCrossfade
         ? await invoke<TrackMetadata>("player_play_crossfade", { filePath: track.file_path, crossfadeSecs: 0.25 })
@@ -436,8 +693,8 @@ export function usePlayer() {
 
       currentTrack.value = metadata;
       // Обновляем указатель на позицию в playbackOrder
-      if (orderIndex !== undefined && orderIndex >= 0 && orderIndex < playbackOrder.value.length) {
-        currentOrderIndex.value = orderIndex;
+      if (options.orderIndex !== undefined && options.orderIndex >= 0 && options.orderIndex < playbackOrder.value.length) {
+        currentOrderIndex.value = options.orderIndex;
       } else {
         currentOrderIndex.value = locateInOrder(metadata.file_path);
       }
@@ -451,6 +708,8 @@ export function usePlayer() {
       }
       playbackState.value = "Playing";
       positionSecs.value = 0;
+      beginStatsSession(metadata, 0, "Playing");
+      recordTrackStartStatistics(metadata.file_path, options);
       showSettings.value = false;
     } catch (e: any) {
       // Удаляем недоступный трек из списка и пробуем следующий
@@ -459,10 +718,10 @@ export function usePlayer() {
         trackList.value.splice(failedIdx, 1);
         syncPlaybackOrder();
       }
-      if (!_skipAttempt && playbackOrder.value.length > 0) {
+      if (!options.skipAttempt && playbackOrder.value.length > 0) {
         const nextIdx = Math.min(failedIdx, playbackOrder.value.length - 1);
         if (nextIdx >= 0) {
-          await playTrack(playbackOrder.value[nextIdx], true);
+          await playTrack(playbackOrder.value[nextIdx], { skipAttempt: true, finishPrevious: false });
           return;
         }
       }
@@ -476,11 +735,14 @@ export function usePlayer() {
     try {
       errorMessage.value = "";
       if (playbackState.value === "Playing") {
+        updateStatsProgress(positionSecs.value, "Playing");
+        if (statsSession) statsSession.lastWallClockMs = null;
         await invoke("player_pause");
         playbackState.value = "Paused";
       } else if (playbackState.value === "Paused") {
         await invoke("player_resume");
         playbackState.value = "Playing";
+        if (statsSession) statsSession.lastWallClockMs = performance.now();
       }
     } catch (e: any) {
       errorMessage.value = `Ошибка: ${e}`;
@@ -490,6 +752,7 @@ export function usePlayer() {
   async function stop() {
     try {
       errorMessage.value = "";
+      await finishCurrentStatsSession();
       await invoke("player_stop");
       playbackState.value = "Stopped";
       currentTrack.value = null;
@@ -501,15 +764,18 @@ export function usePlayer() {
 
   async function playNext(auto = false) {
     if (auto && repeatMode.value === "track" && currentTrack.value) {
-      await playTrack(currentTrack.value, false, currentOrderIndex.value);
+      await playTrack(currentTrack.value, { orderIndex: currentOrderIndex.value, finishPrevious: false });
       return;
+    }
+    if (!auto) {
+      await finishCurrentStatsSession({ forwardSkip: true });
     }
     if (shuffled.value) ensureLookahead();
     if (playbackOrder.value.length === 0) return;
     const idx = currentOrderIndex.value;
     if (idx >= 0 && idx < playbackOrder.value.length - 1) {
       const nextIdx = idx + 1;
-      await playTrack(playbackOrder.value[nextIdx], false, nextIdx);
+      await playTrack(playbackOrder.value[nextIdx], { orderIndex: nextIdx, finishPrevious: false });
       if (shuffled.value) {
         ensureLookahead();
         trimHistory();
@@ -517,7 +783,7 @@ export function usePlayer() {
     } else {
       // В unshuffled-режиме зацикливаемся в начало; в shuffled сюда попасть
       // не должны (ensureLookahead гарантирует хвост), но на всякий случай.
-      await playTrack(playbackOrder.value[0], false, 0);
+      await playTrack(playbackOrder.value[0], { orderIndex: 0, finishPrevious: false });
       if (shuffled.value) ensureLookahead();
     }
   }
@@ -529,12 +795,13 @@ export function usePlayer() {
       return;
     }
     const idx = currentOrderIndex.value;
+    await finishCurrentStatsSession();
     if (idx > 0) {
       const prevIdx = idx - 1;
-      await playTrack(playbackOrder.value[prevIdx], false, prevIdx);
+      await playTrack(playbackOrder.value[prevIdx], { orderIndex: prevIdx, finishPrevious: false });
     } else {
       const lastIdx = playbackOrder.value.length - 1;
-      await playTrack(playbackOrder.value[lastIdx], false, lastIdx);
+      await playTrack(playbackOrder.value[lastIdx], { orderIndex: lastIdx, finishPrevious: false });
     }
   }
 
@@ -584,6 +851,7 @@ export function usePlayer() {
         await invoke("player_seek", { positionSecs: position });
       }
       positionSecs.value = position;
+      updateStatsProgress(position, playbackState.value);
     } catch (e: any) {
       errorMessage.value = `Ошибка перемотки: ${e}`;
     }
@@ -596,21 +864,25 @@ export function usePlayer() {
       volume.value = status.volume;
 
       if (!isSeeking.value) positionSecs.value = status.position_secs;
+      updateStatsProgress(status.position_secs, status.state);
 
       if (status.current_file_path) {
         if (currentTrack.value?.file_path !== status.current_file_path) {
           const inList = getTrackByPath(status.current_file_path!);
           if (inList) {
             currentTrack.value = inList;
+            beginStatsSession(inList, status.position_secs, status.state);
           } else {
             const meta = await invoke<TrackMetadata>("get_track_metadata", { filePath: status.current_file_path });
             currentTrack.value = meta;
+            beginStatsSession(meta, status.position_secs, status.state);
           }
         }
       } else if (status.state === "Stopped") {
         if (currentTrack.value && !isHandlingTrackEnd && !isLoading.value) {
           isHandlingTrackEnd = true;
           try {
+            await finishCurrentStatsSession({ fullListen: true });
             await playNext(true);
           } finally {
             isHandlingTrackEnd = false;
@@ -640,6 +912,8 @@ export function usePlayer() {
   }
 
   async function saveState() {
+    await flushCurrentStatisticsProgress();
+
     // Вычисляем индекс текущего трека в источнике
     let trackIndex: number | null = null;
     if (currentTrack.value) {
@@ -776,6 +1050,7 @@ export function usePlayer() {
       }
       playbackState.value = "Paused";
       positionSecs.value = pos;
+      beginStatsSession(metadata, pos, "Paused");
     } catch (e) {
       console.error("Ошибка восстановления трека, сбрасываем сохранённое состояние:", e);
       // Сбрасываем сломанное состояние, чтобы следующий запуск был чистым

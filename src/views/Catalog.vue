@@ -292,7 +292,7 @@ function onCoverClick(track: TrackMetadata) {
         return
     }
     setPlaylistSource(catalogSourceId.value, filteredTracks.value)
-    playTrack(track)
+    playTrack(track, { manualListStart: true })
 }
 
 

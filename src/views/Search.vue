@@ -273,7 +273,7 @@ async function onPlayAlbum(e: MouseEvent, a: AlbumResult) {
     const map = new Map(trackList.value.map(t => [t.file_path, t]))
     const merged = tracks.map(t => map.get(t.file_path) ?? t)
     setPlaylistSource(sourceId, merged)
-    await playTrack(merged[0])
+    await playTrack(merged[0], { searchStart: true })
 }
 
 // ── Tracks ─────────────────────────────────────────────────────────────────
@@ -308,7 +308,7 @@ function onTrackCoverClick(track: TrackMetadata) {
         return
     }
     setPlaylistSource(trackSourceId.value, trackResults.value)
-    playTrack(track)
+    playTrack(track, { searchStart: true, manualListStart: true })
 }
 
 function onTrackClick(e: MouseEvent) {
@@ -407,7 +407,7 @@ async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     const map = new Map(trackList.value.map(t => [t.file_path, t]))
     const merged = tracks.map(t => map.get(t.file_path) ?? t)
     setPlaylistSource(sourceId, merged)
-    await playTrack(merged[0])
+    await playTrack(merged[0], { searchStart: true })
 }
 
 // ── Horizontal scroll helper ───────────────────────────────────────────────

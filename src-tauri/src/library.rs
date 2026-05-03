@@ -1,5 +1,6 @@
 use crate::audio_features::{self, AudioFeatures, AUDIO_FEATURE_ANALYZER_VERSION};
 use crate::audio_player::{AudioPlayer, TrackMetadata};
+use crate::statistics::{self, CollectionKind, TrackStatisticsDelta};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -328,6 +329,9 @@ impl MusicLibrary {
              );",
         )
         .map_err(|e| format!("Ошибка создания таблиц: {}", e))?;
+
+        statistics::create_tables(&conn)
+            .map_err(|e| format!("Ошибка создания таблиц статистики: {}", e))?;
 
         // Миграции: добавляем столбцы только если их ещё нет
         let existing_columns: HashSet<String> = {
@@ -1243,12 +1247,19 @@ impl MusicLibrary {
             )
             .map_err(|e| format!("Ошибка чтения sort_order: {}", e))?;
 
-        self.conn
+        let changed = self.conn
             .execute(
                 "INSERT OR IGNORE INTO playlist_tracks (playlist_id, file_path, sort_order) VALUES (?1, ?2, ?3)",
                 params![playlist_id, file_path, max_order + 1],
             )
             .map_err(|e| format!("Ошибка добавления трека: {}", e))?;
+        if changed > 0 {
+            self.add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: file_path.to_string(),
+                playlist_add_count_delta: 1,
+                ..TrackStatisticsDelta::default()
+            })?;
+        }
         Ok(())
     }
 
@@ -1262,12 +1273,19 @@ impl MusicLibrary {
             return Err("Нельзя удалять треки из системных плейлистов".into());
         }
 
-        self.conn
+        let changed = self.conn
             .execute(
                 "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND file_path = ?2",
                 params![playlist_id, file_path],
             )
             .map_err(|e| format!("Ошибка удаления трека: {}", e))?;
+        if changed > 0 {
+            self.add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: file_path.to_string(),
+                playlist_add_count_delta: -1,
+                ..TrackStatisticsDelta::default()
+            })?;
+        }
         Ok(())
     }
 
@@ -1289,6 +1307,20 @@ impl MusicLibrary {
         };
 
         rows.filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn add_track_statistics_delta(&self, delta: TrackStatisticsDelta) -> Result<(), String> {
+        statistics::apply_track_delta(&self.conn, &delta)
+            .map_err(|e| format!("Ошибка записи статистики трека: {}", e))
+    }
+
+    pub fn add_collection_full_listen(
+        &self,
+        kind: CollectionKind,
+        key: &str,
+    ) -> Result<(), String> {
+        statistics::apply_collection_full_listen(&self.conn, kind, key)
+            .map_err(|e| format!("Ошибка записи статистики подборки: {}", e))
     }
 
     /// Поднять трек на первое место в плейлисте

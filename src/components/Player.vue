@@ -347,7 +347,7 @@ function onQfCoverClick(track: TrackMetadata) {
         togglePlayPause()
         return
     }
-    playTrack(track)
+    playTrack(track, { manualListStart: true })
 }
 
 function openQfTrackMenu(e: MouseEvent, track: TrackMetadata) {

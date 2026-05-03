@@ -230,7 +230,7 @@ function onCoverClick(track: TrackMetadata) {
         return
     }
     setPlaylistSource(sourceId.value, filteredTracks.value)
-    playTrack(track)
+    playTrack(track, { manualListStart: true })
 }
 
 // ── Context menu ────────────────────────────────────────────────────────────

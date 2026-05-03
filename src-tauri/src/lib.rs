@@ -5,6 +5,7 @@ mod library;
 mod pins;
 mod player_state;
 mod settings;
+pub mod statistics;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -491,6 +492,25 @@ fn playlist_get_ids_for_track(state: State<LibraryState>, file_path: String) -> 
     Ok(library.get_user_playlist_ids_for_track(&file_path))
 }
 
+#[tauri::command]
+fn statistics_add_track_delta(
+    state: State<LibraryState>,
+    delta: statistics::TrackStatisticsDelta,
+) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.add_track_statistics_delta(delta)
+}
+
+#[tauri::command]
+fn statistics_add_collection_full_listen(
+    state: State<LibraryState>,
+    kind: statistics::CollectionKind,
+    key: String,
+) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.add_collection_full_listen(kind, &key)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Команды эквалайзера
 // ──────────────────────────────────────────────────────────────────────────────
@@ -871,6 +891,8 @@ pub fn run() {
             playlist_remove_track,
             playlist_move_track_to_top,
             playlist_get_ids_for_track,
+            statistics_add_track_delta,
+            statistics_add_collection_full_listen,
             // Эквалайзер
             eq_set_bands,
             eq_get_bands,
