@@ -38,6 +38,13 @@ export interface TrackMetadata {
   file_path: string;
   cover_art: string | null;
   accent_color: string | null;
+  bpm: number | null;
+  loudness: number | null;
+  energy: number | null;
+  danceability: number | null;
+  spectral_centroid: number | null;
+  key: string | null;
+  audio_fingerprint: string | null;
 }
 
 export interface PlayerStatus {
@@ -47,6 +54,12 @@ export interface PlayerStatus {
   current_file_path: string | null;
 }
 
+interface AudioFeatureProgressStatus {
+  current: number;
+  total: number;
+  percent: number;
+  active: boolean;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Утилиты
@@ -114,7 +127,7 @@ export function usePlayer() {
   const {
     folders, isScanning, removingFolder, scanProgress,
     init: initFolders, addFolder: addFolderRaw, removeFolder: removeFolderRaw,
-    rescanLibrary: rescanLibraryRaw, folderDisplayName,
+    rescanLibrary: rescanLibraryRaw, folderDisplayName, openTracksReadyModal,
   } = useFolders();
 
   const { loadPlaylists, getPlaylistTracks } = usePlaylists();
@@ -370,8 +383,15 @@ export function usePlayer() {
 
   async function addFolder() {
     errorMessage.value = "";
-    await addFolderRaw();
+    const featureStatus = await invoke<AudioFeatureProgressStatus>("library_audio_features_status")
+      .catch(() => null);
+    const workerWasActive = featureStatus?.active === true;
+    const added = await addFolderRaw();
+    if (!added) return;
     await refreshLibrary();
+    if (!workerWasActive) {
+      openTracksReadyModal();
+    }
   }
 
   async function removeFolder(folder: string) {

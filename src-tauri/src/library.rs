@@ -1,3 +1,4 @@
+use crate::audio_features::{self, AudioFeatures, AUDIO_FEATURE_ANALYZER_VERSION};
 use crate::audio_player::{AudioPlayer, TrackMetadata};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
@@ -5,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -65,6 +67,173 @@ pub fn split_artists(artist: &str, separators: &[String]) -> Vec<String> {
 
 pub struct MusicLibrary {
     conn: Connection,
+    db_path: PathBuf,
+}
+
+pub type AudioFeatureProgressEmitter = Arc<dyn Fn(usize, usize) + Send + Sync + 'static>;
+
+static AUDIO_FEATURE_WORKER_GENERATION: AtomicU64 = AtomicU64::new(0);
+static AUDIO_FEATURE_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn current_audio_feature_generation() -> u64 {
+    AUDIO_FEATURE_WORKER_GENERATION.load(Ordering::SeqCst)
+}
+
+fn is_audio_feature_generation_current(generation: u64) -> bool {
+    current_audio_feature_generation() == generation
+}
+
+fn spawn_audio_feature_analysis(
+    db_path: PathBuf,
+    jobs: Vec<(String, Option<f64>, u64)>,
+    initial_completed: usize,
+    total: usize,
+    generation: u64,
+    progress: Option<AudioFeatureProgressEmitter>,
+) {
+    if jobs.is_empty() {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("audio-feature-analysis".into())
+        .spawn(move || {
+            let mut completed = initial_completed.min(total);
+            if is_audio_feature_generation_current(generation) {
+                AUDIO_FEATURE_WORKER_ACTIVE.store(true, Ordering::SeqCst);
+            }
+
+            if is_audio_feature_generation_current(generation) {
+                if let Some(progress) = &progress {
+                    progress(completed, total);
+                }
+            }
+
+            let Ok(mut conn) = Connection::open(db_path) else {
+                if is_audio_feature_generation_current(generation) {
+                    AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
+                }
+                if is_audio_feature_generation_current(generation) {
+                    if let Some(progress) = &progress {
+                        progress(total, total);
+                    }
+                }
+                return;
+            };
+            let _ = conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA foreign_keys=ON;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA busy_timeout=5000;
+                 PRAGMA temp_store=MEMORY;",
+            );
+
+            let pool = match rayon::ThreadPoolBuilder::new()
+                .num_threads(MusicLibrary::scan_thread_count())
+                .build()
+            {
+                Ok(pool) => pool,
+                Err(_) => {
+                    if is_audio_feature_generation_current(generation) {
+                        AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
+                    }
+                    if is_audio_feature_generation_current(generation) {
+                        if let Some(progress) = &progress {
+                            progress(total, total);
+                        }
+                    }
+                    return;
+                }
+            };
+
+            let chunk_size = MusicLibrary::scan_thread_count().max(1);
+            for chunk in jobs.chunks(chunk_size) {
+                if !is_audio_feature_generation_current(generation) {
+                    return;
+                }
+
+                let results: Vec<(String, u64, Option<AudioFeatures>)> = pool.install(|| {
+                    chunk
+                        .par_iter()
+                        .filter_map(|(path, duration, mtime)| {
+                            if !is_audio_feature_generation_current(generation) {
+                                return None;
+                            }
+
+                            let features = audio_features::analyze_file(path, *duration).ok();
+                            if !is_audio_feature_generation_current(generation) {
+                                return None;
+                            }
+
+                            Some((
+                                path.clone(),
+                                *mtime,
+                                features,
+                            ))
+                        })
+                        .collect()
+                });
+
+                if !is_audio_feature_generation_current(generation) {
+                    return;
+                }
+
+                let Ok(tx) = conn.transaction() else {
+                    continue;
+                };
+
+                if let Ok(mut stmt) = tx.prepare(
+                        "INSERT INTO track_audio_features
+                         (file_path, bpm, loudness, energy, danceability, spectral_centroid,
+                          track_key, audio_fingerprint,
+                          analyzed_modified_secs, analyzer_version)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                         ON CONFLICT(file_path) DO UPDATE SET
+                            bpm = excluded.bpm,
+                            loudness = excluded.loudness,
+                            energy = excluded.energy,
+                            danceability = excluded.danceability,
+                            spectral_centroid = excluded.spectral_centroid,
+                            track_key = excluded.track_key,
+                            audio_fingerprint = excluded.audio_fingerprint,
+                            analyzed_modified_secs = excluded.analyzed_modified_secs,
+                            analyzer_version = excluded.analyzer_version",
+                    ) {
+                    for (file_path, mtime, features) in &results {
+                        let _ = stmt.execute(params![
+                            file_path,
+                            features.as_ref().and_then(|f| f.bpm),
+                            features.as_ref().and_then(|f| f.loudness),
+                            features.as_ref().and_then(|f| f.energy),
+                            features.as_ref().and_then(|f| f.danceability),
+                            features.as_ref().and_then(|f| f.spectral_centroid),
+                            features.as_ref().and_then(|f| f.key.as_deref()),
+                            features.as_ref().and_then(|f| f.audio_fingerprint.as_deref()),
+                            *mtime as i64,
+                            AUDIO_FEATURE_ANALYZER_VERSION,
+                        ]);
+                    }
+                }
+
+                let _ = tx.commit();
+
+                if !is_audio_feature_generation_current(generation) {
+                    return;
+                }
+
+                completed = (completed + results.len()).min(total);
+                if let Some(progress) = &progress {
+                    progress(completed, total);
+                }
+            }
+
+            if is_audio_feature_generation_current(generation) {
+                AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
+                if let Some(progress) = &progress {
+                    progress(total, total);
+                }
+            }
+        });
 }
 
 impl MusicLibrary {
@@ -86,6 +255,7 @@ impl MusicLibrary {
             "PRAGMA journal_mode=WAL;
              PRAGMA foreign_keys=ON;
              PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;
              PRAGMA cache_size=-8000;
              PRAGMA temp_store=MEMORY;",
         )
@@ -115,6 +285,24 @@ impl MusicLibrary {
              CREATE INDEX IF NOT EXISTS idx_tracks_folder ON tracks(folder_path);
              CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
              CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album);
+
+             CREATE TABLE IF NOT EXISTS track_audio_features (
+                 file_path              TEXT PRIMARY KEY NOT NULL,
+                 bpm                    REAL,
+                 loudness               REAL,
+                 energy                 REAL,
+                 danceability           REAL,
+                 spectral_centroid      REAL,
+                 track_key              TEXT,
+                 audio_fingerprint      TEXT,
+                 analyzed_modified_secs INTEGER NOT NULL DEFAULT 0,
+                 analyzer_version       INTEGER NOT NULL DEFAULT 1,
+                 FOREIGN KEY (file_path) REFERENCES tracks(file_path) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_track_audio_features_bpm
+                 ON track_audio_features(bpm);
+             CREATE INDEX IF NOT EXISTS idx_track_audio_features_fingerprint
+                 ON track_audio_features(audio_fingerprint);
 
              CREATE TABLE IF NOT EXISTS playlists (
                  id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,20 +373,111 @@ impl MusicLibrary {
             );
         }
 
-        Ok(Self { conn })
+        Ok(Self { conn, db_path })
     }
 
-    /// Корректное закрытие БД перед выходом: сливаем WAL в основной файл,
-    /// запускаем PRAGMA optimize и переключаем журнал в DELETE,
-    /// чтобы SQLite удалил sidecar-файлы -wal и -shm.
+    pub fn resume_pending_audio_feature_analysis(
+        &self,
+        progress: Option<AudioFeatureProgressEmitter>,
+    ) -> Result<usize, String> {
+        self.restart_pending_audio_feature_analysis(progress)
+    }
+
+    fn restart_pending_audio_feature_analysis(
+        &self,
+        progress: Option<AudioFeatureProgressEmitter>,
+    ) -> Result<usize, String> {
+        let generation = AUDIO_FEATURE_WORKER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
+
+        let (completed, total) = self.audio_feature_progress_counts()?;
+        let jobs = self.pending_audio_feature_jobs()?;
+        let count = jobs.len();
+        AUDIO_FEATURE_WORKER_ACTIVE.store(count > 0, Ordering::SeqCst);
+
+        if count == 0 {
+            if let Some(progress) = progress {
+                progress(completed, total);
+            }
+            return Ok(0);
+        }
+
+        spawn_audio_feature_analysis(
+            self.db_path.clone(),
+            jobs,
+            completed,
+            total,
+            generation,
+            progress,
+        );
+        Ok(count)
+    }
+
+    pub fn cancel_audio_feature_analysis(&self) {
+        AUDIO_FEATURE_WORKER_GENERATION.fetch_add(1, Ordering::SeqCst);
+        AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    pub fn audio_feature_status(&self) -> Result<(usize, usize, bool), String> {
+        let (completed, total) = self.audio_feature_progress_counts()?;
+        let active = AUDIO_FEATURE_WORKER_ACTIVE.load(Ordering::SeqCst) && completed < total;
+        Ok((completed, total, active))
+    }
+
+    fn pending_audio_feature_jobs(&self) -> Result<Vec<(String, Option<f64>, u64)>, String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.file_path, t.duration_secs, t.modified_secs
+             FROM tracks t
+             LEFT JOIN track_audio_features af
+               ON af.file_path = t.file_path
+              AND af.analyzed_modified_secs = t.modified_secs
+              AND af.analyzer_version = ?1
+             WHERE af.file_path IS NULL"
+        ).map_err(|e| format!("Ошибка подготовки pending audio features: {}", e))?;
+
+        let rows = stmt
+            .query_map(params![AUDIO_FEATURE_ANALYZER_VERSION], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
+            .map_err(|e| format!("Ошибка чтения pending audio features: {}", e))?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    fn audio_feature_progress_counts(&self) -> Result<(usize, usize), String> {
+        self.conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN af.file_path IS NULL THEN 0 ELSE 1 END), 0),
+                COUNT(*)
+             FROM tracks t
+             LEFT JOIN track_audio_features af
+               ON af.file_path = t.file_path
+              AND af.analyzed_modified_secs = t.modified_secs
+              AND af.analyzer_version = ?1",
+            params![AUDIO_FEATURE_ANALYZER_VERSION],
+            |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize)),
+        ).map_err(|e| format!("Ошибка подсчёта прогресса audio features: {}", e))
+    }
+
+    /// Корректное закрытие БД перед выходом: делаем лёгкую оптимизацию и
+    /// неблокирующий checkpoint. WAL оставляем включённым, потому что фоновые
+    /// DSP-потоки могут ещё держать своё SQLite-соединение при закрытии окна.
     pub fn shutdown(&self) -> Result<(), String> {
-        self.conn
-            .execute_batch(
-                "PRAGMA wal_checkpoint(TRUNCATE);
-                 PRAGMA optimize;
-                 PRAGMA journal_mode=DELETE;",
-            )
-            .map_err(|e| format!("Ошибка закрытия БД: {}", e))
+        let _ = self.conn.execute_batch("PRAGMA optimize;");
+        match self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::DatabaseBusy
+                    || err.code == rusqlite::ErrorCode::DatabaseLocked =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(format!("Ошибка закрытия БД: {}", e)),
+        }
     }
 
     // ── Вспомогательные ────────────────────────────────────────────────────
@@ -270,6 +549,8 @@ impl MusicLibrary {
     fn scan_folder_internal<F>(
         &mut self,
         folder: &str,
+        analyze_audio_features: bool,
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
         progress: F,
     ) -> Result<(), String>
     where
@@ -285,7 +566,13 @@ impl MusicLibrary {
         let mut all_files: Vec<PathBuf> = Vec::new();
         Self::collect_audio_files(&path, &supported, 0, &mut all_files);
 
-        self.scan_folder_files(folder, &all_files, progress)
+        self.scan_folder_files(
+            folder,
+            &all_files,
+            analyze_audio_features,
+            audio_feature_progress,
+            progress,
+        )
     }
 
     // ── Публичный API ───────────────────────────────────────────────────────
@@ -331,6 +618,7 @@ impl MusicLibrary {
         &mut self,
         folder: String,
         artist_separators: &[String],
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
         progress: F,
     ) -> Result<Vec<TrackMetadata>, String>
     where
@@ -348,13 +636,20 @@ impl MusicLibrary {
             )
             .map_err(|e| format!("Ошибка добавления папки: {}", e))?;
 
-        self.scan_folder_internal(&folder, progress)?;
+        self.scan_folder_internal(&folder, true, audio_feature_progress, progress)?;
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
         Ok(self.get_all_tracks_light())
     }
 
-    pub fn remove_folder(&mut self, folder: String, artist_separators: &[String]) -> Result<(), String> {
+    pub fn remove_folder(
+        &mut self,
+        folder: String,
+        artist_separators: &[String],
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
+    ) -> Result<(), String> {
+        self.cancel_audio_feature_analysis();
+
         let tx = self
             .conn
             .transaction()
@@ -383,6 +678,7 @@ impl MusicLibrary {
 
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
+        let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
         Ok(())
     }
 
@@ -455,9 +751,12 @@ impl MusicLibrary {
                     t.album, t.genre, t.duration_secs,
                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                     COALESCE(o.accent_color, t.accent_color),
-                    NULL
+                    NULL,
+                    af.bpm, af.loudness, af.energy, af.danceability,
+                    af.spectral_centroid, af.track_key, af.audio_fingerprint
              FROM tracks t
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              ORDER BY
                  t.sort_order DESC,
                  CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
@@ -471,9 +770,12 @@ impl MusicLibrary {
                     t.album, t.genre, t.duration_secs,
                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                     COALESCE(o.accent_color, t.accent_color),
-                    o.cover_data
+                    o.cover_data,
+                    af.bpm, af.loudness, af.energy, af.danceability,
+                    af.spectral_centroid, af.track_key, af.audio_fingerprint
              FROM tracks t
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              ORDER BY
                  t.sort_order DESC,
                  CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
@@ -512,6 +814,13 @@ impl MusicLibrary {
             is_lossless: row.get::<_, i32>(11)? != 0,
             cover_art: cover_override,
             accent_color: row.get(12)?,
+            bpm: row.get(14)?,
+            loudness: row.get(15)?,
+            energy: row.get(16)?,
+            danceability: row.get(17)?,
+            spectral_centroid: row.get(18)?,
+            key: row.get(19)?,
+            audio_fingerprint: row.get(20)?,
         })
     }
 
@@ -526,9 +835,12 @@ impl MusicLibrary {
                         t.album, t.genre, t.duration_secs,
                         t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                         COALESCE(o.accent_color, t.accent_color),
-                        o.cover_data
+                        o.cover_data,
+                        af.bpm, af.loudness, af.energy, af.danceability,
+                        af.spectral_centroid, af.track_key, af.audio_fingerprint
                  FROM tracks t
                  LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                 LEFT JOIN track_audio_features af ON af.file_path = t.file_path
                  WHERE t.file_path = ?1",
             )
             .ok()?;
@@ -590,7 +902,7 @@ impl MusicLibrary {
             let folder_total = files.len();
             let offset = global_current;
 
-            self.scan_folder_files(folder, files, |i, _| {
+            self.scan_folder_files(folder, files, false, None, |i, _| {
                 progress(offset + i, grand_total);
             })?;
 
@@ -610,6 +922,8 @@ impl MusicLibrary {
         &mut self,
         folder: &str,
         files: &[PathBuf],
+        analyze_audio_features: bool,
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
         progress: F,
     ) -> Result<(), String>
     where
@@ -743,6 +1057,10 @@ impl MusicLibrary {
 
             tx.commit()
                 .map_err(|e| format!("Ошибка коммита: {}", e))?;
+
+            if analyze_audio_features {
+                let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
+            }
         }
 
         Ok(())
@@ -806,10 +1124,13 @@ impl MusicLibrary {
                     t.album, t.genre, t.duration_secs,
                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                     COALESCE(o.accent_color, t.accent_color),
-                    NULL
+                    NULL,
+                    af.bpm, af.loudness, af.energy, af.danceability,
+                    af.spectral_centroid, af.track_key, af.audio_fingerprint
              FROM playlist_tracks pt
              JOIN tracks t ON t.file_path = pt.file_path
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              WHERE pt.playlist_id = ?1
              ORDER BY pt.sort_order ASC,
                       pt.rowid ASC"
@@ -820,10 +1141,13 @@ impl MusicLibrary {
                     t.album, t.genre, t.duration_secs,
                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                     COALESCE(o.accent_color, t.accent_color),
-                    o.cover_data
+                    o.cover_data,
+                    af.bpm, af.loudness, af.energy, af.danceability,
+                    af.spectral_centroid, af.track_key, af.audio_fingerprint
              FROM playlist_tracks pt
              JOIN tracks t ON t.file_path = pt.file_path
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              WHERE pt.playlist_id = ?1
              ORDER BY pt.sort_order ASC,
                       pt.rowid ASC"

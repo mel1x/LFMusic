@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watchEffect } from 'vue';
+import { computed, ref, onMounted, onUnmounted, watchEffect } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import MaximizeIcon from './components/Icons/MaximizeIcon.vue';
 import MinimizeIcon from './components/Icons/MinimizeIcon.vue';
 import CloseIcon from './components/Icons/CloseIcon.vue';
@@ -12,6 +14,7 @@ import TrackInfoModal from './components/TrackInfoModal.vue';
 import TrackEditModal from './components/TrackEditModal.vue';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
+import { useFolders } from './composables/useFolders';
 import { useCustomCovers } from './composables/useCustomCovers';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
@@ -20,15 +23,25 @@ import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
-const { language } = useI18n();
+const { language, t } = useI18n();
 const { saveState, currentTrack, currentAccentColor } = usePlayer();
+const { showTracksReadyModal, dismissTracksReadyModal } = useFolders();
 const { loadCustomCovers } = useCustomCovers();
+
+interface AudioFeatureProgressPayload {
+  current: number;
+  total: number;
+  percent: number;
+  active: boolean;
+}
 
 const BASE_W = 1460;
 const BASE_H = 860;
 const MIN_SCALE = 0.78;
 const MAX_SCALE = 2.0;
 let resizeRaf: number | null = null;
+let unlistenAudioFeatureProgress: UnlistenFn | null = null;
+let featureProgressHideTimer: ReturnType<typeof setTimeout> | null = null;
 
 function applyUiScale() {
   resizeRaf = null;
@@ -54,6 +67,50 @@ if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
 
 const showSplash = ref(!isReload);
 const splashFading = ref(false);
+const featureProgressVisible = ref(false);
+const featureProgress = ref<AudioFeatureProgressPayload>({
+  current: 0,
+  total: 0,
+  percent: 0,
+  active: false,
+});
+
+const featureProgressPercent = computed(() => {
+  return Math.max(0, Math.min(100, featureProgress.value.percent || 0));
+});
+
+const featureProgressNumberWidth = computed(() => {
+  const p = featureProgress.value;
+  const digits = Math.max(1, String(Math.max(p.current, p.total)).length);
+  return `${digits * 0.68}em`;
+});
+
+const featureProgressIsDone = computed(() => {
+  const p = featureProgress.value;
+  return p.total > 0 && (!p.active || p.current >= p.total);
+});
+
+const featureProgressTooltipHeading = computed(() => {
+  const p = featureProgress.value;
+  if (p.total <= 0) return t('audioFeatures.progressPendingTitle');
+  if (!p.active || p.current >= p.total) {
+    return t('audioFeatures.progressDoneTitle');
+  }
+  return t('audioFeatures.progressActiveTitle');
+});
+
+const featureProgressTooltipText = computed(() => {
+  const p = featureProgress.value;
+  if (p.total <= 0) return t('audioFeatures.progressStarting');
+  if (!p.active || p.current >= p.total) {
+    return t('audioFeatures.progressDone', { total: p.total });
+  }
+  return t('audioFeatures.progressActive', { current: p.current, total: p.total });
+});
+
+const featureProgressAriaLabel = computed(() => {
+  return `${featureProgressTooltipHeading.value}. ${featureProgressTooltipText.value}`;
+});
 
 function onSplashEnded() {
   splashFading.value = true;
@@ -64,6 +121,12 @@ function onSplashEnded() {
 
 // Перехват F5 / Ctrl+R — сохраняем состояние перед перезагрузкой
 async function handleReloadKey(e: KeyboardEvent) {
+  if (e.key === 'Escape' && showTracksReadyModal.value) {
+    e.preventDefault();
+    dismissTracksReadyModal();
+    return;
+  }
+
   if (e.key === 'F5' || (e.ctrlKey && e.key === 'r')) {
     e.preventDefault();
     sessionStorage.setItem('lfmusic_reloaded', '1');
@@ -77,11 +140,36 @@ function handleContextMenu(e: MouseEvent) {
   e.preventDefault();
 }
 
+function onTracksReadyBackdrop(e: MouseEvent) {
+  if (e.target === e.currentTarget) dismissTracksReadyModal();
+}
+
 onMounted(() => {
   load();
   startDomI18n();
   loadCustomCovers();
   applyUiScale();
+  void listen<AudioFeatureProgressPayload>('audio_feature_progress', (event) => {
+    const payload = event.payload;
+    featureProgress.value = payload;
+
+    if (featureProgressHideTimer) {
+      clearTimeout(featureProgressHideTimer);
+      featureProgressHideTimer = null;
+    }
+
+    featureProgressVisible.value = payload.total > 0;
+    if (payload.total > 0 && (!payload.active || payload.current >= payload.total)) {
+      featureProgressHideTimer = setTimeout(() => {
+        featureProgressVisible.value = false;
+      }, 2200);
+    }
+  }).then((unlisten) => {
+    unlistenAudioFeatureProgress = unlisten;
+    return invoke<number>('library_resume_audio_features');
+  }).catch(() => {
+    // Продолжение фоновой подготовки не должно мешать запуску интерфейса.
+  });
   window.addEventListener('resize', scheduleUiScale);
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
@@ -92,6 +180,14 @@ onUnmounted(() => {
   if (resizeRaf !== null) {
     cancelAnimationFrame(resizeRaf);
     resizeRaf = null;
+  }
+  if (featureProgressHideTimer) {
+    clearTimeout(featureProgressHideTimer);
+    featureProgressHideTimer = null;
+  }
+  if (unlistenAudioFeatureProgress) {
+    unlistenAudioFeatureProgress();
+    unlistenAudioFeatureProgress = null;
   }
   document.removeEventListener('keydown', handleReloadKey);
   document.removeEventListener('contextmenu', handleContextMenu);
@@ -150,6 +246,36 @@ const closeWindow = async () => {
       <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.artist || 'Неизвестный исполнитель') : 'by mel1x' }}</div>
     </div>
     <div class="winControls">
+      <div
+        v-if="featureProgressVisible"
+        class="featureWorkerProgress"
+        :aria-label="featureProgressAriaLabel"
+      >
+        <div class="featureWorkerTrack">
+          <div class="featureWorkerFill" :style="{ width: featureProgressPercent + '%' }"></div>
+        </div>
+        <span class="featureWorkerPercent">{{ Math.round(featureProgressPercent) }}%</span>
+        <div class="featureWorkerTooltip" role="tooltip">
+          <div class="featureWorkerTooltipTitle">{{ featureProgressTooltipHeading }}</div>
+          <div class="featureWorkerTooltipText">
+            <template v-if="featureProgress.total <= 0">
+              {{ t('audioFeatures.progressStarting') }}
+            </template>
+            <template v-else-if="featureProgressIsDone">
+              {{ t('audioFeatures.progressDonePrefix') }}
+              <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
+              {{ t('audioFeatures.progressDoneSuffix') }}
+            </template>
+            <template v-else>
+              {{ t('audioFeatures.progressActivePrefix') }}
+              <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.current }}</span>
+              {{ t('audioFeatures.progressActiveMiddle') }}
+              <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
+              {{ t('audioFeatures.progressActiveSuffix') }}
+            </template>
+          </div>
+        </div>
+      </div>
       <a v-if="settings.show_github_badge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
       <button class="controlsButton" @click="minimizeWindow"><MinimizeIcon /></button>
       <button class="controlsButton" @click="maximizeWindow"><MaximizeIcon /></button>
@@ -160,6 +286,23 @@ const closeWindow = async () => {
   <Player :key="`player-${language}`" class="playerPart" />
   <TrackInfoModal :key="`info-${language}`" />
   <TrackEditModal :key="`edit-${language}`" />
+  <Teleport to="body">
+    <Transition name="scan-ready">
+      <div
+        v-if="showTracksReadyModal"
+        class="scanReadyBackdrop"
+        @mousedown="onTracksReadyBackdrop"
+      >
+        <div class="scanReadyModal" @mousedown.stop>
+          <div class="scanReadyTitle">{{ t('audioFeatures.tracksReadyTitle') }}</div>
+          <div class="scanReadyText">
+            {{ t('audioFeatures.tracksReadyText') }}
+          </div>
+          <button class="scanReadyButton" @click="dismissTracksReadyModal">{{ t('audioFeatures.tracksReadyButton') }}</button>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style>
@@ -271,6 +414,105 @@ body {
   align-items: center;
   justify-content: center;
 }
+.featureWorkerProgress {
+  position: relative;
+  width: 176px;
+  height: 25px;
+  margin-right: 10px;
+  padding: 0 8px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 25%, 1), hsla(var(--accent-h), var(--accent-s), 15%, 1));
+  color: hsla(0, 0%, 100%, 0.84);
+  cursor: help;
+  transition: background-color .24s ease, border-color .24s ease;
+}
+.featureWorkerProgress:hover {
+  border-color: hsla(0, 0%, 100%, 0.14);
+}
+.featureWorkerTrack {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: hsla(0, 0%, 100%, 0.13);
+}
+.featureWorkerFill {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%, 0.95);
+  transition: width .28s ease;
+}
+.featureWorkerPercent {
+  min-width: 30px;
+  text-align: right;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.featureWorkerTooltip {
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  width: 290px;
+  padding: 11px 12px 12px;
+  border-radius: 14px;
+  background: hsla(var(--accent-h), min(var(--accent-s), 42%), 10%, 0.98);
+  border: 1px solid hsla(0, 0%, 100%, 0.1);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.36);
+  color: #fff;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity .16s ease, transform .16s ease;
+  z-index: 20;
+}
+.featureWorkerTooltip::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  right: 24px;
+  width: 10px;
+  height: 10px;
+  transform: rotate(45deg);
+  background: inherit;
+  border-left: 1px solid hsla(0, 0%, 100%, 0.1);
+  border-top: 1px solid hsla(0, 0%, 100%, 0.1);
+}
+.featureWorkerProgress:hover .featureWorkerTooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+.featureWorkerTooltipTitle {
+  position: relative;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 800;
+  color: hsla(0, 0%, 100%, 0.95);
+  user-select: none;
+}
+.featureWorkerTooltipText {
+  position: relative;
+  min-height: 34px;
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.42;
+  font-weight: 500;
+  color: hsla(0, 0%, 100%, 0.66);
+  user-select: none;
+}
+.featureWorkerTooltipNumber {
+  display: inline-block;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: hsla(0, 0%, 100%, 0.82);
+}
 .winControls a {
   display: flex;
   flex-direction: row;
@@ -327,5 +569,73 @@ body {
   width: 100%;
   height: 104px;
   flex-shrink: 0;
+}
+.scanReadyBackdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: calc(100vw / var(--ui-scale, 1));
+  height: calc(100vh / var(--ui-scale, 1));
+  z-index: 1000001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: hsla(0, 0%, 0%, 0.42);
+  backdrop-filter: blur(5px);
+}
+.scanReadyModal {
+  width: 430px;
+  max-width: calc(100vw - 42px);
+  padding: 26px 26px 18px;
+  border-radius: 28px;
+  background: linear-gradient(165deg, var(--light-bg), hsla(var(--accent-h), var(--accent-s), 10%, 0.98));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.scanReadyTitle {
+  font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 22px;
+  line-height: 1.15;
+  font-weight: 800;
+  color: hsla(0, 0%, 100%, 0.95);
+  user-select: none;
+}
+.scanReadyText {
+  font-size: 15px;
+  line-height: 1.45;
+  font-weight: 500;
+  color: hsla(0, 0%, 100%, 0.64);
+  user-select: none;
+}
+.scanReadyButton {
+  align-self: flex-end;
+  margin-top: 8px;
+  padding: 7px 16px;
+  border-radius: 18px;
+  background: hsla(0, 0%, 100%, 0.08);
+  color: hsla(0, 0%, 100%, 0.9);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color .2s ease, color .2s ease;
+}
+.scanReadyButton:hover {
+  background: hsla(0, 0%, 100%, 0.14);
+  color: #fff;
+}
+.scan-ready-enter-active, .scan-ready-leave-active {
+  transition: opacity .18s ease;
+}
+.scan-ready-enter-active .scanReadyModal, .scan-ready-leave-active .scanReadyModal {
+  transition: transform .18s ease, opacity .18s ease;
+}
+.scan-ready-enter-from, .scan-ready-leave-to {
+  opacity: 0;
+}
+.scan-ready-enter-from .scanReadyModal, .scan-ready-leave-to .scanReadyModal {
+  transform: scale(0.96) translateY(4px);
+  opacity: 0;
 }
 </style>

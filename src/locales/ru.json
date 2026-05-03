@@ -22,5 +22,21 @@
     "nextTrack": "Следующий трек",
     "noTrack": "Нет трека",
     "untitled": "Без названия"
+  },
+  "audioFeatures": {
+    "progressPendingTitle": "Подготовка рекомендаций",
+    "progressDoneTitle": "Подготовка завершена",
+    "progressActiveTitle": "Фоновая подготовка рекомендаций",
+    "progressStarting": "Запускается первый анализ аудио. Треки уже можно слушать.",
+    "progressDone": "Готово: обработано {total} треков.",
+    "progressActive": "Обработано {current} из {total} треков. Это первый фоновый анализ для будущих рекомендаций. Сильно нагружает CPU!",
+    "progressDonePrefix": "Готово: обработано",
+    "progressDoneSuffix": "треков.",
+    "progressActivePrefix": "Обработано",
+    "progressActiveMiddle": "из",
+    "progressActiveSuffix": "треков. Это первый фоновый анализ для будущих рекомендаций. Сильно нагружает CPU!",
+    "tracksReadyTitle": "Треки уже можно слушать!",
+    "tracksReadyText": "Сканирование треков завершено. В фоне первый раз идет подготовка к рекомендациям, это не мешает воспроизведению, но сильно нагружает CPU!",
+    "tracksReadyButton": "Понятно"
   }
 }

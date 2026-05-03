@@ -39,6 +39,13 @@ pub struct TrackMetadata {
     pub cover_art: Option<String>,
     /// Акцентный цвет обложки в формате hex (#RRGGBB)
     pub accent_color: Option<String>,
+    pub bpm: Option<f32>,
+    pub loudness: Option<f32>,
+    pub energy: Option<f32>,
+    pub danceability: Option<f32>,
+    pub spectral_centroid: Option<f32>,
+    pub key: Option<String>,
+    pub audio_fingerprint: Option<String>,
 }
 
 /// Состояние воспроизведения
@@ -1119,6 +1126,13 @@ impl AudioPlayer {
             file_path: file_path.to_string(),
             cover_art,
             accent_color,
+            bpm: None,
+            loudness: None,
+            energy: None,
+            danceability: None,
+            spectral_centroid: None,
+            key: None,
+            audio_fingerprint: None,
         })
     }
 

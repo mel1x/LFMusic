@@ -23,6 +23,22 @@
     "noTrack": "No track",
     "untitled": "Untitled"
   },
+  "audioFeatures": {
+    "progressPendingTitle": "Recommendation prep",
+    "progressDoneTitle": "Prep complete",
+    "progressActiveTitle": "Background recommendation prep",
+    "progressStarting": "Starting the first audio analysis. Tracks are ready to listen.",
+    "progressDone": "Done: processed {total} tracks.",
+    "progressActive": "Processed {current} of {total} tracks. This is the first background analysis for future recommendations. High CPU usage!",
+    "progressDonePrefix": "Done: processed",
+    "progressDoneSuffix": "tracks.",
+    "progressActivePrefix": "Processed",
+    "progressActiveMiddle": "of",
+    "progressActiveSuffix": "tracks. This is the first background analysis for future recommendations. High CPU usage!",
+    "tracksReadyTitle": "Tracks are ready to listen!",
+    "tracksReadyText": "Track scanning is complete. The first recommendation prep is running in the background; playback is not blocked, but CPU usage can be high!",
+    "tracksReadyButton": "Got it"
+  },
   "source": {
     "Поиск": "Search",
     "Главная": "Home",

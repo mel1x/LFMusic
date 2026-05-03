@@ -1,4 +1,5 @@
 mod audio_player;
+mod audio_features;
 mod covers;
 mod library;
 mod pins;
@@ -7,7 +8,7 @@ mod settings;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use library::{FolderInfo, MusicLibrary, PlaylistInfo};
+use library::{AudioFeatureProgressEmitter, FolderInfo, MusicLibrary, PlaylistInfo};
 use player_state::SavedPlayerState;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +24,16 @@ struct ScanProgress {
     percent: f64,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct AudioFeatureProgress {
+    current: usize,
+    total: usize,
+    percent: f64,
+    active: bool,
+}
+
 const SCAN_PROGRESS_EMIT_MS: u64 = 120;
+const AUDIO_FEATURE_PROGRESS_EMIT_MS: u64 = 250;
 
 fn emit_scan_progress(app: &tauri::AppHandle, current: usize, total: usize) {
     let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
@@ -50,6 +60,37 @@ fn scan_progress_emitter(app: tauri::AppHandle) -> impl Fn(usize, usize) + Send 
             emit_scan_progress(&app, current, total);
         }
     }
+}
+
+fn emit_audio_feature_progress(app: &tauri::AppHandle, current: usize, total: usize) {
+    let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
+    let active = total > 0 && current < total;
+    let _ = app.emit(
+        "audio_feature_progress",
+        AudioFeatureProgress { current, total, percent, active },
+    );
+}
+
+fn audio_feature_progress_emitter(app: tauri::AppHandle) -> AudioFeatureProgressEmitter {
+    let started = Instant::now();
+    let last_emit_ms = Arc::new(AtomicU64::new(0));
+
+    Arc::new(move |current, total| {
+        let done = total == 0 || current >= total;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let last = last_emit_ms.load(Ordering::Relaxed);
+        if !done && elapsed_ms.saturating_sub(last) < AUDIO_FEATURE_PROGRESS_EMIT_MS {
+            return;
+        }
+
+        if done
+            || last_emit_ms
+                .compare_exchange(last, elapsed_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            emit_audio_feature_progress(&app, current, total);
+        }
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -82,6 +123,13 @@ fn apply_accent_color(library: &State<LibraryState>, file_path: &str, metadata: 
         if let Some(ref artist) = t.artist {
             metadata.artist = Some(artist.clone());
         }
+        metadata.bpm = t.bpm;
+        metadata.loudness = t.loudness;
+        metadata.energy = t.energy;
+        metadata.danceability = t.danceability;
+        metadata.spectral_centroid = t.spectral_centroid;
+        metadata.key = t.key.clone();
+        metadata.audio_fingerprint = t.audio_fingerprint.clone();
         if let Some(cover) = lib.get_override_cover(file_path) {
             metadata.cover_art = Some(cover);
         }
@@ -284,7 +332,12 @@ async fn library_add_folder(
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
         let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        library.add_folder(folder_path, &separators, scan_progress_emitter(app.clone()))
+        library.add_folder(
+            folder_path,
+            &separators,
+            Some(audio_feature_progress_emitter(app.clone())),
+            scan_progress_emitter(app.clone()),
+        )
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -293,13 +346,18 @@ async fn library_add_folder(
 /// Удалить папку и все её треки из кэша
 #[tauri::command]
 fn library_remove_folder(
+    app: tauri::AppHandle,
     library_state: State<LibraryState>,
     settings_state: State<SettingsState>,
     folder_path: String,
 ) -> Result<(), String> {
     let separators = settings::get_artist_separators(&settings_state);
     let mut library = library_state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    library.remove_folder(folder_path, &separators)
+    library.remove_folder(
+        folder_path,
+        &separators,
+        Some(audio_feature_progress_emitter(app)),
+    )
 }
 
 /// Получить все треки из кэша (без пересканирования)
@@ -307,6 +365,23 @@ fn library_remove_folder(
 fn library_get_tracks(state: State<LibraryState>) -> Result<Vec<TrackMetadata>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_all_tracks())
+}
+
+#[tauri::command]
+fn library_resume_audio_features(
+    app: tauri::AppHandle,
+    state: State<LibraryState>,
+) -> Result<usize, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.resume_pending_audio_feature_analysis(Some(audio_feature_progress_emitter(app)))
+}
+
+#[tauri::command]
+fn library_audio_features_status(state: State<LibraryState>) -> Result<AudioFeatureProgress, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let (current, total, active) = library.audio_feature_status()?;
+    let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
+    Ok(AudioFeatureProgress { current, total, percent, active })
 }
 
 /// Поднять трек на первое место в каталоге (навсегда)
@@ -780,6 +855,8 @@ pub fn run() {
             library_add_folder,
             library_remove_folder,
             library_get_tracks,
+            library_resume_audio_features,
+            library_audio_features_status,
             library_move_track_to_top,
             library_cleanup,
             library_rescan,

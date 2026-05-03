@@ -13,6 +13,7 @@ const folders = ref<FolderInfo[]>([])
 const isScanning = ref(false)
 const removingFolder = ref<string | null>(null)
 const scanProgress = ref({ current: 0, total: 0, percent: 0 })
+const showTracksReadyModal = ref(false)
 
 let initialized = false
 
@@ -29,7 +30,7 @@ async function init() {
 
 async function addFolder() {
     const dirPath = await open({ directory: true, multiple: false })
-    if (!dirPath) return
+    if (!dirPath) return false
 
     isScanning.value = true
     scanProgress.value = { current: 0, total: 0, percent: 0 }
@@ -37,6 +38,7 @@ async function addFolder() {
     try {
         await invoke('library_add_folder', { folderPath: dirPath as string })
         folders.value = await invoke<FolderInfo[]>('library_get_folders')
+        return true
     } finally {
         isScanning.value = false
     }
@@ -68,16 +70,27 @@ function folderDisplayName(path: string): string {
     return path.replace(/\\/g, '/')
 }
 
+function dismissTracksReadyModal() {
+    showTracksReadyModal.value = false
+}
+
+function openTracksReadyModal() {
+    showTracksReadyModal.value = true
+}
+
 export function useFolders() {
     return {
         folders,
         isScanning,
         removingFolder,
         scanProgress,
+        showTracksReadyModal,
         init,
         addFolder,
         removeFolder,
         rescanLibrary,
         folderDisplayName,
+        dismissTracksReadyModal,
+        openTracksReadyModal,
     }
 }
