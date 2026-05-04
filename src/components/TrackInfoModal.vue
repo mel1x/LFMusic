@@ -3,11 +3,19 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTrackInfoModal } from '../composables/useTrackInfoModal'
 import { usePlaylists } from '../composables/usePlaylists'
+import {
+    TRACK_STATISTICS_UPDATED_EVENT,
+    getTrackStatistics,
+    type TrackStatisticsUpdateEventDetail,
+} from '../composables/useStatistics'
+import { timesCountText } from '../utils/format'
 import CloseIcon from './Icons/CloseIcon.vue'
 
 const router = useRouter()
 const { isOpen, currentTrack, closeTrackInfo } = useTrackInfoModal()
 const { albums, loadPlaylists } = usePlaylists()
+const listenCount = ref(0)
+let listenCountRequestId = 0
 
 const trackAlbumName = computed(() => (currentTrack.value?.album || '').trim())
 const hasAlbum = computed(() => {
@@ -16,8 +24,36 @@ const hasAlbum = computed(() => {
     return albums.value.some(a => a.name === name)
 })
 
+async function refreshListenCount() {
+    const filePath = currentTrack.value?.file_path
+    const requestId = ++listenCountRequestId
+    if (!filePath) {
+        listenCount.value = 0
+        return
+    }
+
+    try {
+        const stats = await getTrackStatistics(filePath)
+        if (requestId === listenCountRequestId) listenCount.value = stats.listen_count
+    } catch (e) {
+        console.error('Ошибка чтения статистики прослушиваний трека:', e)
+    }
+}
+
+function onTrackStatisticsUpdated(event: Event) {
+    const detail = (event as CustomEvent<TrackStatisticsUpdateEventDetail>).detail
+    if (!detail?.listenCountDelta) return
+    if (detail.filePath !== currentTrack.value?.file_path) return
+    void refreshListenCount()
+}
+
 watch(isOpen, (open) => {
     if (open && !albums.value.length) loadPlaylists()
+    if (open) void refreshListenCount()
+})
+
+watch(() => currentTrack.value?.file_path, () => {
+    if (isOpen.value) void refreshListenCount()
 })
 
 function openAlbum() {
@@ -70,6 +106,7 @@ const generalFields = computed(() => {
     return [
         { label: 'Жанр', value: t.genre || '—' },
         { label: 'Длительность', value: formatDuration(t.duration_secs) },
+        { label: 'Прослушано', value: timesCountText(listenCount.value) },
     ]
 })
 
@@ -113,10 +150,12 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
     document.addEventListener('keydown', onKeydown)
+    window.addEventListener(TRACK_STATISTICS_UPDATED_EVENT, onTrackStatisticsUpdated)
 })
 
 onUnmounted(() => {
     document.removeEventListener('keydown', onKeydown)
+    window.removeEventListener(TRACK_STATISTICS_UPDATED_EVENT, onTrackStatisticsUpdated)
     if (copyTimer) clearTimeout(copyTimer)
 })
 </script>
@@ -149,8 +188,8 @@ onUnmounted(() => {
                             <div class="trackTitle">{{ currentTrack.title || fileName }}</div>
                             <div class="trackArtist">{{ currentTrack.artist || 'Неизвестный исполнитель' }}</div>
                         <div class="badges">
-                            <span class="chip chipFormat" v-tooltip="'Аудио формат файла — определяет тип сжатия и совместимость'">{{ (currentTrack.format || '—').toUpperCase() }}</span>
-                            <span class="chip" :class="currentTrack.is_lossless ? 'chipLossless' : 'chipLossy'" v-tooltip="currentTrack.is_lossless ? 'Lossless — сжатие без потери качества (FLAC, ALAC, WAV)' : 'Lossy — меньший размер файла с некоторой потерей качества (MP3, AAC)'">
+                            <span class="chip chipFormat" v-tooltip:bottom="'Аудио формат файла — определяет тип сжатия и совместимость'">{{ (currentTrack.format || '—').toUpperCase() }}</span>
+                            <span class="chip" :class="currentTrack.is_lossless ? 'chipLossless' : 'chipLossy'" v-tooltip:bottom="currentTrack.is_lossless ? 'Lossless — сжатие без потери качества (FLAC, ALAC, WAV)' : 'Lossy — меньший размер файла с некоторой потерей качества (MP3, AAC)'">
                                 {{ currentTrack.is_lossless ? 'Lossless' : 'Lossy' }}
                             </span>
                         </div>

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,11 +28,31 @@ pub struct TrackStatisticsDelta {
     pub search_start_count_delta: i64,
     pub manual_start_count_delta: i64,
     pub repeat_enabled_count_delta: i64,
+    pub move_to_top_count_delta: i64,
     pub morning_listen_count_delta: i64,
     pub day_listen_count_delta: i64,
     pub evening_listen_count_delta: i64,
     pub night_listen_count_delta: i64,
     pub total_listened_secs_delta: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TrackStatistics {
+    pub file_path: String,
+    pub early_skip_count: i64,
+    pub skip_count: i64,
+    pub listen_count: i64,
+    pub full_listen_count: i64,
+    pub playlist_add_count: i64,
+    pub search_start_count: i64,
+    pub manual_start_count: i64,
+    pub repeat_enabled_count: i64,
+    pub move_to_top_count: i64,
+    pub morning_listen_count: i64,
+    pub day_listen_count: i64,
+    pub evening_listen_count: i64,
+    pub night_listen_count: i64,
+    pub total_listened_secs: f64,
 }
 
 impl CollectionKind {
@@ -72,6 +92,7 @@ pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
              search_start_count         INTEGER NOT NULL DEFAULT 0,
              manual_start_count         INTEGER NOT NULL DEFAULT 0,
              repeat_enabled_count       INTEGER NOT NULL DEFAULT 0,
+             move_to_top_count          INTEGER NOT NULL DEFAULT 0,
              morning_listen_count       INTEGER NOT NULL DEFAULT 0,
              day_listen_count           INTEGER NOT NULL DEFAULT 0,
              evening_listen_count       INTEGER NOT NULL DEFAULT 0,
@@ -115,11 +136,12 @@ pub fn apply_track_delta(
              search_start_count = max(0, search_start_count + ?7),
              manual_start_count = max(0, manual_start_count + ?8),
              repeat_enabled_count = max(0, repeat_enabled_count + ?9),
-             morning_listen_count = max(0, morning_listen_count + ?10),
-             day_listen_count = max(0, day_listen_count + ?11),
-             evening_listen_count = max(0, evening_listen_count + ?12),
-             night_listen_count = max(0, night_listen_count + ?13),
-             total_listened_secs = max(0, total_listened_secs + ?14),
+             move_to_top_count = max(0, move_to_top_count + ?10),
+             morning_listen_count = max(0, morning_listen_count + ?11),
+             day_listen_count = max(0, day_listen_count + ?12),
+             evening_listen_count = max(0, evening_listen_count + ?13),
+             night_listen_count = max(0, night_listen_count + ?14),
+             total_listened_secs = max(0, total_listened_secs + ?15),
              updated_at = unixepoch()
          WHERE file_path = ?1",
         params![
@@ -132,6 +154,7 @@ pub fn apply_track_delta(
             delta.search_start_count_delta,
             delta.manual_start_count_delta,
             delta.repeat_enabled_count_delta,
+            delta.move_to_top_count_delta,
             delta.morning_listen_count_delta,
             delta.day_listen_count_delta,
             delta.evening_listen_count_delta,
@@ -141,6 +164,76 @@ pub fn apply_track_delta(
     )?;
 
     Ok(())
+}
+
+pub fn get_track_statistics(
+    conn: &Connection,
+    file_path: &str,
+) -> rusqlite::Result<TrackStatistics> {
+    let stats = conn
+        .query_row(
+            "SELECT early_skip_count, skip_count, listen_count, full_listen_count,
+                    playlist_add_count, search_start_count, manual_start_count,
+                    repeat_enabled_count, move_to_top_count, morning_listen_count,
+                    day_listen_count, evening_listen_count, night_listen_count,
+                    total_listened_secs
+             FROM track_statistics
+             WHERE file_path = ?1",
+            params![file_path],
+            |row| {
+                Ok(TrackStatistics {
+                    file_path: file_path.to_string(),
+                    early_skip_count: row.get(0)?,
+                    skip_count: row.get(1)?,
+                    listen_count: row.get(2)?,
+                    full_listen_count: row.get(3)?,
+                    playlist_add_count: row.get(4)?,
+                    search_start_count: row.get(5)?,
+                    manual_start_count: row.get(6)?,
+                    repeat_enabled_count: row.get(7)?,
+                    move_to_top_count: row.get(8)?,
+                    morning_listen_count: row.get(9)?,
+                    day_listen_count: row.get(10)?,
+                    evening_listen_count: row.get(11)?,
+                    night_listen_count: row.get(12)?,
+                    total_listened_secs: row.get(13)?,
+                })
+            },
+        )
+        .optional()?;
+
+    Ok(stats.unwrap_or_else(|| TrackStatistics {
+        file_path: file_path.to_string(),
+        ..TrackStatistics::default()
+    }))
+}
+
+pub fn sum_listen_count(conn: &Connection, file_paths: &[String]) -> rusqlite::Result<i64> {
+    if file_paths.is_empty() {
+        return Ok(0);
+    }
+
+    let mut total = 0;
+    for chunk in file_paths.chunks(500) {
+        let placeholders = std::iter::repeat("?")
+            .take(chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT COALESCE(SUM(listen_count), 0)
+             FROM track_statistics
+             WHERE file_path IN ({})",
+            placeholders,
+        );
+        let chunk_total = conn.query_row(
+            &sql,
+            params_from_iter(chunk.iter().map(|file_path| file_path.as_str())),
+            |row| row.get::<_, i64>(0),
+        )?;
+        total += chunk_total;
+    }
+
+    Ok(total)
 }
 
 pub fn apply_collection_full_listen(

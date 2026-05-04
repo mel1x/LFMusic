@@ -13,7 +13,7 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists } from '../composables/usePlaylists'
 import { useSettings } from '../composables/useSettings'
 import { createRipple } from '../composables/useRipple'
-import { tracksCountText, splitArtistsList } from '../utils/format'
+import { tracksCountText, splitArtistsList, listenCountText } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue'
 import TrackArtists from '../components/TrackArtists.vue'
@@ -21,6 +21,11 @@ import { usePins } from '../composables/usePins'
 import CoverEditor from '../components/CoverEditor.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
+import {
+    TRACK_STATISTICS_UPDATED_EVENT,
+    sumListenCount,
+    type TrackStatisticsUpdateEventDetail,
+} from '../composables/useStatistics'
 
 const route = useRoute()
 const router = useRouter()
@@ -113,8 +118,36 @@ const artistAlbums = computed<AlbumEntry[]>(() => {
         .sort((a, b) => a.name.localeCompare(b.name))
 })
 
-// Listen-count badge — статичный
 const listenCount = ref(0)
+const artistTrackPathsSignature = computed(() => artistTracks.value.map(t => t.file_path).join('\n'))
+let listenCountRequestId = 0
+
+async function refreshListenCount() {
+    const requestId = ++listenCountRequestId
+    const filePaths = artistTracks.value.map(t => t.file_path)
+    if (filePaths.length === 0) {
+        listenCount.value = 0
+        return
+    }
+
+    try {
+        const count = await sumListenCount(filePaths)
+        if (requestId === listenCountRequestId) listenCount.value = count
+    } catch (e) {
+        console.error('Ошибка чтения статистики прослушиваний артиста:', e)
+    }
+}
+
+function onTrackStatisticsUpdated(event: Event) {
+    const detail = (event as CustomEvent<TrackStatisticsUpdateEventDetail>).detail
+    if (!detail?.listenCountDelta) return
+    if (!artistTracks.value.some(t => t.file_path === detail.filePath)) return
+    void refreshListenCount()
+}
+
+watch(artistTrackPathsSignature, () => {
+    void refreshListenCount()
+}, { immediate: true })
 
 // ── Cover prefetch for visible items ───────────────────────────────────────
 
@@ -137,6 +170,7 @@ function requestCovers() {
 }
 
 onMounted(async () => {
+    window.addEventListener(TRACK_STATISTICS_UPDATED_EVENT, onTrackStatisticsUpdated)
     if (albumPlaylists.value.length === 0) await loadPlaylists()
     await nextTick()
     requestCovers()
@@ -200,6 +234,7 @@ watch(() => artistAlbums.value.length, async () => {
 })
 
 onUnmounted(() => {
+    window.removeEventListener(TRACK_STATISTICS_UPDATED_EVENT, onTrackStatisticsUpdated)
     albumsRO?.disconnect()
     albumsRO = null
 })
@@ -363,7 +398,7 @@ function onTogglePin() {
                     </div>
                     <div class="badges">
                         <div class="badge" v-tooltip="'Количество треков исполнителя'">{{ tracksCountText(artistTracks.length) }}</div>
-                        <div class="badge" v-tooltip="'Сколько раз была прослушана музыка этого исполнителя'">{{ listenCount }} раз прослушано</div>
+                        <div class="badge" v-tooltip="'Сколько раз была прослушана музыка этого исполнителя'">{{ listenCountText(listenCount) }}</div>
                     </div>
                 </div>
                 <div class="controls">

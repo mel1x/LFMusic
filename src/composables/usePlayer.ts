@@ -5,6 +5,7 @@ import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
 import { usePlaylists } from "./usePlaylists";
 import { useCoverLoader } from "./useCoverLoader";
+import { emitTrackStatisticsUpdated } from "./useStatistics";
 import { splitArtistsList } from "../utils/format";
 import router from "../router";
 
@@ -72,6 +73,7 @@ interface TrackStatisticsDelta {
   searchStartCountDelta?: number;
   manualStartCountDelta?: number;
   repeatEnabledCountDelta?: number;
+  moveToTopCountDelta?: number;
   morningListenCountDelta?: number;
   dayListenCountDelta?: number;
   eveningListenCountDelta?: number;
@@ -237,7 +239,14 @@ export function usePlayer() {
   function sendTrackStatisticsDelta(delta: TrackStatisticsDelta): Promise<void> {
     if (!hasTrackDelta(delta)) return Promise.resolve();
     return invoke("statistics_add_track_delta", { delta })
-      .then(() => undefined)
+      .then(() => {
+        if ((delta.listenCountDelta ?? 0) !== 0) {
+          emitTrackStatisticsUpdated({
+            filePath: delta.filePath,
+            listenCountDelta: delta.listenCountDelta,
+          });
+        }
+      })
       .catch((e) => {
         console.error("Ошибка записи статистики трека:", e);
       });

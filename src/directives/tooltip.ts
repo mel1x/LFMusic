@@ -7,6 +7,8 @@ let activeTarget: HTMLElement | null = null
 let globalListenersInstalled = false
 let showTimer: number | null = null
 
+type TooltipPlacement = 'top' | 'bottom'
+
 const STYLE = `
 .app-tooltip {
     position: fixed;
@@ -65,21 +67,38 @@ function getTooltip(): HTMLElement {
     return tooltipEl
 }
 
-function position(el: HTMLElement, tt: HTMLElement) {
+function getUiScale(): number {
+    const scale = Number((window as any).__uiScale)
+    if (Number.isFinite(scale) && scale > 0) return scale
+
+    const cssScale = Number(getComputedStyle(document.documentElement)
+        .getPropertyValue('--ui-scale')
+        .trim())
+    return Number.isFinite(cssScale) && cssScale > 0 ? cssScale : 1
+}
+
+function position(el: HTMLElement, tt: HTMLElement, placement: TooltipPlacement = 'top') {
     const rect = el.getBoundingClientRect()
     const ttRect = tt.getBoundingClientRect()
     const margin = 8
     let left = rect.left + rect.width / 2 - ttRect.width / 2
-    let top = rect.top - ttRect.height - margin
+    let top = placement === 'bottom'
+        ? rect.bottom + margin
+        : rect.top - ttRect.height - margin
     if (left < margin) left = margin
     const maxLeft = window.innerWidth - ttRect.width - margin
     if (left > maxLeft) left = Math.max(margin, maxLeft)
-    if (top < margin) top = rect.bottom + margin
-    tt.style.left = left + 'px'
-    tt.style.top = top + 'px'
+    if (placement === 'top' && top < margin) {
+        top = rect.bottom + margin
+    } else if (placement === 'bottom' && top + ttRect.height > window.innerHeight - margin) {
+        top = Math.max(margin, rect.top - ttRect.height - margin)
+    }
+    const scale = getUiScale()
+    tt.style.left = `${left / scale}px`
+    tt.style.top = `${top / scale}px`
 }
 
-function show(el: HTMLElement, text: string) {
+function show(el: HTMLElement, text: string, placement: TooltipPlacement) {
     if (!text) return
     const tt = getTooltip()
     tt.textContent = translateText(text).trim()
@@ -89,7 +108,7 @@ function show(el: HTMLElement, text: string) {
     tt.classList.add('visible')
     requestAnimationFrame(() => {
         if (activeTarget !== el) return
-        position(el, tt)
+        position(el, tt, placement)
     })
 }
 
@@ -126,6 +145,7 @@ interface Handlers {
 
 const handlerMap = new WeakMap<HTMLElement, Handlers>()
 const textMap = new WeakMap<HTMLElement, string>()
+const placementMap = new WeakMap<HTMLElement, TooltipPlacement>()
 
 function resolveText(binding: DirectiveBinding): string {
     const v = binding.value
@@ -133,17 +153,22 @@ function resolveText(binding: DirectiveBinding): string {
     return String(v)
 }
 
+function resolvePlacement(binding: DirectiveBinding): TooltipPlacement {
+    return binding.arg === 'bottom' || binding.modifiers.bottom ? 'bottom' : 'top'
+}
+
 export const vTooltip: Directive<HTMLElement, unknown> = {
     mounted(el, binding) {
         installGlobalListeners()
         textMap.set(el, resolveText(binding))
+        placementMap.set(el, resolvePlacement(binding))
         const enter = () => {
             const text = textMap.get(el) || ''
             if (!text) return
             if (showTimer !== null) window.clearTimeout(showTimer)
             showTimer = window.setTimeout(() => {
                 showTimer = null
-                show(el, text)
+                show(el, text, placementMap.get(el) ?? 'top')
             }, 250)
         }
         const leave = () => hide(el)
@@ -155,12 +180,13 @@ export const vTooltip: Directive<HTMLElement, unknown> = {
     updated(el, binding) {
         const text = resolveText(binding)
         textMap.set(el, text)
+        placementMap.set(el, resolvePlacement(binding))
         if (activeTarget === el && tooltipEl) {
             if (!text) {
                 hide(el)
             } else {
                 tooltipEl.textContent = translateText(text)
-                position(el, tooltipEl)
+                position(el, tooltipEl, placementMap.get(el) ?? 'top')
             }
         }
     },
@@ -173,6 +199,7 @@ export const vTooltip: Directive<HTMLElement, unknown> = {
             handlerMap.delete(el)
         }
         textMap.delete(el)
+        placementMap.delete(el)
         hide(el)
     },
 }

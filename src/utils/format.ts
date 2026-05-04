@@ -27,6 +27,16 @@ export function albumsCountText(n: number): string {
     return `${n} ${pluralizeRu(n, ['альбом', 'альбома', 'альбомов'])}`
 }
 
+export function listenCountText(n: number): string {
+    if (isEnglish()) return `${n} ${pluralizeEn(n, 'listen', 'listens')}`
+    return `${n} ${pluralizeRu(n, ['прослушивание', 'прослушивания', 'прослушиваний'])}`
+}
+
+export function timesCountText(n: number): string {
+    if (isEnglish()) return `${n} ${pluralizeEn(n, 'time', 'times')}`
+    return `${n} ${pluralizeRu(n, ['раз', 'раза', 'раз'])}`
+}
+
 export type ArtistPart = { type: 'artist' | 'sep'; text: string }
 
 function escapeRegExp(s: string): string {

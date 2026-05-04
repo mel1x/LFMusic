@@ -1,6 +1,6 @@
 use crate::audio_features::{self, AudioFeatures, AUDIO_FEATURE_ANALYZER_VERSION};
 use crate::audio_player::{AudioPlayer, TrackMetadata};
-use crate::statistics::{self, CollectionKind, TrackStatisticsDelta};
+use crate::statistics::{self, CollectionKind, TrackStatistics, TrackStatisticsDelta};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -556,7 +556,7 @@ impl MusicLibrary {
         analyze_audio_features: bool,
         audio_feature_progress: Option<AudioFeatureProgressEmitter>,
         progress: F,
-    ) -> Result<(), String>
+    ) -> Result<usize, String>
     where
         F: Fn(usize, usize) + Send + Sync,
     {
@@ -640,7 +640,7 @@ impl MusicLibrary {
             )
             .map_err(|e| format!("Ошибка добавления папки: {}", e))?;
 
-        self.scan_folder_internal(&folder, true, audio_feature_progress, progress)?;
+        let _ = self.scan_folder_internal(&folder, true, audio_feature_progress, progress)?;
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
         Ok(self.get_all_tracks_light())
@@ -860,17 +860,30 @@ impl MusicLibrary {
             .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
             .map_err(|e| format!("Ошибка чтения sort_order: {}", e))?;
 
-        self.conn
+        let changed = self.conn
             .execute(
                 "UPDATE tracks SET sort_order = ?1 WHERE file_path = ?2",
                 params![max_order + 1, file_path],
             )
             .map_err(|e| format!("Ошибка обновления sort_order: {}", e))?;
 
+        if changed > 0 {
+            self.add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: file_path.to_string(),
+                move_to_top_count_delta: 1,
+                ..TrackStatisticsDelta::default()
+            })?;
+        }
+
         Ok(())
     }
 
-    pub fn rescan_all<F>(&mut self, artist_separators: &[String], progress: F) -> Result<Vec<TrackMetadata>, String>
+    pub fn rescan_all<F>(
+        &mut self,
+        artist_separators: &[String],
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
+        progress: F,
+    ) -> Result<Vec<TrackMetadata>, String>
     where
         F: Fn(usize, usize) + Send + Sync,
     {
@@ -902,11 +915,12 @@ impl MusicLibrary {
         let mut global_current: usize = 0;
 
         // Сканируем каждую папку с учётом общего прогресса
+        let mut scanned_count = 0usize;
         for (folder, files) in &folder_file_lists {
             let folder_total = files.len();
             let offset = global_current;
 
-            self.scan_folder_files(folder, files, false, None, |i, _| {
+            scanned_count += self.scan_folder_files(folder, files, false, None, |i, _| {
                 progress(offset + i, grand_total);
             })?;
 
@@ -914,10 +928,15 @@ impl MusicLibrary {
         }
 
         // Удаляем треки, файлы которых больше не существуют
-        self.delete_missing_tracks()?;
+        let deleted_count = self.delete_missing_tracks()?;
 
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
+
+        if scanned_count > 0 || deleted_count > 0 {
+            let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
+        }
+
         Ok(self.get_all_tracks())
     }
 
@@ -929,13 +948,13 @@ impl MusicLibrary {
         analyze_audio_features: bool,
         audio_feature_progress: Option<AudioFeatureProgressEmitter>,
         progress: F,
-    ) -> Result<(), String>
+    ) -> Result<usize, String>
     where
         F: Fn(usize, usize) + Send + Sync,
     {
         let total = files.len();
         if total == 0 {
-            return Ok(());
+            return Ok(0);
         }
 
         // 1. Загружаем все cached mtimes одним запросом
@@ -981,7 +1000,7 @@ impl MusicLibrary {
 
         if to_scan.is_empty() {
             progress(total, total);
-            return Ok(());
+            return Ok(0);
         }
 
         // 3. Параллельное чтение метаданных (без обложек)
@@ -1067,7 +1086,7 @@ impl MusicLibrary {
             }
         }
 
-        Ok(())
+        Ok(batch.len())
     }
 
     // ── Плейлисты ─────────────────────────────────────────────────────────────
@@ -1314,6 +1333,16 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка записи статистики трека: {}", e))
     }
 
+    pub fn get_track_statistics(&self, file_path: &str) -> Result<TrackStatistics, String> {
+        statistics::get_track_statistics(&self.conn, file_path)
+            .map_err(|e| format!("Ошибка чтения статистики трека: {}", e))
+    }
+
+    pub fn sum_track_listen_count(&self, file_paths: &[String]) -> Result<i64, String> {
+        statistics::sum_listen_count(&self.conn, file_paths)
+            .map_err(|e| format!("Ошибка чтения прослушиваний треков: {}", e))
+    }
+
     pub fn add_collection_full_listen(
         &self,
         kind: CollectionKind,
@@ -1333,12 +1362,19 @@ impl MusicLibrary {
             )
             .map_err(|e| format!("Ошибка чтения sort_order: {}", e))?;
 
-        self.conn
+        let changed = self.conn
             .execute(
                 "UPDATE playlist_tracks SET sort_order = ?1 WHERE playlist_id = ?2 AND file_path = ?3",
                 params![min_order - 1, playlist_id, file_path],
             )
             .map_err(|e| format!("Ошибка обновления sort_order: {}", e))?;
+        if changed > 0 {
+            self.add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: file_path.to_string(),
+                move_to_top_count_delta: 1,
+                ..TrackStatisticsDelta::default()
+            })?;
+        }
         Ok(())
     }
 

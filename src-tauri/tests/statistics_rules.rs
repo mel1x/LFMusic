@@ -1,6 +1,7 @@
 use lf_music_lib::statistics::{
     apply_collection_full_listen, apply_track_delta, create_tables, day_part_for_hour,
-    listen_threshold_secs, CollectionKind, DayPart, TrackStatisticsDelta,
+    get_track_statistics, listen_threshold_secs, sum_listen_count, CollectionKind, DayPart,
+    TrackStatisticsDelta,
 };
 use rusqlite::{params, Connection};
 
@@ -55,6 +56,7 @@ fn track_delta_upserts_and_clamps_playlist_removals() {
             search_start_count_delta: 1,
             manual_start_count_delta: 1,
             repeat_enabled_count_delta: 1,
+            move_to_top_count_delta: 1,
             morning_listen_count_delta: 1,
             day_listen_count_delta: 0,
             evening_listen_count_delta: 0,
@@ -78,7 +80,8 @@ fn track_delta_upserts_and_clamps_playlist_removals() {
         .query_row(
             "SELECT early_skip_count, skip_count, listen_count, full_listen_count,
                     playlist_add_count, search_start_count, manual_start_count,
-                    repeat_enabled_count, morning_listen_count, total_listened_secs
+                    repeat_enabled_count, move_to_top_count, morning_listen_count,
+                    total_listened_secs
              FROM track_statistics
              WHERE file_path = ?1",
             params!["track.flac"],
@@ -93,13 +96,51 @@ fn track_delta_upserts_and_clamps_playlist_removals() {
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
-                    row.get::<_, f64>(9)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, f64>(10)?,
                 ))
             },
         )
         .expect("statistics row");
 
-    assert_eq!(row, (1, 1, 1, 1, 0, 1, 1, 1, 1, 42.5));
+    assert_eq!(row, (1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 42.5));
+}
+
+#[test]
+fn track_statistics_can_be_read_for_track_and_artist_sum() {
+    let conn = setup_conn();
+    conn.execute(
+        "INSERT INTO tracks (file_path) VALUES (?1)",
+        params!["other.flac"],
+    )
+    .expect("second track row");
+
+    apply_track_delta(
+        &conn,
+        &TrackStatisticsDelta {
+            file_path: "track.flac".into(),
+            listen_count_delta: 2,
+            ..TrackStatisticsDelta::default()
+        },
+    )
+    .expect("first track listens");
+    apply_track_delta(
+        &conn,
+        &TrackStatisticsDelta {
+            file_path: "other.flac".into(),
+            listen_count_delta: 3,
+            full_listen_count_delta: 9,
+            ..TrackStatisticsDelta::default()
+        },
+    )
+    .expect("second track listens");
+
+    let track = get_track_statistics(&conn, "track.flac").expect("track statistics");
+    assert_eq!(track.listen_count, 2);
+
+    let paths = vec!["track.flac".to_string(), "other.flac".to_string()];
+    assert_eq!(sum_listen_count(&conn, &paths).expect("artist listen sum"), 5);
+    assert_eq!(sum_listen_count(&conn, &[]).expect("empty sum"), 0);
 }
 
 #[test]

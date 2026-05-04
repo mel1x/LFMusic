@@ -408,7 +408,11 @@ async fn library_rescan(
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
         let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        library.rescan_all(&separators, scan_progress_emitter(app.clone()))
+        library.rescan_all(
+            &separators,
+            Some(audio_feature_progress_emitter(app.clone())),
+            scan_progress_emitter(app.clone()),
+        )
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -499,6 +503,24 @@ fn statistics_add_track_delta(
 ) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.add_track_statistics_delta(delta)
+}
+
+#[tauri::command]
+fn statistics_get_track(
+    state: State<LibraryState>,
+    file_path: String,
+) -> Result<statistics::TrackStatistics, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.get_track_statistics(&file_path)
+}
+
+#[tauri::command]
+fn statistics_sum_listen_count(
+    state: State<LibraryState>,
+    file_paths: Vec<String>,
+) -> Result<i64, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.sum_track_listen_count(&file_paths)
 }
 
 #[tauri::command]
@@ -892,6 +914,8 @@ pub fn run() {
             playlist_move_track_to_top,
             playlist_get_ids_for_track,
             statistics_add_track_delta,
+            statistics_get_track,
+            statistics_sum_listen_count,
             statistics_add_collection_full_listen,
             // Эквалайзер
             eq_set_bands,
