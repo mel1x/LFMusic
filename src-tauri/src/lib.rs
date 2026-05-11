@@ -1,16 +1,18 @@
-mod audio_player;
 mod audio_features;
+mod audio_player;
 mod covers;
 mod library;
 mod pins;
 mod player_state;
 mod settings;
 pub mod statistics;
+mod window_state;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use library::{AudioFeatureProgressEmitter, FolderInfo, MusicLibrary, PlaylistInfo};
 use player_state::SavedPlayerState;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,8 +39,19 @@ const SCAN_PROGRESS_EMIT_MS: u64 = 120;
 const AUDIO_FEATURE_PROGRESS_EMIT_MS: u64 = 250;
 
 fn emit_scan_progress(app: &tauri::AppHandle, current: usize, total: usize) {
-    let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
-    let _ = app.emit("scan_progress", ScanProgress { current, total, percent });
+    let percent = if total > 0 {
+        (current as f64 / total as f64) * 100.0
+    } else {
+        100.0
+    };
+    let _ = app.emit(
+        "scan_progress",
+        ScanProgress {
+            current,
+            total,
+            percent,
+        },
+    );
 }
 
 fn scan_progress_emitter(app: tauri::AppHandle) -> impl Fn(usize, usize) + Send + Sync {
@@ -64,11 +77,20 @@ fn scan_progress_emitter(app: tauri::AppHandle) -> impl Fn(usize, usize) + Send 
 }
 
 fn emit_audio_feature_progress(app: &tauri::AppHandle, current: usize, total: usize) {
-    let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
+    let percent = if total > 0 {
+        (current as f64 / total as f64) * 100.0
+    } else {
+        100.0
+    };
     let active = total > 0 && current < total;
     let _ = app.emit(
         "audio_feature_progress",
-        AudioFeatureProgress { current, total, percent, active },
+        AudioFeatureProgress {
+            current,
+            total,
+            percent,
+            active,
+        },
     );
 }
 
@@ -110,7 +132,11 @@ pub struct SettingsState(pub Mutex<(settings::AppSettings, PathBuf)>);
 /// а также наложить пользовательские переопределения трека
 /// (название, исполнитель, обложка) — чтобы при воспроизведении плеер
 /// показывал отредактированные пользователем значения.
-fn apply_accent_color(library: &State<LibraryState>, file_path: &str, metadata: &mut TrackMetadata) {
+fn apply_accent_color(
+    library: &State<LibraryState>,
+    file_path: &str,
+    metadata: &mut TrackMetadata,
+) {
     let lib = match library.0.lock() {
         Ok(guard) => guard,
         Err(_) => return,
@@ -258,7 +284,10 @@ fn get_track_metadata(
 }
 
 #[tauri::command]
-fn get_cover_art(library: State<LibraryState>, file_path: String) -> Result<Option<String>, String> {
+fn get_cover_art(
+    library: State<LibraryState>,
+    file_path: String,
+) -> Result<Option<String>, String> {
     if let Ok(lib) = library.0.lock() {
         if let Some(cover) = lib.get_override_cover(&file_path) {
             return Ok(Some(cover));
@@ -309,7 +338,10 @@ fn get_original_track(
 
 #[tauri::command]
 fn get_supported_formats() -> Vec<String> {
-    AudioPlayer::supported_formats().iter().map(|s| s.to_string()).collect()
+    AudioPlayer::supported_formats()
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -344,6 +376,85 @@ async fn library_add_folder(
     .map_err(|e| format!("Task error: {}", e))?
 }
 
+fn android_music_folder_candidates() -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut folders = Vec::new();
+    for candidate in [
+        "/storage/emulated/0/Music",
+        "/storage/emulated/0/Download",
+        "/storage/emulated/0/Downloads",
+        "/storage/emulated/0/Podcasts",
+        "/storage/emulated/0/Audio",
+        "/storage/emulated/0/Sounds",
+        "/storage/emulated/0/Recordings",
+        "/sdcard/Music",
+        "/sdcard/Download",
+        "/sdcard/Downloads",
+        "/sdcard/Podcasts",
+        "/sdcard/Audio",
+        "/sdcard/Sounds",
+        "/sdcard/Recordings",
+    ] {
+        let path = PathBuf::from(candidate);
+        if !path.is_dir() {
+            continue;
+        }
+
+        let key = std::fs::canonicalize(&path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        if seen.insert(key) {
+            folders.push(candidate.to_string());
+        }
+    }
+    folders
+}
+
+#[tauri::command]
+async fn library_add_android_music_folders(
+    app: tauri::AppHandle,
+) -> Result<Vec<TrackMetadata>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let candidates = android_music_folder_candidates();
+        if candidates.is_empty() {
+            return Err("Не удалось найти стандартные папки с аудио. Разрешите доступ к аудио и проверьте, что на устройстве есть музыкальные файлы.".to_string());
+        }
+
+        let separators = settings::get_artist_separators(&app.state::<SettingsState>());
+        let state = app.state::<LibraryState>();
+        let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut result = Vec::new();
+        let mut added = 0usize;
+        let mut last_error: Option<String> = None;
+
+        for folder_path in candidates {
+            match library.add_folder(
+                folder_path,
+                &separators,
+                Some(audio_feature_progress_emitter(app.clone())),
+                scan_progress_emitter(app.clone()),
+            ) {
+                Ok(tracks) => {
+                    result = tracks;
+                    added += 1;
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        if added == 0 {
+            return Err(last_error.unwrap_or_else(|| "Не удалось просканировать стандартные папки с аудио.".to_string()));
+        }
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
 /// Удалить папку и все её треки из кэша
 #[tauri::command]
 fn library_remove_folder(
@@ -353,7 +464,10 @@ fn library_remove_folder(
     folder_path: String,
 ) -> Result<(), String> {
     let separators = settings::get_artist_separators(&settings_state);
-    let mut library = library_state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut library = library_state
+        .0
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
     library.remove_folder(
         folder_path,
         &separators,
@@ -378,11 +492,22 @@ fn library_resume_audio_features(
 }
 
 #[tauri::command]
-fn library_audio_features_status(state: State<LibraryState>) -> Result<AudioFeatureProgress, String> {
+fn library_audio_features_status(
+    state: State<LibraryState>,
+) -> Result<AudioFeatureProgress, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     let (current, total, active) = library.audio_feature_status()?;
-    let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 100.0 };
-    Ok(AudioFeatureProgress { current, total, percent, active })
+    let percent = if total > 0 {
+        (current as f64 / total as f64) * 100.0
+    } else {
+        100.0
+    };
+    Ok(AudioFeatureProgress {
+        current,
+        total,
+        percent,
+        active,
+    })
 }
 
 /// Поднять трек на первое место в каталоге (навсегда)
@@ -401,9 +526,7 @@ fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
 
 /// Пересканировать все папки: обновить изменённые файлы, удалить несуществующие
 #[tauri::command]
-async fn library_rescan(
-    app: tauri::AppHandle,
-) -> Result<Vec<TrackMetadata>, String> {
+async fn library_rescan(app: tauri::AppHandle) -> Result<Vec<TrackMetadata>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
@@ -425,7 +548,10 @@ fn library_rebuild_artists(
     settings_state: State<SettingsState>,
 ) -> Result<(), String> {
     let separators = settings::get_artist_separators(&settings_state);
-    let mut library = library_state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut library = library_state
+        .0
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
     library.rebuild_artist_playlists(&separators)
 }
 
@@ -442,7 +568,10 @@ fn playlist_get_all(state: State<LibraryState>) -> Result<Vec<PlaylistInfo>, Str
 
 /// Получить треки плейлиста
 #[tauri::command]
-fn playlist_get_tracks(state: State<LibraryState>, playlist_id: i64) -> Result<Vec<TrackMetadata>, String> {
+fn playlist_get_tracks(
+    state: State<LibraryState>,
+    playlist_id: i64,
+) -> Result<Vec<TrackMetadata>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_playlist_tracks(playlist_id))
 }
@@ -456,7 +585,11 @@ fn playlist_create(state: State<LibraryState>, name: String) -> Result<PlaylistI
 
 /// Переименовать плейлист
 #[tauri::command]
-fn playlist_rename(state: State<LibraryState>, playlist_id: i64, name: String) -> Result<(), String> {
+fn playlist_rename(
+    state: State<LibraryState>,
+    playlist_id: i64,
+    name: String,
+) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.rename_playlist(playlist_id, name)
 }
@@ -470,28 +603,43 @@ fn playlist_delete(state: State<LibraryState>, playlist_id: i64) -> Result<(), S
 
 /// Добавить трек в плейлист
 #[tauri::command]
-fn playlist_add_track(state: State<LibraryState>, playlist_id: i64, file_path: String) -> Result<(), String> {
+fn playlist_add_track(
+    state: State<LibraryState>,
+    playlist_id: i64,
+    file_path: String,
+) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.add_track_to_playlist(playlist_id, &file_path)
 }
 
 /// Удалить трек из плейлиста
 #[tauri::command]
-fn playlist_remove_track(state: State<LibraryState>, playlist_id: i64, file_path: String) -> Result<(), String> {
+fn playlist_remove_track(
+    state: State<LibraryState>,
+    playlist_id: i64,
+    file_path: String,
+) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.remove_track_from_playlist(playlist_id, &file_path)
 }
 
 /// Поднять трек на первое место в плейлисте
 #[tauri::command]
-fn playlist_move_track_to_top(state: State<LibraryState>, playlist_id: i64, file_path: String) -> Result<(), String> {
+fn playlist_move_track_to_top(
+    state: State<LibraryState>,
+    playlist_id: i64,
+    file_path: String,
+) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.move_playlist_track_to_top(playlist_id, &file_path)
 }
 
 /// Получить id пользовательских плейлистов, в которых уже есть указанный трек
 #[tauri::command]
-fn playlist_get_ids_for_track(state: State<LibraryState>, file_path: String) -> Result<Vec<i64>, String> {
+fn playlist_get_ids_for_track(
+    state: State<LibraryState>,
+    file_path: String,
+) -> Result<Vec<i64>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_user_playlist_ids_for_track(&file_path))
 }
@@ -539,7 +687,10 @@ fn statistics_add_collection_full_listen(
 
 /// Сохранить EQ в общий settings.json
 fn eq_persist(settings_state: &State<SettingsState>, eq: &EqSettings) -> Result<(), String> {
-    let mut state = settings_state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut state = settings_state
+        .0
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
     state.0.eq_settings = eq.clone();
     settings::save(&state.1, &state.0)
 }
@@ -550,7 +701,10 @@ fn eq_set_bands(
     settings_state: State<SettingsState>,
     bands: Vec<f32>,
 ) -> Result<(), String> {
-    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    let player = player_state
+        .0
+        .read()
+        .map_err(|e| format!("Lock error: {}", e))?;
     player.set_eq_bands(bands);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
@@ -568,7 +722,10 @@ fn eq_set_gain(
     settings_state: State<SettingsState>,
     gain: f32,
 ) -> Result<(), String> {
-    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    let player = player_state
+        .0
+        .read()
+        .map_err(|e| format!("Lock error: {}", e))?;
     player.set_eq_gain(gain);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
@@ -586,7 +743,10 @@ fn eq_set_enabled(
     settings_state: State<SettingsState>,
     enabled: bool,
 ) -> Result<(), String> {
-    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    let player = player_state
+        .0
+        .read()
+        .map_err(|e| format!("Lock error: {}", e))?;
     player.set_eq_enabled(enabled);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
@@ -610,7 +770,10 @@ fn eq_set_settings(
     settings_state: State<SettingsState>,
     eq_settings: EqSettings,
 ) -> Result<(), String> {
-    let player = player_state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    let player = player_state
+        .0
+        .read()
+        .map_err(|e| format!("Lock error: {}", e))?;
     player.set_eq_settings(eq_settings);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
@@ -622,13 +785,18 @@ fn eq_set_settings(
 
 /// Фронтенд может хранить опции разных типов (булевые, строковые и т.д.)
 #[tauri::command]
-fn get_settings(state: State<SettingsState>) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+fn get_settings(
+    state: State<SettingsState>,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
     let state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(state.0.options.clone())
 }
 
 #[tauri::command]
-fn save_settings(state: State<SettingsState>, settings: std::collections::HashMap<String, serde_json::Value>) -> Result<(), String> {
+fn save_settings(
+    state: State<SettingsState>,
+    settings: std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
     let mut state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     state.0.options = settings;
     settings::save(&state.1, &state.0)
@@ -683,8 +851,8 @@ struct CoverInput {
 }
 
 fn read_cover_as_data_url(source_path: &str) -> Result<(String, Option<String>), String> {
-    let bytes = std::fs::read(source_path)
-        .map_err(|e| format!("Не удалось прочитать обложку: {}", e))?;
+    let bytes =
+        std::fs::read(source_path).map_err(|e| format!("Не удалось прочитать обложку: {}", e))?;
     let mime = match std::path::Path::new(source_path)
         .extension()
         .and_then(|e| e.to_str())
@@ -846,6 +1014,8 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Не удалось получить директорию данных приложения");
 
+            window_state::restore_main_window_geometry(app, &app_data_dir);
+
             let app_settings = settings::load(&app_data_dir);
 
             // Загружаем сохранённые настройки эквалайзера из settings.json
@@ -854,7 +1024,10 @@ pub fn run() {
             player.set_eq_settings(app_settings.eq_settings.clone());
             drop(player);
 
-            app.manage(SettingsState(Mutex::new((app_settings, app_data_dir.clone()))));
+            app.manage(SettingsState(Mutex::new((
+                app_settings,
+                app_data_dir.clone(),
+            ))));
 
             let mut library =
                 MusicLibrary::new(app_data_dir).expect("Не удалось инициализировать библиотеку");
@@ -895,6 +1068,7 @@ pub fn run() {
             // Библиотека
             library_get_folders,
             library_add_folder,
+            library_add_android_music_folders,
             library_remove_folder,
             library_get_tracks,
             library_resume_audio_features,

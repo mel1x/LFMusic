@@ -10,12 +10,16 @@ import {
 } from '../composables/useStatistics'
 import { timesCountText } from '../utils/format'
 import CloseIcon from './Icons/CloseIcon.vue'
+import { isPhoneViewport } from '../composables/usePlatform'
 
 const router = useRouter()
 const { isOpen, currentTrack, closeTrackInfo } = useTrackInfoModal()
 const { albums, loadPlaylists } = usePlaylists()
 const listenCount = ref(0)
+const modalCardEl = ref<HTMLElement | null>(null)
 let listenCountRequestId = 0
+let sheetDragStartY = 0
+let sheetDragging = false
 
 const trackAlbumName = computed(() => (currentTrack.value?.album || '').trim())
 const hasAlbum = computed(() => {
@@ -137,7 +141,44 @@ async function copyPath() {
 }
 
 function onBackdropMousedown(e: MouseEvent) {
+    if (isPhoneViewport()) return
     if (e.target === e.currentTarget) closeTrackInfo()
+}
+
+function onSheetDragStart(e: PointerEvent) {
+    if (!isPhoneViewport()) return
+    e.preventDefault()
+    sheetDragging = true
+    sheetDragStartY = e.clientY
+    if (modalCardEl.value) modalCardEl.value.style.transition = 'none'
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    window.addEventListener('pointermove', onSheetDragMove)
+    window.addEventListener('pointerup', onSheetDragEnd)
+    window.addEventListener('pointercancel', onSheetDragEnd)
+}
+
+function onSheetDragMove(e: PointerEvent) {
+    if (!sheetDragging || !modalCardEl.value) return
+    e.preventDefault()
+    const delta = Math.max(0, e.clientY - sheetDragStartY)
+    modalCardEl.value.style.transform = `translateY(${delta}px)`
+}
+
+function onSheetDragEnd(e: PointerEvent) {
+    if (!sheetDragging) return
+    sheetDragging = false
+    window.removeEventListener('pointermove', onSheetDragMove)
+    window.removeEventListener('pointerup', onSheetDragEnd)
+    window.removeEventListener('pointercancel', onSheetDragEnd)
+    const delta = Math.max(0, e.clientY - sheetDragStartY)
+    if (delta > 76) {
+        closeTrackInfo()
+        return
+    }
+    if (modalCardEl.value) {
+        modalCardEl.value.style.transition = ''
+        modalCardEl.value.style.transform = ''
+    }
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -156,6 +197,9 @@ onMounted(() => {
 onUnmounted(() => {
     document.removeEventListener('keydown', onKeydown)
     window.removeEventListener(TRACK_STATISTICS_UPDATED_EVENT, onTrackStatisticsUpdated)
+    window.removeEventListener('pointermove', onSheetDragMove)
+    window.removeEventListener('pointerup', onSheetDragEnd)
+    window.removeEventListener('pointercancel', onSheetDragEnd)
     if (copyTimer) clearTimeout(copyTimer)
 })
 </script>
@@ -168,7 +212,8 @@ onUnmounted(() => {
                 class="modalBackdrop"
                 @mousedown="onBackdropMousedown"
             >
-                <div class="modalCard" @mousedown.stop>
+                <div ref="modalCardEl" class="modalCard" @mousedown.stop>
+                    <div class="sheetHandle" @pointerdown="onSheetDragStart"></div>
                     <div class="accentGlow"></div>
 
                     <button class="closeBtn" @click="closeTrackInfo" aria-label="Закрыть">
@@ -267,6 +312,9 @@ onUnmounted(() => {
     flex-direction: column;
     gap: 22px;
     overflow: hidden;
+}
+.sheetHandle {
+    display: none;
 }
 .accentGlow {
     pointer-events: none;
@@ -590,5 +638,109 @@ onUnmounted(() => {
 .modal-enter-from .modalCard, .modal-leave-to .modalCard {
     transform: scale(0.94) translateY(8px);
     opacity: 0;
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .modalBackdrop {
+        align-items: flex-end !important;
+        justify-content: center !important;
+        padding: calc(var(--safe-top) + 12px) 0 0 !important;
+        background-color: hsla(0, 0%, 0%, 0.36);
+    }
+
+    .modalCard {
+        width: 100vw !important;
+        max-width: none !important;
+        height: calc(100dvh - var(--safe-top) - 12px) !important;
+        max-height: none !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        padding: 0 16px calc(18px + var(--safe-bottom));
+        gap: 18px;
+        border-radius: 28px 28px 0 0 !important;
+        background-color: hsl(var(--accent-h), min(var(--accent-s), 48%), 11%);
+        overflow-y: auto !important;
+        overscroll-behavior: contain;
+        touch-action: pan-y;
+        transition: transform .2s ease;
+        will-change: transform;
+    }
+
+    .sheetHandle {
+        display: flex;
+        flex: 0 0 auto;
+        height: 34px;
+        margin: 0 -16px;
+        align-items: center;
+        justify-content: center;
+        cursor: grab;
+        touch-action: none;
+    }
+
+    .sheetHandle::before {
+        content: "";
+        width: 42px;
+        height: 4px;
+        border-radius: 999px;
+        background-color: hsla(0, 0%, 100%, 0.28);
+    }
+
+    .closeBtn {
+        display: none;
+    }
+
+    .coverWrap {
+        align-self: center;
+        width: min(42vw, 132px);
+        height: min(42vw, 132px);
+    }
+
+    .headerText {
+        text-align: center;
+        align-items: center;
+    }
+
+    .trackTitle,
+    .trackArtist {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        text-align: center;
+    }
+
+    .badges {
+        justify-content: center;
+    }
+
+    .pathBlock {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .copyHint {
+        align-self: flex-start;
+    }
+
+    .modal-enter-active .modalCard,
+    .modal-leave-active .modalCard {
+        transition: transform .2s ease, opacity .2s ease;
+    }
+
+    .modal-enter-from .modalCard,
+    .modal-leave-to .modalCard {
+        transform: translateY(20px);
+        opacity: 0;
+    }
+
+    :global(body.lfmusic-phone) .modalBackdrop {
+        padding: calc(var(--safe-top) + 12px) 0 0 !important;
+    }
+
+    :global(body.lfmusic-phone) .modalCard {
+        width: 100vw !important;
+        max-width: none !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        border-radius: 28px 28px 0 0 !important;
+    }
 }
 </style>

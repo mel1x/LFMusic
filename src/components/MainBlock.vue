@@ -376,4 +376,75 @@ watch(resolvedPins, () => requestPinCovers());
   height: 100%;
   transition: .24s ease;
 }
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+  .mainWrapper {
+    display: block;
+    height: 100%;
+  }
+
+  .asideSpacer {
+    display: none;
+  }
+
+  .navAside {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: var(--mobile-nav-height);
+    padding: 7px 8px calc(7px + var(--safe-bottom));
+    gap: 0;
+    justify-content: center;
+    background-color: var(--mobile-chrome-bg);
+    border-top: 1px solid hsla(0, 0%, 100%, 0.07);
+    backdrop-filter: blur(16px);
+    z-index: 50;
+  }
+
+  .navList {
+    width: 100%;
+    height: 100%;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-around;
+    gap: 4px;
+  }
+
+  .navLink {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 52px;
+    padding: 5px 3px 4px;
+    border-radius: 14px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    font-size: 10px;
+    line-height: 1.1;
+    text-align: center;
+  }
+
+  .navLink svg {
+    width: 21px;
+    height: 21px;
+  }
+
+  .navLink.router-link-active {
+    background-color: hsla(0, 0%, 100%, 0.07);
+  }
+
+  .pinsBlock {
+    display: none;
+  }
+
+  .frameWrapper {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+    padding-bottom: 0;
+    background-attachment: local;
+  }
+}
 </style>

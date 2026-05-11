@@ -18,6 +18,7 @@ import { useFolders } from './composables/useFolders';
 import { useCustomCovers } from './composables/useCustomCovers';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
+import { isAndroidRuntime, isPhoneViewport, updateRuntimeClasses } from './composables/usePlatform';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
@@ -43,8 +44,24 @@ let resizeRaf: number | null = null;
 let unlistenAudioFeatureProgress: UnlistenFn | null = null;
 let featureProgressHideTimer: ReturnType<typeof setTimeout> | null = null;
 
+function resetUiScale() {
+  const body = document.body;
+  (body.style as any).zoom = '';
+  body.style.width = '100vw';
+  body.style.height = '100dvh';
+  document.documentElement.style.setProperty('--ui-scale', '1');
+  (window as any).__uiScale = 1;
+}
+
 function applyUiScale() {
   resizeRaf = null;
+  updateRuntimeClasses();
+
+  if (isPhoneViewport()) {
+    resetUiScale();
+    return;
+  }
+
   const w = window.innerWidth;
   const h = window.innerHeight;
   const raw = Math.min(w / BASE_W, h / BASE_H);
@@ -144,6 +161,22 @@ function onTracksReadyBackdrop(e: MouseEvent) {
   if (e.target === e.currentTarget) dismissTracksReadyModal();
 }
 
+function publishAndroidFeatureProgress(payload: AudioFeatureProgressPayload) {
+  if (!isAndroidRuntime()) return false;
+  const bridge = window.LFMusicAndroid?.updateAudioFeatureProgress;
+  if (!bridge) return false;
+
+  bridge(JSON.stringify({
+    current: payload.current,
+    total: payload.total,
+    percent: payload.percent,
+    active: payload.active,
+    title: featureProgressTooltipHeading.value,
+    text: featureProgressTooltipText.value,
+  }));
+  return true;
+}
+
 onMounted(() => {
   load();
   startDomI18n();
@@ -156,6 +189,11 @@ onMounted(() => {
     if (featureProgressHideTimer) {
       clearTimeout(featureProgressHideTimer);
       featureProgressHideTimer = null;
+    }
+
+    if (publishAndroidFeatureProgress(payload)) {
+      featureProgressVisible.value = false;
+      return;
     }
 
     featureProgressVisible.value = payload.total > 0;
@@ -171,12 +209,14 @@ onMounted(() => {
     // Продолжение фоновой подготовки не должно мешать запуску интерфейса.
   });
   window.addEventListener('resize', scheduleUiScale);
+  window.visualViewport?.addEventListener('resize', scheduleUiScale);
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
 });
 
 onUnmounted(() => {
   window.removeEventListener('resize', scheduleUiScale);
+  window.visualViewport?.removeEventListener('resize', scheduleUiScale);
   if (resizeRaf !== null) {
     cancelAnimationFrame(resizeRaf);
     resizeRaf = null;
@@ -198,11 +238,14 @@ watchEffect(() => {
     ? (currentAccentColor.value ?? '#1a1a1a')
     : settings.value.static_accent_color;
   const { h, s, l } = hexToHSL(hex);
+  const chromeHex = hslToHex(h, Math.min(s, 50), 8);
   const root = document.documentElement.style;
   root.setProperty('--accent-h', `${h}`);
   root.setProperty('--accent-s', `${s}%`);
   root.setProperty('--accent-l', `${l}%`);
   root.setProperty('--accent-color', h === 0 && s === 0 ? '#353535' : `hsl(${h}, ${s}%, ${l}%)`);
+  root.setProperty('--mobile-chrome-color', chromeHex);
+  window.LFMusicAndroid?.updateSystemBars?.(chromeHex);
 });
 
 function hexToHSL(hex: string) {
@@ -223,6 +266,28 @@ function hexToHSL(hex: string) {
   }
 
   return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+function hslToHex(h: number, s: number, l: number) {
+  s /= 100;
+  l /= 100;
+
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+
+  const toHex = (value: number) => Math.round((value + m) * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
 const minimizeWindow = () => win.minimize();
@@ -283,7 +348,7 @@ const closeWindow = async () => {
     </div>
   </div>
   <MainBlock :key="`main-${language}`" class="mainFrame" />
-  <Player :key="`player-${language}`" class="playerPart" />
+  <Player :key="`player-${language}`" />
   <TrackInfoModal :key="`info-${language}`" />
   <TrackEditModal :key="`edit-${language}`" />
   <Teleport to="body">
@@ -357,17 +422,37 @@ html {
      чтобы все три тона --accent-color / --dark-bg / --light-bg стакались. */
   --dark-bg: hsl(var(--accent-h), min(var(--accent-s), 50%), 8%);
   --light-bg: hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 1);
+  --android-safe-top: 0px;
+  --android-safe-right: 0px;
+  --android-safe-bottom: 0px;
+  --android-safe-left: 0px;
+  --safe-top: var(--android-safe-top);
+  --safe-right: var(--android-safe-right);
+  --safe-bottom: var(--android-safe-bottom);
+  --safe-left: var(--android-safe-left);
+  --mobile-chrome-color: #101010;
+  --mobile-chrome-bg: var(--mobile-chrome-color);
+  --mobile-player-height: 96px;
+  --mobile-nav-height: calc(68px + var(--safe-bottom));
 
-  background-color: var(--dark-bg);
+  background: var(--dark-bg) !important;
   overflow: hidden;
   transition: .24s ease;
+}
+@supports (padding-top: max(0px, 1px)) {
+  html {
+    --safe-top: max(env(safe-area-inset-top, 0px), var(--android-safe-top));
+    --safe-right: max(env(safe-area-inset-right, 0px), var(--android-safe-right));
+    --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--android-safe-bottom));
+    --safe-left: max(env(safe-area-inset-left, 0px), var(--android-safe-left));
+  }
 }
 html::selection {
   color: #fff;
   background-color: var(--dark-bg);
 }
 body {
-  background-color: var(--dark-bg);
+  background: var(--dark-bg) !important;
   overflow: hidden;
   transition: .24s ease;
 }
@@ -565,11 +650,6 @@ body {
   flex: 1;
   min-height: 0;
 }
-.playerPart {
-  width: 100%;
-  height: 104px;
-  flex-shrink: 0;
-}
 .scanReadyBackdrop {
   position: fixed;
   top: 0;
@@ -637,5 +717,380 @@ body {
 .scan-ready-enter-from .scanReadyModal, .scan-ready-leave-to .scanReadyModal {
   transform: scale(0.96) translateY(4px);
   opacity: 0;
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+  html,
+  body {
+    width: 100vw !important;
+    height: 100dvh !important;
+    min-width: 100vw !important;
+    min-height: 100dvh !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    overflow: hidden !important;
+    --android-safe-top: 0px !important;
+    --safe-top: 0px !important;
+  }
+
+  body {
+    position: fixed;
+    inset: 0;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html.lfmusic-phone:not(.lfmusic-android),
+  body.lfmusic-phone:not(.lfmusic-android) {
+    --safe-right: 0px;
+    --safe-bottom: 0px;
+    --safe-left: 0px;
+  }
+
+  body.lfmusic-phone,
+  body.lfmusic-phone * {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  body.lfmusic-phone::-webkit-scrollbar,
+  body.lfmusic-phone *::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+  }
+
+  #app {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100dvh;
+    margin: 0 !important;
+    padding: 0;
+    background: var(--dark-bg);
+  }
+
+  .hat {
+    display: none !important;
+  }
+
+  .mainFrame {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+
+  .splash-overlay,
+  .scanReadyBackdrop {
+    width: 100vw;
+    height: 100dvh;
+  }
+
+  .scanReadyBackdrop,
+  body.lfmusic-phone .modalBackdrop {
+    width: 100vw !important;
+    height: 100dvh !important;
+    align-items: flex-end !important;
+    justify-content: center !important;
+  }
+
+  .scanReadyModal,
+  body.lfmusic-phone .modalCard {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: calc(100dvh - var(--safe-top) - 12px) !important;
+    border-radius: 24px 24px 0 0 !important;
+    overflow-y: auto !important;
+  }
+
+  .scanReadyModal {
+    padding: 22px 18px calc(18px + var(--safe-bottom));
+  }
+
+  .scanReadyButton,
+  body.lfmusic-phone .modalBtn,
+  body.lfmusic-phone .btn {
+    min-height: 44px !important;
+    padding: 10px 16px !important;
+  }
+
+  .toast {
+    width: min(360px, calc(100vw - 24px));
+    border-radius: 18px;
+  }
+
+  body.lfmusic-phone .pageRoot {
+    min-height: 100% !important;
+    padding: 0;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    background-attachment: local !important;
+  }
+
+  body.lfmusic-phone .pageTitle {
+    margin-bottom: 22px !important;
+    font-size: 30px !important;
+    line-height: 1.08 !important;
+  }
+
+  body.lfmusic-phone .pageHat {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 16px !important;
+    margin-bottom: 24px !important;
+    position: relative;
+  }
+
+  body.lfmusic-phone .pageHat .coverWrap {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+    
+    &:hover {
+      transform: scale(1) !important;
+    }
+  }
+
+  body.lfmusic-phone .pageHat .cover,
+  body.lfmusic-phone .pageHat .cover img {
+    width: 100% !important;
+    height: 100% !important;
+    border-radius: 0;
+
+    &:hover {
+      transform: scale(1) !important;
+    }
+  }
+  body.lfmusic-phone .pageHat .coverWrap::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -40px;
+
+    height: 160px;
+
+    background: linear-gradient(
+      to bottom,
+      transparent 0%,
+      var(--light-bg) 60%
+    );
+
+    pointer-events: none;
+  }
+
+  body.lfmusic-phone .pageHat .dataZone {
+    position: absolute;
+    top: 65% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+  }
+
+  body.lfmusic-phone .pageHat .dataZone,
+  body.lfmusic-phone .pageHat .dataZone .info {
+    width: 100% !important;
+    min-width: 0 !important;
+    text-align: center !important;
+    align-self: center !important;
+    justify-content: center !important;
+
+  }
+
+  body.lfmusic-phone .pageHat .dataZone .info .listTitle,
+  body.lfmusic-phone .pageHat .dataZone .info .listTitle h1 {
+    max-width: 100% !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+  }
+
+  body.lfmusic-phone .pageHat .dataZone .info .listTitle h1 {
+    font-size: 32px !important;
+    line-height: 1.08 !important;
+  }
+
+  body.lfmusic-phone .pageHat .dataZone .info .badges,
+  body.lfmusic-phone .pageHat .dataZone .controls {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+
+  body.lfmusic-phone .pageHat .dataZone .controls button,
+  body.lfmusic-phone .playListBtn,
+  body.lfmusic-phone .pinBtn,
+  body.lfmusic-phone .moreBtn,
+  body.lfmusic-phone .cardMore,
+  body.lfmusic-phone .overlayBtn {
+    min-width: 42px !important;
+    min-height: 42px !important;
+  }
+
+  body.lfmusic-phone .searchZone {
+    width: 100% !important;
+    height: 46px !important;
+    margin: 0 0 16px !important;
+    border-radius: 16px !important;
+  }
+
+  body.lfmusic-phone .search {
+    min-width: 0 !important;
+    font-size: 15px !important;
+  }
+
+  body.lfmusic-phone .stickyHeader {
+    top: 0 !important;
+    margin: 0 -14px 12px !important;
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+  }
+
+  body.lfmusic-phone .lineList {
+    width: calc(100vw - 28px) !important;
+    overflow-x: auto !important;
+    scroll-snap-type: x proximity;
+    padding-bottom: 12px !important;
+    --card-w: 132px !important;
+  }
+
+  body.lfmusic-phone .playlistItem {
+    width: var(--card-w, 132px) !important;
+    min-width: var(--card-w, 132px) !important;
+    scroll-snap-align: start;
+  }
+
+  body.lfmusic-phone .playlistItem .overlayBtn,
+  body.lfmusic-phone .playlistItem .cardMore,
+  body.lfmusic-phone .playlistItem .moreBtn,
+  body.lfmusic-phone .playlistItem .pinBtn {
+    opacity: 1 !important;
+  }
+
+  body.lfmusic-phone .trackElem {
+    min-height: 60px !important;
+    padding: 7px 46px 7px 7px !important;
+    border-radius: 12px !important;
+    gap: 9px !important;
+  }
+
+  body.lfmusic-phone .trackCover,
+  body.lfmusic-phone .trackCoverWrap,
+  body.lfmusic-phone .trackElem .coverWrap {
+    width: 44px !important;
+    height: 44px !important;
+    flex-shrink: 0 !important;
+  }
+
+  body.lfmusic-phone .trackName,
+  body.lfmusic-phone .trackArtist,
+  body.lfmusic-phone .playlistItem .title,
+  body.lfmusic-phone .playlistItem .subtitle {
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  body.lfmusic-phone .trackTime {
+    display: none !important;
+  }
+
+  body.lfmusic-phone .hoverOptionsBtn,
+  body.lfmusic-phone .hoverOptions,
+  body.lfmusic-phone .hoverIcon {
+    opacity: 1 !important;
+  }
+
+  body.lfmusic-phone .hoverIcon {
+    display: none !important;
+  }
+
+  body.lfmusic-phone .trackElem.activePaused .playingAnim {
+    animation-play-state: paused !important;
+    opacity: 0.82 !important;
+  }
+
+  body.lfmusic-phone .hoverOptionsBtn,
+  body.lfmusic-phone .hoverOptions {
+    right: 6px !important;
+    width: 40px !important;
+    height: 40px !important;
+  }
+
+  body.lfmusic-phone .emptyState,
+  body.lfmusic-phone .emptyInfo {
+    padding: 28px 12px !important;
+  }
+
+  body.lfmusic-phone .ctx-menu {
+    left: 8px !important;
+    right: 8px !important;
+    top: auto !important;
+    bottom: calc(var(--safe-bottom) + 10px) !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-height: min(70dvh, 440px) !important;
+    overflow-y: auto !important;
+    border-radius: 20px !important;
+    background-color: hsla(var(--accent-h), min(var(--accent-s), 48%), 12%, 0.96) !important;
+    box-shadow: 0 24px 56px rgba(0, 0, 0, 0.45) !important;
+  }
+
+  body.lfmusic-phone .ctx-item {
+    min-height: 46px !important;
+    padding: 12px 14px !important;
+    font-size: 14px !important;
+  }
+
+  body.lfmusic-phone .ctx-separator {
+    margin: 6px 12px !important;
+  }
+
+  body.lfmusic-phone .ctx-submenu {
+    left: 8px !important;
+    right: 8px !important;
+    top: auto !important;
+    bottom: calc(var(--safe-bottom) + 10px) !important;
+    width: auto !important;
+  }
+
+  body.lfmusic-phone .ctx-submenu-list {
+    max-height: min(62dvh, 380px) !important;
+    border-radius: 20px !important;
+    background-color: hsla(var(--accent-h), min(var(--accent-s), 48%), 12%, 0.96) !important;
+  }
+
+  body.lfmusic-phone .modalActions,
+  body.lfmusic-phone .footer {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+
+  body.lfmusic-phone .modalBtn,
+  body.lfmusic-phone .footer .btn {
+    flex: 1 1 auto !important;
+  }
+
+  body.lfmusic-phone .modalHeader,
+  body.lfmusic-phone .editArea {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  body.lfmusic-phone .sections {
+    max-height: none !important;
+  }
+
+  body.lfmusic-phone .fieldRow {
+    align-items: flex-start !important;
+    flex-wrap: wrap !important;
+  }
+
+  body.lfmusic-phone .fieldLabel {
+    width: auto !important;
+  }
+
+  body.lfmusic-phone .fieldValue {
+    text-align: left !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+  }
 }
 </style>

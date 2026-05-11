@@ -209,6 +209,7 @@ export function usePlayer() {
     folders, isScanning, removingFolder, scanProgress,
     init: initFolders, addFolder: addFolderRaw, removeFolder: removeFolderRaw,
     rescanLibrary: rescanLibraryRaw, folderDisplayName, openTracksReadyModal,
+    folderAddError,
   } = useFolders();
 
   const { loadPlaylists, getPlaylistTracks } = usePlaylists();
@@ -1140,6 +1141,7 @@ export function usePlayer() {
     isScanning,
     removingFolder,
     scanProgress,
+    folderAddError,
 
     // Computed
     trackTitle,

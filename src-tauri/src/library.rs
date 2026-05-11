@@ -400,9 +400,6 @@ impl MusicLibrary {
         AUDIO_FEATURE_WORKER_ACTIVE.store(count > 0, Ordering::SeqCst);
 
         if count == 0 {
-            if let Some(progress) = progress {
-                progress(completed, total);
-            }
             return Ok(0);
         }
 
@@ -1775,5 +1772,81 @@ impl MusicLibrary {
             .into_iter()
             .filter(|p| p.kind == PlaylistKind::Artist)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_library_dir(test_name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lfmusic_{test_name}_{unique}"))
+    }
+
+    #[test]
+    fn resume_audio_features_does_not_emit_done_progress_when_nothing_is_pending() {
+        let dir = temp_library_dir("audio_features_done");
+        let library = MusicLibrary::new(dir.clone()).expect("library should initialize");
+        library
+            .conn
+            .execute("INSERT INTO folders(path) VALUES (?1)", params!["/music"])
+            .expect("folder insert should work");
+        library
+            .conn
+            .execute(
+                "INSERT INTO tracks
+                 (file_path, folder_path, title, artist, album, duration_secs, format,
+                  sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    "/music/done.flac",
+                    "/music",
+                    "Done",
+                    "LFMusic",
+                    "Tests",
+                    180.0,
+                    "flac",
+                    44100,
+                    16,
+                    2,
+                    900000,
+                    1,
+                    777,
+                    1,
+                ],
+            )
+            .expect("track insert should work");
+        library
+            .conn
+            .execute(
+                "INSERT INTO track_audio_features
+                 (file_path, analyzed_modified_secs, analyzer_version)
+                 VALUES (?1, ?2, ?3)",
+                params!["/music/done.flac", 777, AUDIO_FEATURE_ANALYZER_VERSION],
+            )
+            .expect("features insert should work");
+
+        let emissions = Arc::new(StdMutex::new(Vec::new()));
+        let seen = Arc::clone(&emissions);
+        let pending = library
+            .resume_pending_audio_feature_analysis(Some(Arc::new(move |current, total| {
+                seen.lock().expect("emissions lock").push((current, total));
+            })))
+            .expect("resume should succeed");
+
+        assert_eq!(pending, 0);
+        assert!(
+            emissions.lock().expect("emissions lock").is_empty(),
+            "resume should stay silent when all tracks are already analyzed"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
     }
 }

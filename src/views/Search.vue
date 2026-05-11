@@ -14,6 +14,7 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists'
 import { searchRanked } from '../composables/useSearch'
 import { createRipple } from '../composables/useRipple'
+import { isPhoneViewport } from '../composables/usePlatform'
 
 import TrackArtists from '../components/TrackArtists.vue'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
@@ -311,7 +312,11 @@ function onTrackCoverClick(track: TrackMetadata) {
     playTrack(track, { searchStart: true, manualListStart: true })
 }
 
-function onTrackClick(e: MouseEvent) {
+function onTrackClick(e: MouseEvent, track: TrackMetadata) {
+    if (isPhoneViewport()) {
+        onTrackCoverClick(track)
+        return
+    }
     createRipple(e)
 }
 
@@ -648,7 +653,7 @@ function scrollToTop() {
                             active: currentTrack?.file_path === track.file_path,
                             activePaused: currentTrack?.file_path === track.file_path && !isPlaying,
                         }"
-                        @click="onTrackClick($event)"
+                        @click="onTrackClick($event, track)"
                     >
                         <div class="hoverIcon" @click.stop="onTrackCoverClick(track)">
                             <PauseIcon
@@ -663,7 +668,7 @@ function scrollToTop() {
                             />
                         </div>
                         <div
-                            v-if="currentTrack?.file_path === track.file_path && isPlaying"
+                            v-if="currentTrack?.file_path === track.file_path"
                             class="playingAnim"
                         ></div>
                         <div class="trackCover" @click.stop="onTrackCoverClick(track)">
@@ -679,7 +684,7 @@ function scrollToTop() {
                             <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                         </div>
                         <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                        <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
+                        <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
                     </div>
                 </div>
                 <button

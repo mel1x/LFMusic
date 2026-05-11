@@ -32,6 +32,7 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
 import { useI18n } from '../composables/useI18n';
+import { useAndroidMediaSession } from '../composables/useAndroidMediaSession';
 
 const win = getCurrentWindow();
 
@@ -40,6 +41,7 @@ const { t } = useI18n();
 
 const {
     currentTrack,
+    playbackState,
     volume,
     positionSecs,
     isSeeking,
@@ -75,6 +77,17 @@ const {
     loadCoversForTracks,
     activePlaylistSource,
 } = usePlayer();
+
+useAndroidMediaSession({
+    currentTrack,
+    currentCoverArt,
+    playbackState,
+    positionSecs,
+    durationSecs,
+    playPrev,
+    playNext,
+    togglePlayPause,
+});
 
 const { playlists, loadPlaylists } = usePlaylists();
 
@@ -1309,7 +1322,7 @@ function openQfCoverMenu(e: MouseEvent) {
     background-color: #ffffff;
     transition: .24s ease-in-out;
     transform-origin: center;
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) * 2), 80%), calc(var(--accent-l) * 1.1), 1);
+    color: hsla(var(--accent-h), min(var(--accent-s), 34%), 12%, 1);
 }
 .playBtn:disabled {
     opacity: 0.25;
@@ -1996,7 +2009,7 @@ function openQfCoverMenu(e: MouseEvent) {
     height: 72px;
     border-radius: 50%;
     background: #fff;
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) * 2), 80%), calc(var(--accent-l) * 1.1), 1);
+    color: hsla(var(--accent-h), min(var(--accent-s), 34%), 12%, 1);
     cursor: pointer;
     transition: transform .24s ease;
 }
@@ -2213,6 +2226,381 @@ function openQfCoverMenu(e: MouseEvent) {
 }
 
 /* ── Transition ──────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .player {
+        height: var(--mobile-player-height);
+        margin-bottom: var(--mobile-nav-height);
+        flex-shrink: 0;
+        align-items: stretch;
+        background: var(--dark-bg);
+    }
+
+    .asideWrapper {
+        display: none;
+    }
+
+    .playerControlsWrapper {
+        width: 100%;
+        height: 100%;
+        padding: 7px 8px 8px;
+    }
+
+    .progress-slider {
+        height: 12px;
+        margin: 0 0 -8px;
+        width: 100%;
+    }
+
+    .progress-slider::-webkit-slider-thumb {
+        width: 14px;
+        height: 14px;
+        opacity: 1;
+    }
+
+    .playerControlsWrapper .progress-bar-bg,
+    .playerControlsWrapper .progress-bar-fill {
+        opacity: 1;
+    }
+
+    .playerControls {
+        height: 100%;
+        border-radius: 16px;
+        background-color: hsla(var(--accent-h), min(var(--accent-s), 50%), 14%, 0.98);
+    }
+
+    .progress-bg {
+        height: 100%;
+    }
+
+    .botPart {
+        top: 8px;
+        width: 100%;
+        height: calc(100% - 8px);
+        padding: 0 10px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 6px;
+        align-items: center;
+    }
+
+    .trackInfo {
+        flex: initial;
+        width: 100%;
+        min-width: 0;
+        margin-left: 0;
+        gap: 8px;
+    }
+
+    .coverWrapper,
+    .trackCover {
+        width: 52px;
+        height: 52px;
+        border-radius: 8px;
+    }
+
+    .coverWrapper {
+        margin-top: 0;
+    }
+
+    .fullscreenBtn {
+        top: auto;
+        left: auto;
+        right: 4px;
+        bottom: 4px;
+        width: 24px;
+        height: 24px;
+        opacity: 1;
+        background: hsla(0, 0%, 0%, 0.45);
+        backdrop-filter: blur(8px);
+    }
+
+    .fullscreenBtn svg {
+        width: 15px;
+        height: 15px;
+    }
+
+    .trackTitle {
+        min-width: 0;
+        flex: 1 1 auto;
+        margin-top: 0;
+        overflow: hidden;
+    }
+
+    .topLine {
+        width: 100%;
+        max-width: none;
+        gap: 5px;
+    }
+
+    .topLine .trackName,
+    .artistName {
+        width: 100%;
+        max-width: 100%;
+        font-size: 13px;
+        line-height: 1.2;
+    }
+
+    .topLine .moreBtn {
+        width: 30px;
+        height: 30px;
+        flex-shrink: 0;
+    }
+
+    .controls {
+        flex: 0 0 auto;
+        margin-top: 0;
+        gap: 0;
+    }
+
+    .shuffleBtn,
+    .repeatBtn {
+        display: none;
+    }
+
+    .shuffleBtn,
+    .prevBtn,
+    .nextBtn,
+    .repeatBtn,
+    .queueList {
+        width: 38px;
+        height: 38px;
+        padding: 8px;
+        margin: 0;
+    }
+
+    .playBtn {
+        width: 42px;
+        height: 42px;
+        margin: 0 1px;
+    }
+
+    .additionalControls {
+        flex: 0 0 auto;
+        width: auto;
+        max-width: none;
+        margin: 0;
+        gap: 0;
+    }
+
+    .codecInfo,
+    .volumeControl {
+        display: none;
+    }
+
+    .fullscreen-overlay {
+        width: 100vw;
+        height: 100dvh;
+        align-items: stretch;
+        justify-content: stretch;
+    }
+
+    .fs-bg {
+        inset: -24px;
+    }
+
+    .fs-bg-img {
+        filter: blur(56px) brightness(0.28) saturate(1.35);
+    }
+
+    .fs-titlebar,
+    .fs-win-controls {
+        display: none;
+    }
+
+    .fs-close-btn {
+        top: calc(var(--safe-top) + 12px);
+        left: calc(var(--safe-left) + 12px);
+        width: 44px;
+        height: 44px;
+        background: hsla(0, 0%, 100%, 0.11);
+        backdrop-filter: blur(12px);
+    }
+
+    .qf-content {
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        min-height: 100%;
+        height: 100%;
+        padding: calc(var(--safe-top) + 68px) calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 18px) calc(var(--safe-left) + 16px);
+        gap: 18px;
+        overflow-y: auto;
+        contain: none;
+    }
+
+    .qf-left {
+        flex: 0 0 auto;
+        width: 100%;
+        max-width: 420px;
+        align-self: center;
+        justify-content: flex-start;
+        gap: 14px;
+        transform: none !important;
+    }
+
+    .qf-cover-wrapper {
+        width: min(78vw, 360px);
+        height: min(78vw, 360px);
+        border-radius: 18px;
+        box-shadow: 0 22px 64px rgba(0, 0, 0, 0.5);
+    }
+
+    .qf-cover-dim,
+    .qf-cover-overlay {
+        opacity: 1;
+    }
+
+    .qf-cover-overlay {
+        pointer-events: auto;
+    }
+
+    .qf-corner-btn,
+    .qf-side-btn,
+    .qf-center-btn {
+        width: 44px;
+        height: 44px;
+    }
+
+    .qf-corner-tr {
+        top: 12px;
+        right: 12px;
+    }
+
+    .qf-corner-bl {
+        bottom: 12px;
+        left: 12px;
+    }
+
+    .qf-corner-br {
+        right: 12px;
+        bottom: 12px;
+    }
+
+    .qf-volume-slider-popup {
+        display: none;
+    }
+
+    .qf-side-left {
+        left: 16px;
+    }
+
+    .qf-side-right {
+        right: 16px;
+    }
+
+    .qf-center-controls {
+        gap: 10px;
+    }
+
+    .qf-center-play {
+        width: 64px;
+        height: 64px;
+    }
+
+    .fs-info {
+        gap: 5px;
+        padding: 0 4px;
+    }
+
+    .fs-title {
+        font-size: 21px;
+    }
+
+    .fs-artist {
+        font-size: 15px;
+    }
+
+    .fs-album {
+        font-size: 13px;
+    }
+
+    .fs-progress {
+        width: 100%;
+        max-width: 420px;
+    }
+
+    .fs-times {
+        opacity: 1 !important;
+    }
+
+    .qf-right-wrap {
+        flex: 1 1 auto;
+        width: 100%;
+        max-width: 520px;
+        transform: none !important;
+        opacity: 1 !important;
+    }
+
+    .mode-player .qf-right-wrap {
+        display: none;
+    }
+
+    .mode-queue .qf-right-wrap {
+        display: block;
+    }
+
+    .mode-queue .qf-left {
+        display: none;
+    }
+
+    .qf-right {
+        justify-content: flex-start;
+        height: auto;
+        overflow-y: visible;
+        padding-bottom: 12px;
+    }
+
+    .qf-queue-header {
+        padding-left: 2px;
+        margin-top: 4px;
+    }
+
+    .qf-queue-header.styled-header {
+        font-size: 21px;
+        line-height: 1.15;
+        white-space: normal;
+    }
+
+    .qf-queue-list {
+        gap: 3px;
+    }
+
+    .qf-queue-item {
+        min-height: 58px;
+        padding: 7px 48px 7px 7px;
+        border-radius: 12px;
+    }
+
+    .qf-queue-cover-wrap {
+        width: 44px;
+        height: 44px;
+        opacity: 0.78;
+    }
+
+    .qf-hover-icon {
+        left: 18px;
+        opacity: 1;
+    }
+
+    .qf-queue-duration {
+        display: none;
+    }
+
+    .qf-hover-options {
+        right: 8px;
+        width: 40px;
+        height: 40px;
+        padding: 7px;
+        opacity: 1;
+    }
+}
+
+@media (max-width: 390px), (pointer: coarse) and (max-width: 390px) {
+    .topLine {
+        max-width: none;
+    }
+}
 
 .fs-enter-active {
     transition: opacity .35s ease, transform .35s ease;

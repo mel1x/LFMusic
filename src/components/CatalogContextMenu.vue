@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import ContextMenu from './ContextMenu.vue'
+import EditIcon from './Icons/EditIcon.vue'
 import PinIcon from './Icons/PinIcon.vue'
+import { useCustomCovers } from '../composables/useCustomCovers'
 import { usePins } from '../composables/usePins'
 
 defineProps<{
@@ -14,8 +16,14 @@ const emit = defineEmits<{
     close: []
 }>()
 
+const { pickAndSetCustomCover } = useCustomCovers()
 const { isPinned, togglePin } = usePins()
 const pinned = computed(() => isPinned('catalog', 'catalog'))
+
+async function onChangeCover() {
+    emit('close')
+    await pickAndSetCustomCover('catalog', 'catalog')
+}
 
 function onTogglePin() {
     togglePin({ kind: 'catalog', key: 'catalog', name: 'Мой каталог' })
@@ -24,7 +32,17 @@ function onTogglePin() {
 </script>
 
 <template>
-    <ContextMenu :x="x" :y="y" :centerX="centerX" @close="emit('close')">
+    <ContextMenu
+        :x="x"
+        :y="y"
+        :centerX="centerX"
+        mobileSheet="content"
+        @close="emit('close')"
+    >
+        <button class="ctx-item" @click="onChangeCover">
+            <EditIcon width="16" height="16" />
+            <span>Изменить обложку</span>
+        </button>
         <button class="ctx-item" @click="onTogglePin">
             <PinIcon width="16" height="16" />
             <span>{{ pinned ? 'Открепить' : 'Закрепить' }}</span>

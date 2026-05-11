@@ -12,6 +12,7 @@ import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
+import { isPhoneViewport } from '../composables/usePlatform';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
 import { searchRanked } from '../composables/useSearch';
 import { tracksCountText } from '../utils/format';
@@ -215,7 +216,11 @@ function scrollToTop() {
 
 // ── Track click ─────────────────────────────────────────────────────────────
 
-function onTrackClick(e: MouseEvent) {
+function onTrackClick(e: MouseEvent, track: TrackMetadata) {
+    if (isPhoneViewport()) {
+        onCoverClick(track)
+        return
+    }
     createRipple(e)
 }
 
@@ -326,7 +331,7 @@ function goBack() {
                     active: currentTrack?.file_path === track.file_path,
                     activePaused: currentTrack?.file_path === track.file_path && !isPlaying,
                 }"
-                @click="onTrackClick($event)"
+                @click="onTrackClick($event, track)"
             >
                 <div class="hoverIcon" @click.stop="onCoverClick(track)">
                     <PauseIcon
@@ -341,7 +346,7 @@ function goBack() {
                     />
                 </div>
                 <div
-                    v-if="currentTrack?.file_path === track.file_path && isPlaying"
+                    v-if="currentTrack?.file_path === track.file_path"
                     class="playingAnim"
                 ></div>
                 <div class="trackCover" @click.stop="onCoverClick(track)">
@@ -357,7 +362,7 @@ function goBack() {
                     <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                 </div>
                 <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
+                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
             </div>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>

@@ -7,6 +7,7 @@ import CloseIcon from './Icons/CloseIcon.vue'
 import EditIcon from './Icons/EditIcon.vue'
 import { useTrackEditModal } from '../composables/useTrackEditModal'
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
+import { isPhoneViewport } from '../composables/usePlatform'
 
 const { isOpen, currentTrack, closeTrackEdit } = useTrackEditModal()
 const { refreshLibrary, trackList, currentTrack: playerCurrentTrack } = usePlayer()
@@ -34,6 +35,9 @@ const loadingOriginal = ref(false)
 
 const saving = ref(false)
 const errorText = ref('')
+const modalCardEl = ref<HTMLElement | null>(null)
+let sheetDragStartY = 0
+let sheetDragging = false
 
 const fileName = computed(() => {
     const p = currentTrack.value?.file_path || ''
@@ -197,7 +201,44 @@ async function onSave() {
 }
 
 function onBackdropMousedown(e: MouseEvent) {
+    if (isPhoneViewport()) return
     if (e.target === e.currentTarget) closeTrackEdit()
+}
+
+function onSheetDragStart(e: PointerEvent) {
+    if (!isPhoneViewport()) return
+    e.preventDefault()
+    sheetDragging = true
+    sheetDragStartY = e.clientY
+    if (modalCardEl.value) modalCardEl.value.style.transition = 'none'
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    window.addEventListener('pointermove', onSheetDragMove)
+    window.addEventListener('pointerup', onSheetDragEnd)
+    window.addEventListener('pointercancel', onSheetDragEnd)
+}
+
+function onSheetDragMove(e: PointerEvent) {
+    if (!sheetDragging || !modalCardEl.value) return
+    e.preventDefault()
+    const delta = Math.max(0, e.clientY - sheetDragStartY)
+    modalCardEl.value.style.transform = `translateY(${delta}px)`
+}
+
+function onSheetDragEnd(e: PointerEvent) {
+    if (!sheetDragging) return
+    sheetDragging = false
+    window.removeEventListener('pointermove', onSheetDragMove)
+    window.removeEventListener('pointerup', onSheetDragEnd)
+    window.removeEventListener('pointercancel', onSheetDragEnd)
+    const delta = Math.max(0, e.clientY - sheetDragStartY)
+    if (delta > 76) {
+        closeTrackEdit()
+        return
+    }
+    if (modalCardEl.value) {
+        modalCardEl.value.style.transition = ''
+        modalCardEl.value.style.transform = ''
+    }
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -217,6 +258,9 @@ onMounted(() => {
 
 onUnmounted(() => {
     document.removeEventListener('keydown', onKeydown)
+    window.removeEventListener('pointermove', onSheetDragMove)
+    window.removeEventListener('pointerup', onSheetDragEnd)
+    window.removeEventListener('pointercancel', onSheetDragEnd)
 })
 </script>
 
@@ -228,7 +272,8 @@ onUnmounted(() => {
                 class="modalBackdrop"
                 @mousedown="onBackdropMousedown"
             >
-                <div class="modalCard" @mousedown.stop>
+                <div ref="modalCardEl" class="modalCard" @mousedown.stop>
+                    <div class="sheetHandle" @pointerdown="onSheetDragStart"></div>
                     <div class="accentGlow"></div>
 
                     <button class="closeBtn" @click="closeTrackEdit" aria-label="Закрыть">
@@ -353,6 +398,9 @@ onUnmounted(() => {
     flex-direction: column;
     gap: 18px;
     overflow: hidden;
+}
+.sheetHandle {
+    display: none;
 }
 .accentGlow {
     pointer-events: none;
@@ -657,5 +705,123 @@ onUnmounted(() => {
 .modal-enter-from .modalCard, .modal-leave-to .modalCard {
     transform: scale(0.94) translateY(8px);
     opacity: 0;
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .modalBackdrop {
+        align-items: flex-end !important;
+        justify-content: center !important;
+        padding: calc(var(--safe-top) + 12px) 0 0 !important;
+        background-color: hsla(0, 0%, 0%, 0.36);
+    }
+
+    .modalCard {
+        width: 100vw !important;
+        max-width: none !important;
+        height: calc(100dvh - var(--safe-top) - 12px) !important;
+        max-height: none !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        padding: 0 16px calc(18px + var(--safe-bottom));
+        gap: 16px;
+        border-radius: 28px 28px 0 0 !important;
+        background-color: hsl(var(--accent-h), min(var(--accent-s), 48%), 11%);
+        overflow-y: auto !important;
+        overscroll-behavior: contain;
+        touch-action: pan-y;
+        transition: transform .2s ease;
+        will-change: transform;
+    }
+
+    .sheetHandle {
+        display: flex;
+        flex: 0 0 auto;
+        height: 34px;
+        margin: 0 -16px;
+        align-items: center;
+        justify-content: center;
+        cursor: grab;
+        touch-action: none;
+    }
+
+    .sheetHandle::before {
+        content: "";
+        width: 42px;
+        height: 4px;
+        border-radius: 999px;
+        background-color: hsla(0, 0%, 100%, 0.28);
+    }
+
+    .modalHeader {
+        padding-right: 0;
+    }
+
+    .closeBtn {
+        display: none;
+    }
+
+    .coverColumn {
+        align-items: stretch;
+    }
+
+    .coverWrap {
+        align-self: center;
+        width: min(52vw, 170px);
+        height: min(52vw, 170px);
+    }
+
+    .coverActions {
+        opacity: 1;
+    }
+
+    .coverActionBtn {
+        width: 44px;
+        height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .coverPickBtn {
+        min-height: 44px;
+        justify-content: center;
+        border-radius: 14px;
+    }
+
+    .fieldInput {
+        min-height: 44px;
+        font-size: 16px;
+    }
+
+    .hint {
+        font-size: 12px;
+    }
+
+    .footerSpacer {
+        display: none;
+    }
+
+    .modal-enter-active .modalCard,
+    .modal-leave-active .modalCard {
+        transition: transform .2s ease, opacity .2s ease;
+    }
+
+    .modal-enter-from .modalCard,
+    .modal-leave-to .modalCard {
+        transform: translateY(20px);
+        opacity: 0;
+    }
+
+    :global(body.lfmusic-phone) .modalBackdrop {
+        padding: calc(var(--safe-top) + 12px) 0 0 !important;
+    }
+
+    :global(body.lfmusic-phone) .modalCard {
+        width: 100vw !important;
+        max-width: none !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        border-radius: 28px 28px 0 0 !important;
+    }
 }
 </style>

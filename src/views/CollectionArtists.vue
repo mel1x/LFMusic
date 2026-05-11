@@ -14,6 +14,7 @@ import { usePlaylists } from '../composables/usePlaylists';
 import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
 import AnimatedCover from '../components/AnimatedCover.vue';
+import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 
 const router = useRouter();
@@ -315,7 +316,8 @@ function scrollToTop() {
 
 <template>
     <div class="pageRoot" ref="pageRootEl" @scroll="handleScroll">
-        <div class="stickyHeaderAnchor">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader title="Исполнители" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
                     <div>Исполнители</div>

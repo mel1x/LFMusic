@@ -18,7 +18,7 @@ const { rebuildArtists } = usePlaylists();
 const {
     folders, isScanning, removingFolder, scanProgress,
     addFolder, removeFolder, rescanLibrary, folderDisplayName,
-    refreshLibrary,
+    refreshLibrary, folderAddError,
 } = usePlayer();
 
 // ── Сброс редактирования треков ────────────────────────────────────────────
@@ -368,7 +368,10 @@ function onSeparatorKey(e: KeyboardEvent) {
             <div class="settingDesc">Кастомизация дополнительного функционала приложения</div>
             <div class="settingsBlock">
                 <template v-for="item in settingItems" :key="item.key">
-                    <label class="settingElem">
+                    <label
+                        class="settingElem"
+                        :class="{ phoneHiddenSetting: item.key === 'show_player_extra_block' }"
+                    >
                         <input type="checkbox" class="settingCheckbox"
                             :checked="settings[item.key]"
                             @change="toggle(item.key)">
@@ -627,6 +630,10 @@ function onSeparatorKey(e: KeyboardEvent) {
                     <div class="scanProgressTrack">
                         <div class="scanProgressFill" :style="{ width: scanProgress.percent + '%' }" />
                     </div>
+                </div>
+
+                <div v-if="folderAddError" class="folderAddError">
+                    {{ folderAddError }}
                 </div>
 
                 <div class="foldersEmpty" v-if="!folders.length && !isScanning">
@@ -1428,6 +1435,15 @@ function onSeparatorKey(e: KeyboardEvent) {
     border-radius: 999px;
     transition: width 0.15s linear;
 }
+.folderAddError {
+    padding: 11px 14px;
+    border-radius: 10px;
+    background-color: hsla(0, 70%, 50%, 0.12);
+    color: hsl(0, 70%, 82%);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.35;
+}
 .foldersEmpty {
     padding: 16px;
     text-align: center;
@@ -1621,5 +1637,186 @@ function onSeparatorKey(e: KeyboardEvent) {
 }
 .eqSlider::-webkit-slider-thumb:hover {
     transform: scale(1.2);
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .pageRoot {
+        padding: 18px 14px 20px;
+    }
+
+    .pageTitle {
+        margin-bottom: 24px;
+        font-size: 30px;
+    }
+
+    .settingBlock {
+        margin-bottom: 30px;
+    }
+
+    .settingTitle {
+        font-size: 18px;
+        line-height: 1.2;
+    }
+
+    .settingDesc {
+        font-size: 14px;
+        line-height: 1.35;
+    }
+
+    .settingsBlock,
+    .eqBlock,
+    .separatorsBlock,
+    .foldersBlock {
+        max-width: none;
+    }
+
+    .settingElem {
+        min-height: 46px;
+        align-items: center;
+        gap: 12px;
+        font-size: 15px;
+    }
+
+    .phoneHiddenSetting,
+    .extraModePanel {
+        display: none;
+    }
+
+    .languageSetting,
+    .accentPickerHead,
+    .foldersHat,
+    .eqHeader,
+    .eqGainRow,
+    .separatorAddRow {
+        flex-wrap: wrap;
+    }
+
+    .languageDropdown,
+    .separatorAddRow,
+    .separatorInput,
+    .separatorAddBtn {
+        width: 100%;
+    }
+
+    .languageMenu {
+        position: static;
+        margin-top: 7px;
+    }
+
+    .accentPicker {
+        padding: 13px;
+        border-radius: 14px;
+    }
+
+    .accentPickerInfo {
+        width: min-content;
+    }
+
+    .accentPresets {
+        gap: 10px;
+    }
+
+    .accentPresetBtn {
+        width: 34px;
+        height: 34px;
+    }
+
+    .separatorChip {
+        min-height: 34px;
+    }
+
+    .separatorRemove {
+        width: 28px;
+        height: 28px;
+    }
+
+    .foldersHat {
+        align-items: stretch;
+        gap: 8px;
+    }
+
+    .addFolder,
+    .rescanFolders,
+    .resetEditsBtn,
+    .eqResetBtn,
+    .eqPresetBtn,
+    .separatorAddBtn {
+        min-height: 44px;
+        justify-content: center;
+        border-radius: 12px;
+    }
+
+    .addFolder,
+    .rescanFolders {
+        flex: 1 1 calc(50% - 4px);
+    }
+
+    .resetEditsBtn {
+        flex: 1 1 100%;
+    }
+
+    .folderElem {
+        align-items: flex-start;
+        gap: 10px;
+        padding: 10px;
+        border-radius: 12px;
+    }
+
+    .folderElem .icon {
+        padding: 4px 0 0;
+        flex-shrink: 0;
+    }
+
+    .folderInfo {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .folderPath {
+        font-size: 13px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+    }
+
+    .removeBtn {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        padding: 8px;
+    }
+
+    .scanProgress,
+    .folderAddError {
+        border-radius: 12px;
+    }
+
+    .eqPresets {
+        gap: 8px;
+    }
+
+    .eqGainRow {
+        align-items: center;
+        padding: 12px;
+    }
+
+    .eqGainSlider {
+        min-width: 180px;
+    }
+
+    .eqSliders {
+        justify-content: flex-start;
+        gap: 10px;
+        padding: 16px 10px;
+        overflow-x: auto;
+        border-radius: 14px;
+    }
+
+    .eqBand {
+        flex: 0 0 38px;
+    }
+
+    .eqSliderWrap {
+        height: 130px;
+    }
 }
 </style>

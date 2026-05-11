@@ -212,4 +212,16 @@ main::-webkit-scrollbar {
 .scrollThumb:active {
   background: #ffffff50;
 }
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+  main {
+    border-radius: 0;
+    border: 0;
+    overscroll-behavior: contain;
+  }
+
+  .scrollTrack {
+    display: none;
+  }
+}
 </style>

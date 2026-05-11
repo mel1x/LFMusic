@@ -47,7 +47,16 @@ function onMoveToTop() {
 </script>
 
 <template>
-    <ContextMenu :x="x" :y="y" :alignRight="alignRight" :anchorBottom="anchorBottom" :centerX="centerX" :centerY="centerY" @close="emit('close')">
+    <ContextMenu
+        :x="x"
+        :y="y"
+        :alignRight="alignRight"
+        :anchorBottom="anchorBottom"
+        :centerX="centerX"
+        :centerY="centerY"
+        mobileSheet="content"
+        @close="emit('close')"
+    >
         <button v-if="showMoveToTop" class="ctx-item" @click="onMoveToTop">
             <ArrowUpIcon v-if="moveToTopUp" width="16" height="16" />
             <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

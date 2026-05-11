@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
+import { isAndroidRuntime } from './usePlatform'
 
 export interface FolderInfo {
     path: string
@@ -14,6 +15,7 @@ const isScanning = ref(false)
 const removingFolder = ref<string | null>(null)
 const scanProgress = ref({ current: 0, total: 0, percent: 0 })
 const showTracksReadyModal = ref(false)
+const folderAddError = ref('')
 
 let initialized = false
 
@@ -29,6 +31,24 @@ async function init() {
 }
 
 async function addFolder() {
+    folderAddError.value = ''
+
+    if (isAndroidRuntime()) {
+        isScanning.value = true
+        scanProgress.value = { current: 0, total: 0, percent: 0 }
+
+        try {
+            await invoke('library_add_android_music_folders')
+            folders.value = await invoke<FolderInfo[]>('library_get_folders')
+            return true
+        } catch (e) {
+            folderAddError.value = String(e)
+            return false
+        } finally {
+            isScanning.value = false
+        }
+    }
+
     const dirPath = await open({ directory: true, multiple: false })
     if (!dirPath) return false
 
@@ -39,6 +59,9 @@ async function addFolder() {
         await invoke('library_add_folder', { folderPath: dirPath as string })
         folders.value = await invoke<FolderInfo[]>('library_get_folders')
         return true
+    } catch (e) {
+        folderAddError.value = String(e)
+        return false
     } finally {
         isScanning.value = false
     }
@@ -85,6 +108,7 @@ export function useFolders() {
         removingFolder,
         scanProgress,
         showTracksReadyModal,
+        folderAddError,
         init,
         addFolder,
         removeFolder,

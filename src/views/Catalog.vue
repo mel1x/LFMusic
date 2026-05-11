@@ -4,15 +4,14 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import MoreIcon from '../components/Icons/MoreIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
-import SearchIcon from '../components/Icons/SearchIcon.vue';
 import defaultCover from '../assets/trackCover.webp';
 import cover from '../assets/cover.webp';
 
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { createRipple } from '../composables/useRipple';
+import { isPhoneViewport } from '../composables/usePlatform';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
-import { searchRanked } from '../composables/useSearch';
 import { tracksCountText } from '../utils/format';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
@@ -20,6 +19,7 @@ import CatalogContextMenu from '../components/CatalogContextMenu.vue';
 import TrackArtists from '../components/TrackArtists.vue';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
+import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 
 const {
@@ -37,33 +37,6 @@ const {
 
 const { getCustomCover } = useCustomCovers();
 const catalogCustomCover = computed(() => getCustomCover('catalog', 'catalog'));
-
-// ── Search ──────────────────────────────────────────────────────────────────
-
-const searchInput = ref<HTMLInputElement | null>(null)
-const rawSearch = ref('')
-const debouncedSearch = ref('')
-let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
-
-function onSearchInput(e: Event) {
-    const value = (e.target as HTMLInputElement).value
-    rawSearch.value = value
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
-    searchDebounceTimer = setTimeout(() => {
-        debouncedSearch.value = value
-    }, 250)
-}
-
-const focusSearch = () => {
-    searchInput.value?.focus()
-}
-
-function clearSearch() {
-    rawSearch.value = ''
-    debouncedSearch.value = ''
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
-    searchInput.value?.focus()
-}
 
 // ── Genre filter ───────────────────────────────────────────────────────────
 
@@ -123,17 +96,7 @@ const filteredTracks = computed(() => {
     if (selectedGenre.value) {
         list = list.filter(t => t.genre === selectedGenre.value)
     }
-    const q = debouncedSearch.value.trim()
-    if (!q) return list
-    return searchRanked(
-        list,
-        q,
-        (t) => {
-            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
-            return [t.title || '', t.artist || '', t.album || '', fileName]
-        },
-        { formatPath: (t) => t.file_path },
-    )
+    return list
 })
 
 // ── Header height (for virtual scroll offset) ─────────────────────────────
@@ -183,7 +146,7 @@ const {
 } = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
 
 // Reset scroll on search/genre change
-watch([debouncedSearch, selectedGenre], () => {
+watch(selectedGenre, () => {
     resetScroll()
 })
 
@@ -237,7 +200,11 @@ function scrollToTop() {
 
 // ── Track click ─────────────────────────────────────────────────────────────
 
-function onTrackClick(e: MouseEvent) {
+function onTrackClick(e: MouseEvent, track: TrackMetadata) {
+    if (isPhoneViewport()) {
+        onCoverClick(track)
+        return
+    }
     createRipple(e)
 }
 
@@ -282,7 +249,6 @@ async function moveTrackToTop(track: TrackMetadata) {
 const catalogSourceId = computed(() => {
     let id = 'catalog'
     if (selectedGenre.value) id += `:genre:${selectedGenre.value}`
-    if (debouncedSearch.value.trim()) id += `:search`
     return id
 })
 
@@ -299,8 +265,9 @@ function onCoverClick(track: TrackMetadata) {
 </script>
 
 <template>
-    <div class="pageRoot" ref="trackListEl" @scroll="handleScroll">
-        <div class="stickyHeaderAnchor">
+    <div class="pageRoot catalogPage" ref="trackListEl" @scroll="handleScroll">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader title="Мой каталог" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
                     <div>Мой каталог</div>
@@ -323,32 +290,13 @@ function onCoverClick(track: TrackMetadata) {
                         </div>
                     </div>
                     <div class="controls">
-                        <button class="playListBtn" @click="onPlayCatalog">
+                        <button class="playListBtn" type="button" aria-label="Слушать каталог" @click="onPlayCatalog">
                             <PauseIcon v-if="isCatalogActive && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                            Слушать
+                            <span class="playListText">Слушать</span>
                         </button>
-                        <button class="moreOptionsBtn" @mousedown="openCatalogMenu($event)"><MoreIcon width="22" height="22" /></button>
+                        <button class="moreOptionsBtn" type="button" aria-label="Действия каталога" @mousedown="openCatalogMenu($event)"><MoreIcon width="22" height="22" /></button>
                     </div>
-                </div>
-            </div>
-            <div class="searchZone">
-                <SearchIcon class="searchIcon" @click="focusSearch" />
-                <input
-                    ref="searchInput"
-                    type="text"
-                    class="search"
-                    name="search"
-                    id="search"
-                    placeholder="Поиск трека"
-                    autocomplete="off"
-                    :value="rawSearch"
-                    @input="onSearchInput"
-                />
-                <div class="searchClear" v-if="rawSearch" @click="clearSearch">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
                 </div>
             </div>
             <div class="genreBarWrap" v-if="genreList.length > 0" @wheel.prevent="onGenreWheel">
@@ -395,7 +343,7 @@ function onCoverClick(track: TrackMetadata) {
                 }"
 
 
-                @click="onTrackClick($event)"
+                @click="onTrackClick($event, track)"
             >
                 <div class="hoverIcon" @click.stop="onCoverClick(track)">
                     <PauseIcon
@@ -410,7 +358,7 @@ function onCoverClick(track: TrackMetadata) {
                     />
                 </div>
                 <div
-                    v-if="currentTrack?.file_path === track.file_path && isPlaying"
+                    v-if="currentTrack?.file_path === track.file_path"
                     class="playingAnim"
                 ></div>
                 <div class="trackCover" @click.stop="onCoverClick(track)">
@@ -426,14 +374,9 @@ function onCoverClick(track: TrackMetadata) {
                     <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                 </div>
                 <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)"><MoreIcon width="26" height="26" /></div>
+                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
             </div>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
-        </div>
-        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0">
-            <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
-            <div class="emptyText">Ничего не найдено</div>
-            <div class="emptyDesc">Попробуйте изменить критерии поиска или добавить папки с треками в настройках.</div>
         </div>
         <div class="emptyState" v-else-if="trackList.length === 0">
             <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
@@ -1047,6 +990,211 @@ function onCoverClick(track: TrackMetadata) {
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.07);
+    }
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    body.lfmusic-phone .catalogPage {
+        padding: 0 14px !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+    }
+
+    body.lfmusic-phone .catalogPage .scrollHeader {
+        --catalog-mobile-cover-height: clamp(290px, 86vw, 390px);
+        --catalog-mobile-header-overlap: 56px;
+        position: relative;
+        isolation: isolate;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 100%;
+    }
+
+    body.lfmusic-phone .catalogPage .scrollHeader::after {
+        content: "";
+        position: absolute;
+        left: -14px;
+        right: -14px;
+        top: calc(var(--catalog-mobile-cover-height) - 18px);
+        bottom: 0;
+        z-index: 0;
+        pointer-events: none;
+        background:
+            linear-gradient(
+                to bottom,
+                var(--light-bg) 0%,
+                hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.42) 42%,
+                hsla(var(--accent-h), min(var(--accent-s), 48%), 14%, 0.22) 70%,
+                var(--light-bg) 100%
+            );
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat {
+        position: relative;
+        z-index: 1;
+        align-items: center !important;
+        justify-content: flex-start !important;
+        width: calc(100% + 28px) !important;
+        min-height: calc(var(--catalog-mobile-cover-height) + var(--catalog-mobile-header-overlap));
+        margin: calc(var(--catalog-mobile-header-overlap) * -1) -14px 18px !important;
+        gap: 0 !important;
+        overflow: hidden;
+        border-radius: 0 !important;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .coverWrap {
+        width: 100% !important;
+        height: calc(var(--catalog-mobile-cover-height) + var(--catalog-mobile-header-overlap)) !important;
+        overflow: hidden;
+        border-radius: 0 !important;
+        box-shadow: 0 18px 48px hsla(var(--accent-h), min(var(--accent-s), 48%), 6%, 0.34);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .cover,
+    body.lfmusic-phone .catalogPage .pageHat .cover img {
+        width: 100% !important;
+        height: 100% !important;
+        border-radius: 0 !important;
+        object-fit: cover;
+        filter: saturate(1.05) brightness(0.86);
+        transform: none !important;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .coverWrap::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        z-index: 2;
+        height: 74%;
+        pointer-events: none;
+        background:
+            radial-gradient(circle at 50% 78%, hsla(var(--accent-h), min(var(--accent-s), 70%), 58%, 0.24), transparent 48%),
+            linear-gradient(
+                to bottom,
+                hsla(var(--accent-h), min(var(--accent-s), 50%), 10%, 0) 0%,
+                hsla(var(--accent-h), min(var(--accent-s), 58%), 14%, 0.34) 38%,
+                hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.86) 74%,
+                var(--light-bg) 100%
+            );
+    }
+
+    body.lfmusic-phone .catalogPage .coverEditButtons {
+        display: none !important;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone {
+        position: absolute;
+        top: auto !important;
+        bottom: 20px !important;
+        left: 50% !important;
+        z-index: 3;
+        width: min(270px, calc(100% - 36px)) !important;
+        gap: 12px !important;
+        align-items: center !important;
+        transform: translateX(-50%) !important;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone,
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .info {
+        min-width: 0 !important;
+        text-align: center !important;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .info {
+        align-items: center !important;
+        margin-top: 0 !important;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .info .listType {
+        margin-left: 0;
+        font-size: 11px;
+        font-weight: 700;
+        color: hsla(0, 0%, 100%, 0.56);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .info .listName {
+        max-width: 100%;
+        margin-top: 1px;
+        font-size: 28px;
+        line-height: 1.04;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        color: hsla(0, 0%, 100%, 0.96);
+        text-shadow: 0 2px 18px rgba(0, 0, 0, 0.28);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .info .badges {
+        justify-content: center;
+        margin-top: 9px;
+        gap: 6px !important;
+    }
+
+    body.lfmusic-phone .catalogPage .badge {
+        padding: 3px 9px;
+        font-size: 11px;
+        background-color: hsla(0, 0%, 100%, 0.1);
+        color: hsla(0, 0%, 100%, 0.72);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls {
+        justify-content: center;
+        gap: 10px !important;
+        margin-top: 0;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls .playListBtn,
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls .moreOptionsBtn {
+        width: 46px !important;
+        height: 46px !important;
+        min-width: 46px !important;
+        min-height: 46px !important;
+        padding: 0 !important;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls .playListBtn {
+        background-color: hsla(0, 0%, 100%, 0.94);
+        color: hsla(var(--accent-h), min(var(--accent-s), 62%), 15%, 1);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls .moreOptionsBtn {
+        flex-direction: row;
+        background-color: hsla(0, 0%, 100%, 0.12);
+        color: hsla(0, 0%, 100%, 0.94);
+        backdrop-filter: blur(12px);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls .playListBtn:hover {
+        background-color: hsla(0, 0%, 100%, 1);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls .moreOptionsBtn:hover {
+        background-color: hsla(0, 0%, 100%, 0.18);
+    }
+
+    body.lfmusic-phone .catalogPage .playListText {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .dataZone .controls svg {
+        width: 18px !important;
+        height: 18px !important;
+    }
+
+    body.lfmusic-phone .catalogPage .genreBarWrap {
+        position: relative;
+        z-index: 2;
+        width: 100% !important;
     }
 }
 </style>
