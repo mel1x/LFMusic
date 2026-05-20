@@ -65,15 +65,15 @@ function openSearch() {
 
     .mobileScrollHeader {
         position: fixed;
-        top: 0;
+        top: var(--safe-top);
         left: 0;
         right: 0;
         z-index: 70;
         display: grid;
         grid-template-columns: 48px minmax(0, 1fr) auto;
         align-items: center;
-        height: calc(56px + var(--safe-top));
-        padding: calc(6px + var(--safe-top)) calc(10px + var(--safe-right)) 6px calc(10px + var(--safe-left));
+        height: 56px;
+        padding: 6px calc(10px + var(--safe-right)) 6px calc(10px + var(--safe-left));
         color: hsla(0, 0%, 100%, 0.96);
         pointer-events: auto;
         background: hsla(var(--accent-h), min(var(--accent-s), 42%), 10%, 0);

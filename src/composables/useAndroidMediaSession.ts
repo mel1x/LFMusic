@@ -9,6 +9,9 @@ declare global {
       updateMediaSession(payload: string): void
       updateAudioFeatureProgress?(payload: string): void
       updateSystemBars?(color: string): void
+      getPermissionStatus?(): string
+      getSystemInsets?(): string
+      requestRequiredPermissionsFromJs?(): void
     }
   }
 }

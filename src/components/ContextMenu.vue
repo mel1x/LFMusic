@@ -20,6 +20,7 @@ const emit = defineEmits<{
 
 const menuEl = ref<HTMLElement | null>(null)
 const positioned = ref(false)
+const compactMobileSheet = ref(false)
 let dragStartY = 0
 let dragging = false
 
@@ -28,6 +29,7 @@ function adjustPosition() {
     if (!el) return
 
     if (isPhoneViewport()) {
+        compactMobileSheet.value = false
         el.style.left = '8px'
         el.style.right = '8px'
         el.style.top = 'auto'
@@ -45,9 +47,15 @@ function adjustPosition() {
             el.style.bottom = '0'
         }
         positioned.value = true
+        requestAnimationFrame(() => {
+            if (!menuEl.value || props.mobileSheet !== 'content' || !isPhoneViewport()) return
+            const viewportHeight = window.visualViewport?.height ?? window.innerHeight
+            compactMobileSheet.value = menuEl.value.getBoundingClientRect().height < viewportHeight * 0.5
+        })
         return
     }
 
+    compactMobileSheet.value = false
     const scale = (window as any).__uiScale || 1
     const rect = el.getBoundingClientRect()
     const pad = 8
@@ -75,7 +83,6 @@ function adjustPosition() {
 }
 
 function onClickOutside(e: MouseEvent) {
-    if (isPhoneViewport() && props.mobileSheet) return
     const target = e.target as Node
     if (menuEl.value && !menuEl.value.contains(target)) {
         const submenu = (target as Element).closest?.('.ctx-submenu')
@@ -167,14 +174,22 @@ onUnmounted(() => {
 <template>
     <Teleport to="body">
         <div
+            v-if="mobileSheet"
+            class="ctx-mobile-backdrop"
+            :class="{ visible: positioned }"
+            @mousedown="emit('close')"
+        ></div>
+        <div
             ref="menuEl"
             class="ctx-menu"
             :class="{
                 visible: positioned,
                 'mobile-full-sheet': mobileSheet === 'full',
                 'mobile-content-sheet': mobileSheet === 'content',
+                'compact-mobile-sheet': compactMobileSheet,
             }"
             @mousedown.stop
+            @pointerdown.self="onDragStart"
         >
             <div
                 v-if="mobileSheet"
@@ -182,6 +197,11 @@ onUnmounted(() => {
                 @pointerdown="onDragStart"
             ></div>
             <slot />
+            <div
+                v-if="mobileSheet === 'content' && compactMobileSheet"
+                class="ctx-mobile-spacer"
+                @pointerdown="onDragStart"
+            ></div>
         </div>
     </Teleport>
 </template>
@@ -203,6 +223,12 @@ onUnmounted(() => {
 .ctx-drag-handle {
     display: none;
 }
+.ctx-mobile-backdrop {
+    display: none;
+}
+.ctx-mobile-spacer {
+    display: none;
+}
 .ctx-menu.visible {
     opacity: 1;
     animation: ctx-appear 0.15s ease;
@@ -220,6 +246,21 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .ctx-mobile-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        display: block;
+        background: transparent;
+        opacity: 0;
+        pointer-events: auto;
+        transition: opacity .18s ease;
+    }
+
+    .ctx-mobile-backdrop.visible {
+        opacity: 1;
+    }
+
     :global(body.lfmusic-phone .ctx-menu.mobile-full-sheet) {
         left: 0 !important;
         right: 0 !important;
@@ -261,6 +302,12 @@ onUnmounted(() => {
         touch-action: pan-y;
         transition: transform .2s ease;
         will-change: transform;
+    }
+
+    .ctx-mobile-spacer {
+        display: block;
+        flex: 0 0 48px;
+        touch-action: none;
     }
 
     .ctx-drag-handle {

@@ -152,6 +152,21 @@ function openQueueFullscreen() {
     if (currentTrack.value) fsMode.value = 'queue';
 }
 
+const mobilePlayerQuery = '(max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px)';
+
+function isMobilePlayerLayout() {
+    return typeof window !== 'undefined' && window.matchMedia(mobilePlayerQuery).matches;
+}
+
+function onPlayerSurfaceClick(e: MouseEvent) {
+    if (isMobilePlayerLayout()) {
+        openFullscreen();
+        return;
+    }
+
+    if (e.target === e.currentTarget) onPlayerRipple(e);
+}
+
 function toggleFsMode() {
     if (!currentTrack.value) return;
     fsMode.value = fsMode.value === 'queue' ? 'player' : 'queue';
@@ -506,10 +521,10 @@ function openQfCoverMenu(e: MouseEvent) {
                 <div class="progress-bar-fill" :style="{ width: progressFillPercent + '%' }"></div>
                 <div class="progress-bg" :style="{ width: progressFillPercent + '%' }"></div>
             </div>
-            <div class="botPart" @click.self="onPlayerRipple">
+            <div class="botPart" @click="onPlayerSurfaceClick">
                 <div class="trackInfo">
                     <div class="coverWrapper">
-                        <button class="fullscreenBtn" @click="openFullscreen"><FullscreenIcon /></button>
+                        <button class="fullscreenBtn" @click.stop="openFullscreen"><FullscreenIcon /></button>
                         <img
                             v-if="currentCoverArt"
                             :src="currentCoverArt"
@@ -522,7 +537,7 @@ function openQfCoverMenu(e: MouseEvent) {
                     <div class="trackTitle" v-if="currentTrack">
                         <div class="topLine">
                             <div v-truncate class="trackName">{{ trackTitle }}</div>
-                            <button class="moreBtn" @mousedown="openPlayerTrackMenu($event)"><MoreIcon /></button>
+                            <button class="moreBtn" @mousedown.stop="openPlayerTrackMenu($event)" @click.stop><MoreIcon /></button>
                         </div>
                         <div class="artistName"><TrackArtists :artist="currentTrack.artist" /></div>
                     </div>
@@ -532,7 +547,7 @@ function openQfCoverMenu(e: MouseEvent) {
                         </div>
                     </div>
                 </div>
-                <div class="controls">
+                <div class="controls" @click.stop>
                     <button
                         class="shuffleBtn"
                         :class="{ active: shuffled }"
@@ -579,8 +594,8 @@ function openQfCoverMenu(e: MouseEvent) {
                         <RepeatIcon v-else />
                     </button>
                 </div>
-                <div class="additionalControls">
-                    <div v-if="currentTrack" class="queueList" @click="openQueueFullscreen"><ListIcon /></div>
+                <div class="additionalControls" @click.stop>
+                    <div v-if="currentTrack" class="queueList" @click.stop="openQueueFullscreen"><ListIcon /></div>
                     <div class="codecInfo" v-if="currentTrack && codecDisplay"
                         v-tooltip="'Формат и параметры аудио — нажмите для подробностей'">
                         {{ codecDisplay }}
@@ -2243,24 +2258,17 @@ function openQfCoverMenu(e: MouseEvent) {
     .playerControlsWrapper {
         width: 100%;
         height: 100%;
-        padding: 7px 8px 8px;
+        padding: 8px 14px;
     }
 
     .progress-slider {
-        height: 12px;
-        margin: 0 0 -8px;
-        width: 100%;
-    }
-
-    .progress-slider::-webkit-slider-thumb {
-        width: 14px;
-        height: 14px;
-        opacity: 1;
+        display: none;
     }
 
     .playerControlsWrapper .progress-bar-bg,
-    .playerControlsWrapper .progress-bar-fill {
-        opacity: 1;
+    .playerControlsWrapper .progress-bar-fill,
+    .progress-bg {
+        display: none;
     }
 
     .playerControls {
@@ -2274,14 +2282,15 @@ function openQfCoverMenu(e: MouseEvent) {
     }
 
     .botPart {
-        top: 8px;
+        top: 0;
         width: 100%;
-        height: calc(100% - 8px);
-        padding: 0 10px;
+        height: 100%;
+        padding: 0 24px 0 20px;
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto auto;
-        gap: 6px;
+        gap: 4px;
         align-items: center;
+        cursor: pointer;
     }
 
     .trackInfo {
@@ -2294,8 +2303,8 @@ function openQfCoverMenu(e: MouseEvent) {
 
     .coverWrapper,
     .trackCover {
-        width: 52px;
-        height: 52px;
+        width: 56px;
+        height: 56px;
         border-radius: 8px;
     }
 
@@ -2304,20 +2313,7 @@ function openQfCoverMenu(e: MouseEvent) {
     }
 
     .fullscreenBtn {
-        top: auto;
-        left: auto;
-        right: 4px;
-        bottom: 4px;
-        width: 24px;
-        height: 24px;
-        opacity: 1;
-        background: hsla(0, 0%, 0%, 0.45);
-        backdrop-filter: blur(8px);
-    }
-
-    .fullscreenBtn svg {
-        width: 15px;
-        height: 15px;
+        display: none;
     }
 
     .trackTitle {
@@ -2342,18 +2338,19 @@ function openQfCoverMenu(e: MouseEvent) {
     }
 
     .topLine .moreBtn {
-        width: 30px;
-        height: 30px;
-        flex-shrink: 0;
+        display: none;
     }
 
     .controls {
         flex: 0 0 auto;
         margin-top: 0;
         gap: 0;
+        order: 3;
     }
 
     .shuffleBtn,
+    .prevBtn,
+    .nextBtn,
     .repeatBtn {
         display: none;
     }
@@ -2370,9 +2367,11 @@ function openQfCoverMenu(e: MouseEvent) {
     }
 
     .playBtn {
-        width: 42px;
-        height: 42px;
-        margin: 0 1px;
+        width: 38px;
+        height: 38px;
+        margin: 0;
+        background: transparent;
+        color: #fff;
     }
 
     .additionalControls {
@@ -2381,6 +2380,7 @@ function openQfCoverMenu(e: MouseEvent) {
         max-width: none;
         margin: 0;
         gap: 0;
+        order: 2;
     }
 
     .codecInfo,

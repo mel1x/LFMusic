@@ -75,6 +75,22 @@ class MainActivity : TauriActivity() {
     handleMediaIntent(intent)
   }
 
+  override fun onResume() {
+    super.onResume()
+    appWebView?.let { publishPermissionStatus(it) }
+  }
+
+  override fun onRequestPermissionsResult(
+    requestCode: Int,
+    permissions: Array<out String>,
+    grantResults: IntArray,
+  ) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (requestCode == AUDIO_PERMISSION_REQUEST) {
+      appWebView?.let { publishPermissionStatus(it) }
+    }
+  }
+
   @SuppressLint("AddJavascriptInterface")
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
@@ -82,6 +98,7 @@ class MainActivity : TauriActivity() {
     setupEdgeToEdgeWebView(webView)
     webView.addJavascriptInterface(AndroidMediaBridge(), "LFMusicAndroid")
     installInsetsBridge(webView)
+    publishPermissionStatus(webView)
   }
 
   override fun onDestroy() {
@@ -117,7 +134,41 @@ class MainActivity : TauriActivity() {
 
     if (permissions.isNotEmpty()) {
       ActivityCompat.requestPermissions(this, permissions.toTypedArray(), AUDIO_PERMISSION_REQUEST)
+    } else {
+      appWebView?.let { publishPermissionStatus(it) }
     }
+  }
+
+  private fun mediaPermissionName(): String {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+      Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+  }
+
+  private fun permissionStatusJson(): String {
+    val mediaPermission = mediaPermissionName()
+    val mediaGranted = ContextCompat.checkSelfPermission(this, mediaPermission) == PackageManager.PERMISSION_GRANTED
+    val notificationsRequired = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    val notificationsGranted = !notificationsRequired ||
+      ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    return JSONObject()
+      .put("mediaGranted", mediaGranted)
+      .put("notificationsGranted", notificationsGranted)
+      .put("notificationsRequired", notificationsRequired)
+      .toString()
+  }
+
+  private fun publishPermissionStatus(webView: WebView) {
+    val payload = JSONObject.quote(permissionStatusJson())
+    val js = """
+      window.dispatchEvent(new CustomEvent('lfmusic:android-permissions', {
+        detail: JSON.parse($payload)
+      }));
+    """.trimIndent()
+    webView.post { webView.evaluateJavascript(js, null) }
   }
 
   private fun setupSystemBars() {
@@ -149,12 +200,6 @@ class MainActivity : TauriActivity() {
     webView.fitsSystemWindows = false
     webView.setPadding(0, 0, 0, 0)
     webView.setBackgroundColor(Color.TRANSPARENT)
-
-    ViewCompat.setOnApplyWindowInsetsListener(webView) { view, windowInsets ->
-      view.setPadding(0, 0, 0, 0)
-      windowInsets
-    }
-    ViewCompat.requestApplyInsets(webView)
   }
 
   private fun applySystemBarsColor(color: Int) {
@@ -203,37 +248,63 @@ class MainActivity : TauriActivity() {
   }
 
   private fun installInsetsBridge(webView: WebView) {
-    ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, windowInsets ->
+    val publishInsets = { windowInsets: WindowInsetsCompat ->
       val mask = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
       publishSystemInsets(webView, withResourceFallbacks(windowInsets.getInsets(mask)))
       windowInsets
     }
+    ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, windowInsets ->
+      publishInsets(windowInsets)
+    }
+    ViewCompat.setOnApplyWindowInsetsListener(webView) { view, windowInsets ->
+      view.setPadding(0, 0, 0, 0)
+      publishInsets(windowInsets)
+    }
     ViewCompat.requestApplyInsets(window.decorView)
+    ViewCompat.requestApplyInsets(webView)
 
     webView.post {
       ViewCompat.requestApplyInsets(window.decorView)
+      ViewCompat.requestApplyInsets(webView)
       publishSystemInsets(webView, fallbackSystemInsets())
     }
   }
 
   private fun publishSystemInsets(webView: WebView, insets: Insets) {
+    val payload = systemInsetsJson(insets)
+    val js = """
+      (() => {
+        const detail = $payload;
+        const root = document.documentElement;
+        if (!root) return;
+        root.style.setProperty('--android-safe-top', detail.top + 'px');
+        root.style.setProperty('--android-safe-right', detail.right + 'px');
+        root.style.setProperty('--android-safe-bottom', detail.bottom + 'px');
+        root.style.setProperty('--android-safe-left', detail.left + 'px');
+        window.dispatchEvent(new CustomEvent('lfmusic:android-insets', { detail }));
+      })();
+    """.trimIndent()
+    webView.post { webView.evaluateJavascript(js, null) }
+  }
+
+  private fun currentSystemInsets(): Insets {
+    val rootInsets = ViewCompat.getRootWindowInsets(window.decorView)
+    val mask = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+    return withResourceFallbacks(rootInsets?.getInsets(mask) ?: fallbackSystemInsets())
+  }
+
+  private fun systemInsetsJson(insets: Insets): String {
     val density = resources.displayMetrics.density.coerceAtLeast(1f)
     val top = insets.top / density
     val right = insets.right / density
     val bottom = insets.bottom / density
     val left = insets.left / density
-    val js = """
-      (() => {
-        const root = document.documentElement;
-        if (!root) return;
-        root.style.setProperty('--android-safe-top', '${top}px');
-        root.style.setProperty('--android-safe-right', '${right}px');
-        root.style.setProperty('--android-safe-bottom', '${bottom}px');
-        root.style.setProperty('--android-safe-left', '${left}px');
-        window.dispatchEvent(new CustomEvent('lfmusic:android-insets'));
-      })();
-    """.trimIndent()
-    webView.post { webView.evaluateJavascript(js, null) }
+    return JSONObject()
+      .put("top", top)
+      .put("right", right)
+      .put("bottom", bottom)
+      .put("left", left)
+      .toString()
   }
 
   private fun withResourceFallbacks(insets: Insets): Insets {
@@ -502,6 +573,23 @@ class MainActivity : TauriActivity() {
   }
 
   inner class AndroidMediaBridge {
+    @JavascriptInterface
+    fun getPermissionStatus(): String {
+      return permissionStatusJson()
+    }
+
+    @JavascriptInterface
+    fun getSystemInsets(): String {
+      return systemInsetsJson(currentSystemInsets())
+    }
+
+    @JavascriptInterface
+    fun requestRequiredPermissionsFromJs() {
+      runOnUiThread {
+        requestRequiredPermissions()
+      }
+    }
+
     @JavascriptInterface
     fun updateMediaSession(payload: String) {
       runOnUiThread {

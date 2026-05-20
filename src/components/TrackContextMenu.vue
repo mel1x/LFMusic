@@ -412,12 +412,21 @@ function onAbout() {
         <Transition name="playlist-sheet">
             <div
                 v-if="showPlaylistSheet"
+                class="mobilePlaylistBackdrop"
+                @mousedown="emit('close')"
+            ></div>
+        </Transition>
+        <Transition name="playlist-sheet">
+            <div
+                v-if="showPlaylistSheet"
                 ref="playlistSheetEl"
                 class="mobilePlaylistSheet"
+                @mousedown.stop
+                @pointerdown.self="onPlaylistSheetDragStart"
             >
                 <div class="mobilePlaylistSheetHandle" @pointerdown="onPlaylistSheetDragStart"></div>
                 <div class="mobilePlaylistSheetTitle">Добавить в плейлист</div>
-                <div class="mobilePlaylistList">
+                <div class="mobilePlaylistList" @pointerdown.self="onPlaylistSheetDragStart">
                     <button
                         class="mobilePlaylistRow mobilePlaylistCreateRow"
                         @click="onCreatePlaylistAndAdd"
@@ -616,6 +625,13 @@ function onAbout() {
 
     .ctx-submenu-trigger .ctx-chevron {
         display: none;
+    }
+
+    .mobilePlaylistBackdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1000001;
+        background: transparent;
     }
 
     .mobilePlaylistSheet {

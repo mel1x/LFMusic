@@ -19,8 +19,6 @@ import { useCustomCovers } from './composables/useCustomCovers';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
 import { isAndroidRuntime, isPhoneViewport, updateRuntimeClasses } from './composables/usePlatform';
-import splashVideoWebm from './assets/splash_screen_dark.webm';
-import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
@@ -36,6 +34,19 @@ interface AudioFeatureProgressPayload {
   active: boolean;
 }
 
+interface AndroidPermissionStatus {
+  mediaGranted: boolean;
+  notificationsGranted: boolean;
+  notificationsRequired: boolean;
+}
+
+interface AndroidSafeInsets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
 const BASE_W = 1460;
 const BASE_H = 860;
 const MIN_SCALE = 0.78;
@@ -43,6 +54,8 @@ const MAX_SCALE = 2.0;
 let resizeRaf: number | null = null;
 let unlistenAudioFeatureProgress: UnlistenFn | null = null;
 let featureProgressHideTimer: ReturnType<typeof setTimeout> | null = null;
+let androidInsetsRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let androidInsetsRetryCount = 0;
 
 function resetUiScale() {
   const body = document.body;
@@ -79,12 +92,8 @@ function scheduleUiScale() {
   resizeRaf = requestAnimationFrame(applyUiScale);
 }
 
-const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
-if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
-
-const showSplash = ref(!isReload);
-const splashFading = ref(false);
 const featureProgressVisible = ref(false);
+const androidPermissionStatus = ref<AndroidPermissionStatus | null>(null);
 const featureProgress = ref<AudioFeatureProgressPayload>({
   current: 0,
   total: 0,
@@ -129,12 +138,23 @@ const featureProgressAriaLabel = computed(() => {
   return `${featureProgressTooltipHeading.value}. ${featureProgressTooltipText.value}`;
 });
 
-function onSplashEnded() {
-  splashFading.value = true;
-  setTimeout(() => {
-    showSplash.value = false;
-  }, 600);
-}
+const missingAndroidPermissions = computed(() => {
+  const status = androidPermissionStatus.value;
+  if (!isAndroidRuntime() || !status) return [];
+
+  const missing: string[] = [];
+  if (!status.mediaGranted) missing.push('доступ к медиафайлам');
+  if (status.notificationsRequired && !status.notificationsGranted) missing.push('уведомления');
+  return missing;
+});
+
+const showAndroidPermissionWarning = computed(() => missingAndroidPermissions.value.length > 0);
+
+const androidPermissionWarningText = computed(() => {
+  const missing = missingAndroidPermissions.value;
+  if (missing.length === 0) return '';
+  return `Не выданы разрешения: ${missing.join(', ')}. Без них LFMusic не сможет полноценно читать локальную музыку и показывать управление плеером в уведомлениях.`;
+});
 
 // Перехват F5 / Ctrl+R — сохраняем состояние перед перезагрузкой
 async function handleReloadKey(e: KeyboardEvent) {
@@ -146,7 +166,6 @@ async function handleReloadKey(e: KeyboardEvent) {
 
   if (e.key === 'F5' || (e.ctrlKey && e.key === 'r')) {
     e.preventDefault();
-    sessionStorage.setItem('lfmusic_reloaded', '1');
     await saveState();
     location.reload();
   }
@@ -177,11 +196,91 @@ function publishAndroidFeatureProgress(payload: AudioFeatureProgressPayload) {
   return true;
 }
 
+function applyAndroidPermissionStatus(status: AndroidPermissionStatus) {
+  androidPermissionStatus.value = {
+    mediaGranted: Boolean(status.mediaGranted),
+    notificationsGranted: Boolean(status.notificationsGranted),
+    notificationsRequired: Boolean(status.notificationsRequired),
+  };
+}
+
+function refreshAndroidPermissions() {
+  if (!isAndroidRuntime()) return;
+  const raw = window.LFMusicAndroid?.getPermissionStatus?.();
+  if (!raw) return;
+
+  try {
+    applyAndroidPermissionStatus(JSON.parse(raw) as AndroidPermissionStatus);
+  } catch {
+    androidPermissionStatus.value = null;
+  }
+}
+
+function requestAndroidPermissions() {
+  window.LFMusicAndroid?.requestRequiredPermissionsFromJs?.();
+  setTimeout(refreshAndroidPermissions, 500);
+}
+
+function applyAndroidInsets(insets: AndroidSafeInsets) {
+  const root = document.documentElement.style;
+  root.setProperty('--android-safe-top', `${Math.max(0, insets.top || 0)}px`);
+  root.setProperty('--android-safe-right', `${Math.max(0, insets.right || 0)}px`);
+  root.setProperty('--android-safe-bottom', `${Math.max(0, insets.bottom || 0)}px`);
+  root.setProperty('--android-safe-left', `${Math.max(0, insets.left || 0)}px`);
+}
+
+function refreshAndroidInsets() {
+  if (!isAndroidRuntime()) return;
+  const raw = window.LFMusicAndroid?.getSystemInsets?.();
+  if (!raw) return;
+
+  try {
+    applyAndroidInsets(JSON.parse(raw) as AndroidSafeInsets);
+  } catch {
+    // Native inset updates are best-effort; CSS env() and fallback values stay in place.
+  }
+}
+
+function scheduleAndroidInsetsRefresh() {
+  if (!isAndroidRuntime()) return;
+  refreshAndroidInsets();
+  if (androidInsetsRetryCount >= 12) return;
+  androidInsetsRetryCount += 1;
+  if (androidInsetsRetryTimer) clearTimeout(androidInsetsRetryTimer);
+  androidInsetsRetryTimer = setTimeout(scheduleAndroidInsetsRefresh, androidInsetsRetryCount < 5 ? 120 : 350);
+}
+
+function onAndroidPermissionsEvent(event: Event) {
+  const detail = (event as CustomEvent<AndroidPermissionStatus>).detail;
+  if (!detail) return;
+  applyAndroidPermissionStatus(detail);
+}
+
+function onAndroidInsetsEvent(event: Event) {
+  const detail = (event as CustomEvent<AndroidSafeInsets>).detail;
+  if (detail) applyAndroidInsets(detail);
+  refreshAndroidInsets();
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    refreshAndroidPermissions();
+    scheduleAndroidInsetsRefresh();
+  }
+}
+
+function onWindowFocus() {
+  refreshAndroidPermissions();
+  scheduleAndroidInsetsRefresh();
+}
+
 onMounted(() => {
   load();
   startDomI18n();
   loadCustomCovers();
   applyUiScale();
+  refreshAndroidPermissions();
+  scheduleAndroidInsetsRefresh();
   void listen<AudioFeatureProgressPayload>('audio_feature_progress', (event) => {
     const payload = event.payload;
     featureProgress.value = payload;
@@ -209,14 +308,23 @@ onMounted(() => {
     // Продолжение фоновой подготовки не должно мешать запуску интерфейса.
   });
   window.addEventListener('resize', scheduleUiScale);
+  window.addEventListener('focus', onWindowFocus);
+  window.addEventListener('lfmusic:android-permissions', onAndroidPermissionsEvent as EventListener);
+  window.addEventListener('lfmusic:android-insets', onAndroidInsetsEvent as EventListener);
   window.visualViewport?.addEventListener('resize', scheduleUiScale);
+  window.visualViewport?.addEventListener('resize', scheduleAndroidInsetsRefresh);
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
+  document.addEventListener('visibilitychange', onVisibilityChange);
 });
 
 onUnmounted(() => {
   window.removeEventListener('resize', scheduleUiScale);
+  window.removeEventListener('focus', onWindowFocus);
+  window.removeEventListener('lfmusic:android-permissions', onAndroidPermissionsEvent as EventListener);
+  window.removeEventListener('lfmusic:android-insets', onAndroidInsetsEvent as EventListener);
   window.visualViewport?.removeEventListener('resize', scheduleUiScale);
+  window.visualViewport?.removeEventListener('resize', scheduleAndroidInsetsRefresh);
   if (resizeRaf !== null) {
     cancelAnimationFrame(resizeRaf);
     resizeRaf = null;
@@ -225,12 +333,17 @@ onUnmounted(() => {
     clearTimeout(featureProgressHideTimer);
     featureProgressHideTimer = null;
   }
+  if (androidInsetsRetryTimer) {
+    clearTimeout(androidInsetsRetryTimer);
+    androidInsetsRetryTimer = null;
+  }
   if (unlistenAudioFeatureProgress) {
     unlistenAudioFeatureProgress();
     unlistenAudioFeatureProgress = null;
   }
   document.removeEventListener('keydown', handleReloadKey);
   document.removeEventListener('contextmenu', handleContextMenu);
+  document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 
 watchEffect(() => {
@@ -299,12 +412,6 @@ const closeWindow = async () => {
 </script>
 
 <template>
-  <div data-tauri-drag-region v-if="showSplash" class="splash-overlay" :class="{ 'splash-fading': splashFading }">
-    <video data-tauri-drag-region autoplay muted playsinline @ended="onSplashEnded" class="splash-video">
-      <source :src="splashVideoWebm" type="video/webm" />
-      <source :src="splashVideoMp4" type="video/mp4" />
-    </video>
-  </div>
   <div class="hat" data-tauri-drag-region>
     <div class="winTitle">
       <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
@@ -351,6 +458,21 @@ const closeWindow = async () => {
   <Player :key="`player-${language}`" />
   <TrackInfoModal :key="`info-${language}`" />
   <TrackEditModal :key="`edit-${language}`" />
+  <div v-if="showAndroidPermissionWarning" class="androidPermissionWarning" role="alertdialog" aria-modal="true">
+    <div class="androidPermissionCard">
+      <div class="androidPermissionKicker">Требуются разрешения</div>
+      <div class="androidPermissionTitle">LFMusic нужен доступ</div>
+      <div class="androidPermissionText">{{ androidPermissionWarningText }}</div>
+      <div class="androidPermissionActions">
+        <button class="androidPermissionButton primary" type="button" @click="requestAndroidPermissions">
+          Выдать разрешения
+        </button>
+        <button class="androidPermissionButton" type="button" @click="refreshAndroidPermissions">
+          Проверить снова
+        </button>
+      </div>
+    </div>
+  </div>
   <Teleport to="body">
     <Transition name="scan-ready">
       <div
@@ -371,25 +493,6 @@ const closeWindow = async () => {
 </template>
 
 <style>
-.splash-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 99999;
-  background: #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 1;
-  transition: opacity 0.6s ease;
-}
-.splash-overlay.splash-fading {
-  opacity: 0;
-}
-.splash-video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
 .toast {
   display: flex;
   flex-direction: row;
@@ -432,7 +535,7 @@ html {
   --safe-left: var(--android-safe-left);
   --mobile-chrome-color: #101010;
   --mobile-chrome-bg: var(--mobile-chrome-color);
-  --mobile-player-height: 96px;
+  --mobile-player-height: 84px;
   --mobile-nav-height: calc(68px + var(--safe-bottom));
 
   background: var(--dark-bg) !important;
@@ -719,6 +822,68 @@ body {
   opacity: 0;
 }
 
+.androidPermissionWarning {
+  position: fixed;
+  inset: 0;
+  z-index: 1000001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--safe-top) + 18px) calc(var(--safe-right) + 18px) calc(var(--safe-bottom) + 18px) calc(var(--safe-left) + 18px);
+  background: hsla(0, 0%, 0%, 0.58);
+  backdrop-filter: blur(18px);
+}
+.androidPermissionCard {
+  width: min(420px, 100%);
+  border: 1px solid hsla(0, 0%, 100%, 0.1);
+  border-radius: 24px;
+  padding: 22px;
+  background: hsl(var(--accent-h), min(var(--accent-s), 48%), 11%);
+  box-shadow: 0 26px 80px hsla(0, 0%, 0%, 0.5);
+  color: #fff;
+}
+.androidPermissionKicker {
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: 0;
+  color: hsla(0, 0%, 100%, 0.5);
+}
+.androidPermissionTitle {
+  font-size: 24px;
+  line-height: 1.12;
+  font-weight: 900;
+}
+.androidPermissionText {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.45;
+  font-weight: 600;
+  color: hsla(0, 0%, 100%, 0.72);
+}
+.androidPermissionActions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+.androidPermissionButton {
+  min-height: 44px;
+  flex: 1 1 0;
+  min-width: 0;
+  border-radius: 14px;
+  padding: 10px 14px;
+  background: hsla(0, 0%, 100%, 0.1);
+  color: hsla(0, 0%, 100%, 0.88);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.androidPermissionButton.primary {
+  background: #fff;
+  color: #0f0f0f;
+}
+
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
   html,
   body {
@@ -730,8 +895,6 @@ body {
     padding: 0 !important;
     border: 0 !important;
     overflow: hidden !important;
-    --android-safe-top: 0px !important;
-    --safe-top: 0px !important;
   }
 
   body {
@@ -763,9 +926,12 @@ body {
 
   #app {
     position: fixed;
-    inset: 0;
+    top: var(--safe-top);
+    right: 0;
+    bottom: 0;
+    left: 0;
     width: 100vw;
-    height: 100dvh;
+    height: calc(100dvh - var(--safe-top));
     margin: 0 !important;
     padding: 0;
     background: var(--dark-bg);
@@ -781,7 +947,6 @@ body {
     min-height: 0;
   }
 
-  .splash-overlay,
   .scanReadyBackdrop {
     width: 100vw;
     height: 100dvh;
@@ -818,6 +983,17 @@ body {
   .toast {
     width: min(360px, calc(100vw - 24px));
     border-radius: 18px;
+  }
+
+  .androidPermissionWarning {
+    align-items: flex-end;
+    padding: calc(var(--safe-top) + 14px) calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 12px) calc(var(--safe-left) + 12px);
+  }
+
+  .androidPermissionCard {
+    width: 100%;
+    border-radius: 24px;
+    padding: 20px;
   }
 
   body.lfmusic-phone .pageRoot {
@@ -975,8 +1151,9 @@ body {
   body.lfmusic-phone .trackCover,
   body.lfmusic-phone .trackCoverWrap,
   body.lfmusic-phone .trackElem .coverWrap {
-    width: 44px !important;
-    height: 44px !important;
+    border-radius: 12px !important;
+    width: 56px !important;
+    height: 56px !important;
     flex-shrink: 0 !important;
   }
 
