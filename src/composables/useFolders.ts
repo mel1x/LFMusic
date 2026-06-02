@@ -80,10 +80,15 @@ async function removeFolder(folderPath: string) {
 async function rescanLibrary() {
     isScanning.value = true
     scanProgress.value = { current: 0, total: 0, percent: 0 }
+    folderAddError.value = ''
 
     try {
         await invoke('library_rescan')
         folders.value = await invoke<FolderInfo[]>('library_get_folders')
+        return true
+    } catch (e) {
+        folderAddError.value = String(e)
+        return false
     } finally {
         isScanning.value = false
     }

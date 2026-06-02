@@ -31,6 +31,7 @@ import { useSettings } from '../composables/useSettings';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
+import { isPhoneViewport } from '../composables/usePlatform';
 import { useI18n } from '../composables/useI18n';
 import { useAndroidMediaSession } from '../composables/useAndroidMediaSession';
 
@@ -365,8 +366,11 @@ async function moveTrackToTop(track: TrackMetadata) {
 
 const qfTrackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
-function onQfTrackClick(e: MouseEvent) {
+function onQfTrackClick(e: MouseEvent, track: TrackMetadata) {
     createRipple(e)
+    if (isPhoneViewport()) {
+        onQfCoverClick(track)
+    }
 }
 
 function onQfCoverClick(track: TrackMetadata) {
@@ -768,6 +772,34 @@ function openQfCoverMenu(e: MouseEvent) {
                             </div>
                         </div>
 
+                        <!-- DESKTOP METADATA AND PROGRESS BAR -->
+                        <div class="fs-info desktop-only">
+                            <div v-truncate class="fs-title">{{ trackTitle }}</div>
+                            <div class="fs-artist"><TrackArtists :artist="currentTrack?.artist" /></div>
+                            <div v-if="currentTrack?.album" v-truncate class="fs-album">{{ currentTrack.album }}</div>
+                        </div>
+                        <div class="fs-progress qf-progress-hover desktop-only">
+                            <input
+                                type="range"
+                                class="fs-progress-slider"
+                                min="0"
+                                :max="durationSecs || 0"
+                                step="0.1"
+                                :value="progressSliderValue"
+                                :style="{ '--fs-val': fsProgressPercent }"
+                                @mousedown="onSeekStart"
+                                @input="onSeekInput"
+                                @mouseup="onSeekEnd"
+                                @touchstart="onSeekStart"
+                                @touchend="onSeekEnd"
+                                :disabled="!currentTrack"
+                            />
+                            <div class="fs-times">
+                                <span>{{ positionFormatted }}</span>
+                                <span>{{ durationFormatted }}</span>
+                            </div>
+                        </div>
+
                         <!-- MOBILE FULLSCREEN PLAYER CONTROLS (WITHOUT VOLUME CONTROL, ENLARGED COVER, TRANSPARENT SIDE BUTTONS) -->
                         <div class="qf-mobile-layout mobile-only">
                             <div class="qf-mobile-meta-row">
@@ -855,7 +887,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                     v-if="currentTrack"
                                     class="qf-queue-item qf-queue-current"
                                     :class="{ activePaused: !isPlaying }"
-                                    @click="onQfTrackClick($event)"
+                                    @click="onQfTrackClick($event, currentTrack)"
                                 >
                                     <div class="qf-hover-icon" @click.stop="onQfCoverClick(currentTrack)">
                                         <PauseIcon v-if="isPlaying" width="10" height="10" style="margin-left:0.5px;" />
@@ -883,7 +915,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                     v-for="(track, i) in queueUpcoming"
                                     :key="i"
                                     class="qf-queue-item"
-                                    @click="onQfTrackClick($event)"
+                                    @click="onQfTrackClick($event, track)"
                                 >
                                     <div class="qf-hover-icon" @click.stop="onQfCoverClick(track)">
                                         <PlayIcon width="10" height="10" style="margin-left:1px;" />
@@ -1848,6 +1880,12 @@ function openQfCoverMenu(e: MouseEvent) {
     gap: 48px;
     contain: layout style;
 }
+.mobile-only {
+    display: none !important;
+}
+.desktop-only {
+    /* visible on desktop */
+}
 .qf-left {
     display: flex;
     flex-direction: column;
@@ -1864,6 +1902,12 @@ function openQfCoverMenu(e: MouseEvent) {
 }
 .mode-player .qf-left {
     transform: translateX(calc((720px + 48px) / 2));
+}
+.qf-cover-container {
+    position: relative;
+    width: 440px;
+    height: 440px;
+    flex-shrink: 0;
 }
 .qf-cover-wrapper {
     position: relative;
@@ -1883,12 +1927,13 @@ function openQfCoverMenu(e: MouseEvent) {
     transition: opacity .48s ease;
     pointer-events: none;
     z-index: 2;
+    border-radius: 20px;
 }
-.qf-cover-wrapper:hover .qf-cover-dim,
-.qf-cover-wrapper.menu-open .qf-cover-dim {
+.qf-cover-container:hover .qf-cover-dim,
+.qf-cover-container.menu-open .qf-cover-dim {
     opacity: 1;
 }
-.qf-cover-overlay {
+.qf-player-controls {
     position: absolute;
     inset: 0;
     z-index: 3;
@@ -1896,8 +1941,8 @@ function openQfCoverMenu(e: MouseEvent) {
     transition: opacity .48s ease;
     pointer-events: none;
 }
-.qf-cover-wrapper:hover .qf-cover-overlay,
-.qf-cover-wrapper.menu-open .qf-cover-overlay {
+.qf-cover-container:hover .qf-player-controls,
+.qf-cover-container.menu-open .qf-player-controls {
     opacity: 1;
     pointer-events: auto;
 }
@@ -2727,21 +2772,6 @@ function openQfCoverMenu(e: MouseEvent) {
         transform: none !important;
     }
 
-    .qf-cover-wrapper {
-        width: min(78vw, 360px);
-        height: min(78vw, 360px);
-        border-radius: 18px;
-        box-shadow: 0 22px 64px rgba(0, 0, 0, 0.5);
-    }
-
-    .qf-cover-dim,
-    .qf-cover-overlay {
-        opacity: 1;
-    }
-
-    .qf-cover-overlay {
-        pointer-events: auto;
-    }
 
     .qf-corner-btn,
     .qf-side-btn,
@@ -2868,6 +2898,9 @@ function openQfCoverMenu(e: MouseEvent) {
 
     .qf-hover-icon {
         left: 18px;
+        opacity: 0;
+    }
+    .qf-queue-current .qf-hover-icon {
         opacity: 1;
     }
 

@@ -650,9 +650,14 @@ export function usePlayer() {
     const featureStatus = await invoke<AudioFeatureProgressStatus>("library_audio_features_status")
       .catch(() => null);
     const workerWasActive = featureStatus?.active === true;
-    const added = await addFolderRaw();
-    if (!added) return;
-    await refreshLibrary();
+    try {
+      const added = await addFolderRaw();
+      if (!added) return;
+    } catch (e: any) {
+      errorMessage.value = `Ошибка добавления папки: ${e}`;
+    } finally {
+      await refreshLibrary();
+    }
     if (!workerWasActive) {
       openTracksReadyModal();
     }
@@ -660,14 +665,24 @@ export function usePlayer() {
 
   async function removeFolder(folder: string) {
     errorMessage.value = "";
-    await removeFolderRaw(folder);
-    await refreshLibrary();
+    try {
+      await removeFolderRaw(folder);
+    } catch (e: any) {
+      errorMessage.value = `Ошибка удаления папки: ${e}`;
+    } finally {
+      await refreshLibrary();
+    }
   }
 
   async function rescanLibrary() {
     errorMessage.value = "";
-    await rescanLibraryRaw();
-    await refreshLibrary();
+    try {
+      await rescanLibraryRaw();
+    } catch (e: any) {
+      errorMessage.value = `Ошибка сканирования: ${e}`;
+    } finally {
+      await refreshLibrary();
+    }
   }
 
   // ── Управление плеером ────────────────────────────────────────────────────

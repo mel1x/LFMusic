@@ -355,12 +355,12 @@ fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, St
     Ok(library.get_folders())
 }
 
-/// Добавить папку, просканировать, вернуть все треки из библиотеки
+/// Добавить папку, просканировать
 #[tauri::command]
 async fn library_add_folder(
     app: tauri::AppHandle,
     folder_path: String,
-) -> Result<Vec<TrackMetadata>, String> {
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
@@ -370,7 +370,8 @@ async fn library_add_folder(
             &separators,
             Some(audio_feature_progress_emitter(app.clone())),
             scan_progress_emitter(app.clone()),
-        )
+        )?;
+        Ok(())
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -414,7 +415,7 @@ fn android_music_folder_candidates() -> Vec<String> {
 #[tauri::command]
 async fn library_add_android_music_folders(
     app: tauri::AppHandle,
-) -> Result<Vec<TrackMetadata>, String> {
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let candidates = android_music_folder_candidates();
         if candidates.is_empty() {
@@ -424,7 +425,6 @@ async fn library_add_android_music_folders(
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
         let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        let mut result = Vec::new();
         let mut added = 0usize;
         let mut last_error: Option<String> = None;
 
@@ -435,8 +435,7 @@ async fn library_add_android_music_folders(
                 Some(audio_feature_progress_emitter(app.clone())),
                 scan_progress_emitter(app.clone()),
             ) {
-                Ok(tracks) => {
-                    result = tracks;
+                Ok(_) => {
                     added += 1;
                 }
                 Err(e) => {
@@ -449,7 +448,7 @@ async fn library_add_android_music_folders(
             return Err(last_error.unwrap_or_else(|| "Не удалось просканировать стандартные папки с аудио.".to_string()));
         }
 
-        Ok(result)
+        Ok(())
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -526,7 +525,7 @@ fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
 
 /// Пересканировать все папки: обновить изменённые файлы, удалить несуществующие
 #[tauri::command]
-async fn library_rescan(app: tauri::AppHandle) -> Result<Vec<TrackMetadata>, String> {
+async fn library_rescan(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
@@ -535,7 +534,8 @@ async fn library_rescan(app: tauri::AppHandle) -> Result<Vec<TrackMetadata>, Str
             &separators,
             Some(audio_feature_progress_emitter(app.clone())),
             scan_progress_emitter(app.clone()),
-        )
+        )?;
+        Ok(())
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -1057,8 +1057,24 @@ fn cover_load_all(state: State<SettingsState>) -> Result<Vec<covers::CustomCover
 // Точка входа
 // ──────────────────────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
+fn set_windows_priority_class() {
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn SetPriorityClass(h_process: *mut std::ffi::c_void, dw_priority_class: u32) -> i32;
+        }
+        // ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+        let _ = SetPriorityClass(GetCurrentProcess(), 0x00008000);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    set_windows_priority_class();
+
     let player = AudioPlayer::new().expect("Не удалось инициализировать аудиоплеер");
 
     tauri::Builder::default()
