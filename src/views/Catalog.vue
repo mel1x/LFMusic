@@ -6,6 +6,8 @@ import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
 import defaultCover from '../assets/trackCover.webp';
 import cover from '../assets/cover.webp';
+import SearchIcon from '../components/Icons/SearchIcon.vue';
+import { searchRanked } from '../composables/useSearch';
 
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
@@ -91,12 +93,47 @@ function scrollToActiveGenre() {
     bar.scrollTo({ left: chipLeft - barWidth / 2 + chipWidth / 2, behavior: 'smooth' })
 }
 
+const searchInput = ref<HTMLInputElement | null>(null)
+const rawSearch = ref('')
+const debouncedSearch = ref('')
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+function onSearchInput(e: Event) {
+    const value = (e.target as HTMLInputElement).value
+    rawSearch.value = value
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = setTimeout(() => {
+        debouncedSearch.value = value
+    }, 250)
+}
+
+const focusSearch = () => {
+    searchInput.value?.focus()
+}
+
+function clearSearch() {
+    rawSearch.value = ''
+    debouncedSearch.value = ''
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+    searchInput.value?.focus()
+}
+
 const filteredTracks = computed(() => {
     let list = trackList.value
     if (selectedGenre.value) {
         list = list.filter(t => t.genre === selectedGenre.value)
     }
-    return list
+    const q = debouncedSearch.value.trim()
+    if (!q) return list
+    return searchRanked(
+        list,
+        q,
+        (t) => {
+            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
+            return [t.title || '', t.artist || '', t.album || '', fileName]
+        },
+        { formatPath: (t) => t.file_path },
+    )
 })
 
 // ── Header height (for virtual scroll offset) ─────────────────────────────
@@ -146,7 +183,7 @@ const {
 } = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
 
 // Reset scroll on search/genre change
-watch(selectedGenre, () => {
+watch([debouncedSearch, selectedGenre], () => {
     resetScroll()
 })
 
@@ -249,6 +286,7 @@ async function moveTrackToTop(track: TrackMetadata) {
 const catalogSourceId = computed(() => {
     let id = 'catalog'
     if (selectedGenre.value) id += `:genre:${selectedGenre.value}`
+    if (debouncedSearch.value.trim()) id += `:search`
     return id
 })
 
@@ -297,6 +335,25 @@ function onCoverClick(track: TrackMetadata) {
                         </button>
                         <button class="moreOptionsBtn" type="button" aria-label="Действия каталога" @mousedown="openCatalogMenu($event)"><MoreIcon width="22" height="22" /></button>
                     </div>
+                </div>
+            </div>
+            <div class="searchZone" v-if="!isPhoneViewport()">
+                <SearchIcon class="searchIcon" @click="focusSearch" />
+                <input
+                    ref="searchInput"
+                    type="text"
+                    class="search"
+                    name="search"
+                    id="search"
+                    placeholder="Поиск трека"
+                    autocomplete="off"
+                    :value="rawSearch"
+                    @input="onSearchInput"
+                />
+                <div class="searchClear" v-if="rawSearch" @click="clearSearch">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
                 </div>
             </div>
             <div class="genreBarWrap" v-if="genreList.length > 0" @wheel.prevent="onGenreWheel">
@@ -377,6 +434,11 @@ function onCoverClick(track: TrackMetadata) {
                 <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
             </div>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
+        </div>
+        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0">
+            <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
+            <div class="emptyText">Ничего не найдено</div>
+            <div class="emptyDesc">Попробуйте изменить критерии поиска или добавить папки с треками в настройках.</div>
         </div>
         <div class="emptyState" v-else-if="trackList.length === 0">
             <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
@@ -878,7 +940,7 @@ function onCoverClick(track: TrackMetadata) {
 }
 .playingAnim {
     position: absolute;
-    left: 21px;
+    left: 19px;
     width: 16px;
     height: 16px;
     background: #fff;

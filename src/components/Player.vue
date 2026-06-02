@@ -55,7 +55,6 @@ const {
     shuffled,
     repeatMode,
     trackTitle,
-    trackAlbum,
     currentCoverArt,
     codecDisplay,
     codecDetails,
@@ -681,23 +680,27 @@ function openQfCoverMenu(e: MouseEvent) {
                 <button class="fs-close-btn" @click="closeFullscreen"><MinimizeScreenIcon /></button>
                 <div class="qf-content">
                     <div class="qf-left">
-                        <div class="qf-cover-wrapper" :class="{ 'menu-open': qfCoverMenu }">
-                            <img
-                                :src="fsCoverA || trackCover"
-                                alt="cover"
-                                class="fs-cover"
-                                :class="{ active: fsActiveBuffer === 'a' }"
-                                draggable="false"
-                            />
-                            <img
-                                :src="fsCoverB || trackCover"
-                                alt="cover"
-                                class="fs-cover"
-                                :class="{ active: fsActiveBuffer === 'b' }"
-                                draggable="false"
-                            />
+                        <div class="qf-cover-container" :class="{ 'menu-open': qfCoverMenu }">
+                            <div class="qf-cover-wrapper">
+                                <img
+                                    :src="fsCoverA || trackCover"
+                                    alt="cover"
+                                    class="fs-cover"
+                                    :class="{ active: fsActiveBuffer === 'a' }"
+                                    draggable="false"
+                                />
+                                <img
+                                    :src="fsCoverB || trackCover"
+                                    alt="cover"
+                                    class="fs-cover"
+                                    :class="{ active: fsActiveBuffer === 'b' }"
+                                    draggable="false"
+                                />
+                            </div>
                             <div class="qf-cover-dim"></div>
-                            <div class="qf-cover-overlay">
+                            
+                            <!-- DESKTOP PLAYBACK CONTROLS -->
+                            <div class="qf-player-controls desktop-only" :class="{ 'menu-open': qfCoverMenu }">
                                 <button
                                     class="qf-corner-btn qf-corner-tr"
                                     :disabled="!currentTrack"
@@ -764,31 +767,83 @@ function openQfCoverMenu(e: MouseEvent) {
                                 </div>
                             </div>
                         </div>
-                        <div class="fs-info">
-                            <div v-truncate class="fs-title">{{ trackTitle }}</div>
-                            <div class="fs-artist"><TrackArtists :artist="currentTrack?.artist" /></div>
-                            <div v-if="trackAlbum" v-truncate class="fs-album">{{ trackAlbum }}</div>
-                        </div>
-                        <div class="fs-progress qf-progress-hover">
-                            <input
-                                type="range"
-                                class="fs-progress-slider"
-                                min="0"
-                                :max="durationSecs || 0"
-                                step="0.1"
-                                :value="progressSliderValue"
-                                :style="{ '--fs-val': fsProgressPercent }"
-                                @mousedown="onSeekStart"
-                                @input="onSeekInput"
-                                @mouseup="onSeekEnd"
-                                @touchstart="onSeekStart"
-                                @touchend="onSeekEnd"
-                                :disabled="!currentTrack"
-                            />
-                            <div class="fs-times">
-                                <span>{{ positionFormatted }}</span>
-                                <span>{{ durationFormatted }}</span>
+
+                        <!-- MOBILE FULLSCREEN PLAYER CONTROLS (WITHOUT VOLUME CONTROL, ENLARGED COVER, TRANSPARENT SIDE BUTTONS) -->
+                        <div class="qf-mobile-layout mobile-only">
+                            <div class="qf-mobile-meta-row">
+                                <div class="fs-info">
+                                    <div v-truncate class="fs-title">{{ trackTitle }}</div>
+                                    <div class="fs-artist"><TrackArtists :artist="currentTrack?.artist" /></div>
+                                </div>
+                                <button
+                                    class="qf-mobile-more-btn"
+                                    :disabled="!currentTrack"
+                                    @mousedown="openQfCoverMenu($event)"
+                                >
+                                    <MoreIcon />
+                                </button>
                             </div>
+
+                            <div class="fs-progress qf-progress-hover">
+                                <input
+                                    type="range"
+                                    class="fs-progress-slider"
+                                    min="0"
+                                    :max="durationSecs || 0"
+                                    step="0.1"
+                                    :value="progressSliderValue"
+                                    :style="{ '--fs-val': fsProgressPercent }"
+                                    @mousedown="onSeekStart"
+                                    @input="onSeekInput"
+                                    @mouseup="onSeekEnd"
+                                    @touchstart="onSeekStart"
+                                    @touchend="onSeekEnd"
+                                    :disabled="!currentTrack"
+                                />
+                                <div class="fs-times">
+                                    <span>{{ positionFormatted }}</span>
+                                    <span>{{ durationFormatted }}</span>
+                                </div>
+                            </div>
+
+                            <div class="qf-mobile-playback-row">
+                                <button
+                                    class="qf-mobile-side-btn"
+                                    :class="{ active: shuffled }"
+                                    :disabled="!currentTrack"
+                                    @click="() => { toggleShuffle(); toast.info(shuffled ? 'Случайный порядок' : 'Воспроизведение подряд') }"
+                                >
+                                    <ShuffleIcon />
+                                </button>
+                                <button class="qf-mobile-playback-btn" :disabled="!currentTrack" @click="playPrev">
+                                    <PrevIcon />
+                                </button>
+                                <button class="qf-mobile-playback-play" @click="togglePlayPause" :disabled="isStopped && !isLoading">
+                                    <PauseIcon v-if="isPlaying" style="margin-left:1px;" />
+                                    <PlayIcon v-else style="margin-left:3px;" />
+                                </button>
+                                <button class="qf-mobile-playback-btn" :disabled="!currentTrack" @click="playNext()">
+                                    <NextIcon />
+                                </button>
+                                <button
+                                    class="qf-mobile-side-btn"
+                                    :class="{ active: repeatMode === 'track' }"
+                                    :disabled="!currentTrack"
+                                    @click="() => { toggleRepeat(); toast.warning(repeatMode === 'track' ? 'Повтор трека' : 'Повтор плейлиста') }"
+                                >
+                                    <RepeatOneIcon v-if="repeatMode === 'track'" />
+                                    <RepeatIcon v-else />
+                                </button>
+                            </div>
+
+                            <button
+                                class="qf-mobile-queue-toggle-btn"
+                                :disabled="!currentTrack"
+                                @click="toggleFsMode"
+                            >
+                                <ListIcon class="qf-mobile-queue-icon" />
+                                <span>Очередь</span>
+                            </button>
                         </div>
                     </div>
                     <div class="qf-right-wrap">
@@ -2326,7 +2381,240 @@ function openQfCoverMenu(e: MouseEvent) {
     .topLine {
         width: 100%;
         max-width: none;
-        gap: 5px;
+    }
+
+    .mobile-only {
+        display: unset !important;
+    }
+
+    .desktop-only {
+        display: none !important;
+    }
+
+    .qf-left {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        max-width: 420px;
+        align-self: center;
+        gap: 20px;
+        transform: none !important;
+        margin: auto 0;
+    }
+
+    .qf-cover-container {
+        position: relative;
+        width: min(88vw, 360px);
+        height: min(88vw, 360px);
+        border-radius: 12px;
+        box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
+        flex-shrink: 0;
+    }
+
+    .qf-cover-wrapper {
+        width: 100%;
+        height: 100%;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    .qf-cover-dim {
+        display: none !important;
+    }
+
+    /* Refined Mobile Layout */
+    .qf-mobile-layout {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100% !important;
+        gap: 20px !important;
+        align-items: stretch !important;
+    }
+
+    /* 1. Metadata row */
+    .qf-mobile-meta-row {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        width: 100% !important;
+        gap: 12px !important;
+    }
+
+    .qf-mobile-meta-row .fs-info {
+        flex: 1 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        text-align: left !important;
+        min-width: 0 !important;
+        gap: 4px !important;
+    }
+
+    .qf-mobile-meta-row .fs-title {
+        font-size: 20px !important;
+        font-weight: 800 !important;
+        color: #ffffff !important;
+        width: 100% !important;
+    }
+
+    .qf-mobile-meta-row .fs-artist {
+        font-size: 14px !important;
+        color: hsla(0, 0%, 100%, 0.6) !important;
+        width: 100% !important;
+    }
+
+    .qf-mobile-more-btn {
+        width: 40px !important;
+        height: 40px !important;
+        min-width: 40px !important;
+        border-radius: 50% !important;
+        background: hsla(0, 0%, 100%, 0.08) !important;
+        color: hsla(0, 0%, 100%, 0.8) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        border: none !important;
+        transition: background-color 0.2s !important;
+    }
+
+    .qf-mobile-more-btn:active {
+        background: hsla(0, 0%, 100%, 0.16) !important;
+    }
+
+    .qf-mobile-more-btn svg {
+        width: 20px !important;
+        height: 20px !important;
+    }
+
+    /* 2. Progress Bar */
+    .qf-mobile-layout .fs-progress {
+        width: 100% !important;
+        max-width: none !important;
+        margin-top: 0 !important;
+    }
+
+    .qf-mobile-layout .fs-times {
+        opacity: 1 !important;
+        display: flex !important;
+        justify-content: space-between !important;
+        margin-top: 6px !important;
+        font-size: 11px !important;
+        color: hsla(0, 0%, 100%, 0.5) !important;
+    }
+
+    /* 3. Playback Controls Row */
+    .qf-mobile-playback-row {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        width: 100% !important;
+        padding: 0 4px !important;
+    }
+
+    .qf-mobile-playback-btn {
+        width: 40px !important;
+        height: 40px !important;
+        border-radius: 50% !important;
+        background: hsla(0, 0%, 100%, 0.08) !important;
+        color: #ffffff !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        border: none !important;
+        transition: background-color 0.2s !important;
+    }
+
+    .qf-mobile-playback-btn:active {
+        background: hsla(0, 0%, 100%, 0.16) !important;
+    }
+
+    .qf-mobile-playback-btn svg {
+        width: 16px !important;
+        height: 16px !important;
+    }
+
+    .qf-mobile-playback-play {
+        width: 58px !important;
+        height: 58px !important;
+        border-radius: 50% !important;
+        background: #ffffff !important;
+        color: #121212 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        border: none !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
+        transition: background-color 0.2s, transform 0.1s !important;
+    }
+
+    .qf-mobile-playback-play:active {
+        background: hsla(0, 0%, 100%, 0.9) !important;
+        transform: scale(0.96) !important;
+    }
+
+    .qf-mobile-playback-play svg {
+        width: 22px !important;
+        height: 22px !important;
+    }
+
+    /* Outermost buttons (Shuffle, Repeat): No background, only icons */
+    .qf-mobile-side-btn {
+        width: 40px !important;
+        height: 40px !important;
+        border-radius: 50% !important;
+        background: transparent !important;
+        color: hsla(0, 0%, 100%, 0.5) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        border: none !important;
+        transition: color 0.2s !important;
+    }
+
+    .qf-mobile-side-btn.active {
+        color: hsla(var(--accent-h), min(var(--accent-s), 80%), 65%, 1) !important;
+    }
+
+    .qf-mobile-side-btn svg {
+        width: 20px !important;
+        height: 20px !important;
+    }
+
+    /* 4. Wide bottom Queue Button */
+    .qf-mobile-queue-toggle-btn {
+        width: 100% !important;
+        height: 48px !important;
+        border-radius: 9999px !important;
+        border: none !important;
+        background: hsla(var(--accent-h), min(var(--accent-s), 50%), var(--accent-l), 0.15) !important;
+        color: hsla(0, 0%, 100%, 0.9) !important;
+        font-size: 14px !important;
+        font-weight: 600 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 8px !important;
+        cursor: pointer !important;
+        transition: background-color 0.2s !important;
+        margin-top: 6px !important;
+    }
+
+    .qf-mobile-queue-toggle-btn:active {
+        background: hsla(var(--accent-h), min(var(--accent-s), 50%), var(--accent-l), 0.25) !important;
+    }
+
+    .qf-mobile-queue-icon {
+        width: 18px !important;
+        height: 18px !important;
     }
 
     .topLine .trackName,

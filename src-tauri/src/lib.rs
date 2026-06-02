@@ -681,6 +681,60 @@ fn statistics_add_collection_full_listen(
     library.add_collection_full_listen(kind, &key)
 }
 
+#[tauri::command]
+fn statistics_get_recently_played(
+    state: State<LibraryState>,
+    limit: usize,
+) -> Result<Vec<audio_player::TrackMetadata>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_recently_played(limit))
+}
+
+#[tauri::command]
+fn statistics_get_most_played(
+    state: State<LibraryState>,
+    limit: usize,
+) -> Result<Vec<audio_player::TrackMetadata>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_most_played(limit))
+}
+
+#[tauri::command]
+fn statistics_get_top_artists(
+    state: State<LibraryState>,
+    limit: usize,
+) -> Result<Vec<library::TopArtist>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_top_artists(limit))
+}
+
+#[tauri::command]
+fn statistics_get_top_albums(
+    state: State<LibraryState>,
+    limit: usize,
+) -> Result<Vec<library::TopAlbum>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_top_albums(limit))
+}
+
+#[tauri::command]
+fn statistics_get_summary_stats(
+    state: State<LibraryState>,
+) -> Result<library::SummaryStats, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_summary_stats())
+}
+
+#[tauri::command]
+fn statistics_get_recommendations(
+    state: State<LibraryState>,
+    mood: String,
+    limit: usize,
+) -> Result<Vec<audio_player::TrackMetadata>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_recommendations_by_mood(&mood, limit))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Команды эквалайзера
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1091,6 +1145,12 @@ pub fn run() {
             statistics_get_track,
             statistics_sum_listen_count,
             statistics_add_collection_full_listen,
+            statistics_get_recently_played,
+            statistics_get_most_played,
+            statistics_get_top_artists,
+            statistics_get_top_albums,
+            statistics_get_summary_stats,
+            statistics_get_recommendations,
             // Эквалайзер
             eq_set_bands,
             eq_get_bands,

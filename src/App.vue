@@ -19,6 +19,8 @@ import { useCustomCovers } from './composables/useCustomCovers';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
 import { isAndroidRuntime, isPhoneViewport, updateRuntimeClasses } from './composables/usePlatform';
+import splashVideoWebm from './assets/splash_screen_dark.webm';
+import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
@@ -90,6 +92,19 @@ function applyUiScale() {
 function scheduleUiScale() {
   if (resizeRaf !== null) return;
   resizeRaf = requestAnimationFrame(applyUiScale);
+}
+
+const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
+if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
+
+const showSplash = ref(!isReload && !isPhoneViewport());
+const splashFading = ref(false);
+
+function onSplashEnded() {
+  splashFading.value = true;
+  setTimeout(() => {
+    showSplash.value = false;
+  }, 600);
 }
 
 const featureProgressVisible = ref(false);
@@ -412,6 +427,12 @@ const closeWindow = async () => {
 </script>
 
 <template>
+  <div data-tauri-drag-region v-if="showSplash" class="splash-overlay" :class="{ 'splash-fading': splashFading }">
+    <video data-tauri-drag-region autoplay muted playsinline @ended="onSplashEnded" class="splash-video">
+      <source :src="splashVideoWebm" type="video/webm" />
+      <source :src="splashVideoMp4" type="video/mp4" />
+    </video>
+  </div>
   <div class="hat" data-tauri-drag-region>
     <div class="winTitle">
       <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
@@ -493,6 +514,25 @@ const closeWindow = async () => {
 </template>
 
 <style>
+.splash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 1;
+  transition: opacity 0.6s ease;
+}
+.splash-overlay.splash-fading {
+  opacity: 0;
+}
+.splash-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 .toast {
   display: flex;
   flex-direction: row;
@@ -947,6 +987,7 @@ body {
     min-height: 0;
   }
 
+  .splash-overlay,
   .scanReadyBackdrop {
     width: 100vw;
     height: 100dvh;
@@ -1155,6 +1196,19 @@ body {
     width: 56px !important;
     height: 56px !important;
     flex-shrink: 0 !important;
+  }
+
+  body.lfmusic-phone .catalogPage .trackElem {
+    min-height: 54px !important;
+    padding: 5px 46px 5px 5px !important;
+    border-radius: 10px !important;
+    gap: 10px !important;
+  }
+
+  body.lfmusic-phone .catalogPage .trackCover {
+    border-radius: 6px !important;
+    width: 44px !important;
+    height: 44px !important;
   }
 
   body.lfmusic-phone .trackName,

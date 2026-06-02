@@ -328,7 +328,7 @@ function onAbout() {
         :anchorBottom="anchorBottom"
         :centerX="centerX"
         :centerY="centerY"
-        mobileSheet="full"
+        mobileSheet="content"
         @close="emit('close')"
     >
         <div class="trackSheetActions">

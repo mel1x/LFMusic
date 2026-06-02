@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { type TrackMetadata } from './usePlayer'
 
 export interface TrackStatistics {
   file_path: string
@@ -16,6 +17,32 @@ export interface TrackStatistics {
   evening_listen_count: number
   night_listen_count: number
   total_listened_secs: number
+}
+
+export interface TopArtist {
+  name: string
+  listen_count: number
+  total_listened_secs: number
+  track_count: number
+}
+
+export interface TopAlbum {
+  name: string
+  artist: string
+  listen_count: number
+  total_listened_secs: number
+  first_file_path: string | null
+}
+
+export interface SummaryStats {
+  total_tracks: number
+  total_folders: number
+  total_listened_secs: number
+  total_listens: number
+  morning_listens: number
+  day_listens: number
+  evening_listens: number
+  night_listens: number
 }
 
 export interface TrackStatisticsUpdateEventDetail {
@@ -39,4 +66,28 @@ export function getTrackStatistics(filePath: string): Promise<TrackStatistics> {
 export function sumListenCount(filePaths: string[]): Promise<number> {
   if (filePaths.length === 0) return Promise.resolve(0)
   return invoke<number>('statistics_sum_listen_count', { filePaths })
+}
+
+export function getRecentlyPlayed(limit: number): Promise<TrackMetadata[]> {
+  return invoke<TrackMetadata[]>('statistics_get_recently_played', { limit })
+}
+
+export function getMostPlayed(limit: number): Promise<TrackMetadata[]> {
+  return invoke<TrackMetadata[]>('statistics_get_most_played', { limit })
+}
+
+export function getTopArtists(limit: number): Promise<TopArtist[]> {
+  return invoke<TopArtist[]>('statistics_get_top_artists', { limit })
+}
+
+export function getTopAlbums(limit: number): Promise<TopAlbum[]> {
+  return invoke<TopAlbum[]>('statistics_get_top_albums', { limit })
+}
+
+export function getSummaryStats(): Promise<SummaryStats> {
+  return invoke<SummaryStats>('statistics_get_summary_stats')
+}
+
+export function getRecommendations(mood: string, limit: number): Promise<TrackMetadata[]> {
+  return invoke<TrackMetadata[]>('statistics_get_recommendations', { mood, limit })
 }

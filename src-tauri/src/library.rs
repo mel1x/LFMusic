@@ -42,6 +42,38 @@ pub struct PlaylistInfo {
     pub first_file_path: Option<String>,
 }
 
+/// Информация о популярном артисте
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopArtist {
+    pub name: String,
+    pub listen_count: i64,
+    pub total_listened_secs: f64,
+    pub track_count: usize,
+}
+
+/// Информация о популярном альбоме
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopAlbum {
+    pub name: String,
+    pub artist: String,
+    pub listen_count: i64,
+    pub total_listened_secs: f64,
+    pub first_file_path: Option<String>,
+}
+
+/// Сводная статистика библиотеки
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryStats {
+    pub total_tracks: usize,
+    pub total_folders: usize,
+    pub total_listened_secs: f64,
+    pub total_listens: i64,
+    pub morning_listens: i64,
+    pub day_listens: i64,
+    pub evening_listens: i64,
+    pub night_listens: i64,
+}
+
 /// Разделить строку с исполнителями по списку разделителей.
 /// Применяет каждый разделитель последовательно, обрезает пробелы и убирает пустые элементы.
 pub fn split_artists(artist: &str, separators: &[String]) -> Vec<String> {
@@ -1772,6 +1804,207 @@ impl MusicLibrary {
             .into_iter()
             .filter(|p| p.kind == PlaylistKind::Artist)
             .collect()
+    }
+
+    pub fn get_recently_played(&self, limit: usize) -> Vec<TrackMetadata> {
+        let sql = "SELECT t.file_path,
+                          COALESCE(o.title, t.title),
+                          COALESCE(o.artist, t.artist),
+                          t.album, t.genre, t.duration_secs,
+                          t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                          COALESCE(o.accent_color, t.accent_color),
+                          o.cover_data,
+                          af.bpm, af.loudness, af.energy, af.danceability,
+                          af.spectral_centroid, af.track_key, af.audio_fingerprint
+                   FROM tracks t
+                   JOIN track_statistics s ON s.file_path = t.file_path
+                   LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                   LEFT JOIN track_audio_features af ON af.file_path = t.file_path
+                   WHERE s.updated_at > 0
+                   ORDER BY s.updated_at DESC
+                   LIMIT ?1";
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![limit as i64], |row| Self::row_to_metadata_with_override(row)) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn get_most_played(&self, limit: usize) -> Vec<TrackMetadata> {
+        let sql = "SELECT t.file_path,
+                          COALESCE(o.title, t.title),
+                          COALESCE(o.artist, t.artist),
+                          t.album, t.genre, t.duration_secs,
+                          t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                          COALESCE(o.accent_color, t.accent_color),
+                          o.cover_data,
+                          af.bpm, af.loudness, af.energy, af.danceability,
+                          af.spectral_centroid, af.track_key, af.audio_fingerprint
+                   FROM tracks t
+                   JOIN track_statistics s ON s.file_path = t.file_path
+                   LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                   LEFT JOIN track_audio_features af ON af.file_path = t.file_path
+                   WHERE s.listen_count > 0
+                   ORDER BY s.listen_count DESC, s.total_listened_secs DESC
+                   LIMIT ?1";
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![limit as i64], |row| Self::row_to_metadata_with_override(row)) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn get_top_artists(&self, limit: usize) -> Vec<TopArtist> {
+        let sql = "SELECT COALESCE(o.artist, t.artist) AS artist_name,
+                          SUM(s.listen_count) AS total_listens,
+                          SUM(s.total_listened_secs) AS total_secs,
+                          COUNT(t.file_path) AS tracks_cnt
+                   FROM tracks t
+                   JOIN track_statistics s ON s.file_path = t.file_path
+                   LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                   WHERE COALESCE(o.artist, t.artist) IS NOT NULL AND COALESCE(o.artist, t.artist) != ''
+                   GROUP BY artist_name
+                   ORDER BY total_listens DESC, total_secs DESC
+                   LIMIT ?1";
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![limit as i64], |row| {
+            Ok(TopArtist {
+                name: row.get(0)?,
+                listen_count: row.get(1)?,
+                total_listened_secs: row.get(2)?,
+                track_count: row.get::<_, i64>(3)? as usize,
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn get_top_albums(&self, limit: usize) -> Vec<TopAlbum> {
+        let sql = "SELECT t.album AS album_name,
+                          COALESCE(o.artist, t.artist) AS artist_name,
+                          SUM(s.listen_count) AS total_listens,
+                          SUM(s.total_listened_secs) AS total_secs,
+                          MIN(t.file_path) AS first_path
+                   FROM tracks t
+                   JOIN track_statistics s ON s.file_path = t.file_path
+                   LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                   WHERE t.album IS NOT NULL AND t.album != ''
+                   GROUP BY album_name, artist_name
+                   ORDER BY total_listens DESC, total_secs DESC
+                   LIMIT ?1";
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![limit as i64], |row| {
+            Ok(TopAlbum {
+                name: row.get(0)?,
+                artist: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                listen_count: row.get(2)?,
+                total_listened_secs: row.get(3)?,
+                first_file_path: row.get(4)?,
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn get_summary_stats(&self) -> SummaryStats {
+        let total_tracks: usize = self.conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap_or(0);
+        let total_folders: usize = self.conn
+            .query_row("SELECT COUNT(*) FROM folders", [], |r| r.get(0))
+            .unwrap_or(0);
+        let (total_listened_secs, total_listens, morning, day, evening, night) = self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(total_listened_secs), 0),
+                        COALESCE(SUM(listen_count), 0),
+                        COALESCE(SUM(morning_listen_count), 0),
+                        COALESCE(SUM(day_listen_count), 0),
+                        COALESCE(SUM(evening_listen_count), 0),
+                        COALESCE(SUM(night_listen_count), 0)
+                 FROM track_statistics",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .unwrap_or((0.0, 0, 0, 0, 0, 0));
+
+        SummaryStats {
+            total_tracks,
+            total_folders,
+            total_listened_secs,
+            total_listens,
+            morning_listens: morning,
+            day_listens: day,
+            evening_listens: evening,
+            night_listens: night,
+        }
+    }
+
+    pub fn get_recommendations_by_mood(&self, mood: &str, limit: usize) -> Vec<TrackMetadata> {
+        let where_clause = match mood {
+            "energetic" => "af.energy >= 0.55 AND af.danceability >= 0.45",
+            "relax" => "af.energy < 0.4 AND (af.bpm < 100 OR af.bpm IS NULL)",
+            "dance" => "af.danceability >= 0.65",
+            "melancholic" => "af.spectral_centroid < 2000.0 AND af.energy < 0.4",
+            "forgotten" => "(s.listen_count IS NULL OR s.listen_count = 0)",
+            _ => "1=1",
+        };
+
+        let sql = format!(
+            "SELECT t.file_path,
+                     COALESCE(o.title, t.title),
+                     COALESCE(o.artist, t.artist),
+                     t.album, t.genre, t.duration_secs,
+                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                     COALESCE(o.accent_color, t.accent_color),
+                     o.cover_data,
+                     af.bpm, af.loudness, af.energy, af.danceability,
+                     af.spectral_centroid, af.track_key, af.audio_fingerprint
+              FROM tracks t
+              LEFT JOIN track_overrides o ON o.file_path = t.file_path
+              LEFT JOIN track_audio_features af ON af.file_path = t.file_path
+              LEFT JOIN track_statistics s ON s.file_path = t.file_path
+              WHERE {}
+              ORDER BY RANDOM()
+              LIMIT ?1",
+            where_clause
+        );
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![limit as i64], |row| Self::row_to_metadata_with_override(row)) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 }
 

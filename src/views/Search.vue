@@ -504,7 +504,7 @@ function scrollToTop() {
 </script>
 
 <template>
-    <div class="pageRoot" ref="pageRootEl" @scroll="handleScroll">
+    <div class="pageRoot searchPage" ref="pageRootEl" @scroll="handleScroll">
         <div class="stickyHeaderAnchor">
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
@@ -513,6 +513,7 @@ function scrollToTop() {
                 </div>
             </Transition>
         </div>
+        <h1 class="pageTitle">Поиск</h1>
         <div class="searchZone">
             <SearchIcon class="searchIcon" @click="focusSearch" />
             <input
@@ -1411,5 +1412,136 @@ function scrollToTop() {
     font-size: 13px;
     font-weight: 400;
     color: hsla(0, 0%, 100%, 0.3);
+}
+
+.pageTitle {
+    display: none;
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .pageTitle {
+        display: block !important;
+        margin-top: 12px;
+        margin-bottom: 22px !important;
+        font-size: 30px !important;
+        line-height: 1.08 !important;
+        font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-weight: 800;
+        color: hsla(0, 0%, 100%, 0.9);
+    }
+
+    .searchPage.pageRoot {
+        padding: 0 16px 80px !important;
+    }
+
+    .searchZone {
+        height: 48px !important;
+        border-radius: 14px !important;
+        margin-bottom: 16px !important;
+    }
+
+    .search {
+        height: 100% !important;
+        padding: 0 44px 0 42px !important;
+        border-radius: 14px !important;
+        font-size: 14px !important;
+    }
+
+    .searchClear {
+        width: 44px !important;
+        height: 44px !important;
+        right: 4px !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+    .searchClear svg {
+        width: 16px !important;
+        height: 16px !important;
+    }
+
+    .pastSearchesBar {
+        gap: 8px !important;
+        margin-bottom: 20px !important;
+    }
+
+    .pastSearchChip {
+        padding: 8px 14px !important;
+        border-radius: 12px !important;
+        font-size: 13px !important;
+    }
+
+    .lineList {
+        width: 100vw !important;
+        margin-left: -16px !important;
+        margin-right: -16px !important;
+        padding: 0 16px 12px !important;
+        --card-w: 132px !important;
+    }
+
+    .lineControls {
+        display: none !important;
+    }
+
+    .trackElem {
+        height: 54px !important;
+        min-height: 54px !important;
+        padding: 5px 46px 5px 5px !important;
+        border-radius: 10px !important;
+        gap: 10px !important;
+    }
+
+    .trackCover {
+        border-radius: 6px !important;
+        width: 40px !important;
+        height: 40px !important;
+    }
+
+    .trackCoverImg {
+        width: 100% !important;
+        height: 100% !important;
+    }
+
+    .playingAnim {
+        left: 17px !important;
+    }
+
+    .trackTime {
+        display: block !important;
+        opacity: 1 !important;
+        margin-right: 32px !important;
+    }
+
+    .hoverOptionsBtn {
+        opacity: 1 !important;
+    }
+
+    .moreTracksBtn {
+        align-self: stretch !important;
+        width: 100% !important;
+        margin-left: 0 !important;
+        text-align: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        height: 40px !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    .moreArtistsRow {
+        width: 100% !important;
+        display: flex !important;
+        box-sizing: border-box !important;
+    }
+
+    .moreArtistsBtn {
+        display: inline-flex !important;
+        width: 100% !important;
+        justify-content: center !important;
+        height: 40px !important;
+        box-sizing: border-box !important;
+    }
 }
 </style>

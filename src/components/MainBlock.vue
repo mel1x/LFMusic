@@ -397,9 +397,9 @@ watch(resolvedPins, () => requestPinCovers());
     padding: 7px 8px calc(7px + var(--safe-bottom));
     gap: 0;
     justify-content: center;
-    background-color: var(--mobile-chrome-bg);
-    border-top: 1px solid hsla(0, 0%, 100%, 0.07);
-    backdrop-filter: blur(16px);
+    background-color: hsla(var(--accent-h), min(var(--accent-s), 50%), 8%, 0.72) !important;
+    border-top: 1px solid hsla(var(--accent-h), min(var(--accent-s), 40%), 80%, 0.08);
+    backdrop-filter: blur(20px);
     z-index: 50;
   }
 
@@ -424,15 +424,26 @@ watch(resolvedPins, () => requestPinCovers());
     font-size: 10px;
     line-height: 1.1;
     text-align: center;
+    transition: transform 0.14s ease, background-color 0.2s ease, color 0.2s ease;
+  }
+
+  .navLink:active {
+    transform: scale(0.96);
   }
 
   .navLink svg {
     width: 21px;
     height: 21px;
+    transition: color 0.2s ease;
   }
 
   .navLink.router-link-active {
-    background-color: hsla(0, 0%, 100%, 0.07);
+    background-color: hsla(var(--accent-h), min(var(--accent-s), 50%), 60%, 0.15) !important;
+    color: #fff !important;
+  }
+
+  .navLink.router-link-active svg {
+    color: hsl(var(--accent-h), min(var(--accent-s), 90%), 75%) !important;
   }
 
   .pinsBlock {
