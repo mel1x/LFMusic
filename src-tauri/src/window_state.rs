@@ -52,6 +52,10 @@ fn monitors_match(saved: &MonitorSnapshot, current: &MonitorSnapshot) -> bool {
     }
 }
 
+fn is_geometry_valid(x: i32, y: i32, width: u32, height: u32) -> bool {
+    x != -32000 && y != -32000 && width >= 300 && height >= 300
+}
+
 pub fn resolve_window_geometry(
     saved: Option<&SavedWindowGeometry>,
     monitors: &[MonitorSnapshot],
@@ -59,16 +63,18 @@ pub fn resolve_window_geometry(
     default_height: u32,
 ) -> Option<ResolvedWindowGeometry> {
     if let Some(saved) = saved {
-        if monitors
-            .iter()
-            .any(|monitor| monitors_match(&saved.monitor, monitor))
-        {
-            return Some(ResolvedWindowGeometry {
-                x: saved.x,
-                y: saved.y,
-                width: saved.width,
-                height: saved.height,
-            });
+        if is_geometry_valid(saved.x, saved.y, saved.width, saved.height) {
+            if monitors
+                .iter()
+                .any(|monitor| monitors_match(&saved.monitor, monitor))
+            {
+                return Some(ResolvedWindowGeometry {
+                    x: saved.x,
+                    y: saved.y,
+                    width: saved.width,
+                    height: saved.height,
+                });
+            }
         }
     }
 
@@ -93,7 +99,12 @@ fn state_path(app_data_dir: &Path) -> PathBuf {
 fn load(app_data_dir: &Path) -> Option<SavedWindowGeometry> {
     let path = state_path(app_data_dir);
     let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let state: SavedWindowGeometry = serde_json::from_slice(&bytes).ok()?;
+    if is_geometry_valid(state.x, state.y, state.width, state.height) {
+        Some(state)
+    } else {
+        None
+    }
 }
 
 fn save(app_data_dir: &Path, state: &SavedWindowGeometry) -> Result<(), String> {
@@ -156,7 +167,10 @@ fn current_window_geometry(
 
 fn save_current_window_geometry(window: &WebviewWindow, app_data_dir: &Path) -> Result<(), String> {
     let state = current_window_geometry(window, load(app_data_dir))?;
-    save(app_data_dir, &state)
+    if is_geometry_valid(state.x, state.y, state.width, state.height) {
+        save(app_data_dir, &state)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -311,5 +325,31 @@ mod tests {
         let saved: SavedWindowGeometry = serde_json::from_str(json).unwrap();
 
         assert!(!saved.fullscreen);
+    }
+
+    #[test]
+    fn ignores_invalid_geometry_minimized_coordinates() {
+        let saved = SavedWindowGeometry {
+            x: -32000,
+            y: -32000,
+            width: 200,
+            height: 41,
+            fullscreen: false,
+            monitor: monitor("DISPLAY1", 0, 0, 1920, 1080),
+        };
+        let monitors = [monitor("DISPLAY1", 0, 0, 1920, 1080)];
+
+        let resolved = resolve_window_geometry(Some(&saved), &monitors, 1460, 860).unwrap();
+
+        // Should center the default size on the first monitor instead of using saved geometry
+        assert_eq!(
+            resolved,
+            ResolvedWindowGeometry {
+                x: 230,
+                y: 110,
+                width: 1460,
+                height: 860,
+            }
+        );
     }
 }

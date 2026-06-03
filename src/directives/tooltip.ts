@@ -19,8 +19,8 @@ const STYLE = `
     opacity: 0;
     background: var(--dark-bg, #1a1a1a);
     border: 1px solid hsla(0, 0%, 100%, 0.1);
-    border-radius: 8px;
-    padding: 6px 8px;
+    border-radius: 24px;
+    padding: 6px 10px;
     font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 12px;
     font-weight: 600;

@@ -173,6 +173,45 @@ let stopStatusWatcher: (() => void) | null = null;
 let isHandlingTrackEnd = false;
 const STATUS_POLL_MS = 500;
 
+let lastFrameTime = performance.now();
+let animationFrameId: number | null = null;
+
+function updateSmoothProgress() {
+  if (playbackState.value !== "Playing") {
+    animationFrameId = null;
+    return;
+  }
+  const now = performance.now();
+  const delta = (now - lastFrameTime) / 1000;
+  lastFrameTime = now;
+
+  if (!isSeeking.value) {
+    if (delta > 0 && delta < 1) {
+      const duration = currentTrack.value?.duration_secs ?? 0;
+      if (duration > 0) {
+        positionSecs.value = Math.min(duration, positionSecs.value + delta);
+      } else {
+        positionSecs.value += delta;
+      }
+    }
+  }
+  animationFrameId = requestAnimationFrame(updateSmoothProgress);
+}
+
+function startSmoothProgress() {
+  if (animationFrameId === null) {
+    lastFrameTime = performance.now();
+    animationFrameId = requestAnimationFrame(updateSmoothProgress);
+  }
+}
+
+function stopSmoothProgress() {
+  if (animationFrameId !== null) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+}
+
 // Shuffle / Repeat
 const shuffled = ref(false);
 const repeatMode = ref<"queue" | "track">("queue");
@@ -863,6 +902,7 @@ export function usePlayer() {
     const newPos = parseFloat((event.target as HTMLInputElement).value);
     seekValue.value = newPos;
     positionSecs.value = newPos;
+    lastFrameTime = performance.now();
     await seekTo(newPos);
     isSeeking.value = false;
   }
@@ -876,6 +916,7 @@ export function usePlayer() {
         await invoke("player_seek", { positionSecs: position });
       }
       positionSecs.value = position;
+      lastFrameTime = performance.now();
       updateStatsProgress(position, playbackState.value);
     } catch (e: any) {
       errorMessage.value = `Ошибка перемотки: ${e}`;
@@ -888,7 +929,10 @@ export function usePlayer() {
       playbackState.value = status.state;
       volume.value = status.volume;
 
-      if (!isSeeking.value) positionSecs.value = status.position_secs;
+      if (!isSeeking.value) {
+        positionSecs.value = status.position_secs;
+        lastFrameTime = performance.now();
+      }
       updateStatsProgress(status.position_secs, status.state);
 
       if (status.current_file_path) {
@@ -1005,7 +1049,8 @@ export function usePlayer() {
         }
       } else if (src && src.startsWith("album:")) {
         const name = src.slice("album:".length);
-        sourceTrackList.value = trackList.value.filter(t => (t.album || '').trim() === name);
+        const tracks = trackList.value.filter(t => (t.album || '').trim() === name);
+        sourceTrackList.value = tracks.sort((a, b) => a.file_path.localeCompare(b.file_path, undefined, { numeric: true, sensitivity: 'base' }));
         if (sourceTrackList.value.length === 0) {
           activePlaylistSource.value = null;
         }
@@ -1109,20 +1154,24 @@ export function usePlayer() {
     await restoreState();
     if (playbackState.value === "Playing") {
       startStatusPolling();
+      startSmoothProgress();
     }
 
     // Останавливаем поллинг, когда плеер не воспроизводит звук.
     stopStatusWatcher = watch(playbackState, (state: string) => {
       if (state === 'Playing') {
         startStatusPolling();
+        startSmoothProgress();
       } else {
         stopStatusPolling();
+        stopSmoothProgress();
       }
     });
   }
 
   function destroy() {
     stopStatusPolling();
+    stopSmoothProgress();
     if (stopStatusWatcher) {
       stopStatusWatcher();
       stopStatusWatcher = null;

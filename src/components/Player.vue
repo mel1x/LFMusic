@@ -574,7 +574,7 @@ function openQfCoverMenu(e: MouseEvent) {
                         @click="togglePlayPause"
                         :disabled="isStopped && !isLoading"
                                             >
-                        <PauseIcon style="margin-left:1px;" v-if="isPlaying" />
+                        <PauseIcon v-if="isPlaying" />
                         <PlayIcon style="margin-left:2px;" v-else />
                     </button>
                     <button
@@ -779,21 +779,25 @@ function openQfCoverMenu(e: MouseEvent) {
                             <div v-if="currentTrack?.album" v-truncate class="fs-album">{{ currentTrack.album }}</div>
                         </div>
                         <div class="fs-progress qf-progress-hover desktop-only">
-                            <input
-                                type="range"
-                                class="fs-progress-slider"
-                                min="0"
-                                :max="durationSecs || 0"
-                                step="0.1"
-                                :value="progressSliderValue"
-                                :style="{ '--fs-val': fsProgressPercent }"
-                                @mousedown="onSeekStart"
-                                @input="onSeekInput"
-                                @mouseup="onSeekEnd"
-                                @touchstart="onSeekStart"
-                                @touchend="onSeekEnd"
-                                :disabled="!currentTrack"
-                            />
+                            <div class="fs-progress-bar-wrapper">
+                                <input
+                                    type="range"
+                                    class="fs-progress-slider"
+                                    min="0"
+                                    :max="durationSecs || 0"
+                                    step="0.1"
+                                    :value="progressSliderValue"
+                                    @mousedown="onSeekStart"
+                                    @input="onSeekInput"
+                                    @mouseup="onSeekEnd"
+                                    @touchstart="onSeekStart"
+                                    @touchend="onSeekEnd"
+                                    :disabled="!currentTrack"
+                                />
+                                <div class="fs-progress-track">
+                                    <div class="fs-progress-fill" :style="{ width: fsProgressPercent }"></div>
+                                </div>
+                            </div>
                             <div class="fs-times">
                                 <span>{{ positionFormatted }}</span>
                                 <span>{{ durationFormatted }}</span>
@@ -817,21 +821,25 @@ function openQfCoverMenu(e: MouseEvent) {
                             </div>
 
                             <div class="fs-progress qf-progress-hover">
-                                <input
-                                    type="range"
-                                    class="fs-progress-slider"
-                                    min="0"
-                                    :max="durationSecs || 0"
-                                    step="0.1"
-                                    :value="progressSliderValue"
-                                    :style="{ '--fs-val': fsProgressPercent }"
-                                    @mousedown="onSeekStart"
-                                    @input="onSeekInput"
-                                    @mouseup="onSeekEnd"
-                                    @touchstart="onSeekStart"
-                                    @touchend="onSeekEnd"
-                                    :disabled="!currentTrack"
-                                />
+                                <div class="fs-progress-bar-wrapper">
+                                    <input
+                                        type="range"
+                                        class="fs-progress-slider"
+                                        min="0"
+                                        :max="durationSecs || 0"
+                                        step="0.1"
+                                        :value="progressSliderValue"
+                                        @mousedown="onSeekStart"
+                                        @input="onSeekInput"
+                                        @mouseup="onSeekEnd"
+                                        @touchstart="onSeekStart"
+                                        @touchend="onSeekEnd"
+                                        :disabled="!currentTrack"
+                                    />
+                                    <div class="fs-progress-track">
+                                        <div class="fs-progress-fill" :style="{ width: fsProgressPercent }"></div>
+                                    </div>
+                                </div>
                                 <div class="fs-times">
                                     <span>{{ positionFormatted }}</span>
                                     <span>{{ durationFormatted }}</span>
@@ -1106,7 +1114,6 @@ function openQfCoverMenu(e: MouseEvent) {
     width: 0%;
     border-radius: inherit;
     background-color: hsla(0, 0%, 100%, 0.56);
-    transition: width 0.5s linear;
 }
 .asideNextTrack {
     display: grid;
@@ -1225,7 +1232,7 @@ function openQfCoverMenu(e: MouseEvent) {
     width: 0px;
     background-color: hsla(0, 0%, 100%, 0.65);
     opacity: 0;
-    transition: width 0.5s linear, opacity 0.3s ease;
+    transition: opacity 0.3s ease;
 }
 .progress-bg {
     position: absolute;
@@ -1235,7 +1242,6 @@ function openQfCoverMenu(e: MouseEvent) {
     width: 0%;
     z-index: 2;
     background-color: hsla(0, 0%, 100%, 0.11);
-    transition: width 0.5s linear;
 }
 .playerControlsWrapper:hover .progress-bar-bg {
     opacity: 1;
@@ -1422,9 +1428,18 @@ function openQfCoverMenu(e: MouseEvent) {
     height: 40px;
     border-radius: 50%;
     background-color: #ffffff;
-    transition: .24s ease-in-out;
+    transition: transform .24s ease-in-out;
     transform-origin: center;
-    color: hsla(var(--accent-h), min(var(--accent-s), 34%), 12%, 1);
+    color: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 1);
+    transform: translateZ(0);
+    will-change: transform;
+    backface-visibility: hidden;
+}
+.playBtn:hover:not(:disabled) {
+    transform: scale(1.055) translateZ(0);
+}
+.playBtn:active:not(:disabled) {
+    transform: scale(1.0) translateZ(0);
 }
 .playBtn:disabled {
     opacity: 0.25;
@@ -1789,40 +1804,77 @@ function openQfCoverMenu(e: MouseEvent) {
     width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
 }
-.fs-progress-slider {
+.fs-progress-bar-wrapper {
+    position: relative;
     width: 100%;
     height: 14px;
+    display: flex;
+    align-items: center;
+}
+.fs-progress-slider {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     appearance: none;
     -webkit-appearance: none;
     cursor: pointer;
     outline: none;
     background: transparent;
+    z-index: 2;
 }
 .fs-progress-slider::-webkit-slider-runnable-track {
-    height: 6px;
-    border-radius: 3px;
-    background: linear-gradient(
-        to right,
-        hsla(0, 0%, 100%, 0.7) var(--fs-val, 0%),
-        hsla(0, 0%, 100%, 0.12) var(--fs-val, 0%)
-    );
+    background: transparent;
+    height: 14px;
 }
 .fs-progress-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
     background: #fff;
     cursor: pointer;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-    margin-top: -4px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    margin-top: 1px;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+.fs-progress:hover .fs-progress-slider::-webkit-slider-thumb,
+.fs-progress-slider:active::-webkit-slider-thumb {
+    opacity: 1;
 }
 .fs-progress-slider:disabled {
     opacity: 0.3;
     cursor: default;
+}
+.fs-progress-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 4px;
+    border-radius: 2px;
+    background-color: hsla(0, 0%, 100%, 0.12);
+    z-index: 1;
+    overflow: hidden;
+    transition: background-color 0.25s ease;
+}
+.fs-progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 2px;
+    background-color: hsla(0, 0%, 100%, 0.7);
+    transition: background-color 0.25s ease;
+}
+.fs-progress:hover .fs-progress-track,
+.fs-progress-bar-wrapper:hover .fs-progress-track {
+    background-color: hsla(0, 0%, 100%, 0.18);
+}
+.fs-progress:hover .fs-progress-fill,
+.fs-progress-bar-wrapper:hover .fs-progress-fill {
+    background-color: #fff;
 }
 .fs-times {
     display: flex;
@@ -2124,7 +2176,7 @@ function openQfCoverMenu(e: MouseEvent) {
     height: 72px;
     border-radius: 50%;
     background: #fff;
-    color: hsla(var(--accent-h), min(var(--accent-s), 34%), 12%, 1);
+    color: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 1);
     cursor: pointer;
     transition: transform .24s ease;
 }
@@ -2136,14 +2188,14 @@ function openQfCoverMenu(e: MouseEvent) {
     cursor: not-allowed;
 }
 .qf-progress-hover .fs-times {
-    opacity: 0;
+    opacity: 0.45;
     transition: opacity .24s ease;
 }
 .qf-progress-hover:hover .fs-times,
 .qf-progress-hover .fs-progress-slider:hover + .fs-times,
 .qf-progress-hover .fs-progress-slider:focus + .fs-times,
 .qf-progress-hover .fs-progress-slider:active + .fs-times {
-    opacity: 1;
+    opacity: 0.9;
 }
 .qf-right-wrap {
     position: relative;
@@ -2344,11 +2396,19 @@ function openQfCoverMenu(e: MouseEvent) {
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .player {
-        height: var(--mobile-player-height);
-        margin-bottom: var(--mobile-nav-height);
+        height: calc(var(--mobile-player-height) + var(--mobile-nav-height));
+        margin-bottom: 0;
         flex-shrink: 0;
         align-items: stretch;
-        background: var(--dark-bg);
+        background:
+            radial-gradient(
+                ellipse 100% 75% at 50% 0%,
+                hsla(var(--accent-h), min(var(--accent-s), 70%), 58%, 0.24),
+                transparent 95%
+            ),
+            hsla(var(--accent-h), min(var(--accent-s), 50%), 8%, 0.72) !important;
+        backdrop-filter: blur(20px);
+        border-top: 1px solid hsla(var(--accent-h), min(var(--accent-s), 90%), 75%, 0.15);
     }
 
     .asideWrapper {
@@ -2357,7 +2417,7 @@ function openQfCoverMenu(e: MouseEvent) {
 
     .playerControlsWrapper {
         width: 100%;
-        height: 100%;
+        height: var(--mobile-player-height);
         padding: 8px 14px;
     }
 
@@ -2626,7 +2686,7 @@ function openQfCoverMenu(e: MouseEvent) {
     }
 
     .qf-mobile-side-btn.active {
-        color: hsla(var(--accent-h), min(var(--accent-s), 80%), 65%, 1) !important;
+        color: hsla(0, 0%, 100%, 0.95) !important;
     }
 
     .qf-mobile-side-btn svg {
@@ -2640,7 +2700,7 @@ function openQfCoverMenu(e: MouseEvent) {
         height: 48px !important;
         border-radius: 9999px !important;
         border: none !important;
-        background: hsla(var(--accent-h), min(var(--accent-s), 50%), var(--accent-l), 0.15) !important;
+        background: hsla(0, 0%, 100%, 0.08) !important;
         color: hsla(0, 0%, 100%, 0.9) !important;
         font-size: 14px !important;
         font-weight: 600 !important;
@@ -2654,7 +2714,7 @@ function openQfCoverMenu(e: MouseEvent) {
     }
 
     .qf-mobile-queue-toggle-btn:active {
-        background: hsla(var(--accent-h), min(var(--accent-s), 50%), var(--accent-l), 0.25) !important;
+        background: hsla(0, 0%, 100%, 0.16) !important;
     }
 
     .qf-mobile-queue-icon {

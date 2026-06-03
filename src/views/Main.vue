@@ -12,7 +12,7 @@ import TimeIcon from '../components/Icons/TimeIcon.vue';
             </div>
 
             <div class="mid">
-                <div class="statBadge" v-tooltip="'Test'"><TimeIcon /> 6ч 32м</div>
+                <div class="statBadge" v-tooltip:bottom="'Время прослушивания'"><TimeIcon /> 6ч 32м</div>
             </div>
 
             <div class="end">

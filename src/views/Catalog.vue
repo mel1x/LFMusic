@@ -205,7 +205,7 @@ const isCatalogActive = computed(() => {
 })
 
 function onPlayCatalog() {
-    if (isCatalogActive.value) {
+    if (isCatalogActive.value && currentTrack.value) {
         togglePlayPause()
     } else {
         setPlaylistSource(catalogSourceId.value, filteredTracks.value)

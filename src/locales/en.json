@@ -239,6 +239,7 @@
     "У этого исполнителя нет треков": "This artist has no tracks",
     "Подборка формируется автоматически из вашей библиотеки.": "The mix is generated automatically from your library.",
     "Поиск альбома": "Search albums",
-    "Поиск исполнителя": "Search artists"
+    "Поиск исполнителя": "Search artists",
+    "Время прослушивания":"Listening time"
   }
 }

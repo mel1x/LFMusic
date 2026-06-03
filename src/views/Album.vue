@@ -46,9 +46,10 @@ const albumName = computed(() => {
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
-const albumTracks = computed<TrackMetadata[]>(() =>
-    trackList.value.filter(t => (t.album || '').trim() === albumName.value)
-)
+const albumTracks = computed<TrackMetadata[]>(() => {
+    const tracks = trackList.value.filter(t => (t.album || '').trim() === albumName.value);
+    return tracks.sort((a, b) => a.file_path.localeCompare(b.file_path, undefined, { numeric: true, sensitivity: 'base' }));
+})
 
 const albumArtist = computed(() =>
     albumTracks.value[0]?.artist || 'Неизвестный исполнитель'

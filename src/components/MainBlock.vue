@@ -101,11 +101,11 @@ watch(resolvedPins, () => requestPinCovers());
     <div class="asideSpacer"></div>
     <aside class="navAside" :style="{ '--mainblock-aside-bottom': asideBottom }">
       <nav class="navList">
-        <RouterLink to="/search" class="navLink"><SearchIcon width="24" height="24" stroke-width="2.25" />Поиск</RouterLink>
-        <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" />Главная</RouterLink>
-        <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2.25" />Коллекция</RouterLink>
-        <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2.25" />Каталог</RouterLink>
-        <RouterLink to="/settings" class="navLink"><SettingsIcon width="24" height="24" stroke-width="2.25" />Настройки</RouterLink>
+        <RouterLink to="/search" class="navLink"><SearchIcon width="24" height="24" stroke-width="2.25" /><span>Поиск</span></RouterLink>
+        <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" /><span>Главная</span></RouterLink>
+        <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2.25" /><span>Коллекция</span></RouterLink>
+        <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2.25" /><span>Каталог</span></RouterLink>
+        <RouterLink to="/settings" class="navLink"><SettingsIcon width="24" height="24" stroke-width="2.25" /><span>Настройки</span></RouterLink>
       </nav>
 
       <div class="pinsBlock" v-if="resolvedPins.length > 0">
@@ -397,9 +397,9 @@ watch(resolvedPins, () => requestPinCovers());
     padding: 7px 8px calc(7px + var(--safe-bottom));
     gap: 0;
     justify-content: center;
-    background-color: hsla(var(--accent-h), min(var(--accent-s), 50%), 8%, 0.72) !important;
-    border-top: 1px solid hsla(var(--accent-h), min(var(--accent-s), 40%), 80%, 0.08);
-    backdrop-filter: blur(20px);
+    background-color: transparent !important;
+    border-top: none;
+    backdrop-filter: none;
     z-index: 50;
   }
 
@@ -427,18 +427,39 @@ watch(resolvedPins, () => requestPinCovers());
     transition: transform 0.14s ease, background-color 0.2s ease, color 0.2s ease;
   }
 
+  .navLink span {
+    display: none;
+  }
+
+  /* Порядок на мобильной версии: Главная, Коллекция, Поиск, Каталог, Настройки */
+  .navLink:nth-child(2) {
+    order: 1; /* Главная (to="/") */
+  }
+  .navLink:nth-child(3) {
+    order: 2; /* Коллекция (to="/collections") */
+  }
+  .navLink:nth-child(1) {
+    order: 3; /* Поиск (to="/search") */
+  }
+  .navLink:nth-child(4) {
+    order: 4; /* Каталог (to="/catalog") */
+  }
+  .navLink:nth-child(5) {
+    order: 5; /* Настройки (to="/settings") */
+  }
+
   .navLink:active {
     transform: scale(0.96);
   }
 
   .navLink svg {
-    width: 21px;
-    height: 21px;
+    width: 24px;
+    height: 24px;
     transition: color 0.2s ease;
   }
 
   .navLink.router-link-active {
-    background-color: hsla(var(--accent-h), min(var(--accent-s), 50%), 60%, 0.15) !important;
+    background-color: transparent !important;
     color: #fff !important;
   }
 

@@ -115,7 +115,12 @@ export function usePlaylists() {
   }
 
   async function getPlaylistTracks(playlistId: number): Promise<TrackMetadata[]> {
-    return invoke<TrackMetadata[]>("playlist_get_tracks", { playlistId });
+    const tracks = await invoke<TrackMetadata[]>("playlist_get_tracks", { playlistId });
+    const playlist = playlists.value.find((p) => p.id === playlistId);
+    if (playlist && playlist.kind === "Album") {
+      return tracks.sort((a, b) => a.file_path.localeCompare(b.file_path, undefined, { numeric: true, sensitivity: 'base' }));
+    }
+    return tracks;
   }
 
   async function createPlaylist(name: string): Promise<PlaylistInfo | null> {
