@@ -429,6 +429,8 @@ function scrollToTop() {
             :isPinned="isPinned(playlistMenu.pl.id)"
             showMoveToTop
             :centerX="playlistMenu.centerX"
+            customCoverKind="playlist"
+            :customCoverKey="playlistMenu.pl.id"
             @close="playlistMenu = null"
             @togglePin="togglePinId(playlistMenu!.pl.id)"
             @delete="onDeleteFromMenu(playlistMenu!.pl)"
@@ -635,7 +637,7 @@ function scrollToTop() {
     background-color: hsl(var(--accent-h), min(var(--accent-s), 50%), 8%);
     width: 100%;
     aspect-ratio: 1 / 1;
-    border-radius: 12px;
+    border-radius: 18px;
     transition: .24s ease;
 }
 .createPlaylistItem .cover svg {
@@ -683,14 +685,14 @@ function scrollToTop() {
     position: relative;
     width: 100%;
     aspect-ratio: 1 / 1;
-    border-radius: 12px;
+    border-radius: 18px;
     overflow: hidden;
 }
 .playlistItem .cover {
     display: block;
     width: 100%;
     height: 100%;
-    border-radius: 12px;
+    border-radius: 18px;
     object-fit: cover;
     transition: filter .24s ease, transform .24s ease;
     user-select: none;

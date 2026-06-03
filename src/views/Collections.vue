@@ -993,7 +993,7 @@ function scrollToTop() {
     background-color: hsl(var(--accent-h), min(var(--accent-s), 50%), 8%);
     width: var(--card-w, 240px);
     height: var(--card-w, 240px);
-    border-radius: 12px;
+    border-radius: 18px;
     transition: .24s ease;
 }
 .createPlaylistItem .cover svg {
@@ -1040,14 +1040,14 @@ function scrollToTop() {
     position: relative;
     width: var(--card-w, 240px);
     height: var(--card-w, 240px);
-    border-radius: 12px;
+    border-radius: 18px;
     overflow: hidden;
 }
 .playlistItem .cover {
     display: block;
     width: var(--card-w, 240px);
     height: var(--card-w, 240px);
-    border-radius: 12px;
+    border-radius: 18px;
     object-fit: cover;
     transition: filter .24s ease, transform .24s ease;
     user-select: none;

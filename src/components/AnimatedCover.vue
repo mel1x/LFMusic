@@ -12,7 +12,7 @@ defineOptions({ inheritAttrs: false })
 <style>
 .cover-fade-enter-active,
 .cover-fade-leave-active {
-    transition: opacity 0.22s ease, transform 0.22s ease;
+    transition: opacity 0.22s ease, transform 0.22s ease !important;
 }
 .cover-fade-enter-from {
     opacity: 0;

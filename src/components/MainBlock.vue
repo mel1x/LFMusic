@@ -160,6 +160,8 @@ watch(resolvedPins, () => requestPinCovers());
       :showDelete="false"
       showMoveToTop
       moveToTopUp
+      :customCoverKind="pinMenu.pin.kind"
+      :customCoverKey="pinMenu.pin.key"
       @close="pinMenu = null"
       @togglePin="onUnpinFromMenu"
       @moveToTop="onMovePinToTopFromMenu"

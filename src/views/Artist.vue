@@ -382,6 +382,11 @@ function openArtistMenu(e: MouseEvent) {
 function onTogglePin() {
     togglePin({ kind: 'artist', key: artistName.value, name: artistName.value })
 }
+
+function onCoverImgClick() {
+    if (isPhoneViewport()) return
+    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: artistCover.value }))
+}
 </script>
 
 <template>
@@ -391,7 +396,7 @@ function onTogglePin() {
             <span>Назад</span>
         </button>
         <div class="pageHat">
-            <div class="coverWrap cover-edit-host">
+            <div class="coverWrap cover-edit-host" @click="onCoverImgClick">
                 <AnimatedCover :src="artistCover" class="cover" alt="cover" />
                 <CoverEditor kind="artist" :coverKey="artistName" size="large" />
             </div>
@@ -560,6 +565,8 @@ function onTogglePin() {
             :isPinned="isAlbumPinned(albumMenu.album.name)"
             :showDelete="false"
             :centerX="albumMenu.centerX"
+            customCoverKind="album"
+            :customCoverKey="albumMenu.album.name"
             @close="albumMenu = null"
             @togglePin="toggleAlbumPin(albumMenu!.album.name)"
         />
@@ -569,6 +576,8 @@ function onTogglePin() {
             :y="artistMenu.y"
             :isPinned="isPinned"
             :showDelete="false"
+            customCoverKind="artist"
+            :customCoverKey="artistName"
             centerX
             @close="artistMenu = null"
             @togglePin="onTogglePin"
@@ -640,6 +649,7 @@ function onTogglePin() {
     height: 200px;
     flex-shrink: 0;
     border-radius: 9999px;
+    cursor: pointer;
 }
 .pageHat .cover {
     user-select: none;
@@ -647,14 +657,15 @@ function onTogglePin() {
     height: 200px;
     background-color: #202020;
     border-radius: 9999px;
-    transition: .24s ease;
-    transform-origin: center;
+    transition: width .24s ease, height .24s ease, margin .24s ease, filter .28s ease;
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
 }
 .pageHat .coverWrap:hover .cover {
-    transform: scale(1.02);
+    width: 204px;
+    height: 204px;
+    margin: -2px;
 }
 .pageHat .dataZone {
     display: flex;
@@ -1054,14 +1065,14 @@ function onTogglePin() {
     position: relative;
     width: var(--card-w, 210px);
     height: var(--card-w, 210px);
-    border-radius: 12px;
+    border-radius: 18px;
     overflow: hidden;
 }
 .playlistItem .cover {
     display: block;
     width: var(--card-w, 210px);
     height: var(--card-w, 210px);
-    border-radius: 12px;
+    border-radius: 18px;
     object-fit: cover;
     transition: filter .24s ease, transform .24s ease;
     user-select: none;

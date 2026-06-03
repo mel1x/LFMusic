@@ -254,6 +254,11 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 function goBack() {
     router.back()
 }
+
+function onCoverImgClick() {
+    if (isPhoneViewport()) return
+    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: albumCover.value }))
+}
 </script>
 
 <template>
@@ -272,7 +277,7 @@ function goBack() {
                 <span>Назад</span>
             </button>
             <div class="pageHat">
-                <div class="coverWrap cover-edit-host">
+                <div class="coverWrap cover-edit-host" @click="onCoverImgClick">
                     <AnimatedCover :src="albumCover" class="cover" alt="cover" />
                     <CoverEditor kind="album" :coverKey="albumName" size="large" />
                 </div>
@@ -452,22 +457,24 @@ function goBack() {
     width: 200px;
     height: 200px;
     flex-shrink: 0;
-    border-radius: 10px;
+    border-radius: 18px;
+    cursor: pointer;
 }
 .pageHat .cover {
     user-select: none;
     width: 200px;
     height: 200px;
     background-color: transparent;
-    border-radius: 10px;
-    transition: .24s ease;
-    transform-origin: center;
+    border-radius: 18px;
+    transition: width .24s ease, height .24s ease, margin .24s ease, filter .28s ease;
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
 }
 .pageHat .coverWrap:hover .cover {
-    transform: scale(1.02);
+    width: 204px;
+    height: 204px;
+    margin: -2px;
 }
 .pageHat .dataZone {
     display: flex;

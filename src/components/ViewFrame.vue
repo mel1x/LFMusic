@@ -178,7 +178,6 @@ main {
   height: 100%;
   overflow: auto;
   border-radius: 16px;
-  border: 0.0625rem solid hsla(0, 0%, 100%, 0.04);
   scrollbar-width: none;
 }
 main::-webkit-scrollbar {

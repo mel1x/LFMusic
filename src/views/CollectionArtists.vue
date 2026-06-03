@@ -412,6 +412,8 @@ function scrollToTop() {
             showMoveToTop
             :showDelete="false"
             :centerX="artistMenu.centerX"
+            customCoverKind="artist"
+            :customCoverKey="artistMenu.artist.name"
             @close="artistMenu = null"
             @togglePin="toggleArtistPin(artistMenu!.artist.name)"
             @moveToTop="onMoveArtistToTopFromMenu(artistMenu!.artist)"

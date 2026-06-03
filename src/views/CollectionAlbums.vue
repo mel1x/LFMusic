@@ -443,6 +443,8 @@ function scrollToTop() {
             showMoveToTop
             :showDelete="false"
             :centerX="albumMenu.centerX"
+            customCoverKind="album"
+            :customCoverKey="albumMenu.album.name"
             @close="albumMenu = null"
             @togglePin="toggleAlbumPin(albumMenu!.album.name)"
             @moveToTop="onMoveAlbumToTopFromMenu(albumMenu!.album)"
@@ -630,14 +632,14 @@ function scrollToTop() {
     position: relative;
     width: 100%;
     aspect-ratio: 1 / 1;
-    border-radius: 12px;
+    border-radius: 18px;
     overflow: hidden;
 }
 .playlistItem .cover {
     display: block;
     width: 100%;
     height: 100%;
-    border-radius: 12px;
+    border-radius: 18px;
     object-fit: cover;
     transition: filter .24s ease, transform .24s ease;
     user-select: none;

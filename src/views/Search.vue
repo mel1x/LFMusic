@@ -760,7 +760,7 @@ function scrollToTop() {
     background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
-    overflow-y: scroll;
+    overflow-y: auto;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
 .pageRoot::-webkit-scrollbar-track { background-color: var(--light-bg); }
@@ -1126,14 +1126,14 @@ function scrollToTop() {
     position: relative;
     width: var(--card-w, 200px);
     height: var(--card-w, 200px);
-    border-radius: 12px;
+    border-radius: 18px;
     overflow: hidden;
 }
 .playlistItem .cover {
     display: block;
     width: var(--card-w, 200px);
     height: var(--card-w, 200px);
-    border-radius: 12px;
+    border-radius: 18px;
     object-fit: cover;
     transition: filter .24s ease, transform .24s ease;
     user-select: none;
