@@ -8,6 +8,17 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [vue()],
 
+  build: {
+    // WebView2 на Windows / WKWebView на macOS-iOS — современные движки,
+    // транспиляция под старые браузеры не нужна (меньше и быстрее бандл)
+    target:
+      process.env.TAURI_ENV_PLATFORM === "windows" || process.env.TAURI_ENV_PLATFORM === "android"
+        ? "chrome105"
+        : "safari13",
+    minify: !process.env.TAURI_ENV_DEBUG ? ("esbuild" as const) : false,
+    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent vite from obscuring rust errors

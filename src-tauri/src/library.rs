@@ -358,6 +358,10 @@ impl MusicLibrary {
                  artist        TEXT,
                  cover_data    TEXT,
                  accent_color  TEXT
+             );
+             CREATE TABLE IF NOT EXISTS album_track_order (
+                 album_name  TEXT PRIMARY KEY NOT NULL,
+                 track_paths TEXT NOT NULL DEFAULT '[]'
              );",
         )
         .map_err(|e| format!("Ошибка создания таблиц: {}", e))?;
@@ -735,8 +739,10 @@ impl MusicLibrary {
             rows.filter_map(|r| r.ok()).collect()
         };
 
+        // Проверки существования файлов — IO-bound, параллелим
+        // (на больших библиотеках и сетевых дисках серийный обход очень медленный)
         let dead: Vec<String> = all_paths
-            .into_iter()
+            .into_par_iter()
             .filter(|p| !PathBuf::from(p).exists())
             .collect();
 
@@ -1004,9 +1010,10 @@ impl MusicLibrary {
             rows.filter_map(|r| r.ok()).collect()
         };
 
-        // 2. Фильтруем файлы, которые нужно (пере)сканировать
+        // 2. Фильтруем файлы, которые нужно (пере)сканировать.
+        // Чтение mtime — IO-bound, параллелим; par_iter сохраняет порядок файлов.
         let to_scan: Vec<(String, u64)> = files
-            .iter()
+            .par_iter()
             .filter_map(|file_path| {
                 let path_str = file_path.to_string_lossy().to_string();
                 let mtime = Self::get_mtime(file_path);
@@ -1266,12 +1273,35 @@ impl MusicLibrary {
             return Err("Нельзя удалять системные плейлисты".into());
         }
 
+        // Снимаем -1 с playlist_add_count для каждого трека удаляемого плейлиста,
+        // симметрично remove_track_from_playlist.
+        let removed_paths: Vec<String> = {
+            let mut stmt = self.conn
+                .prepare("SELECT file_path FROM playlist_tracks WHERE playlist_id = ?1")
+                .map_err(|e| format!("Ошибка чтения треков плейлиста: {}", e))?;
+            let rows = stmt
+                .query_map(params![playlist_id], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("Ошибка чтения треков плейлиста: {}", e))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
         let tx = self.conn
             .transaction()
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
         tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![playlist_id]).ok();
         tx.execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id]).ok();
+        for file_path in &removed_paths {
+            statistics::apply_track_delta(
+                &tx,
+                &TrackStatisticsDelta {
+                    file_path: file_path.clone(),
+                    playlist_add_count_delta: -1,
+                    ..TrackStatisticsDelta::default()
+                },
+            )
+            .ok();
+        }
 
         tx.commit().map_err(|e| format!("Ошибка коммита: {}", e))?;
         Ok(())
@@ -1966,14 +1996,154 @@ impl MusicLibrary {
         }
     }
 
-    pub fn get_recommendations_by_mood(&self, mood: &str, limit: usize) -> Vec<TrackMetadata> {
-        let where_clause = match mood {
-            "energetic" => "af.energy >= 0.55 AND af.danceability >= 0.45",
-            "relax" => "af.energy < 0.4 AND (af.bpm < 100 OR af.bpm IS NULL)",
-            "dance" => "af.danceability >= 0.65",
-            "melancholic" => "af.spectral_centroid < 2000.0 AND af.energy < 0.4",
-            "forgotten" => "(s.listen_count IS NULL OR s.listen_count = 0)",
-            _ => "1=1",
+    /// Средний «характер» прослушанной музыки: взвешенные (по числу
+    /// прослушиваний) средние и дисперсии аудио-фич. Используется, чтобы
+    /// подбирать похожие («любимое») либо непохожие («незнакомое») треки.
+    fn listening_centroid(&self) -> Option<ListeningCentroid> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT af.energy, af.danceability, af.bpm, af.spectral_centroid, af.loudness, s.listen_count
+                 FROM track_statistics s
+                 JOIN track_audio_features af ON af.file_path = s.file_path
+                 WHERE s.listen_count > 0 AND af.energy IS NOT NULL",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<f64>>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, Option<f64>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .ok()?;
+
+        let mut n = 0_usize;
+        let mut wsum = 0.0_f64;
+        let (mut se, mut sd, mut sb, mut sc, mut sl) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut se2, mut sd2, mut sb2, mut sc2, mut sl2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+
+        for r in rows.flatten() {
+            let (e, d, b, c, l) = match r {
+                (Some(e), Some(d), Some(b), Some(c), Some(l), _cnt) => (e, d, b, c, l),
+                _ => continue,
+            };
+            let w = (r.5.max(1)) as f64;
+            n += 1;
+            wsum += w;
+            se += w * e;  se2 += w * e * e;
+            sd += w * d;  sd2 += w * d * d;
+            sb += w * b;  sb2 += w * b * b;
+            sc += w * c;  sc2 += w * c * c;
+            sl += w * l;  sl2 += w * l * l;
+        }
+
+        if wsum <= 0.0 {
+            return None;
+        }
+        let mean = |s: f64| s / wsum;
+        let var = |s2: f64, m: f64| (s2 / wsum - m * m).max(0.0);
+        let (e, d, b, c, l) = (mean(se), mean(sd), mean(sb), mean(sc), mean(sl));
+        Some(ListeningCentroid {
+            n,
+            e, e_var: var(se2, e),
+            d, d_var: var(sd2, d),
+            b, b_var: var(sb2, b),
+            c, c_var: var(sc2, c),
+            l, l_var: var(sl2, l),
+        })
+    }
+
+    /// Публичный профиль вкуса для раздела статистики.
+    pub fn taste_profile(&self) -> TasteProfile {
+        match self.listening_centroid() {
+            Some(c) => TasteProfile {
+                analyzed_tracks: c.n,
+                energy: Some(c.e),
+                danceability: Some(c.d),
+                bpm: Some(c.b),
+                spectral_centroid: Some(c.c),
+                loudness: Some(c.l),
+            },
+            None => TasteProfile {
+                analyzed_tracks: 0,
+                energy: None,
+                danceability: None,
+                bpm: None,
+                spectral_centroid: None,
+                loudness: None,
+            },
+        }
+    }
+
+    pub fn get_recommendations_by_mood(
+        &self,
+        mood: &str,
+        familiarity: &str,
+        lossless_only: bool,
+        limit: usize,
+    ) -> Vec<TrackMetadata> {
+        let mut clauses: Vec<&str> = Vec::new();
+
+        // Настроение — по аудио-фичам трека.
+        match mood {
+            "energetic" => clauses.push("af.energy >= 0.55 AND af.danceability >= 0.45"),
+            "relax" => clauses.push("af.energy < 0.4 AND (af.bpm < 100 OR af.bpm IS NULL)"),
+            "dance" => clauses.push("af.danceability >= 0.65"),
+            "melancholic" => clauses.push("af.spectral_centroid < 2000.0 AND af.energy < 0.4"),
+            "forgotten" => clauses.push("(s.listen_count IS NULL OR s.listen_count = 0)"),
+            _ => {}
+        }
+
+        if lossless_only {
+            clauses.push("t.is_lossless = 1");
+        }
+
+        let where_clause = if clauses.is_empty() {
+            "1=1".to_string()
+        } else {
+            clauses.join(" AND ")
+        };
+
+        // Знакомость теперь определяется по «характеру» прослушанного:
+        //   favorite — близкие к среднему профилю треки,
+        //   fresh    — наиболее далёкие от него,
+        //   balanced — без учёта характера (случайно).
+        let centroid = match familiarity {
+            "favorite" | "fresh" => self.listening_centroid(),
+            _ => None,
+        };
+
+        // ORDER BY: для favorite/fresh — по нормированному расстоянию до центроида
+        // (с лёгким джиттером, чтобы поток обновлялся), иначе — случайно.
+        // Литералы оборачиваем в скобки, чтобы отрицательные значения (loudness)
+        // не превращались в SQL-комментарий «--».
+        let order_by = match centroid {
+            Some(ct) => {
+                let ke = 1.0 / ct.e_var.max(1e-4);
+                let kd = 1.0 / ct.d_var.max(1e-4);
+                let kb = 1.0 / ct.b_var.max(1.0);
+                let kc = 1.0 / ct.c_var.max(1.0);
+                let kl = 1.0 / ct.l_var.max(1e-2);
+                let dist = format!(
+                    "((COALESCE(af.energy,({e}))-({e}))*(COALESCE(af.energy,({e}))-({e}))*({ke}) \
+                     + (COALESCE(af.danceability,({d}))-({d}))*(COALESCE(af.danceability,({d}))-({d}))*({kd}) \
+                     + (COALESCE(af.bpm,({b}))-({b}))*(COALESCE(af.bpm,({b}))-({b}))*({kb}) \
+                     + (COALESCE(af.spectral_centroid,({c}))-({c}))*(COALESCE(af.spectral_centroid,({c}))-({c}))*({kc}) \
+                     + (COALESCE(af.loudness,({l}))-({l}))*(COALESCE(af.loudness,({l}))-({l}))*({kl}))",
+                    e = ct.e, d = ct.d, b = ct.b, c = ct.c, l = ct.l,
+                    ke = ke, kd = kd, kb = kb, kc = kc, kl = kl,
+                );
+                let jitter = "(0.5 + (ABS(RANDOM()) % 1000) / 1000.0)";
+                let dir = if familiarity == "favorite" { "ASC" } else { "DESC" };
+                // Треки без аудио-фич уходят в конец, оставшийся объём добивается ими.
+                format!("(af.energy IS NULL) ASC, {dist} * {jitter} {dir}")
+            }
+            None => "RANDOM()".to_string(),
         };
 
         let sql = format!(
@@ -1991,9 +2161,9 @@ impl MusicLibrary {
               LEFT JOIN track_audio_features af ON af.file_path = t.file_path
               LEFT JOIN track_statistics s ON s.file_path = t.file_path
               WHERE {}
-              ORDER BY RANDOM()
+              ORDER BY {}
               LIMIT ?1",
-            where_clause
+            where_clause, order_by
         );
 
         let mut stmt = match self.conn.prepare(&sql) {
@@ -2006,6 +2176,65 @@ impl MusicLibrary {
         };
         rows.filter_map(|r| r.ok()).collect()
     }
+
+    // ── Порядок треков в альбоме ────────────────────────────────────────────────
+
+    pub fn get_album_track_order(&self, album_name: &str) -> Result<Option<Vec<String>>, String> {
+        let result: Result<String, rusqlite::Error> = self.conn.query_row(
+            "SELECT track_paths FROM album_track_order WHERE album_name = ?1",
+            params![album_name],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(json) => {
+                let paths: Vec<String> = serde_json::from_str(&json)
+                    .map_err(|e| format!("Ошибка разбора порядка треков: {}", e))?;
+                Ok(if paths.is_empty() { None } else { Some(paths) })
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Ошибка чтения порядка треков: {}", e)),
+        }
+    }
+
+    pub fn set_album_track_order(&self, album_name: &str, paths: &[String]) -> Result<(), String> {
+        let json = serde_json::to_string(paths)
+            .map_err(|e| format!("Ошибка сериализации порядка треков: {}", e))?;
+        self.conn
+            .execute(
+                "INSERT INTO album_track_order (album_name, track_paths) VALUES (?1, ?2)
+                 ON CONFLICT(album_name) DO UPDATE SET track_paths = excluded.track_paths",
+                params![album_name, json],
+            )
+            .map_err(|e| format!("Ошибка сохранения порядка треков: {}", e))?;
+        Ok(())
+    }
+}
+
+/// Взвешенный средний профиль аудио-фич прослушанных треков (+ дисперсии).
+struct ListeningCentroid {
+    n: usize,
+    e: f64,
+    e_var: f64,
+    d: f64,
+    d_var: f64,
+    b: f64,
+    b_var: f64,
+    c: f64,
+    c_var: f64,
+    l: f64,
+    l_var: f64,
+}
+
+/// Средний «характер» прослушанной музыки — публичный профиль вкуса.
+/// Показывается в статистике и используется фильтром «Любимое».
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TasteProfile {
+    pub analyzed_tracks: usize,
+    pub energy: Option<f64>,
+    pub danceability: Option<f64>,
+    pub bpm: Option<f64>,
+    pub spectral_centroid: Option<f64>,
+    pub loudness: Option<f64>,
 }
 
 #[cfg(test)]

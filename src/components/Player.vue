@@ -30,6 +30,7 @@ import CloseIcon from './Icons/CloseIcon.vue';
 import { useSettings } from '../composables/useSettings';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
+import { useAlbumTrackOrder } from '../composables/useAlbumTrackOrder';
 import { createRipple } from '../composables/useRipple';
 import { isPhoneViewport } from '../composables/usePlatform';
 import { useI18n } from '../composables/useI18n';
@@ -76,6 +77,9 @@ const {
     saveState,
     loadCoversForTracks,
     activePlaylistSource,
+    trackList,
+    sourceTrackList,
+    syncPlaybackOrder,
 } = usePlayer();
 
 useAndroidMediaSession({
@@ -99,6 +103,7 @@ const queueSourcePrefix = computed(() => {
     if (src.startsWith('artist:')) return 'Сейчас играет из подборки артиста';
     if (src.startsWith('playlist:')) return 'Сейчас играет из плейлиста';
     if (src.startsWith('search:')) return 'Сейчас играет из';
+    if (src.startsWith('mix')) return 'Сейчас играет из';
     return 'Сейчас играет из';
 });
 
@@ -106,6 +111,7 @@ const queueSourceName = computed(() => {
     const src = activePlaylistSource.value;
     if (!src) return 'Мой каталог';
     if (src.startsWith('catalog')) return 'Мой каталог';
+    if (src === 'mix') return 'Мой микс';
     if (src.startsWith('album:')) {
         const name = src.slice('album:'.length);
         return name || 'Без названия';
@@ -209,10 +215,21 @@ watch(showOverlay, (val) => {
 
 const QUEUE_DISPLAY_COUNT = 7;
 
+const isMixSource = computed(() => activePlaylistSource.value === 'mix');
+const isCatalogSource = computed(() => (activePlaylistSource.value ?? '').startsWith('catalog'));
+const isAlbumSource = computed(() => (activePlaylistSource.value ?? '').startsWith('album:'));
+const isPlaylistSource = computed(() => (activePlaylistSource.value ?? '').startsWith('playlist:'));
+const canMoveToTop = computed(() => isCatalogSource.value || isAlbumSource.value || isPlaylistSource.value);
+
 const queueUpcoming = computed(() => {
     const order = playbackOrder.value;
     const idx = currentTrackIndex.value;
     if (idx < 0 || order.length === 0) return [];
+
+    if (isMixSource.value) {
+        // «Мой микс» (Моя волна): показываем только следующий трек.
+        return order.slice(idx + 1, idx + 2);
+    }
 
     if (shuffled.value) {
         // Шаффл: хвост playbackOrder уже содержит заранее сгенерированные
@@ -353,13 +370,40 @@ function openPlayerTrackMenu(e: MouseEvent) {
 }
 
 async function moveTrackToTop(track: TrackMetadata) {
-    const { trackList } = usePlayer()
-    const idx = trackList.value.findIndex(t => t.file_path === track.file_path)
+    if (isAlbumSource.value) {
+        const albumName = (activePlaylistSource.value ?? '').slice('album:'.length)
+        const { loadOrder, applyOrder, setOrder } = useAlbumTrackOrder()
+        await loadOrder(albumName)
+        const allAlbumTracks = trackList.value.filter(t => (t.album || '').trim() === albumName)
+        const paths = applyOrder(albumName, allAlbumTracks).map(t => t.file_path)
+        const idx = paths.indexOf(track.file_path)
+        if (idx <= 0) return
+        paths.splice(idx, 1)
+        paths.unshift(track.file_path)
+        await setOrder(albumName, paths)
+        sourceTrackList.value = paths.map(p => allAlbumTracks.find(t => t.file_path === p)!).filter(Boolean)
+        syncPlaybackOrder()
+        return
+    }
+    if (isPlaylistSource.value) {
+        const playlistId = parseInt((activePlaylistSource.value ?? '').slice('playlist:'.length), 10)
+        const idx = sourceTrackList.value.findIndex(t => t.file_path === track.file_path)
+        if (idx <= 0) return
+        const [item] = sourceTrackList.value.splice(idx, 1)
+        sourceTrackList.value.unshift(item)
+        await invoke('playlist_move_track_to_top', { playlistId, filePath: track.file_path })
+        window.dispatchEvent(new CustomEvent('lfmusic:playlist-track-moved-to-top', { detail: { playlistId } }))
+        syncPlaybackOrder()
+        return
+    }
+    // Каталог
+    const idx = trackList.value.findIndex((t: TrackMetadata) => t.file_path === track.file_path)
     if (idx > 0) {
         const [item] = trackList.value.splice(idx, 1)
         trackList.value.unshift(item)
     }
     await invoke('library_move_track_to_top', { filePath: track.file_path })
+    syncPlaybackOrder()
 }
 
 // ── Queue fullscreen track interactions ───────────────────────────────
@@ -642,6 +686,7 @@ function openQfCoverMenu(e: MouseEvent) {
             anchorBottom
             centerX
             submenuRight
+            :canMoveToTop="canMoveToTop"
             @close="playerTrackMenu = null"
             @moveToTop="moveTrackToTop"
         />
@@ -776,7 +821,6 @@ function openQfCoverMenu(e: MouseEvent) {
                         <div class="fs-info desktop-only">
                             <div v-truncate class="fs-title">{{ trackTitle }}</div>
                             <div class="fs-artist"><TrackArtists :artist="currentTrack?.artist" /></div>
-                            <div v-if="currentTrack?.album" v-truncate class="fs-album">{{ currentTrack.album }}</div>
                         </div>
                         <div class="fs-progress qf-progress-hover desktop-only">
                             <div class="fs-progress-bar-wrapper">
@@ -918,7 +962,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                         <MoreIcon width="26" height="26" />
                                     </div>
                                 </div>
-                                <div class="qf-queue-header" style="margin-top:12px;margin-bottom:2px;">Далее в очереди</div>
+                                <div class="qf-queue-header" style="margin-top:12px;margin-bottom:2px;">{{ isMixSource ? 'Следующий трек' : 'Далее в очереди' }}</div>
                                 <div
                                     v-for="(track, i) in queueUpcoming"
                                     :key="i"
@@ -959,6 +1003,7 @@ function openQfCoverMenu(e: MouseEvent) {
                     :track="qfTrackMenu.track"
                     alignRight
                     centerY
+                    :canMoveToTop="canMoveToTop"
                     @close="qfTrackMenu = null"
                     @moveToTop="moveTrackToTop"
                 />
@@ -970,6 +1015,7 @@ function openQfCoverMenu(e: MouseEvent) {
                     anchorBottom
                     centerX
                     submenuRight
+                    :canMoveToTop="canMoveToTop"
                     @close="qfCoverMenu = null"
                     @moveToTop="moveTrackToTop"
                 />

@@ -29,6 +29,7 @@ const props = defineProps<{
     centerY?: boolean
     submenuRight?: boolean
     inPlaylist?: boolean
+    canMoveToTop?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -331,12 +332,12 @@ function onAbout() {
         mobileSheet="content"
         @close="emit('close')"
     >
-        <div class="trackSheetActions">
+        <div class="trackSheetActions" :class="{ singleAction: !canMoveToTop }">
             <button class="ctx-item trackSheetAction" @click="onEdit">
                 <TuneIcon width="16" height="16" />
                 <span>Редактировать</span>
             </button>
-            <button class="ctx-item trackSheetAction" @click="onMoveToTop">
+            <button v-if="canMoveToTop" class="ctx-item trackSheetAction" @click="onMoveToTop">
                 <ArrowUpIcon width="16" height="16" />
                 <span>Поднять</span>
             </button>
@@ -580,6 +581,10 @@ function onAbout() {
         grid-template-columns: 1fr 1fr;
         gap: 12px;
         padding: 0 16px 14px;
+    }
+
+    .trackSheetActions.singleAction {
+        grid-template-columns: 1fr;
     }
 
     .trackSheetAction.ctx-item {

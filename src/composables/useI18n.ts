@@ -1,4 +1,4 @@
-import { computed, watch } from 'vue'
+import { computed, watch, effectScope } from 'vue'
 import ru from '../locales/ru.json'
 import en from '../locales/en.json'
 import { useSettings, type Language } from './useSettings'
@@ -141,7 +141,18 @@ export function translateText(text: string): string {
     return finish(text)
 }
 
+// Единственный экземпляр: раньше каждый вызвавший компонент регистрировал
+// собственный watch на language (дубли установки document.documentElement.lang).
+let i18nInstance: ReturnType<typeof createI18n> | null = null
+
 export function useI18n() {
+    if (!i18nInstance) {
+        i18nInstance = effectScope(true).run(createI18n)!
+    }
+    return i18nInstance
+}
+
+function createI18n() {
     const { settings, save } = useSettings()
     const language = computed(() => settings.value.language)
 

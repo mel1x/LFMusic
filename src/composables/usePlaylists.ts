@@ -1,4 +1,4 @@
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
 
@@ -70,7 +70,18 @@ watch(
 // Composable
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Единственный экземпляр: computed-фильтры создаются один раз на приложение,
+// а не по копии на каждый вызвавший компонент.
+let playlistsInstance: ReturnType<typeof createPlaylists> | null = null;
+
 export function usePlaylists() {
+  if (!playlistsInstance) {
+    playlistsInstance = effectScope(true).run(createPlaylists)!;
+  }
+  return playlistsInstance;
+}
+
+function createPlaylists() {
   const albums = computed(() => playlists.value.filter((p) => p.kind === "Album"));
   const artists = computed(() => playlists.value.filter((p) => p.kind === "Artist"));
   const userPlaylists = computed(() => {
@@ -146,6 +157,8 @@ export function usePlaylists() {
 
   async function deletePlaylist(playlistId: number) {
     try {
+      // playlist_add_count откатывается на бэкенде (delete_playlist снимает -1
+      // с каждого трека удаляемого плейлиста — симметрично remove_track).
       await invoke("playlist_delete", { playlistId });
       playlists.value = playlists.value.filter((p) => p.id !== playlistId);
       const idx = topOrder.value.indexOf(playlistId);

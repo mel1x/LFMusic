@@ -102,7 +102,7 @@ watch(resolvedPins, () => requestPinCovers());
     <aside class="navAside" :style="{ '--mainblock-aside-bottom': asideBottom }">
       <nav class="navList">
         <RouterLink to="/search" class="navLink"><SearchIcon width="24" height="24" stroke-width="2.25" /><span>Поиск</span></RouterLink>
-        <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" /><span>Главная</span></RouterLink>
+        <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" /><span>Рекомендации</span></RouterLink>
         <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2.25" /><span>Коллекция</span></RouterLink>
         <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2.25" /><span>Каталог</span></RouterLink>
         <RouterLink to="/settings" class="navLink"><SettingsIcon width="24" height="24" stroke-width="2.25" /><span>Настройки</span></RouterLink>
@@ -433,9 +433,9 @@ watch(resolvedPins, () => requestPinCovers());
     display: none;
   }
 
-  /* Порядок на мобильной версии: Главная, Коллекция, Поиск, Каталог, Настройки */
+  /* Порядок на мобильной версии: Рекомендации, Коллекция, Поиск, Каталог, Настройки */
   .navLink:nth-child(2) {
-    order: 1; /* Главная (to="/") */
+    order: 1; /* Рекомендации (to="/") */
   }
   .navLink:nth-child(3) {
     order: 2; /* Коллекция (to="/collections") */

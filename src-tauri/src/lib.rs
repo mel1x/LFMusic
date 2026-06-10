@@ -273,7 +273,9 @@ fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> 
     Ok(player.get_status())
 }
 
-#[tauri::command]
+// Тяжёлые команды помечены (async): выполняются в пуле потоков, а не на
+// главном потоке — иначе чтение тегов/обложек блокирует событийный цикл окна.
+#[tauri::command(async)]
 fn get_track_metadata(
     library: State<LibraryState>,
     file_path: String,
@@ -283,7 +285,7 @@ fn get_track_metadata(
     Ok(metadata)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_cover_art(
     library: State<LibraryState>,
     file_path: String,
@@ -299,7 +301,7 @@ fn get_cover_art(
 /// Прочитать оригинальную обложку из файла, игнорируя пользовательские
 /// переопределения. Нужно для превью в модалке редактирования: при клике
 /// «сбросить обложку» показываем то, что лежит в тегах файла.
-#[tauri::command]
+#[tauri::command(async)]
 fn get_original_cover_art(file_path: String) -> Result<Option<String>, String> {
     Ok(AudioPlayer::extract_cover_art(&file_path))
 }
@@ -317,7 +319,7 @@ struct OriginalTrack {
     has_override_cover: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_original_track(
     library: State<LibraryState>,
     file_path: String,
@@ -455,7 +457,7 @@ async fn library_add_android_music_folders(
 }
 
 /// Удалить папку и все её треки из кэша
-#[tauri::command]
+#[tauri::command(async)]
 fn library_remove_folder(
     app: tauri::AppHandle,
     library_state: State<LibraryState>,
@@ -475,7 +477,7 @@ fn library_remove_folder(
 }
 
 /// Получить все треки из кэша (без пересканирования)
-#[tauri::command]
+#[tauri::command(async)]
 fn library_get_tracks(state: State<LibraryState>) -> Result<Vec<TrackMetadata>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_all_tracks())
@@ -517,7 +519,7 @@ fn library_move_track_to_top(file_path: String, state: State<LibraryState>) -> R
 }
 
 /// Удалить из кэша треки, файлы которых больше не существуют на диске
-#[tauri::command]
+#[tauri::command(async)]
 fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
     let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.cleanup_missing_tracks()
@@ -542,7 +544,7 @@ async fn library_rescan(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Пересобрать плейлисты исполнителей (вызывать после смены разделителей)
-#[tauri::command]
+#[tauri::command(async)]
 fn library_rebuild_artists(
     library_state: State<LibraryState>,
     settings_state: State<SettingsState>,
@@ -567,7 +569,7 @@ fn playlist_get_all(state: State<LibraryState>) -> Result<Vec<PlaylistInfo>, Str
 }
 
 /// Получить треки плейлиста
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_get_tracks(
     state: State<LibraryState>,
     playlist_id: i64,
@@ -644,6 +646,29 @@ fn playlist_get_ids_for_track(
     Ok(library.get_user_playlist_ids_for_track(&file_path))
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Порядок треков в альбоме
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn album_get_track_order(
+    state: State<LibraryState>,
+    album_name: String,
+) -> Result<Option<Vec<String>>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.get_album_track_order(&album_name)
+}
+
+#[tauri::command]
+fn album_set_track_order(
+    state: State<LibraryState>,
+    album_name: String,
+    track_paths: Vec<String>,
+) -> Result<(), String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    library.set_album_track_order(&album_name, &track_paths)
+}
+
 #[tauri::command]
 fn statistics_add_track_delta(
     state: State<LibraryState>,
@@ -662,7 +687,7 @@ fn statistics_get_track(
     library.get_track_statistics(&file_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_sum_listen_count(
     state: State<LibraryState>,
     file_paths: Vec<String>,
@@ -681,7 +706,7 @@ fn statistics_add_collection_full_listen(
     library.add_collection_full_listen(kind, &key)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_get_recently_played(
     state: State<LibraryState>,
     limit: usize,
@@ -690,7 +715,7 @@ fn statistics_get_recently_played(
     Ok(library.get_recently_played(limit))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_get_most_played(
     state: State<LibraryState>,
     limit: usize,
@@ -699,7 +724,7 @@ fn statistics_get_most_played(
     Ok(library.get_most_played(limit))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_get_top_artists(
     state: State<LibraryState>,
     limit: usize,
@@ -708,7 +733,7 @@ fn statistics_get_top_artists(
     Ok(library.get_top_artists(limit))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_get_top_albums(
     state: State<LibraryState>,
     limit: usize,
@@ -717,7 +742,7 @@ fn statistics_get_top_albums(
     Ok(library.get_top_albums(limit))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_get_summary_stats(
     state: State<LibraryState>,
 ) -> Result<library::SummaryStats, String> {
@@ -725,14 +750,29 @@ fn statistics_get_summary_stats(
     Ok(library.get_summary_stats())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_get_recommendations(
     state: State<LibraryState>,
     mood: String,
+    familiarity: Option<String>,
+    lossless_only: Option<bool>,
     limit: usize,
 ) -> Result<Vec<audio_player::TrackMetadata>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(library.get_recommendations_by_mood(&mood, limit))
+    Ok(library.get_recommendations_by_mood(
+        &mood,
+        familiarity.as_deref().unwrap_or("balanced"),
+        lossless_only.unwrap_or(false),
+        limit,
+    ))
+}
+
+#[tauri::command(async)]
+fn statistics_get_taste_profile(
+    state: State<LibraryState>,
+) -> Result<library::TasteProfile, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.taste_profile())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1157,6 +1197,8 @@ pub fn run() {
             playlist_remove_track,
             playlist_move_track_to_top,
             playlist_get_ids_for_track,
+            album_get_track_order,
+            album_set_track_order,
             statistics_add_track_delta,
             statistics_get_track,
             statistics_sum_listen_count,
@@ -1167,6 +1209,7 @@ pub fn run() {
             statistics_get_top_albums,
             statistics_get_summary_stats,
             statistics_get_recommendations,
+            statistics_get_taste_profile,
             // Эквалайзер
             eq_set_bands,
             eq_get_bands,

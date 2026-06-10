@@ -21,6 +21,7 @@ import TrackArtists from '../components/TrackArtists.vue';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useAlbumTrackOrder } from '../composables/useAlbumTrackOrder';
 
 const route = useRoute()
 const router = useRouter()
@@ -37,6 +38,8 @@ const {
     loadCoversForTracks,
     clearCoverQueue,
     getTrackByPath,
+    sourceTrackList,
+    syncPlaybackOrder,
 } = usePlayer();
 
 const { albums: albumPlaylists, loadPlaylists } = usePlaylists();
@@ -46,9 +49,14 @@ const albumName = computed(() => {
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
+const { loadOrder: loadAlbumOrder, applyOrder: applyAlbumOrder, setOrder: setAlbumOrder } = useAlbumTrackOrder()
+
+// Загружаем порядок из БД при открытии альбома (и при смене маршрута).
+watch(albumName, (name) => { if (name) loadAlbumOrder(name) }, { immediate: true })
+
 const albumTracks = computed<TrackMetadata[]>(() => {
     const tracks = trackList.value.filter(t => (t.album || '').trim() === albumName.value);
-    return tracks.sort((a, b) => a.file_path.localeCompare(b.file_path, undefined, { numeric: true, sensitivity: 'base' }));
+    return applyAlbumOrder(albumName.value, tracks);
 })
 
 const albumArtist = computed(() =>
@@ -226,7 +234,7 @@ function onTrackClick(e: MouseEvent, track: TrackMetadata) {
 }
 
 function onCoverClick(track: TrackMetadata) {
-    if (currentTrack.value?.file_path === track.file_path) {
+    if (isAlbumActive.value && currentTrack.value?.file_path === track.file_path) {
         togglePlayPause()
         return
     }
@@ -247,6 +255,21 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     const btn = (e.currentTarget as HTMLElement)
     const rect = btn.getBoundingClientRect()
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
+}
+
+// ── Поднять трек в альбоме ────────────────────────────────────────────────────
+
+async function moveTrackToTopOfAlbum(track: TrackMetadata) {
+    const paths = albumTracks.value.map(t => t.file_path)
+    const idx = paths.indexOf(track.file_path)
+    if (idx <= 0) return
+    paths.splice(idx, 1)
+    paths.unshift(track.file_path)
+    await setAlbumOrder(albumName.value, paths)
+    if (isAlbumActive.value) {
+        sourceTrackList.value = albumTracks.value.slice()
+        syncPlaybackOrder()
+    }
 }
 
 // ── Back ────────────────────────────────────────────────────────────────────
@@ -334,14 +357,14 @@ function onCoverImgClick() {
                 :key="track.file_path"
                 class="trackElem"
                 :class="{
-                    active: currentTrack?.file_path === track.file_path,
-                    activePaused: currentTrack?.file_path === track.file_path && !isPlaying,
+                    active: isAlbumActive && currentTrack?.file_path === track.file_path,
+                    activePaused: isAlbumActive && currentTrack?.file_path === track.file_path && !isPlaying,
                 }"
                 @click="onTrackClick($event, track)"
             >
                 <div class="hoverIcon" @click.stop="onCoverClick(track)">
                     <PauseIcon
-                        v-if="currentTrack?.file_path === track.file_path && isPlaying"
+                        v-if="isAlbumActive && currentTrack?.file_path === track.file_path && isPlaying"
                         width="10" height="10"
                         style="margin-left:0.5px;"
                     />
@@ -352,7 +375,7 @@ function onCoverImgClick() {
                     />
                 </div>
                 <div
-                    v-if="currentTrack?.file_path === track.file_path"
+                    v-if="isAlbumActive && currentTrack?.file_path === track.file_path"
                     class="playingAnim"
                 ></div>
                 <div class="trackCover" @click.stop="onCoverClick(track)">
@@ -388,9 +411,11 @@ function onCoverImgClick() {
             :x="trackMenu.x"
             :y="trackMenu.y"
             :track="trackMenu.track"
+            :canMoveToTop="true"
             alignRight
             centerY
             @close="trackMenu = null"
+            @moveToTop="moveTrackToTopOfAlbum"
         />
     </div>
 </template>

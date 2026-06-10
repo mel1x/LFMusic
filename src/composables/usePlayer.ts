@@ -1,8 +1,9 @@
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
+import { saveMixQueuePaths, loadMixQueuePaths } from "./useMix";
 import { usePlaylists } from "./usePlaylists";
 import { useCoverLoader } from "./useCoverLoader";
 import { emitTrackStatisticsUpdated } from "./useStatistics";
@@ -242,7 +243,20 @@ let collectionStatsSession: CollectionStatsSession | null = null;
 // Composable
 // ──────────────────────────────────────────────────────────────────────────────
 
+// usePlayer() вызывается из ~20 компонентов. Все refs — модульные синглтоны,
+// но computed/функции раньше пересоздавались на каждый вызов (по копии Map
+// на компонент). Создаём единственный экземпляр в отдельном effectScope,
+// чтобы он не уничтожался при размонтировании первого вызвавшего компонента.
+let playerInstance: ReturnType<typeof createPlayer> | null = null;
+
 export function usePlayer() {
+  if (!playerInstance) {
+    playerInstance = effectScope(true).run(createPlayer)!;
+  }
+  return playerInstance;
+}
+
+function createPlayer() {
   const { settings, load: loadSettings } = useSettings();
   const {
     folders, isScanning, removingFolder, scanProgress,
@@ -545,6 +559,11 @@ export function usePlayer() {
   function setPlaylistSource(sourceId: string, tracks: TrackMetadata[]) {
     activePlaylistSource.value = sourceId;
     sourceTrackList.value = tracks;
+    // Очередь «Моего микса» существует только во фронтенде — сохраняем её,
+    // чтобы восстановить после перезапуска приложения.
+    if (sourceId === "mix") {
+      saveMixQueuePaths(tracks.map(t => t.file_path));
+    }
     syncPlaybackOrder();
   }
 
@@ -1063,6 +1082,14 @@ export function usePlayer() {
           if (a === name) return true;
           return splitArtistsList(a, seps).includes(name);
         });
+        if (sourceTrackList.value.length === 0) {
+          activePlaylistSource.value = null;
+        }
+      } else if (src === "mix") {
+        // Просчитанная очередь микса хранится во фронтенде (localStorage).
+        sourceTrackList.value = loadMixQueuePaths()
+          .map(p => getTrackByPath(p))
+          .filter((t): t is TrackMetadata => !!t);
         if (sourceTrackList.value.length === 0) {
           activePlaylistSource.value = null;
         }

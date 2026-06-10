@@ -88,6 +88,34 @@ export function getSummaryStats(): Promise<SummaryStats> {
   return invoke<SummaryStats>('statistics_get_summary_stats')
 }
 
-export function getRecommendations(mood: string, limit: number): Promise<TrackMetadata[]> {
-  return invoke<TrackMetadata[]>('statistics_get_recommendations', { mood, limit })
+export interface RecommendationOptions {
+  /** 'fresh' — реже среднего/незнакомое, 'favorite' — чаще среднего/любимое, 'balanced' — без фильтра */
+  familiarity?: 'fresh' | 'balanced' | 'favorite'
+  losslessOnly?: boolean
+}
+
+export function getRecommendations(
+  mood: string,
+  limit: number,
+  opts: RecommendationOptions = {},
+): Promise<TrackMetadata[]> {
+  return invoke<TrackMetadata[]>('statistics_get_recommendations', {
+    mood,
+    limit,
+    familiarity: opts.familiarity,
+    losslessOnly: opts.losslessOnly,
+  })
+}
+
+export interface TasteProfile {
+  analyzed_tracks: number
+  energy: number | null
+  danceability: number | null
+  bpm: number | null
+  spectral_centroid: number | null
+  loudness: number | null
+}
+
+export function getTasteProfile(): Promise<TasteProfile> {
+  return invoke<TasteProfile>('statistics_get_taste_profile')
 }

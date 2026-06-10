@@ -11,6 +11,7 @@ import EditIcon from '../components/Icons/EditIcon.vue';
 import defaultTrackCover from '../assets/trackCover.webp';
 import defaultPlaylistCover from '../assets/playlistCover.webp';
 
+import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
@@ -42,9 +43,11 @@ const {
     formatTime,
     loadCoversForTracks,
     clearCoverQueue,
+    sourceTrackList,
+    syncPlaybackOrder,
 } = usePlayer();
 
-const { playlists, loadPlaylists, getPlaylistTracks, movePlaylistTrackToTop, removeTrackFromPlaylist, deletePlaylist, renamePlaylist } = usePlaylists();
+const { playlists, loadPlaylists, getPlaylistTracks, removeTrackFromPlaylist, deletePlaylist, renamePlaylist } = usePlaylists();
 
 const playlistId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -149,8 +152,18 @@ onMounted(async () => {
     await reloadPlaylistTracks()
 })
 
+function onPlaylistTrackMovedToTop(e: Event) {
+    const { playlistId: evtId } = (e as CustomEvent).detail as { playlistId: number }
+    if (evtId === playlistId.value) reloadPlaylistTracks()
+}
+
+onMounted(() => {
+    window.addEventListener('lfmusic:playlist-track-moved-to-top', onPlaylistTrackMovedToTop)
+})
+
 onUnmounted(() => {
     headerResizeObserver?.disconnect()
+    window.removeEventListener('lfmusic:playlist-track-moved-to-top', onPlaylistTrackMovedToTop)
 })
 
 watch(playlistId, async () => {
@@ -231,7 +244,7 @@ function onTrackClick(e: MouseEvent, track: TrackMetadata) {
 }
 
 function onCoverClick(track: TrackMetadata) {
-    if (currentTrack.value?.file_path === track.file_path) {
+    if (isPlaylistActive.value && currentTrack.value?.file_path === track.file_path) {
         togglePlayPause()
         return
     }
@@ -254,19 +267,26 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
 
-async function moveTrackToTop(track: TrackMetadata) {
-    const idx = playlistTrackPaths.value.indexOf(track.file_path)
-    if (idx > 0) {
-        const [item] = playlistTrackPaths.value.splice(idx, 1)
-        playlistTrackPaths.value.unshift(item)
-    }
-    await movePlaylistTrackToTop(playlistId.value, track.file_path)
-}
-
 async function onRemoveFromPlaylist(track: TrackMetadata) {
     const idx = playlistTrackPaths.value.indexOf(track.file_path)
     if (idx !== -1) playlistTrackPaths.value.splice(idx, 1)
     await removeTrackFromPlaylist(playlistId.value, track.file_path)
+}
+
+// «Поднять» доступно только когда этот плейлист является активным источником.
+const canMoveToTop = computed(() => isPlaylistActive.value)
+
+async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
+    const idx = playlistTrackPaths.value.indexOf(track.file_path)
+    if (idx <= 0) return
+    playlistTrackPaths.value.splice(idx, 1)
+    playlistTrackPaths.value.unshift(track.file_path)
+    await invoke('playlist_move_track_to_top', { playlistId: playlistId.value, filePath: track.file_path })
+    if (isPlaylistActive.value) {
+        sourceTrackList.value = playlistTracks.value.slice()
+        syncPlaybackOrder()
+    }
+    window.dispatchEvent(new CustomEvent('lfmusic:playlist-track-moved-to-top', { detail: { playlistId: playlistId.value } }))
 }
 
 // ── Back ────────────────────────────────────────────────────────────────────
@@ -448,14 +468,14 @@ function onCoverImgClick() {
                 :key="track.file_path"
                 class="trackElem"
                 :class="{
-                    active: currentTrack?.file_path === track.file_path,
-                    activePaused: currentTrack?.file_path === track.file_path && !isPlaying,
+                    active: isPlaylistActive && currentTrack?.file_path === track.file_path,
+                    activePaused: isPlaylistActive && currentTrack?.file_path === track.file_path && !isPlaying,
                 }"
                 @click="onTrackClick($event, track)"
             >
                 <div class="hoverIcon" @click.stop="onCoverClick(track)">
                     <PauseIcon
-                        v-if="currentTrack?.file_path === track.file_path && isPlaying"
+                        v-if="isPlaylistActive && currentTrack?.file_path === track.file_path && isPlaying"
                         width="10" height="10"
                         style="margin-left:0.5px;"
                     />
@@ -466,7 +486,7 @@ function onCoverImgClick() {
                     />
                 </div>
                 <div
-                    v-if="currentTrack?.file_path === track.file_path"
+                    v-if="isPlaylistActive && currentTrack?.file_path === track.file_path"
                     class="playingAnim"
                 ></div>
                 <div class="trackCover" @click.stop="onCoverClick(track)">
@@ -503,12 +523,13 @@ function onCoverImgClick() {
             :x="trackMenu.x"
             :y="trackMenu.y"
             :track="trackMenu.track"
+            :canMoveToTop="canMoveToTop"
             alignRight
             centerY
             inPlaylist
             @close="trackMenu = null"
-            @moveToTop="moveTrackToTop"
             @removeFromPlaylist="onRemoveFromPlaylist"
+            @moveToTop="moveTrackToTopOfPlaylist"
         />
         <PlaylistContextMenu
             v-if="playlistMenu"

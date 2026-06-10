@@ -1,4 +1,4 @@
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { usePlayer } from "./usePlayer";
 import { usePlaylists } from "./usePlaylists";
@@ -85,7 +85,17 @@ watch(
   { deep: true },
 );
 
+// Единственный экземпляр: resolvedPins и замыкания создаются один раз.
+let pinsInstance: ReturnType<typeof createPins> | null = null;
+
 export function usePins() {
+  if (!pinsInstance) {
+    pinsInstance = effectScope(true).run(createPins)!;
+  }
+  return pinsInstance;
+}
+
+function createPins() {
   const { trackList, getTrackByPath } = usePlayer();
   const { playlists, albums, artists } = usePlaylists();
   const { getCustomCover } = useCustomCovers();

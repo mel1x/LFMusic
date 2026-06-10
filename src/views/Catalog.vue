@@ -466,6 +466,7 @@ function onCoverImgClick() {
             :track="trackMenu.track"
             alignRight
             centerY
+            canMoveToTop
             @close="trackMenu = null"
             @moveToTop="moveTrackToTop"
         />
