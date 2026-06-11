@@ -1714,14 +1714,37 @@ function openQfCoverMenu(e: MouseEvent) {
     border-radius: 50%;
     background: #fff !important;
 }
-/* WebKitGTK (Linux) / WKWebView ломают КАСТОМНЫЙ вертикальный range: через
-   writing-mode ползунок «улетает» и мышью не тянется, а `transform` для поворота
-   на ряде драйверов (AMD/Wayland) включает ускоренную композицию и переворачивает
-   всю страницу. Кастомная заливка трека требует appearance:none, что несовместимо
-   с вертикалью без этих хаков. Поэтому используем НАТИВНЫЙ вертикальный слайдер
-   WebKit (appearance: slider-vertical) с белым accent-color: без трансформов,
-   ползунок ходит вертикально и нормально тянется. Если движок slider-vertical не
-   поддерживает — остаётся безопасный горизонтальный вариант (writing-mode не трогаем). */
+/* Linux/WebKitGTK: нативный вертикальный range там сломан (track вертикальный,
+   а взаимодействие и ползунок — горизонтальные). Делать его вертикальным нельзя:
+   transform и writing-mode:vertical роняют весь рендер, а border-radius:999px на
+   поп-апе даёт круговой композитный слой и тоже ломает страницу. Поэтому весь
+   поп-ап громкости на этом движке — ГОРИЗОНТАЛЬНЫЙ, с умеренным радиусом. */
+:global(.lfmusic-webkit) .volumeSliderPopup {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 14px;
+    bottom: calc(100% + 6px);
+}
+:global(.lfmusic-webkit) .volume-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    writing-mode: horizontal-tb;
+    direction: ltr;
+    width: 110px;
+    height: 6px;
+    flex: none;
+    border-radius: 3px;
+    background: linear-gradient(to right, #fff var(--val, 50%), #ffffff25 var(--val, 50%));
+}
+:global(.lfmusic-webkit) .volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: #fff !important;
+}
 .botPart:has(.volumeControl:hover) {
     z-index: 100001;
 }
