@@ -1153,6 +1153,14 @@ fn mpris_update_playback(state: String, position_secs: f64) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // На десктопном Linux (WebKitGTK) при ряде GPU-драйверов вебвью рендерится
+    // перевёрнутым/смещённым из-за DMABUF-рендерера. Отключаем его до инициализации
+    // GTK/WebKit (т.е. до сборки приложения) — иначе никаким CSS это не лечится.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     #[cfg(target_os = "windows")]
     set_windows_priority_class();
 
