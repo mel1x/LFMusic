@@ -1714,28 +1714,30 @@ function openQfCoverMenu(e: MouseEvent) {
     border-radius: 50%;
     background: #fff !important;
 }
-/* WebKitGTK (Linux) / WKWebView некорректно обрабатывают вертикальный range
-   через writing-mode + direction: rtl — ползунок «улетает» и мышью не тянется.
-   Поэтому там делаем горизонтальный слайдер и поворачиваем его на -90°.
-   Поп-ап получает фиксированный размер, чтобы повёрнутый бокс (140×32 → 32×140)
-   не распирал контейнер. */
+/* WebKitGTK (Linux) / WKWebView ломают вертикальный range через writing-mode:
+   ползунок «улетает» и мышью не тянется. При этом `transform` для поворота на
+   ряде драйверов (AMD/Wayland) включает ускоренную композицию и переворачивает
+   всю страницу. Поэтому на этом движке делаем ОБЫЧНЫЙ горизонтальный слайдер —
+   нативный горизонтальный range там работает корректно (как qf-volume-slider). */
 :global(.lfmusic-webkit) .volumeSliderPopup {
-    width: 36px;
-    height: 172px;
+    flex-direction: row;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
+    padding: 8px 14px;
+    bottom: calc(100% + 6px);
 }
 :global(.lfmusic-webkit) .volume-slider {
     writing-mode: horizontal-tb;
     direction: ltr;
-    width: 140px;
-    height: 32px;
+    width: 110px;
+    height: 6px;
     flex: none;
-    transform: rotate(-90deg);
-    background:
-        linear-gradient(to right, #fff var(--val, 50%), #ffffff20 var(--val, 50%)) center / 100% 4px no-repeat,
-        var(--dark-bg);
+    border-radius: 3px;
+    background: linear-gradient(to right, #fff var(--val, 50%), #ffffff20 var(--val, 50%));
+}
+:global(.lfmusic-webkit) .volume-slider::-webkit-slider-thumb {
+    width: 12px;
+    height: 12px;
 }
 .botPart:has(.volumeControl:hover) {
     z-index: 100001;
