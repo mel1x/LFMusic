@@ -90,6 +90,7 @@ function resetUiScale() {
   body.style.height = '100dvh';
   document.documentElement.style.setProperty('--ui-scale', '1');
   document.documentElement.style.setProperty('--overlay-scale', '1');
+  document.documentElement.style.setProperty('--overlay-scale', '1');
   (window as any).__uiScale = 1;
 }
 
@@ -139,6 +140,7 @@ function applyUiScale() {
   body.style.height = (h / scale) + 'px';
   document.documentElement.style.setProperty('--ui-scale', String(scale));
   (window as any).__uiScale = scale;
+  measureOverlayScale(scale);
   measureOverlayScale(scale);
 }
 
@@ -1042,6 +1044,8 @@ body {
   left: 0;
   width: calc(100vw / var(--overlay-scale, 1));
   height: calc(100vh / var(--overlay-scale, 1));
+  width: calc(100vw / var(--overlay-scale, 1));
+  height: calc(100vh / var(--overlay-scale, 1));
   z-index: 1000001;
   display: flex;
   align-items: center;
@@ -1578,6 +1582,8 @@ body {
   position: fixed;
   top: 0;
   left: 0;
+  width: calc(100vw / var(--overlay-scale, 1));
+  height: calc(100dvh / var(--overlay-scale, 1));
   width: calc(100vw / var(--overlay-scale, 1));
   height: calc(100dvh / var(--overlay-scale, 1));
   background-color: rgba(0, 0, 0, 0.7);
