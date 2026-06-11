@@ -3,6 +3,22 @@ export function isAndroidRuntime(): boolean {
     return /android/i.test(navigator.userAgent)
 }
 
+// WebKit без Chromium — это WebKitGTK (десктоп Linux) и WKWebView (macOS).
+// У этого движка иначе ведут себя вертикальные range-инпуты (writing-mode)
+// и CSS `zoom` относительно vw-единиц, поэтому такие места правим адресно.
+export function isWebKitRuntime(): boolean {
+    if (typeof navigator === 'undefined') return false
+    const ua = navigator.userAgent
+    return /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg\//.test(ua)
+}
+
+// Десктопный Linux (WebKitGTK), исключая Android.
+export function isLinuxDesktop(): boolean {
+    if (typeof navigator === 'undefined') return false
+    const ua = navigator.userAgent
+    return /Linux/.test(ua) && !/android/i.test(ua)
+}
+
 export function isPhoneViewport(): boolean {
     if (typeof window === 'undefined') return false
     return window.matchMedia(
@@ -16,10 +32,12 @@ export function updateRuntimeClasses() {
     const phone = isPhoneViewport()
     const android = isAndroidRuntime()
     const mobile = phone || android
+    const webkit = isWebKitRuntime()
 
     for (const root of [document.documentElement, document.body]) {
         root.classList.toggle('lfmusic-phone', phone)
         root.classList.toggle('lfmusic-android', android)
         root.classList.toggle('lfmusic-mobile', mobile)
+        root.classList.toggle('lfmusic-webkit', webkit)
     }
 }

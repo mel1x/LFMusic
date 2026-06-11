@@ -2,6 +2,7 @@ mod audio_features;
 mod audio_player;
 mod covers;
 mod library;
+mod mpris;
 mod pins;
 mod player_state;
 mod settings;
@@ -1132,6 +1133,24 @@ fn taskbar_set_covers(
     taskbar::set_covers(&app, prev, current, next, transition);
 }
 
+// ── Системное медиа-управление (MPRIS, Linux) ────────────────────────────────
+
+#[tauri::command]
+fn mpris_update_metadata(
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    cover: Option<String>,
+    duration_secs: f64,
+) {
+    mpris::update_metadata(title, artist, album, cover, duration_secs);
+}
+
+#[tauri::command]
+fn mpris_update_playback(state: String, position_secs: f64) {
+    mpris::update_playback(&state, position_secs);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -1154,6 +1173,17 @@ pub fn run() {
                 if let Ok(hwnd) = window.hwnd() {
                     taskbar::init(&app.handle().clone(), hwnd.0 as isize);
                 }
+            }
+
+            // Системное медиа-управление Linux (MPRIS): отображение трека и кнопки.
+            #[cfg(target_os = "linux")]
+            {
+                let cover_dir = app
+                    .path()
+                    .app_cache_dir()
+                    .unwrap_or_else(|_| app_data_dir.clone());
+                let _ = std::fs::create_dir_all(&cover_dir);
+                mpris::init(&app.handle().clone(), cover_dir);
             }
 
             let app_settings = settings::load(&app_data_dir);
@@ -1298,6 +1328,9 @@ pub fn run() {
             taskbar_set_playing,
             taskbar_set_modes,
             taskbar_set_covers,
+            // Системное медиа-управление (MPRIS, Linux)
+            mpris_update_metadata,
+            mpris_update_playback,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
