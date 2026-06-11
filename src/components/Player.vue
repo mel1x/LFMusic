@@ -32,13 +32,17 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePlaylists } from '../composables/usePlaylists';
 import { useAlbumTrackOrder } from '../composables/useAlbumTrackOrder';
 import { createRipple } from '../composables/useRipple';
-import { isPhoneViewport } from '../composables/usePlatform';
+import { isPhoneViewport, isWebKitRuntime } from '../composables/usePlatform';
 import { useI18n } from '../composables/useI18n';
 import { useAndroidMediaSession } from '../composables/useAndroidMediaSession';
 import { useLinuxMediaSession } from '../composables/useLinuxMediaSession';
 import { isCoverResolved } from '../composables/useCoverLoader';
 
 const win = getCurrentWindow();
+
+// На WebKitGTK (Linux) вертикальный поп-ап громкости неисправим, поэтому там
+// рендерим отдельный горизонтальный поп-ап (см. шаблон / .volumeSliderPopupLinux).
+const isWebKit = isWebKitRuntime();
 
 const { settings } = useSettings();
 const { t } = useI18n();
@@ -712,7 +716,7 @@ function openQfCoverMenu(e: MouseEvent) {
                         class="volumeControl"
                         @wheel.prevent="onVolumeScroll"
                     >
-                        <div class="volumeSliderPopup">
+                        <div class="volumeSliderPopup" v-if="!isWebKit">
                             <input
                                 type="range"
                                 class="volume-slider"
@@ -723,6 +727,18 @@ function openQfCoverMenu(e: MouseEvent) {
                                 :style="{ '--val': volumePercent + '%' }"
                                 @input.stop="onVolumeInput"
                                 orient="vertical"
+                            />
+                        </div>
+                        <div class="volumeSliderPopupLinux" v-else>
+                            <input
+                                type="range"
+                                class="volume-slider-linux"
+                                min="0"
+                                max="1"
+                                step="0.01"
+                                :value="volume"
+                                :style="{ '--val': volumePercent + '%' }"
+                                @input.stop="onVolumeInput"
                             />
                         </div>
                         <div class="volumeIconWrap" @click="toggleMute">
@@ -1714,36 +1730,52 @@ function openQfCoverMenu(e: MouseEvent) {
     border-radius: 50%;
     background: #fff !important;
 }
-/* Linux/WebKitGTK: нативный вертикальный range там сломан (track вертикальный,
-   а взаимодействие и ползунок — горизонтальные). Делать его вертикальным нельзя:
-   transform и writing-mode:vertical роняют весь рендер, а border-radius:999px на
-   поп-апе даёт круговой композитный слой и тоже ломает страницу. Поэтому весь
-   поп-ап громкости на этом движке — ГОРИЗОНТАЛЬНЫЙ, с умеренным радиусом. */
-:global(.lfmusic-webkit) .volumeSliderPopup {
-    flex-direction: row;
+/* Отдельный ГОРИЗОНТАЛЬНЫЙ поп-ап громкости только для Linux/WebKitGTK
+   (рендерится по v-if="isWebKit"). Свои классы, без наследования вертикальной
+   базы .volume-slider — копия рабочего qf-volume-slider. Без transform. */
+.volumeSliderPopupLinux {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    width: 148px;
+    margin-left: -74px;
+
+    display: flex;
     align-items: center;
     justify-content: center;
-    padding: 10px 14px;
-    bottom: calc(100% + 6px);
+    background: var(--dark-bg);
+    border: 1px solid #ffffff20;
+    border-radius: 16px;
+    padding: 10px 0;
+
+    z-index: 11;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
 }
-:global(.lfmusic-webkit) .volume-slider {
+.volumeControl:hover .volumeSliderPopupLinux {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+}
+.volume-slider-linux {
     -webkit-appearance: none;
     appearance: none;
-    writing-mode: horizontal-tb;
-    direction: ltr;
-    width: 110px;
+    width: 120px;
     height: 6px;
-    flex: none;
     border-radius: 3px;
+    cursor: pointer;
     background: linear-gradient(to right, #fff var(--val, 50%), #ffffff25 var(--val, 50%));
 }
-:global(.lfmusic-webkit) .volume-slider::-webkit-slider-thumb {
+.volume-slider-linux::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
     width: 13px;
     height: 13px;
     border-radius: 50%;
-    background: #fff !important;
+    background: #fff;
 }
 .botPart:has(.volumeControl:hover) {
     z-index: 100001;
