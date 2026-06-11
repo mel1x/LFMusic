@@ -1714,30 +1714,30 @@ function openQfCoverMenu(e: MouseEvent) {
     border-radius: 50%;
     background: #fff !important;
 }
-/* WebKitGTK (Linux) / WKWebView ломают вертикальный range через writing-mode:
-   ползунок «улетает» и мышью не тянется. При этом `transform` для поворота на
-   ряде драйверов (AMD/Wayland) включает ускоренную композицию и переворачивает
-   всю страницу. Поэтому на этом движке делаем ОБЫЧНЫЙ горизонтальный слайдер —
-   нативный горизонтальный range там работает корректно (как qf-volume-slider). */
-:global(.lfmusic-webkit) .volumeSliderPopup {
-    flex-direction: row;
-    align-items: center;
-    justify-content: center;
-    padding: 8px 14px;
-    bottom: calc(100% + 6px);
-}
+/* WebKitGTK (Linux) / WKWebView ломают КАСТОМНЫЙ вертикальный range: через
+   writing-mode ползунок «улетает» и мышью не тянется, а `transform` для поворота
+   на ряде драйверов (AMD/Wayland) включает ускоренную композицию и переворачивает
+   всю страницу. Кастомная заливка трека требует appearance:none, что несовместимо
+   с вертикалью без этих хаков. Поэтому используем НАТИВНЫЙ вертикальный слайдер
+   WebKit (appearance: slider-vertical) с белым accent-color: без трансформов,
+   ползунок ходит вертикально и нормально тянется. Если движок slider-vertical не
+   поддерживает — остаётся безопасный горизонтальный вариант (writing-mode не трогаем). */
 :global(.lfmusic-webkit) .volume-slider {
+    -webkit-appearance: slider-vertical;
+    appearance: slider-vertical;
     writing-mode: horizontal-tb;
     direction: ltr;
-    width: 110px;
-    height: 6px;
-    flex: none;
-    border-radius: 3px;
-    background: linear-gradient(to right, #fff var(--val, 50%), #ffffff20 var(--val, 50%));
+    width: 26px;
+    height: 140px;
+    accent-color: #fff;
+    background: transparent;
 }
 :global(.lfmusic-webkit) .volume-slider::-webkit-slider-thumb {
-    width: 12px;
-    height: 12px;
+    -webkit-appearance: auto;
+    appearance: auto;
+    width: auto;
+    height: auto;
+    background: none !important;
 }
 .botPart:has(.volumeControl:hover) {
     z-index: 100001;

@@ -20,7 +20,7 @@ import { useFolders } from './composables/useFolders';
 import { useCustomCovers } from './composables/useCustomCovers';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
-import { isAndroidRuntime, isPhoneViewport, isWebKitRuntime, updateRuntimeClasses } from './composables/usePlatform';
+import { isAndroidRuntime, isPhoneViewport, updateRuntimeClasses } from './composables/usePlatform';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
@@ -121,11 +121,7 @@ function applyUiScale() {
   resizeRaf = null;
   updateRuntimeClasses();
 
-  // WebKitGTK (десктоп Linux) не поддерживает CSS `zoom` так же, как WebView2:
-  // body масштабируется некорректно — интерфейс «сжимается» в левый верхний угол.
-  // Поэтому на этом движке не зумим вовсе, а рендерим 1:1 во весь вьюпорт
-  // (auto-масштабирование UI под размер окна на Linux отключается осознанно).
-  if (isPhoneViewport() || isWebKitRuntime()) {
+  if (isPhoneViewport()) {
     resetUiScale();
     return;
   }
