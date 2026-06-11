@@ -15,7 +15,9 @@ import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
+import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useCoverGate } from '../composables/useCoverGate';
 
 const router = useRouter();
 const {
@@ -112,6 +114,14 @@ const filteredArtists = computed(() => {
     if (!q) return sortedArtists.value;
     return searchRanked(sortedArtists.value, q, (a) => [a.name]);
 });
+
+// Hold back first paint until the first 30 covers have resolved.
+const { ready: coversReady } = useCoverGate(() =>
+    filteredArtists.value
+        .slice(0, 30)
+        .map(a => (a.firstPath ? getTrackByPath(a.firstPath) : undefined))
+        .filter((t): t is TrackMetadata => !!t),
+);
 
 // ── Pinned ─────────────────────────────────────────────────────────────────
 
@@ -347,7 +357,11 @@ function scrollToTop() {
                 </svg>
             </div>
         </div>
-        <div class="grid" v-if="filteredArtists.length > 0" ref="gridEl">
+        <div class="gridGate" v-if="filteredArtists.length > 0">
+            <Transition name="gate-fade">
+                <LoadingSpinner v-if="!coversReady" class="gateOverlay" />
+            </Transition>
+            <div class="grid" :class="{ gateHidden: !coversReady }" ref="gridEl">
             <div
                 v-for="artist in filteredArtists"
                 :ref="(el: any) => bindCard(el, artist)"
@@ -392,6 +406,7 @@ function scrollToTop() {
                     </button>
                 </div>
                 <div v-truncate class="artistTitle">{{ artist.name }}</div>
+            </div>
             </div>
         </div>
         <div class="emptyState" v-else-if="debouncedSearch">
@@ -579,12 +594,30 @@ function scrollToTop() {
     font-weight: 600;
 }
 
+.gridGate {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+.gateOverlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1;
+}
 .grid {
     --card-w: 170px;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr));
     gap: 24px 16px;
     padding-bottom: 24px;
+    transition: opacity 0.24s ease;
+}
+.grid.gateHidden {
+    opacity: 0;
+    pointer-events: none;
 }
 
 .artistItem {

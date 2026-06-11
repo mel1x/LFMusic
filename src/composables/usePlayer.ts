@@ -7,7 +7,7 @@ import { saveMixQueuePaths, loadMixQueuePaths } from "./useMix";
 import { usePlaylists } from "./usePlaylists";
 import { useCoverLoader } from "./useCoverLoader";
 import { emitTrackStatisticsUpdated } from "./useStatistics";
-import { splitArtistsList } from "../utils/format";
+import { artistTagMatches } from "../utils/format";
 import router from "../router";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1076,12 +1076,7 @@ function createPlayer() {
       } else if (src && src.startsWith("artist:")) {
         const name = src.slice("artist:".length);
         const seps = settings.value.artist_separators;
-        sourceTrackList.value = trackList.value.filter(t => {
-          const a = (t.artist || '').trim();
-          if (!a) return false;
-          if (a === name) return true;
-          return splitArtistsList(a, seps).includes(name);
-        });
+        sourceTrackList.value = trackList.value.filter(t => artistTagMatches(t.artist, name, seps));
         if (sourceTrackList.value.length === 0) {
           activePlaylistSource.value = null;
         }

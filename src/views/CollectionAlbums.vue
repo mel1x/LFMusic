@@ -15,7 +15,9 @@ import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
+import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useCoverGate } from '../composables/useCoverGate';
 
 const router = useRouter();
 const route = useRoute();
@@ -152,6 +154,14 @@ const filteredAlbums = computed(() => {
         (a) => [a.name, artistFor(a.firstPath)],
     );
 });
+
+// Hold back first paint until the first 30 covers have resolved.
+const { ready: coversReady } = useCoverGate(() =>
+    filteredAlbums.value
+        .slice(0, 30)
+        .map(a => (a.firstPath ? getTrackByPath(a.firstPath) : undefined))
+        .filter((t): t is TrackMetadata => !!t),
+);
 
 // ── Lazy cover loading ─────────────────────────────────────────────────────
 // All cards are rendered up-front so the document height (and scrollbar) is
@@ -377,7 +387,11 @@ function scrollToTop() {
                 </svg>
             </div>
         </div>
-        <div class="grid" v-if="filteredAlbums.length > 0" ref="gridEl">
+        <div class="gridGate" v-if="filteredAlbums.length > 0">
+            <Transition name="gate-fade">
+                <LoadingSpinner v-if="!coversReady" class="gateOverlay" />
+            </Transition>
+            <div class="grid" :class="{ gateHidden: !coversReady }" ref="gridEl">
             <div
                 v-for="album in filteredAlbums"
                 :ref="(el: any) => bindCard(el, album)"
@@ -423,6 +437,7 @@ function scrollToTop() {
                 </div>
                 <div v-truncate class="title">{{ album.name }}</div>
                 <div v-truncate class="subtitle">{{ artistFor(album.firstPath) }}</div>
+            </div>
             </div>
         </div>
         <div class="emptyState" v-else-if="debouncedSearch">
@@ -610,12 +625,30 @@ function scrollToTop() {
     font-weight: 600;
 }
 
+.gridGate {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+.gateOverlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1;
+}
 .grid {
     --card-w: 200px;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr));
     gap: 24px 16px;
     padding-bottom: 24px;
+    transition: opacity 0.24s ease;
+}
+.grid.gateHidden {
+    opacity: 0;
+    pointer-events: none;
 }
 
 .playlistItem {

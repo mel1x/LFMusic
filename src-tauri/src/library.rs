@@ -412,6 +412,17 @@ impl MusicLibrary {
                 "UPDATE tracks SET accent_color = NULL; PRAGMA user_version = 1;",
             );
         }
+        // v2: новый алгоритм акцентного цвета (гистограмма оттенков,
+        // анти-жёлтый и анти-кислотный фильтры). Кэш треков пересчитается
+        // лениво при воспроизведении, цвета кастомных обложек —
+        // фоновой задачей при старте (см. setup в lib.rs).
+        if user_version < 2 {
+            let _ = conn.execute_batch(
+                "UPDATE tracks SET accent_color = NULL;
+                 UPDATE track_overrides SET accent_color = NULL WHERE cover_data IS NOT NULL;
+                 PRAGMA user_version = 2;",
+            );
+        }
 
         Ok(Self { conn, db_path })
     }
@@ -1562,7 +1573,11 @@ impl MusicLibrary {
     pub fn rebuild_artist_playlists(&mut self, separators: &[String]) -> Result<(), String> {
         // Собираем актуальные плейлисты исполнителей из tracks с учётом
         // переопределений (track_overrides.artist имеет приоритет).
-        let actual_artists: HashMap<String, HashSet<String>> = {
+        // Исполнители группируются регистронезависимо (ключ = имя в нижнем
+        // регистре), чтобы «MZLFF» и «mzlff» считались одним артистом. Для каждого
+        // ключа храним счётчик вариантов написания (для выбора каноничного имени
+        // у новых плейлистов) и объединённый набор треков.
+        let actual_artists: HashMap<String, (HashMap<String, usize>, HashSet<String>)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT COALESCE(o.artist, t.artist) AS effective_artist, t.file_path
                  FROM tracks t
@@ -1571,7 +1586,7 @@ impl MusicLibrary {
                    AND COALESCE(o.artist, t.artist) != ''"
             ).map_err(|e| format!("Ошибка запроса исполнителей: {}", e))?;
 
-            let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+            let mut map: HashMap<String, (HashMap<String, usize>, HashSet<String>)> = HashMap::new();
             let rows = stmt
                 .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
                 .map_err(|e| format!("Ошибка: {}", e))?;
@@ -1579,14 +1594,19 @@ impl MusicLibrary {
             for row in rows.flatten() {
                 let names = split_artists(&row.0, separators);
                 for name in names {
-                    map.entry(name).or_default().insert(row.1.clone());
+                    let key = name.to_lowercase();
+                    let entry = map.entry(key).or_default();
+                    *entry.0.entry(name).or_insert(0) += 1;
+                    entry.1.insert(row.1.clone());
                 }
             }
             map
         };
 
-        // Существующие плейлисты исполнителей: name -> (id, Set<file_path>)
-        let existing_artists: HashMap<String, (i64, HashSet<String>)> = {
+        // Существующие плейлисты исполнителей, сгруппированные по ключу (нижний
+        // регистр имени). В одном ключе может оказаться несколько плейлистов —
+        // legacy-дубликаты разного регистра, которые нужно слить в один.
+        let existing_by_key: HashMap<String, Vec<(i64, String, HashSet<String>)>> = {
             let mut stmt = self.conn.prepare(
                 "SELECT p.id, p.name, pt.file_path
                  FROM playlists p
@@ -1594,7 +1614,7 @@ impl MusicLibrary {
                  WHERE p.kind = 'artist'"
             ).map_err(|e| format!("Ошибка запроса плейлистов исполнителей: {}", e))?;
 
-            let mut map: HashMap<String, (i64, HashSet<String>)> = HashMap::new();
+            let mut by_id: HashMap<i64, (String, HashSet<String>)> = HashMap::new();
             let rows = stmt
                 .query_map([], |row| Ok((
                     row.get::<_, i64>(0)?,
@@ -1604,8 +1624,13 @@ impl MusicLibrary {
                 .map_err(|e| format!("Ошибка: {}", e))?;
 
             for row in rows.flatten() {
-                let entry = map.entry(row.1).or_insert_with(|| (row.0, HashSet::new()));
+                let entry = by_id.entry(row.0).or_insert_with(|| (row.1.clone(), HashSet::new()));
                 if let Some(p) = row.2 { entry.1.insert(p); }
+            }
+
+            let mut map: HashMap<String, Vec<(i64, String, HashSet<String>)>> = HashMap::new();
+            for (id, (name, set)) in by_id {
+                map.entry(name.to_lowercase()).or_default().push((id, name, set));
             }
             map
         };
@@ -1615,51 +1640,69 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
         // Удаляем плейлисты исполнителей, которых больше нет
-        for (name, (id, _)) in &existing_artists {
-            if !actual_artists.contains_key(name) {
-                tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![id]).ok();
-                tx.execute("DELETE FROM playlists WHERE id = ?1", params![id]).ok();
+        for (key, playlists) in &existing_by_key {
+            if !actual_artists.contains_key(key) {
+                for (id, _, _) in playlists {
+                    tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![id]).ok();
+                    tx.execute("DELETE FROM playlists WHERE id = ?1", params![id]).ok();
+                }
             }
         }
 
-        for (artist_name, new_set) in &actual_artists {
-            let playlist_id = if let Some((id, current_set)) = existing_artists.get(artist_name) {
-                if current_set == new_set {
-                    continue;
-                }
-                let to_remove: Vec<&String> = current_set.difference(new_set).collect();
-                if !to_remove.is_empty() {
-                    const BATCH: usize = 256;
-                    for chunk in to_remove.chunks(BATCH) {
-                        let placeholders = (0..chunk.len())
-                            .map(|i| format!("?{}", i + 2))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let sql = format!(
-                            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND file_path IN ({})",
-                            placeholders
-                        );
-                        let mut ps: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
-                        ps.push(id as &dyn rusqlite::ToSql);
-                        for p in chunk { ps.push(*p as &dyn rusqlite::ToSql); }
-                        tx.execute(&sql, ps.as_slice()).ok();
+        for (key, (variants, new_set)) in &actual_artists {
+            // Определяем основной плейлист для ключа. Если их несколько (legacy
+            // дубликаты), оставляем самый «крупный» (по числу треков, при равенстве
+            // — самый старый id) и сливаем в него остальные. Имя существующего
+            // плейлиста сохраняем как есть, чтобы не оборвать закрепления, обложки
+            // и порядок «сверху». Каноничное имя (по самому частому написанию)
+            // выбираем только при создании нового плейлиста.
+            let (playlist_id, current_set) = match existing_by_key.get(key) {
+                Some(playlists) if !playlists.is_empty() => {
+                    let mut sorted: Vec<&(i64, String, HashSet<String>)> = playlists.iter().collect();
+                    sorted.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)));
+                    let primary = sorted[0];
+                    let mut merged_current = primary.2.clone();
+                    for dup in &sorted[1..] {
+                        tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![dup.0]).ok();
+                        tx.execute("DELETE FROM playlists WHERE id = ?1", params![dup.0]).ok();
+                        for p in &dup.2 { merged_current.insert(p.clone()); }
                     }
+                    (primary.0, merged_current)
                 }
-                *id
-            } else {
-                tx.execute(
-                    "INSERT INTO playlists (name, kind) VALUES (?1, 'artist')",
-                    params![artist_name],
-                )
-                .map_err(|e| format!("Ошибка создания плейлиста исполнителя: {}", e))?;
-                tx.last_insert_rowid()
+                _ => {
+                    let canonical = variants
+                        .iter()
+                        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_else(|| key.clone());
+                    tx.execute(
+                        "INSERT INTO playlists (name, kind) VALUES (?1, 'artist')",
+                        params![canonical],
+                    )
+                    .map_err(|e| format!("Ошибка создания плейлиста исполнителя: {}", e))?;
+                    (tx.last_insert_rowid(), HashSet::new())
+                }
             };
 
-            let current_set = existing_artists
-                .get(artist_name)
-                .map(|(_, s)| s)
-                .cloned()
-                .unwrap_or_default();
+            let to_remove: Vec<&String> = current_set.difference(new_set).collect();
+            if !to_remove.is_empty() {
+                const BATCH: usize = 256;
+                for chunk in to_remove.chunks(BATCH) {
+                    let placeholders = (0..chunk.len())
+                        .map(|i| format!("?{}", i + 2))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let sql = format!(
+                        "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND file_path IN ({})",
+                        placeholders
+                    );
+                    let mut ps: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+                    ps.push(&playlist_id as &dyn rusqlite::ToSql);
+                    for p in chunk { ps.push(*p as &dyn rusqlite::ToSql); }
+                    tx.execute(&sql, ps.as_slice()).ok();
+                }
+            }
+
             let to_add: Vec<&String> = new_set.difference(&current_set).collect();
             if !to_add.is_empty() {
                 let mut stmt = tx.prepare(
@@ -1812,6 +1855,35 @@ impl MusicLibrary {
         Ok(())
     }
 
+    /// Кастомные обложки, у которых не вычислен акцентный цвет (сброшен
+    /// миграцией на новый алгоритм). Возвращает пары (file_path, data URL).
+    pub fn get_override_covers_without_accent(&self) -> Vec<(String, String)> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT file_path, cover_data FROM track_overrides
+             WHERE cover_data IS NOT NULL AND accent_color IS NULL",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        });
+        match rows {
+            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Записать пересчитанный акцентный цвет кастомной обложки.
+    pub fn set_override_accent_color(&self, file_path: &str, color: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE track_overrides SET accent_color = ?1 WHERE file_path = ?2",
+                params![color, file_path],
+            )
+            .map_err(|e| format!("Ошибка сохранения accent_color обложки: {}", e))?;
+        Ok(())
+    }
+
     /// Получить все альбомы (удобный метод)
     pub fn get_albums(&self) -> Vec<PlaylistInfo> {
         self.get_playlists()
@@ -1893,6 +1965,8 @@ impl MusicLibrary {
     }
 
     pub fn get_top_artists(&self, limit: usize) -> Vec<TopArtist> {
+        // Группируем по точному написанию в SQL, затем сливаем регистронезависимо
+        // в Rust, чтобы «MZLFF» и «mzlff» были одним артистом в статистике.
         let sql = "SELECT COALESCE(o.artist, t.artist) AS artist_name,
                           SUM(s.listen_count) AS total_listens,
                           SUM(s.total_listened_secs) AS total_secs,
@@ -1901,25 +1975,68 @@ impl MusicLibrary {
                    JOIN track_statistics s ON s.file_path = t.file_path
                    LEFT JOIN track_overrides o ON o.file_path = t.file_path
                    WHERE COALESCE(o.artist, t.artist) IS NOT NULL AND COALESCE(o.artist, t.artist) != ''
-                   GROUP BY artist_name
-                   ORDER BY total_listens DESC, total_secs DESC
-                   LIMIT ?1";
+                   GROUP BY artist_name";
         let mut stmt = match self.conn.prepare(sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = match stmt.query_map(params![limit as i64], |row| {
-            Ok(TopArtist {
-                name: row.get(0)?,
-                listen_count: row.get(1)?,
-                total_listened_secs: row.get(2)?,
-                track_count: row.get::<_, i64>(3)? as usize,
-            })
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)? as usize,
+            ))
         }) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
-        rows.filter_map(|r| r.ok()).collect()
+
+        // ключ (нижний регистр) -> (варианты написания с числом треков, агрегаты)
+        struct Agg {
+            variants: HashMap<String, usize>,
+            listen_count: i64,
+            total_listened_secs: f64,
+            track_count: usize,
+        }
+        let mut map: HashMap<String, Agg> = HashMap::new();
+        for (name, listens, secs, tracks) in rows.flatten() {
+            let entry = map.entry(name.to_lowercase()).or_insert_with(|| Agg {
+                variants: HashMap::new(),
+                listen_count: 0,
+                total_listened_secs: 0.0,
+                track_count: 0,
+            });
+            *entry.variants.entry(name).or_insert(0) += tracks;
+            entry.listen_count += listens;
+            entry.total_listened_secs += secs;
+            entry.track_count += tracks;
+        }
+
+        let mut result: Vec<TopArtist> = map
+            .into_values()
+            .map(|a| {
+                let name = a
+                    .variants
+                    .iter()
+                    .max_by(|x, y| x.1.cmp(y.1).then(y.0.cmp(x.0)))
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_default();
+                TopArtist {
+                    name,
+                    listen_count: a.listen_count,
+                    total_listened_secs: a.total_listened_secs,
+                    track_count: a.track_count,
+                }
+            })
+            .collect();
+        result.sort_by(|a, b| {
+            b.listen_count
+                .cmp(&a.listen_count)
+                .then(b.total_listened_secs.partial_cmp(&a.total_listened_secs).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        result.truncate(limit);
+        result
     }
 
     pub fn get_top_albums(&self, limit: usize) -> Vec<TopAlbum> {

@@ -516,63 +516,144 @@ fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
 }
 
 /// Извлечь акцентный цвет из сырых байтов изображения.
-/// Использует auto-palette для получения доминантных цветов обложки,
-/// выбирает лучший по сочетанию доминантности, насыщенности и близости
-/// к оптимальной светлоте. Сохраняет исходный оттенок без сдвигов.
+/// Строит взвешенную по насыщенности гистограмму оттенков: побеждает оттенок,
+/// который занимает наибольшую «видимую» цветовую массу обложки (площадь ×
+/// насыщенность), а не редкие сочные пиксели. Жёлтые и кислотные тона
+/// исключаются или приглушаются — они плохо работают как цвет UI.
 pub fn extract_accent_color(image_data: &[u8]) -> Option<String> {
     let img = image::load_from_memory(image_data).ok()?;
     let thumb = img.thumbnail(96, 96);
-    extract_via_palette(&thumb)
+    extract_via_hue_histogram(&thumb)
 }
 
-fn extract_via_palette(thumb: &image::DynamicImage) -> Option<String> {
-    use auto_palette::{ImageData, Palette, Swatch};
+const HUE_BINS: usize = 36;
+const HUE_BIN_WIDTH: f64 = 360.0 / HUE_BINS as f64;
 
-    let image_data = ImageData::try_from(thumb).ok()?;
-    let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
+/// Зона жёлтого, запрещённая для UI-акцента.
+const YELLOW_FROM: f64 = 45.0;
+const YELLOW_TO: f64 = 78.0;
 
-    // Берём 12 самых представительных цветов (ранжируются по populations)
-    let swatches = palette.find_swatches(12).ok()?;
-    if swatches.is_empty() {
+fn is_yellow_hue(hue: f64) -> bool {
+    (YELLOW_FROM..YELLOW_TO).contains(&hue)
+}
+
+#[derive(Clone, Copy, Default)]
+struct HueBin {
+    weight: f64,
+    sin: f64,
+    cos: f64,
+    sat: f64,
+    light: f64,
+}
+
+/// Сглаженное окно из трёх соседних бинов: масса и средневзвешенный цвет.
+#[derive(Clone, Copy, Default)]
+struct HueWindow {
+    weight: f64,
+    hue: f64,
+    sat: f64,
+    light: f64,
+}
+
+fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
+    let rgb = thumb.to_rgb8();
+    let total_px = (rgb.width() as f64) * (rgb.height() as f64);
+    if total_px < 1.0 {
         return None;
     }
 
-    // Нормализуем популяции относительно самой массивной
-    let max_pop = swatches
+    let mut bins = [HueBin::default(); HUE_BINS];
+    let mut chroma_weight = 0.0f64;
+    let mut light_sum = 0.0f64;
+
+    for px in rgb.pixels() {
+        let (h, s, l) = rgb_to_hsl(px[0], px[1], px[2]);
+        light_sum += l;
+        // Почти серые и экстремально тёмные/светлые пиксели оттенка не несут
+        if s < 0.12 || !(0.06..=0.94).contains(&l) {
+            continue;
+        }
+        // Видимая цветовая масса пикселя: чем насыщеннее и ближе к средней
+        // светлоте, тем заметнее его оттенок на обложке.
+        let w = s * (1.0 - (2.0 * l - 1.0).abs()).sqrt();
+        let bin = &mut bins[((h / HUE_BIN_WIDTH) as usize).min(HUE_BINS - 1)];
+        let rad = h.to_radians();
+        bin.weight += w;
+        bin.sin += w * rad.sin();
+        bin.cos += w * rad.cos();
+        bin.sat += w * s;
+        bin.light += w * l;
+        chroma_weight += w;
+    }
+
+    // Почти монохромная обложка: нейтральный серый по её средней светлоте,
+    // чтобы случайный цветной пиксель-шум не красил весь интерфейс.
+    if chroma_weight < total_px * 0.015 {
+        let l = (light_sum / total_px).clamp(0.30, 0.46);
+        let (r, g, b) = hsl_to_rgb(0.0, 0.0, l);
+        return Some(format!("#{:02X}{:02X}{:02X}", r, g, b));
+    }
+
+    let window_at = |i: usize| -> HueWindow {
+        let prev = &bins[(i + HUE_BINS - 1) % HUE_BINS];
+        let cur = &bins[i];
+        let next = &bins[(i + 1) % HUE_BINS];
+        let weight = cur.weight + 0.5 * (prev.weight + next.weight);
+        if weight <= f64::EPSILON {
+            return HueWindow::default();
+        }
+        let sin = cur.sin + 0.5 * (prev.sin + next.sin);
+        let cos = cur.cos + 0.5 * (prev.cos + next.cos);
+        HueWindow {
+            weight,
+            hue: sin.atan2(cos).to_degrees().rem_euclid(360.0),
+            sat: (cur.sat + 0.5 * (prev.sat + next.sat)) / weight,
+            light: (cur.light + 0.5 * (prev.light + next.light)) / weight,
+        }
+    };
+    let windows: Vec<HueWindow> = (0..HUE_BINS).map(window_at).collect();
+    let max_weight = windows.iter().map(|w| w.weight).fold(0.0f64, f64::max);
+    if max_weight <= f64::EPSILON {
+        return None;
+    }
+
+    // Кандидаты — только реально заметные оттенки (≥6% цветовой массы):
+    // мелкое сочное пятно не должно красить интерфейс.
+    let mut pool: Vec<usize> = (0..HUE_BINS)
+        .filter(|&i| windows[i].weight >= chroma_weight * 0.06)
+        .collect();
+    if pool.is_empty() {
+        pool = (0..HUE_BINS).filter(|&i| windows[i].weight > 0.0).collect();
+    }
+
+    // Жёлтые оттенки выкидываем, если есть хоть одна заметная альтернатива.
+    // Если вся обложка жёлтая — оставляем, normalize_accent_hsl уведёт оттенок.
+    let non_yellow: Vec<usize> = pool
         .iter()
-        .map(|s| s.population())
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
+        .copied()
+        .filter(|&i| !is_yellow_hue(windows[i].hue))
+        .collect();
+    if !non_yellow.is_empty() {
+        pool = non_yellow;
+    }
 
-    let score = |s: &Swatch<f64>| -> f64 {
-        let rgb = s.color().to_rgb();
-        let (hue, saturation, lightness) = rgb_to_hsl(rgb.r, rgb.g, rgb.b);
-
-        // Доминантность (какую часть изображения занимает этот кластер)
-        let pop_norm = (s.population() as f64 / max_pop).clamp(0.0, 1.0);
-
-        // Близость к оптимальной светлоте 0.42: 1.0 в центре, 0.0 при |Δ|≥0.5
-        let l_fit = (1.0 - (lightness - 0.42).abs() * 2.0).clamp(0.0, 1.0);
-
-        // Насыщенность сама по себе — предпочитаем выраженные цвета,
-        // но серые кластеры не наказываем в ноль (минимум 0.05).
-        let sat_fit = saturation.clamp(0.05, 0.9);
-
-        // Мягкий штраф на «кислотные» жёлтые — они часто плохо смотрятся как фон.
-        let yellow_penalty = if (40.0..=65.0).contains(&hue) { 0.12 } else { 0.0 };
-
-        // Слишком тёмные/светлые кластеры редко дают хороший акцент — отсекаем
-        // по l_fit, но не исключаем: доминантный тёмный всё ещё может победить.
-        pop_norm * 0.45 + sat_fit * 0.25 + l_fit * 0.30 - yellow_penalty
+    // Доминантность решает в первую очередь, качество цвета — во вторую:
+    // редкий, но сочный цвет не должен обгонять основной тон обложки.
+    let score = |w: &HueWindow| -> f64 {
+        let pop = w.weight / max_weight;
+        let sat_fit = (w.sat / 0.55).min(1.0);
+        let light_fit = (1.0 - (w.light - 0.45).abs() * 1.7).clamp(0.0, 1.0);
+        pop * 0.62 + sat_fit * 0.16 + light_fit * 0.22
     };
 
-    let best = swatches.iter().max_by(|a, b| {
-        score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal)
+    let best = pool.into_iter().max_by(|&a, &b| {
+        score(&windows[a])
+            .partial_cmp(&score(&windows[b]))
+            .unwrap_or(std::cmp::Ordering::Equal)
     })?;
 
-    let rgb = best.color().to_rgb();
-    let (r, g, b) = adjust_for_background(rgb.r, rgb.g, rgb.b);
+    let w = &windows[best];
+    let (r, g, b) = normalize_accent_hsl(w.hue, w.sat, w.light);
     Some(format!("#{:02X}{:02X}{:02X}", r, g, b))
 }
 
@@ -629,24 +710,60 @@ fn hsl_to_rgb(hue: f64, sat: f64, lightness: f64) -> (u8, u8, u8) {
     )
 }
 
-/// Подогнать цвет под фон: зажать яркость и насыщенность в предсказуемый
-/// диапазон, сохранив исходный оттенок для соответствия обложке.
-fn adjust_for_background(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
-    let (hue, mut sat, mut lightness) = rgb_to_hsl(r, g, b);
+/// Кусочно-линейный потолок насыщенности по оттенку: «токсичные» зоны
+/// (лайм, неоновая зелень, фуксия) приглушаются сильнее спокойных синих.
+fn saturation_ceiling(hue: f64) -> f64 {
+    // Контрольные точки каждые 30°: 0° красный → 360° красный.
+    const POINTS: [f64; 13] = [
+        0.60, // 0°   красный
+        0.58, // 30°  оранжевый
+        0.45, // 60°  жёлтый (после сдвига сюда почти не попадаем)
+        0.42, // 90°  лайм/олива
+        0.45, // 120° зелёный
+        0.48, // 150° изумруд
+        0.52, // 180° циан
+        0.58, // 210° голубой
+        0.62, // 240° синий
+        0.60, // 270° фиолетовый
+        0.52, // 300° маджента
+        0.56, // 330° розовый
+        0.60, // 360° = 0°
+    ];
+    let h = hue.rem_euclid(360.0);
+    let seg = ((h / 30.0) as usize).min(11);
+    let t = (h - seg as f64 * 30.0) / 30.0;
+    POINTS[seg] + (POINTS[seg + 1] - POINTS[seg]) * t
+}
+
+/// Подогнать цвет под фон UI: исключить жёлтый, зажать светлоту в узкий
+/// диапазон и ограничить насыщенность с учётом «токсичности» оттенка,
+/// сохранив характер цвета обложки.
+fn normalize_accent_hsl(hue: f64, sat: f64, light: f64) -> (u8, u8, u8) {
+    let mut hue = hue.rem_euclid(360.0);
+    let mut sat = sat.clamp(0.0, 1.0);
+
+    // Жёлтый как цвет UI не используем: тёплую половину зоны уводим
+    // в янтарь, холодную (лаймовую) — в приглушённую оливу.
+    if (YELLOW_FROM..62.0).contains(&hue) {
+        hue = 36.0 + (hue - YELLOW_FROM) * (6.0 / (62.0 - YELLOW_FROM));
+    } else if (62.0..YELLOW_TO).contains(&hue) {
+        hue = 88.0 + (hue - 62.0) * (7.0 / (YELLOW_TO - 62.0));
+    }
 
     // Единый узкий диапазон светлоты — чтобы акцент и производные фоны
     // (--dark-bg/--light-bg) выглядели одинаково плотно на любой обложке.
-    lightness = lightness.clamp(0.32, 0.48);
+    let light = light.clamp(0.32, 0.48);
 
-    // Мягкий кап насыщенности. До 0.55 оставляем как есть, выше — сжимаем
-    // с коэффициентом 0.35, жёсткий потолок 0.65. Это убирает «кислотность»,
-    // сохраняя характер цвета.
-    if sat > 0.55 {
-        sat = 0.55 + (sat - 0.55) * 0.35;
+    // Мягкое сжатие насыщенности к потолку оттенка: убирает кислотность,
+    // сохраняя различие между умеренными и сочными обложками.
+    let ceiling = saturation_ceiling(hue);
+    let knee = ceiling * 0.8;
+    if sat > knee {
+        sat = knee + (sat - knee) * 0.35;
     }
-    sat = sat.min(0.65);
+    sat = sat.min(ceiling);
 
-    hsl_to_rgb(hue, sat, lightness)
+    hsl_to_rgb(hue, sat, light)
 }
 
 /// Извлечь обложку и акцентный цвет из lofty тега
@@ -1377,6 +1494,95 @@ impl AudioPlayer {
     pub fn set_eq_settings(&self, settings: EqSettings) {
         if let Ok(mut current) = self.eq_settings.write() {
             *current = settings;
+        }
+    }
+}
+
+#[cfg(test)]
+mod accent_color_tests {
+    use super::*;
+
+    fn img_from_fn(f: impl Fn(u32, u32) -> (u8, u8, u8)) -> image::DynamicImage {
+        let buf = image::RgbImage::from_fn(96, 96, |x, y| {
+            let (r, g, b) = f(x, y);
+            image::Rgb([r, g, b])
+        });
+        image::DynamicImage::ImageRgb8(buf)
+    }
+
+    fn accent_hsl(img: &image::DynamicImage) -> (f64, f64, f64) {
+        let hex = extract_via_hue_histogram(img).expect("цвет должен извлекаться");
+        let r = u8::from_str_radix(&hex[1..3], 16).unwrap();
+        let g = u8::from_str_radix(&hex[3..5], 16).unwrap();
+        let b = u8::from_str_radix(&hex[5..7], 16).unwrap();
+        rgb_to_hsl(r, g, b)
+    }
+
+    #[test]
+    fn dominant_muted_color_beats_small_vivid_spot() {
+        // 90% приглушённого синего фона + узкая неоново-красная полоса:
+        // акцентом должен стать синий, а не заметный лишь вблизи красный.
+        let blue = hsl_to_rgb(220.0, 0.35, 0.40);
+        let red = hsl_to_rgb(0.0, 1.0, 0.50);
+        let img = img_from_fn(|x, _| if x < 86 { blue } else { red });
+        let (h, _, _) = accent_hsl(&img);
+        assert!((190.0..260.0).contains(&h), "ожидался синий, получен hue={h}");
+    }
+
+    #[test]
+    fn yellow_skipped_when_alternative_exists() {
+        // Жёлтый занимает больше площади, но при наличии заметного синего
+        // он не должен попадать в UI.
+        let yellow = hsl_to_rgb(55.0, 0.80, 0.50);
+        let blue = hsl_to_rgb(230.0, 0.60, 0.45);
+        let img = img_from_fn(|x, _| if x < 58 { yellow } else { blue });
+        let (h, _, _) = accent_hsl(&img);
+        assert!((200.0..260.0).contains(&h), "ожидался синий, получен hue={h}");
+    }
+
+    #[test]
+    fn fully_yellow_cover_shifts_out_of_yellow_zone() {
+        // Полностью жёлтая обложка: оттенок уводится в янтарь,
+        // жёлтым акцент быть не должен.
+        let yellow = hsl_to_rgb(55.0, 0.90, 0.50);
+        let img = img_from_fn(|_, _| yellow);
+        let (h, _, _) = accent_hsl(&img);
+        assert!(
+            !is_yellow_hue(h),
+            "жёлтый не должен попадать в UI, получен hue={h}"
+        );
+    }
+
+    #[test]
+    fn neon_green_is_tamed() {
+        // Кислотно-зелёная обложка: оттенок сохраняется, но насыщенность
+        // зажимается потолком зоны, светлота — общим диапазоном.
+        let neon = hsl_to_rgb(120.0, 1.0, 0.50);
+        let img = img_from_fn(|_, _| neon);
+        let (h, s, l) = accent_hsl(&img);
+        assert!((110.0..130.0).contains(&h), "оттенок должен сохраниться, hue={h}");
+        assert!(s <= 0.47, "насыщенность должна быть приглушена, s={s}");
+        assert!((0.31..=0.49).contains(&l), "светлота вне диапазона, l={l}");
+    }
+
+    #[test]
+    fn monochrome_cover_gives_neutral_gray() {
+        let img = img_from_fn(|_, _| (128, 128, 128));
+        let (_, s, _) = accent_hsl(&img);
+        assert!(s < 0.02, "ч/б обложка должна давать нейтральный серый, s={s}");
+    }
+
+    #[test]
+    fn saturation_ceiling_is_continuous() {
+        // Интерполяция между контрольными точками без разрывов на стыках.
+        for i in 0..=12 {
+            let h = i as f64 * 30.0;
+            let before = saturation_ceiling(h - 0.01);
+            let after = saturation_ceiling(h + 0.01);
+            assert!(
+                (before - after).abs() < 0.01,
+                "разрыв потолка насыщенности на {h}°"
+            );
         }
     }
 }

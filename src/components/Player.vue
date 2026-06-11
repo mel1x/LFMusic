@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, watchEffect } from 'vue';
 import { useRoute } from 'vue-router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
@@ -35,6 +35,7 @@ import { createRipple } from '../composables/useRipple';
 import { isPhoneViewport } from '../composables/usePlatform';
 import { useI18n } from '../composables/useI18n';
 import { useAndroidMediaSession } from '../composables/useAndroidMediaSession';
+import { isCoverResolved } from '../composables/useCoverLoader';
 
 const win = getCurrentWindow();
 
@@ -265,12 +266,56 @@ const VISUALIZER_BARS = Array.from({ length: 16 }, (_, i) => {
 });
 
 // ── Queue cover loading ───────────────────────────────────────────────
+// Чтобы при включении shuffle очередь не моргала чёрными обложками, сначала
+// прогружаем обложки новых треков и только потом визуально заменяем список.
+// `displayQueue` — то, что реально рендерится; оно отстаёт от `queueUpcoming`,
+// пока обложки не будут готовы (с предохранительным таймаутом).
+const displayQueue = ref<TrackMetadata[]>([]);
+const pendingQueue = ref<TrackMetadata[] | null>(null);
+let queueSwapTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function clearQueueSwapTimeout() {
+    if (queueSwapTimeout) {
+        clearTimeout(queueSwapTimeout);
+        queueSwapTimeout = null;
+    }
+}
+
+function commitQueue(tracks: TrackMetadata[]) {
+    displayQueue.value = tracks;
+    pendingQueue.value = null;
+    clearQueueSwapTimeout();
+}
 
 watch([isQueueMode, queueUpcoming], ([show, tracks]) => {
-    if (show && tracks.length > 0) {
-        loadCoversForTracks(tracks);
+    if (!show || tracks.length === 0) {
+        commitQueue(tracks);
+        return;
     }
+
+    loadCoversForTracks(tracks);
+
+    // Если обложки уже известны (загружены или подтверждённо отсутствуют) —
+    // меняем очередь мгновенно. Иначе откладываем замену до прогрузки.
+    if (tracks.every(isCoverResolved)) {
+        commitQueue(tracks);
+        return;
+    }
+
+    pendingQueue.value = tracks;
+    clearQueueSwapTimeout();
+    queueSwapTimeout = setTimeout(() => {
+        if (pendingQueue.value) commitQueue(pendingQueue.value);
+    }, 700);
 }, { immediate: true });
+
+// Как только обложки отложенной очереди прогрузились — заменяем список.
+watchEffect(() => {
+    const pending = pendingQueue.value;
+    if (pending && pending.every(isCoverResolved)) {
+        commitQueue(pending);
+    }
+});
 
 const shouldLoadAsideNextCover = computed(() =>
     settings.value.show_player_extra_block && settings.value.player_extra_block_mode === 'next_track'
@@ -285,7 +330,9 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
 // ── Window controls (for fullscreen titlebar) ──────────────────────────────
 
 const minimizeWindow = () => win.minimize();
-const maximizeWindow = () => win.toggleMaximize();
+// Через backend: в полноэкранном режиме (F11) клик выходит из него и
+// разворачивает окно, иначе — обычное переключение maximized.
+const maximizeWindow = () => invoke('toggle_window_maximize');
 const closeWindow = async () => {
     await saveState();
     win.close();
@@ -454,18 +501,17 @@ function openQfCoverMenu(e: MouseEvent) {
 </script>
 
 <template>
-    <Toaster 
+    <Toaster
+        position="bottom-center"
+        :offset="{ bottom: '106px' }"
         style="z-index: 0;"
         :toastOptions="{
           unstyled: true,
-          style: { 
-            bottom: '86px',
-            right: '440px',
-          },
           class: 'toast',
         }"
         :visibleToasts="1"
         theme="dark"
+        :closeButton="true"
     >
         <template #info-icon>
             <ShuffleIcon width="30" height="30" style="background-color:#ffffff20;padding:7px;border-radius:999px;color:#ffffffa0" />
@@ -643,8 +689,7 @@ function openQfCoverMenu(e: MouseEvent) {
                 </div>
                 <div class="additionalControls" @click.stop>
                     <div v-if="currentTrack" class="queueList" @click.stop="openQueueFullscreen"><ListIcon /></div>
-                    <div class="codecInfo" v-if="currentTrack && codecDisplay"
-                        v-tooltip="'Формат и параметры аудио — нажмите для подробностей'">
+                    <div class="codecInfo" v-if="currentTrack && codecDisplay">
                         {{ codecDisplay }}
                         <div class="codecTooltip">
                             <span class="codecTooltip-title">Качество трека</span>
@@ -964,7 +1009,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                 </div>
                                 <div class="qf-queue-header" style="margin-top:12px;margin-bottom:2px;">{{ isMixSource ? 'Следующий трек' : 'Далее в очереди' }}</div>
                                 <div
-                                    v-for="(track, i) in queueUpcoming"
+                                    v-for="(track, i) in displayQueue"
                                     :key="i"
                                     class="qf-queue-item"
                                     @click="onQfTrackClick($event, track)"
@@ -989,7 +1034,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                         <MoreIcon width="26" height="26" />
                                     </div>
                                 </div>
-                                <div v-if="queueUpcoming.length === 0" class="qf-queue-empty">
+                                <div v-if="displayQueue.length === 0" class="qf-queue-empty">
                                     Нет треков в очереди
                                 </div>
                             </div>
@@ -1314,6 +1359,9 @@ function openQfCoverMenu(e: MouseEvent) {
     flex-direction: row;
     align-items: center;
     gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    max-width: 300px;
 }
 .coverWrapper {
     position: relative;
@@ -1533,8 +1581,9 @@ function openQfCoverMenu(e: MouseEvent) {
     justify-content: end;
     gap: 24px;
     margin-right: 16px;
-    max-width: 260px;
-    width: 260px;
+    flex: 1;
+    min-width: 0;
+    max-width: 300px;
 }
 .queueList {
     margin-top: -1px;
@@ -1609,7 +1658,7 @@ function openQfCoverMenu(e: MouseEvent) {
     left: 50%;
     transform: translateX(-50%);
     background: var(--dark-bg);
-    border: 2px solid #ffffff20;
+    border: 1px solid #ffffff20;
     border-radius: 24px;
     padding: 16px 2px;
 
@@ -1945,8 +1994,8 @@ function openQfCoverMenu(e: MouseEvent) {
     transform: translateX(-50%);
     background: var(--dark-bg);
     border: 1px solid hsla(0, 0%, 100%, 0.1);
-    border-radius: 8px;
-    padding: 6px 8px;
+    border-radius: 99999px;
+    padding: 8px 16px;
     white-space: nowrap;
     z-index: 100;
     backdrop-filter: blur(12px);

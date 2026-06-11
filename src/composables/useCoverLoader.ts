@@ -1,4 +1,4 @@
-import { watch, type Ref, type ComputedRef } from "vue";
+import { reactive, watch, type Ref, type ComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
 
@@ -6,6 +6,19 @@ const MAX_CONCURRENT_COVERS = 3;
 const loadingCovers = new Set<string>();
 let activeCoverRequests = 0;
 let coverQueue: string[] = [];
+
+// Paths whose cover request has finished (whether it yielded art or not).
+// Reactive so views can gate first paint until the first N covers resolve.
+const resolvedCovers = reactive(new Set<string>());
+
+function markCoverResolved(filePath: string) {
+    resolvedCovers.add(filePath);
+}
+
+/** True once a track's cover is known — either loaded, or confirmed absent. */
+export function isCoverResolved(track: Pick<TrackMetadata, "file_path" | "cover_art">): boolean {
+    return !!track.cover_art || resolvedCovers.has(track.file_path);
+}
 
 interface CoverLoaderOptions {
     trackList: Ref<TrackMetadata[]>;
@@ -22,6 +35,7 @@ function processCoverQueue() {
         const track = opts.getTrackByPath(filePath);
         if (!track || track.cover_art) {
             loadingCovers.delete(filePath);
+            markCoverResolved(filePath);
             continue;
         }
         activeCoverRequests++;
@@ -35,6 +49,7 @@ function processCoverQueue() {
             .catch(() => {})
             .finally(() => {
                 loadingCovers.delete(filePath);
+                markCoverResolved(filePath);
                 activeCoverRequests--;
                 processCoverQueue();
             });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, watchEffect } from 'vue';
+import { computed, ref, onMounted, onUnmounted, watch, watchEffect } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -12,6 +12,8 @@ import Player from './components/Player.vue';
 import GithubIcon from './components/Icons/GithubIcon.vue';
 import TrackInfoModal from './components/TrackInfoModal.vue';
 import TrackEditModal from './components/TrackEditModal.vue';
+import { toast } from 'vue-sonner';
+import { isCoverResolved } from './composables/useCoverLoader';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
 import { useFolders } from './composables/useFolders';
@@ -25,7 +27,11 @@ import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 const win = getCurrentWindow();
 const { settings, load } = useSettings();
 const { language, t } = useI18n();
-const { saveState, currentTrack, currentAccentColor } = usePlayer();
+const {
+  saveState, currentTrack, currentAccentColor, isPlaying,
+  togglePlayPause, playNext, playPrev, toggleShuffle, toggleRepeat,
+  shuffled, repeatMode, playbackOrder, currentTrackIndex, getTrackByPath, loadCoversForTracks,
+} = usePlayer();
 const { showTracksReadyModal, dismissTracksReadyModal } = useFolders();
 const { loadCustomCovers } = useCustomCovers();
 
@@ -72,6 +78,7 @@ const MIN_SCALE = 0.78;
 const MAX_SCALE = 2.0;
 let resizeRaf: number | null = null;
 let unlistenAudioFeatureProgress: UnlistenFn | null = null;
+let unlistenTaskbarMedia: UnlistenFn | null = null;
 let featureProgressHideTimer: ReturnType<typeof setTimeout> | null = null;
 let androidInsetsRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let androidInsetsRetryCount = 0;
@@ -199,6 +206,20 @@ async function handleReloadKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && fullscreenCoverSrc.value) {
     e.preventDefault();
     hideFullscreenCover();
+    return;
+  }
+
+  // F11 — переключение полноэкранного режима окна (как в браузере).
+  // Логика на стороне Rust: при входе снимает maximized (иначе на Windows
+  // переход maximized→fullscreen ломается) и восстанавливает его при выходе.
+  if (e.key === 'F11') {
+    e.preventDefault();
+    if (isAndroidRuntime()) return;
+    try {
+      await invoke('toggle_window_fullscreen');
+    } catch {
+      // Игнорируем — на платформах без поддержки fullscreen просто ничего не делаем.
+    }
     return;
   }
 
@@ -355,7 +376,98 @@ onMounted(() => {
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
   document.addEventListener('visibilitychange', onVisibilityChange);
+
+  // Кнопки-миниатюры панели задач (Windows) → действия плеера.
+  // Для shuffle/repeat показываем те же тосты, что и кнопки в плеере.
+  void listen<string>('taskbar_media', (event) => {
+    switch (event.payload) {
+      case 'shuffle':
+        toggleShuffle();
+        toast.info(shuffled.value ? 'Случайный порядок' : 'Воспроизведение подряд');
+        break;
+      case 'prev': playPrev(); break;
+      case 'playpause': togglePlayPause(); break;
+      case 'next': playNext(); break;
+      case 'repeat':
+        toggleRepeat();
+        toast.warning(repeatMode.value === 'track' ? 'Повтор трека' : 'Повтор плейлиста');
+        break;
+    }
+  }).then((unlisten) => { unlistenTaskbarMedia = unlisten; }).catch(() => {});
 });
+
+// Соседние треки в очереди (свежие объекты из trackMap — учёт ленивой подгрузки).
+// Очередь закольцована: кнопки prev/next на краях оборачиваются (см. playPrev/playNext),
+// поэтому превью тоже берёт соседей по кругу, а не оставляет пустой слот на стыке —
+// иначе в shuffle (где текущий трек стоит в начале playbackOrder) обложка предыдущего
+// не показывалась, пока не переключишься назад.
+function queueTrack(offset: number) {
+  const len = playbackOrder.value.length;
+  const i = currentTrackIndex.value;
+  if (i < 0 || len === 0) return null;
+  const wrapped = (((i + offset) % len) + len) % len;
+  if (wrapped === i) return null; // очередь из одного трека — соседей нет
+  const t = playbackOrder.value[wrapped];
+  return t ? (getTrackByPath(t.file_path) ?? t) : null;
+}
+const previewTracks = computed(() => ({
+  prev: queueTrack(-1),
+  current: currentTrack.value ? (getTrackByPath(currentTrack.value.file_path) ?? currentTrack.value) : null,
+  next: queueTrack(1),
+}));
+
+// Подгружаем обложки тройки, чтобы превью можно было показать целиком.
+watch(previewTracks, ({ prev, current, next }) => {
+  const tracks = [prev, current, next].filter(Boolean);
+  if (tracks.length) loadCoversForTracks(tracks as any);
+}, { immediate: true });
+
+// Все 3 обложки считаются готовыми, когда каждая загружена или подтверждённо отсутствует.
+const previewReady = computed(() =>
+  [previewTracks.value.prev, previewTracks.value.current, previewTracks.value.next]
+    .every(t => !t || isCoverResolved(t)),
+);
+
+// Состояние воспроизведения → иконка кнопки play/pause в панели задач.
+watch(isPlaying, (playing) => {
+  invoke('taskbar_set_playing', { playing }).catch(() => {});
+}, { immediate: true });
+
+// Состояния shuffle/repeat → иконки кнопок в панели задач.
+watch([shuffled, repeatMode], ([sh, rep]) => {
+  invoke('taskbar_set_modes', { shuffled: sh, repeatTrack: rep === 'track' }).catch(() => {});
+}, { immediate: true });
+
+// Превью в панели задач обновляем только когда все 3 обложки готовы —
+// иначе при перемешивании соседние обложки сначала пропадали бы и подгружались с задержкой.
+let lastPreviewPaths: { prev: string | null; current: string | null; next: string | null } = {
+  prev: null, current: null, next: null,
+};
+watch([previewTracks, previewReady], () => {
+  if (!previewReady.value) return; // держим прежнее превью, пока новые не загрузятся
+  const { prev, current, next } = previewTracks.value;
+  const paths = {
+    prev: prev?.file_path ?? null,
+    current: current?.file_path ?? null,
+    next: next?.file_path ?? null,
+  };
+
+  // Определяем тип анимации: вперёд (next стал центром), назад (prev стал центром), иначе fade.
+  let transition: 'forward' | 'backward' | 'fade' | 'none' = 'none';
+  if (lastPreviewPaths.current && paths.current) {
+    if (paths.current === lastPreviewPaths.next) transition = 'forward';
+    else if (paths.current === lastPreviewPaths.prev) transition = 'backward';
+    else transition = 'fade';
+  }
+  lastPreviewPaths = paths;
+
+  invoke('taskbar_set_covers', {
+    prev: prev?.cover_art ?? null,
+    current: current?.cover_art ?? null,
+    next: next?.cover_art ?? null,
+    transition,
+  }).catch(() => {});
+}, { immediate: true });
 
 onUnmounted(() => {
   window.removeEventListener('resize', scheduleUiScale);
@@ -381,6 +493,10 @@ onUnmounted(() => {
     unlistenAudioFeatureProgress();
     unlistenAudioFeatureProgress = null;
   }
+  if (unlistenTaskbarMedia) {
+    unlistenTaskbarMedia();
+    unlistenTaskbarMedia = null;
+  }
   document.removeEventListener('keydown', handleReloadKey);
   document.removeEventListener('contextmenu', handleContextMenu);
   document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -399,6 +515,17 @@ watchEffect(() => {
   root.setProperty('--accent-color', h === 0 && s === 0 ? '#353535' : `hsl(${h}, ${s}%, ${l}%)`);
   root.setProperty('--mobile-chrome-color', chromeHex);
   window.LFMusicAndroid?.updateSystemBars?.(chromeHex);
+});
+
+// Заголовок окна: текущий трек во время воспроизведения, иначе «LFMusic».
+watchEffect(() => {
+  const track = currentTrack.value;
+  let title = 'LFMusic';
+  if (isPlaying.value && track) {
+    const name = track.title || (track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') ?? '');
+    title = track.artist ? `${name} - ${track.artist}` : name;
+  }
+  win.setTitle(title);
 });
 
 function hexToHSL(hex: string) {
@@ -444,7 +571,9 @@ function hslToHex(h: number, s: number, l: number) {
 }
 
 const minimizeWindow = () => win.minimize();
-const maximizeWindow = () => win.toggleMaximize();
+// Через backend: в полноэкранном режиме (F11) клик выходит из него и
+// разворачивает окно, иначе — обычное переключение maximized.
+const maximizeWindow = () => invoke('toggle_window_maximize');
 const closeWindow = async () => {
   await saveState();
   win.close();
@@ -579,7 +708,7 @@ const closeWindow = async () => {
   flex-direction: row;
   gap: 9px;
   align-items: center;
-  width: 300px;
+  width: 286px;
   background-color: var(--dark-bg);
   border: 2px solid #ffffff20;
   border-radius: 9999px;
@@ -587,7 +716,51 @@ const closeWindow = async () => {
   color: #fff;
   font-size: 13px;
   font-weight: 500;
+  cursor: default;
+  user-select: none;
   transition: transform 400ms ease, opacity 400ms ease, background-color .24s ease;
+  will-change: transform;
+  backface-visibility: hidden;
+  transform: translate3d(0, 0, 0);
+}
+.toast [data-close-button] {
+  order: 99;
+  margin-left: auto;
+  margin-right: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent !important;
+  color: #ffffffa0;
+  cursor: pointer;
+  border: none;
+  outline: none;
+  padding: 0;
+  transition: background-color 0.2s ease, color 0.2s ease;
+  flex-shrink: 0;
+}
+.toast [data-close-button]:hover {
+  background: #ffffff20 !important;
+  color: #ffffff;
+}
+.toast [data-close-button] svg,
+.toast [data-close-button] svg * {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2px !important;
+  will-change: transform;
+  backface-visibility: hidden;
+  transform: translate3d(0, 0, 0);
+}
+[data-sonner-toaster][data-x-position="center"] {
+  left: calc(50% + 110px) !important;
+  width: 286px !important;
+}
+body:has(.fullscreen-overlay) [data-sonner-toaster][data-x-position="center"] {
+  left: 50% !important;
 }
 * {
   margin: 0;
@@ -1065,6 +1238,11 @@ body {
   .toast {
     width: min(360px, calc(100vw - 24px));
     border-radius: 18px;
+  }
+
+  [data-sonner-toaster][data-x-position="center"] {
+    left: 50% !important;
+    width: min(360px, calc(100vw - 24px)) !important;
   }
 
   .androidPermissionWarning {

@@ -19,7 +19,9 @@ import { isPhoneViewport } from '../composables/usePlatform'
 import TrackArtists from '../components/TrackArtists.vue'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
+import LoadingSpinner from '../components/LoadingSpinner.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
+import { useCoverGate } from '../composables/useCoverGate'
 
 const router = useRouter()
 
@@ -354,6 +356,19 @@ watch([albumResults, artistResults], () => {
     if (pending.length) loadCoversForTracks(pending)
 })
 
+// Hold back results until the first 30 artist avatars and 15 track covers
+// have resolved, so they don't flash empty squares on appearance.
+const { ready: coversReady } = useCoverGate(() => {
+    const out: TrackMetadata[] = []
+    for (const a of artistResults.value.slice(0, 30)) {
+        if (!a.firstPath) continue
+        const t = getTrackByPath(a.firstPath)
+        if (t) out.push(t)
+    }
+    out.push(...trackResults.value.slice(0, 15))
+    return out
+})
+
 // ── Playlists ──────────────────────────────────────────────────────────────
 
 const playlistResults = computed<PlaylistInfo[]>(() => {
@@ -475,6 +490,14 @@ watch([albumResults, playlistResults], async () => {
     playlistsLine.observe()
 })
 
+// The results (and their horizontal line lists) mount only once the gate
+// transition finishes entering — re-measure then so scroll state/visibility
+// is correct. Fires harmlessly for the spinner/empty states too (no lists).
+function onGateAfterEnter() {
+    albumsLine.observe()
+    playlistsLine.observe()
+}
+
 onUnmounted(() => {
     albumsLine.unobserve()
     playlistsLine.unobserve()
@@ -547,19 +570,22 @@ function scrollToTop() {
             </button>
         </div>
 
-        <div v-if="!hasQuery" class="emptyState">
+        <Transition name="gate-fade" mode="out-in" @after-enter="onGateAfterEnter">
+        <div v-if="!hasQuery" class="emptyState" key="gate-no-query">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Введите запрос</div>
             <div class="emptyDesc">Введите текст для поиска треков, альбомов, исполнителей и плейлистов в вашей библиотеке.</div>
         </div>
 
-        <div v-else-if="noResults" class="emptyState">
+        <div v-else-if="noResults" class="emptyState" key="gate-no-results">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Ничего не найдено</div>
             <div class="emptyDesc">Попробуйте изменить запрос или добавить папки с треками в настройках.</div>
         </div>
 
-        <template v-else>
+        <LoadingSpinner v-else-if="!coversReady" key="gate-spinner" />
+
+        <div v-else class="searchResults" key="gate-results">
             <!-- Artists -->
             <section v-if="artistResults.length > 0" class="pageLine">
                 <div class="lineHat">
@@ -734,7 +760,8 @@ function scrollToTop() {
                     </div>
                 </div>
             </section>
-        </template>
+        </div>
+        </Transition>
 
         <TrackContextMenu
             v-if="trackMenu"

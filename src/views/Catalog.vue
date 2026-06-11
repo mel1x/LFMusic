@@ -22,7 +22,9 @@ import TrackArtists from '../components/TrackArtists.vue';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
+import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useCoverGate } from '../composables/useCoverGate';
 
 const {
     trackList,
@@ -186,6 +188,9 @@ const {
 watch([debouncedSearch, selectedGenre], () => {
     resetScroll()
 })
+
+// Hold back first paint until the first 20 covers have resolved.
+const { ready: coversReady } = useCoverGate(() => filteredTracks.value.slice(0, 20))
 
 // Load covers for visible tracks (skip during scroll-to-top)
 const isScrollingToTop = ref(false)
@@ -390,9 +395,12 @@ function onCoverImgClick() {
                 </button>
             </div>
         </div>
+        <Transition name="gate-fade" mode="out-in">
+        <LoadingSpinner v-if="filteredTracks.length > 0 && !coversReady" key="gate-spinner" />
         <div
             class="tracksList"
-            v-if="filteredTracks.length > 0"
+            v-else-if="filteredTracks.length > 0"
+            key="gate-list"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
             <div
@@ -440,17 +448,18 @@ function onCoverImgClick() {
             </div>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
-        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0">
+        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0" key="gate-empty-search">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Ничего не найдено</div>
             <div class="emptyDesc">Попробуйте изменить критерии поиска или добавить папки с треками в настройках.</div>
         </div>
-        <div class="emptyState" v-else-if="trackList.length === 0">
+        <div class="emptyState" v-else-if="trackList.length === 0" key="gate-empty-lib">
             <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
             <div class="emptyText">Нет треков в каталоге</div>
             <div class="emptyDesc">Добавьте папки с треками в настройках, чтобы они появились здесь.</div>
             <RouterLink to="/settings" class="emptyBtn">Настройки</RouterLink>
         </div>
+        </Transition>
         <CatalogContextMenu
             v-if="catalogMenu"
             :x="catalogMenu.x"

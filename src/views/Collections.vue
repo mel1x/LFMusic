@@ -15,7 +15,9 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePins } from '../composables/usePins';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
+import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useCoverGate } from '../composables/useCoverGate';
 
 const router = useRouter();
 const {
@@ -455,6 +457,24 @@ const visibleArtists = computed(() => sortedArtists.value.slice(0, visibleArtist
 
 watch([visibleSortedAlbums, visibleArtists], () => requestCoversForCards());
 
+// Hold back first paint until the first covers of each line have resolved, so
+// the cards don't visibly resize/flash while their covers stream in. The lines
+// stay mounted (just hidden) so they measure & request covers during the hold.
+const { ready: coversReady } = useCoverGate(() => {
+    const out: TrackMetadata[] = [];
+    const pushFirst = (path: string | null) => {
+        if (!path) return;
+        const t = getTrackByPath(path);
+        if (t) out.push(t);
+    };
+    // Cover enough of each row to fill a wide viewport so no cards visibly
+    // stream their covers in after the reveal.
+    for (const a of sortedAlbums.value.slice(0, 16)) pushFirst(a.firstPath);
+    for (const a of sortedArtists.value.slice(0, 16)) pushFirst(a.firstPath);
+    for (const pl of userPlaylists.value.slice(0, 16)) pushFirst(pl.first_file_path);
+    return out;
+}, { timeout: 10000 });
+
 const albumMenu = ref<{ x: number; y: number; album: AlbumEntry; centerX: boolean } | null>(null);
 
 function openAlbumMenu(e: MouseEvent, album: AlbumEntry) {
@@ -565,7 +585,12 @@ function scrollToTop() {
                 </div>
             </Transition>
         </div>
+        <Transition name="gate-fade">
+            <LoadingSpinner v-if="!coversReady" class="pageGateOverlay" />
+        </Transition>
         <h1 class="pageTitle">Коллекция</h1>
+        <div class="linesGate">
+        <div class="linesContent" :class="{ gateHidden: !coversReady }">
         <div class="pageLine">
             <div class="lineHat">
                 <div class="lineTitle" @click="router.push('/collections/playlists')">
@@ -749,6 +774,8 @@ function scrollToTop() {
                 </div>
             </div>
         </div>
+        </div>
+        </div>
         <PlaylistContextMenu
             v-if="playlistMenu"
             :x="playlistMenu.x"
@@ -808,6 +835,7 @@ function scrollToTop() {
 
 <style scoped>
 .pageRoot {
+    position: relative;
     padding: 20px 28px;
     display: flex;
     flex-direction: column;
@@ -820,6 +848,11 @@ function scrollToTop() {
     background-attachment: local;
 
     overflow-y: scroll;
+}
+.pageGateOverlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
 .pageRoot::-webkit-scrollbar-track { background: transparent; }
@@ -877,6 +910,25 @@ function scrollToTop() {
     font-size: 36px;
     color: #ffffff;
     margin-bottom: 48px;
+}
+.linesGate {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+.linesContent {
+    display: flex;
+    flex-direction: column;
+    transition: opacity 0.24s ease;
+}
+.linesContent.gateHidden {
+    opacity: 0;
+    pointer-events: none;
+    /* Take the content out of flow while hidden so .linesGate collapses to the
+       visible viewport height and the spinner centers in the viewframe. */
+    position: absolute;
+    inset: 0;
 }
 .pageLine {
     width: 100%;

@@ -14,7 +14,7 @@ import { usePlaylists } from '../composables/usePlaylists'
 import { useSettings } from '../composables/useSettings'
 import { createRipple } from '../composables/useRipple'
 import { isPhoneViewport } from '../composables/usePlatform'
-import { tracksCountText, splitArtistsList, listenCountText } from '../utils/format'
+import { tracksCountText, artistTagMatches, listenCountText } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue'
 import TrackArtists from '../components/TrackArtists.vue'
@@ -54,12 +54,7 @@ const artistName = computed(() => {
 const artistTracks = computed<TrackMetadata[]>(() => {
     const target = artistName.value
     const seps = settings.value.artist_separators
-    return trackList.value.filter(t => {
-        const a = (t.artist || '').trim()
-        if (!a) return false
-        if (a === target) return true
-        return splitArtistsList(a, seps).includes(target)
-    })
+    return trackList.value.filter(t => artistTagMatches(t.artist, target, seps))
 })
 
 const sourceId = computed(() => `artist:${artistName.value}`)

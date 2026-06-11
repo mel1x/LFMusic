@@ -6,6 +6,7 @@ mod pins;
 mod player_state;
 mod settings;
 pub mod statistics;
+mod taskbar;
 mod window_state;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
@@ -1110,6 +1111,27 @@ fn set_windows_priority_class() {
     }
 }
 
+#[tauri::command]
+fn taskbar_set_playing(app: tauri::AppHandle, playing: bool) {
+    taskbar::set_playing(&app, playing);
+}
+
+#[tauri::command]
+fn taskbar_set_modes(app: tauri::AppHandle, shuffled: bool, repeat_track: bool) {
+    taskbar::set_modes(&app, shuffled, repeat_track);
+}
+
+#[tauri::command]
+fn taskbar_set_covers(
+    app: tauri::AppHandle,
+    prev: Option<String>,
+    current: Option<String>,
+    next: Option<String>,
+    transition: String,
+) {
+    taskbar::set_covers(&app, prev, current, next, transition);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -1125,6 +1147,14 @@ pub fn run() {
                 .expect("Не удалось получить директорию данных приложения");
 
             window_state::restore_main_window_geometry(app, &app_data_dir);
+
+            // Интеграция с панелью задач Windows (кнопки + обложка-превью).
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(hwnd) = window.hwnd() {
+                    taskbar::init(&app.handle().clone(), hwnd.0 as isize);
+                }
+            }
 
             let app_settings = settings::load(&app_data_dir);
 
@@ -1153,6 +1183,29 @@ pub fn run() {
             }
 
             app.manage(LibraryState(Mutex::new(library)));
+
+            // Акцентные цвета кастомных обложек, сброшенные миграцией на новый
+            // алгоритм, пересчитываем в фоне — не задерживая запуск окна.
+            // Декодирование изображений идёт без удержания лока библиотеки.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let pending = {
+                    let state = handle.state::<LibraryState>();
+                    let Ok(lib) = state.0.lock() else { return };
+                    lib.get_override_covers_without_accent()
+                };
+                for (file_path, data_url) in pending {
+                    let Some(b64) = data_url.split(',').nth(1) else { continue };
+                    let Ok(bytes) = STANDARD.decode(b64) else { continue };
+                    let Some(color) = audio_player::extract_accent_color(&bytes) else {
+                        continue;
+                    };
+                    let state = handle.state::<LibraryState>();
+                    let Ok(lib) = state.0.lock() else { continue };
+                    let _ = lib.set_override_accent_color(&file_path, &color);
+                }
+            });
+
             Ok(())
         })
         .manage(PlayerState(RwLock::new(player)))
@@ -1238,6 +1291,13 @@ pub fn run() {
             track_clear_all_overrides,
             get_original_track,
             read_image_as_data_url,
+            // Окно
+            window_state::toggle_window_fullscreen,
+            window_state::toggle_window_maximize,
+            // Панель задач (Windows)
+            taskbar_set_playing,
+            taskbar_set_modes,
+            taskbar_set_covers,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -27,7 +27,9 @@ import { usePins } from '../composables/usePins';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
+import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useCoverGate } from '../composables/useCoverGate';
 
 const route = useRoute()
 const router = useRouter()
@@ -191,6 +193,9 @@ watch(debouncedSearch, () => resetScroll())
 
 const isScrollingToTop = ref(false)
 
+// Hold back first paint until the first 20 covers have resolved.
+const { ready: coversReady } = useCoverGate(() => filteredTracks.value.slice(0, 20))
+
 watch(visibleTracks, (tracks) => {
     if (!isScrollingToTop.value) {
         loadCoversForTracks(tracks)
@@ -273,8 +278,9 @@ async function onRemoveFromPlaylist(track: TrackMetadata) {
     await removeTrackFromPlaylist(playlistId.value, track.file_path)
 }
 
-// «Поднять» доступно только когда этот плейлист является активным источником.
-const canMoveToTop = computed(() => isPlaylistActive.value)
+// «Поднять» доступно всегда в плейлисте — порядок воспроизведения
+// пересинхронизируется только если этот плейлист сейчас активный источник.
+const canMoveToTop = computed(() => true)
 
 async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
     const idx = playlistTrackPaths.value.indexOf(track.file_path)
@@ -458,9 +464,12 @@ function onCoverImgClick() {
                 </div>
             </div>
         </div>
+        <Transition name="gate-fade" mode="out-in">
+        <LoadingSpinner v-if="filteredTracks.length > 0 && !coversReady" key="gate-spinner" />
         <div
             class="tracksList"
-            v-if="filteredTracks.length > 0"
+            v-else-if="filteredTracks.length > 0"
+            key="gate-list"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
             <div
@@ -506,17 +515,18 @@ function onCoverImgClick() {
             </div>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
-        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0">
+        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0" key="gate-empty-search">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Ничего не найдено</div>
             <div class="emptyDesc">Попробуйте изменить критерии поиска.</div>
         </div>
-        <div class="emptyState" v-else>
+        <div class="emptyState" v-else key="gate-empty">
             <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
             <div class="emptyText">В плейлисте пока нет треков</div>
             <div class="emptyDesc">Добавьте треки через контекстное меню в каталоге.</div>
             <button class="emptyAction" @click="router.push('/catalog')">Добавить треки</button>
         </div>
+        </Transition>
         <TrackContextMenu
             v-if="trackMenu"
             :key="trackMenu.track.file_path"

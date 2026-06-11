@@ -17,7 +17,9 @@ import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
+import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useCoverGate } from '../composables/useCoverGate';
 
 const router = useRouter();
 const { userPlaylists, loadPlaylists, createPlaylist, getPlaylistTracks, deletePlaylist, movePlaylistToTop } = usePlaylists();
@@ -81,6 +83,14 @@ const filteredPlaylists = computed(() => {
     if (!q) return userPlaylists.value;
     return searchRanked(userPlaylists.value, q, (p) => [p.name]);
 });
+
+// Hold back first paint until the first 30 covers have resolved.
+const { ready: coversReady } = useCoverGate(() =>
+    filteredPlaylists.value
+        .slice(0, 30)
+        .map(p => (p.first_file_path ? getTrackByPath(p.first_file_path) : undefined))
+        .filter((t): t is TrackMetadata => !!t),
+);
 
 // ── Lazy cover loading ─────────────────────────────────────────────────────
 // Single IntersectionObserver whose `root` is the actual scroll container
@@ -361,7 +371,11 @@ function scrollToTop() {
                 </svg>
             </div>
         </div>
-        <div class="grid" v-if="filteredPlaylists.length > 0 || !debouncedSearch" ref="gridEl">
+        <div class="gridGate" v-if="filteredPlaylists.length > 0 || !debouncedSearch">
+            <Transition name="gate-fade">
+                <LoadingSpinner v-if="!coversReady" class="gateOverlay" />
+            </Transition>
+            <div class="grid" :class="{ gateHidden: !coversReady }" ref="gridEl">
             <div v-if="!debouncedSearch" class="createPlaylistItem" @click="onCreatePlaylist">
                 <div class="cover"><PlusIcon width="64px" height="64px" stroke-width="1.1" /></div>
                 <div class="title">Новый плейлист</div>
@@ -413,6 +427,7 @@ function scrollToTop() {
                     <div v-truncate class="title">{{ pl.name }}</div>
                 </div>
             </TransitionGroup>
+            </div>
         </div>
         <div class="emptyState" v-else>
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
@@ -615,12 +630,30 @@ function scrollToTop() {
     font-weight: 600;
 }
 
+.gridGate {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+.gateOverlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1;
+}
 .grid {
     --card-w: 200px;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr));
     gap: 24px 16px;
     padding-bottom: 24px;
+    transition: opacity 0.24s ease;
+}
+.grid.gateHidden {
+    opacity: 0;
+    pointer-events: none;
 }
 
 .createPlaylistItem {

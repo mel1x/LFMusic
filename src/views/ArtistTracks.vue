@@ -16,7 +16,7 @@ import { createRipple } from '../composables/useRipple'
 import { isPhoneViewport } from '../composables/usePlatform'
 import { useVirtualScroll } from '../composables/useVirtualScroll'
 import { searchRanked } from '../composables/useSearch'
-import { tracksCountText, splitArtistsList } from '../utils/format'
+import { tracksCountText, artistTagMatches } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import TrackArtists from '../components/TrackArtists.vue'
 import CoverEditor from '../components/CoverEditor.vue'
@@ -49,12 +49,7 @@ const { settings } = useSettings()
 const artistTracks = computed<TrackMetadata[]>(() => {
     const target = artistName.value
     const seps = settings.value.artist_separators
-    return trackList.value.filter(t => {
-        const a = (t.artist || '').trim()
-        if (!a) return false
-        if (a === target) return true
-        return splitArtistsList(a, seps).includes(target)
-    })
+    return trackList.value.filter(t => artistTagMatches(t.artist, target, seps))
 })
 
 const sourceId = computed(() => `artist:${artistName.value}`)

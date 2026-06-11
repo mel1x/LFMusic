@@ -26,6 +26,8 @@ pub struct SavedWindowGeometry {
     pub height: u32,
     #[serde(default)]
     pub fullscreen: bool,
+    #[serde(default)]
+    pub maximized: bool,
     pub monitor: MonitorSnapshot,
 }
 
@@ -139,9 +141,20 @@ fn current_window_geometry(
     previous: Option<SavedWindowGeometry>,
 ) -> Result<SavedWindowGeometry, String> {
     let fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
-    if fullscreen {
+    let maximized = window.is_maximized().map_err(|e| e.to_string())?;
+
+    // В полноэкранном (F11) или развёрнутом режиме физические position/size
+    // отражают размеры на весь экран — их нельзя сохранять как «нормальную»
+    // геометрию, иначе при выходе из режима окну не к чему будет вернуться.
+    // Поэтому сохраняем предыдущую нормальную геометрию, обновляя только флаги
+    // и текущий монитор.
+    if fullscreen || maximized {
         if let Some(mut state) = previous {
-            state.fullscreen = true;
+            state.fullscreen = fullscreen;
+            state.maximized = maximized;
+            if let Ok(Some(monitor)) = window.current_monitor() {
+                state.monitor = monitor_snapshot(&monitor);
+            }
             return Ok(state);
         }
     }
@@ -161,6 +174,7 @@ fn current_window_geometry(
         width: size.width,
         height: size.height,
         fullscreen,
+        maximized,
         monitor,
     })
 }
@@ -169,6 +183,57 @@ fn save_current_window_geometry(window: &WebviewWindow, app_data_dir: &Path) -> 
     let state = current_window_geometry(window, load(app_data_dir))?;
     if is_geometry_valid(state.x, state.y, state.width, state.height) {
         save(app_data_dir, &state)?;
+    }
+    Ok(())
+}
+
+/// Переключить полноэкранный режим главного окна (F11).
+///
+/// Прямой переход из развёрнутого (maximized) состояния в fullscreen на Windows
+/// вызывает рассинхрон состояния окна (лаги, «сломанный» fullscreen), поэтому
+/// перед входом снимаем maximized. При этом сохраняем тот же размер и позицию
+/// окна, чтобы оно не «прыгало» к старой свёрнутой геометрии — после выхода из
+/// fullscreen окно останется ровно там же. Делается на стороне Rust одним
+/// вызовом, чтобы избежать нескольких медленных IPC-переходов.
+#[tauri::command]
+pub fn toggle_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
+    let is_fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
+    if is_fullscreen {
+        window.set_fullscreen(false).map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        if window.is_maximized().map_err(|e| e.to_string())? {
+            let position = window.outer_position().map_err(|e| e.to_string())?;
+            let size = window.outer_size().map_err(|e| e.to_string())?;
+            window.unmaximize().map_err(|e| e.to_string())?;
+            window
+                .set_position(Position::Physical(PhysicalPosition::new(position.x, position.y)))
+                .map_err(|e| e.to_string())?;
+            window
+                .set_size(Size::Physical(PhysicalSize::new(size.width, size.height)))
+                .map_err(|e| e.to_string())?;
+        }
+        window.set_fullscreen(true).map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}
+
+/// Переключить развёрнутое состояние главного окна (клик по «развернуть» в шапке).
+///
+/// Если окно в полноэкранном режиме (F11) — выходим из него и разворачиваем окно
+/// (выключение F11 + maximize). В остальных случаях — обычное переключение
+/// maximized.
+#[tauri::command]
+pub fn toggle_window_maximize(window: WebviewWindow) -> Result<(), String> {
+    if window.is_fullscreen().map_err(|e| e.to_string())? {
+        window.set_fullscreen(false).map_err(|e| e.to_string())?;
+        window.maximize().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    if window.is_maximized().map_err(|e| e.to_string())? {
+        window.unmaximize().map_err(|e| e.to_string())?;
+    } else {
+        window.maximize().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -195,8 +260,12 @@ pub fn restore_main_window_geometry(app: &tauri::App, app_data_dir: &Path) {
             geometry.x, geometry.y,
         )));
     }
+    // Режимы взаимоисключающие: fullscreen имеет приоритет. Одновременная
+    // установка maximized + fullscreen на Windows ломает состояние окна.
     if saved_state.as_ref().is_some_and(|state| state.fullscreen) {
         let _ = window.set_fullscreen(true);
+    } else if saved_state.as_ref().is_some_and(|state| state.maximized) {
+        let _ = window.maximize();
     }
 
     let app_data_dir = app_data_dir.to_path_buf();
@@ -244,6 +313,7 @@ mod tests {
             width: 1200,
             height: 720,
             fullscreen: false,
+            maximized: false,
             monitor: monitor("DISPLAY2", 1920, 0, 2560, 1440),
         };
         let monitors = [
@@ -272,6 +342,7 @@ mod tests {
             width: 1200,
             height: 720,
             fullscreen: false,
+            maximized: false,
             monitor: monitor("DISPLAY2", 1920, 0, 2560, 1440),
         };
         let monitors = [monitor("DISPLAY1", 0, 0, 1920, 1080)];
@@ -297,6 +368,7 @@ mod tests {
             width: 1200,
             height: 720,
             fullscreen: true,
+            maximized: false,
             monitor: monitor("DISPLAY1", 0, 0, 1920, 1080),
         };
 
@@ -325,6 +397,28 @@ mod tests {
         let saved: SavedWindowGeometry = serde_json::from_str(json).unwrap();
 
         assert!(!saved.fullscreen);
+        assert!(!saved.maximized);
+    }
+
+    #[test]
+    fn serializes_and_restores_maximized_state() {
+        let saved = SavedWindowGeometry {
+            x: 10,
+            y: 20,
+            width: 1200,
+            height: 720,
+            fullscreen: false,
+            maximized: true,
+            monitor: monitor("DISPLAY1", 0, 0, 1920, 1080),
+        };
+
+        let json = serde_json::to_string(&saved).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["maximized"], true);
+
+        let restored: SavedWindowGeometry = serde_json::from_str(&json).unwrap();
+        assert!(restored.maximized);
+        assert!(!restored.fullscreen);
     }
 
     #[test]
@@ -335,6 +429,7 @@ mod tests {
             width: 200,
             height: 41,
             fullscreen: false,
+            maximized: false,
             monitor: monitor("DISPLAY1", 0, 0, 1920, 1080),
         };
         let monitors = [monitor("DISPLAY1", 0, 0, 1920, 1080)];
