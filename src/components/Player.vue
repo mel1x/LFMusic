@@ -1723,21 +1723,22 @@ function openQfCoverMenu(e: MouseEvent) {
    ползунок ходит вертикально и нормально тянется. Если движок slider-vertical не
    поддерживает — остаётся безопасный горизонтальный вариант (writing-mode не трогаем). */
 :global(.lfmusic-webkit) .volume-slider {
-    -webkit-appearance: slider-vertical;
-    appearance: slider-vertical;
-    writing-mode: horizontal-tb;
+    -webkit-appearance: none;
+    appearance: none;
+    writing-mode: vertical-rl;
     direction: ltr;
-    width: 26px;
+    width: 8px;
     height: 140px;
-    accent-color: #fff;
-    background: transparent;
+    border-radius: 4px;
+    background: linear-gradient(to top, #fff var(--val, 50%), #ffffff20 var(--val, 50%));
 }
 :global(.lfmusic-webkit) .volume-slider::-webkit-slider-thumb {
-    -webkit-appearance: auto;
-    appearance: auto;
-    width: auto;
-    height: auto;
-    background: none !important;
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff !important;
 }
 .botPart:has(.volumeControl:hover) {
     z-index: 100001;
