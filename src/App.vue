@@ -840,14 +840,6 @@ body {
   overflow: hidden;
   transition: .24s ease;
 }
-/* WebKitGTK (десктоп Linux) глючит с `background-attachment: local` на
-   скролл-контейнерах — фон (и цвет, и градиент) не отрисовывается и область
-   становится чёрной. На этом движке возвращаем обычное поведение фона.
-   Класс lfmusic-webkit вешается на html/body в updateRuntimeClasses(). */
-.lfmusic-webkit .pageRoot,
-.lfmusic-webkit .frameWrapper {
-  background-attachment: scroll !important;
-}
 .hat {
   display: flex;
   flex-direction: row;
