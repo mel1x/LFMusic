@@ -289,8 +289,8 @@ onUnmounted(() => {
     position: fixed;
     top: 0;
     left: 0;
-    width: calc(100vw / var(--ui-scale, 1));
-    height: calc(100vh / var(--ui-scale, 1));
+    width: calc(100vw / var(--overlay-scale, 1));
+    height: calc(100vh / var(--overlay-scale, 1));
     z-index: 1000001;
     display: flex;
     align-items: center;

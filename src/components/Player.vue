@@ -35,6 +35,7 @@ import { createRipple } from '../composables/useRipple';
 import { isPhoneViewport } from '../composables/usePlatform';
 import { useI18n } from '../composables/useI18n';
 import { useAndroidMediaSession } from '../composables/useAndroidMediaSession';
+import { useLinuxMediaSession } from '../composables/useLinuxMediaSession';
 import { isCoverResolved } from '../composables/useCoverLoader';
 
 const win = getCurrentWindow();
@@ -84,6 +85,17 @@ const {
 } = usePlayer();
 
 useAndroidMediaSession({
+    currentTrack,
+    currentCoverArt,
+    playbackState,
+    positionSecs,
+    durationSecs,
+    playPrev,
+    playNext,
+    togglePlayPause,
+});
+
+useLinuxMediaSession({
     currentTrack,
     currentCoverArt,
     playbackState,
@@ -1702,6 +1714,29 @@ function openQfCoverMenu(e: MouseEvent) {
     border-radius: 50%;
     background: #fff !important;
 }
+/* WebKitGTK (Linux) / WKWebView некорректно обрабатывают вертикальный range
+   через writing-mode + direction: rtl — ползунок «улетает» и мышью не тянется.
+   Поэтому там делаем горизонтальный слайдер и поворачиваем его на -90°.
+   Поп-ап получает фиксированный размер, чтобы повёрнутый бокс (140×32 → 32×140)
+   не распирал контейнер. */
+:global(.lfmusic-webkit) .volumeSliderPopup {
+    width: 36px;
+    height: 172px;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+:global(.lfmusic-webkit) .volume-slider {
+    writing-mode: horizontal-tb;
+    direction: ltr;
+    width: 140px;
+    height: 32px;
+    flex: none;
+    transform: rotate(-90deg);
+    background:
+        linear-gradient(to right, #fff var(--val, 50%), #ffffff20 var(--val, 50%)) center / 100% 4px no-repeat,
+        var(--dark-bg);
+}
 .botPart:has(.volumeControl:hover) {
     z-index: 100001;
 }
@@ -1736,8 +1771,8 @@ function openQfCoverMenu(e: MouseEvent) {
     position: fixed;
     top: 0;
     left: 0;
-    width: calc(100vw / var(--ui-scale, 1));
-    height: calc(100vh / var(--ui-scale, 1));
+    width: calc(100vw / var(--overlay-scale, 1));
+    height: calc(100vh / var(--overlay-scale, 1));
     z-index: 999999;
     display: flex;
     align-items: center;

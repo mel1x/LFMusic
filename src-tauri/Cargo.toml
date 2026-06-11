@@ -31,6 +31,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rayon = "1.10"
 
+# Системное медиа-управление на Linux (MPRIS). use_zbus — чистый Rust,
+# без системной зависимости libdbus.
+[target.'cfg(target_os = "linux")'.dependencies]
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",

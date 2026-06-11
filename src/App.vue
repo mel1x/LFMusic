@@ -20,7 +20,7 @@ import { useFolders } from './composables/useFolders';
 import { useCustomCovers } from './composables/useCustomCovers';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
-import { isAndroidRuntime, isPhoneViewport, updateRuntimeClasses } from './composables/usePlatform';
+import { isAndroidRuntime, isPhoneViewport, isWebKitRuntime, updateRuntimeClasses } from './composables/usePlatform';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
@@ -89,14 +89,42 @@ function resetUiScale() {
   body.style.width = '100vw';
   body.style.height = '100dvh';
   document.documentElement.style.setProperty('--ui-scale', '1');
+  document.documentElement.style.setProperty('--overlay-scale', '1');
   (window as any).__uiScale = 1;
+}
+
+// Полноэкранные fixed-оверлеи (модалки, затемнённые фоны) масштабируем через
+// отдельную переменную --overlay-scale. В Chromium (WebView2) `zoom` не влияет на
+// vw, поэтому 100vw-оверлей внутри отмасштабированного body перекрывает вьюпорт в
+// `scale` раз — делим на это. Замеряем коэффициент напрямую, а не берём scale
+// вслепую. (На WebKitGTK zoom не используется вовсе — там путь resetUiScale.)
+function measureOverlayScale(fallback: number) {
+  let divisor = fallback;
+  try {
+    const probe = document.createElement('div');
+    probe.style.cssText =
+      'position:fixed;left:0;top:0;width:100vw;height:0;visibility:hidden;pointer-events:none;margin:0;padding:0;border:0';
+    document.body.appendChild(probe);
+    const measured = probe.getBoundingClientRect().width;
+    document.body.removeChild(probe);
+    const vw = window.innerWidth;
+    if (measured > 0 && vw > 0) divisor = measured / vw;
+  } catch {
+    // На ошибке оставляем fallback (scale) — поведение как раньше.
+  }
+  if (!isFinite(divisor) || divisor <= 0) divisor = fallback;
+  document.documentElement.style.setProperty('--overlay-scale', String(divisor));
 }
 
 function applyUiScale() {
   resizeRaf = null;
   updateRuntimeClasses();
 
-  if (isPhoneViewport()) {
+  // WebKitGTK (десктоп Linux) не поддерживает CSS `zoom` так же, как WebView2:
+  // body масштабируется некорректно — интерфейс «сжимается» в левый верхний угол.
+  // Поэтому на этом движке не зумим вовсе, а рендерим 1:1 во весь вьюпорт
+  // (auto-масштабирование UI под размер окна на Linux отключается осознанно).
+  if (isPhoneViewport() || isWebKitRuntime()) {
     resetUiScale();
     return;
   }
@@ -111,6 +139,7 @@ function applyUiScale() {
   body.style.height = (h / scale) + 'px';
   document.documentElement.style.setProperty('--ui-scale', String(scale));
   (window as any).__uiScale = scale;
+  measureOverlayScale(scale);
 }
 
 function scheduleUiScale() {
@@ -1011,8 +1040,8 @@ body {
   position: fixed;
   top: 0;
   left: 0;
-  width: calc(100vw / var(--ui-scale, 1));
-  height: calc(100vh / var(--ui-scale, 1));
+  width: calc(100vw / var(--overlay-scale, 1));
+  height: calc(100vh / var(--overlay-scale, 1));
   z-index: 1000001;
   display: flex;
   align-items: center;
@@ -1549,8 +1578,8 @@ body {
   position: fixed;
   top: 0;
   left: 0;
-  width: calc(100vw / var(--ui-scale, 1));
-  height: calc(100dvh / var(--ui-scale, 1));
+  width: calc(100vw / var(--overlay-scale, 1));
+  height: calc(100dvh / var(--overlay-scale, 1));
   background-color: rgba(0, 0, 0, 0.7);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
