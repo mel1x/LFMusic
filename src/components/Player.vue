@@ -1722,21 +1722,33 @@ function openQfCoverMenu(e: MouseEvent) {
    WebKit (appearance: slider-vertical) с белым accent-color: без трансформов,
    ползунок ходит вертикально и нормально тянется. Если движок slider-vertical не
    поддерживает — остаётся безопасный горизонтальный вариант (writing-mode не трогаем). */
+/* На WebKitGTK вертикальный слайдер невозможен: slider-vertical игнорируется,
+   а writing-mode/transform включают ускоренную композицию и поворачивают всю
+   страницу (баг AMD/Wayland). Поэтому делаем ГОРИЗОНТАЛЬНЫЙ нативный range —
+   он там работает корректно (как qf-volume-slider) и ничего не поворачивает.
+   Поп-ап превращаем в горизонтальную плашку. */
+:global(.lfmusic-webkit) .volumeSliderPopup {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 14px;
+    border-radius: 999px;
+    bottom: calc(100% + 8px);
+}
 :global(.lfmusic-webkit) .volume-slider {
-    -webkit-appearance: none;
-    appearance: none;
-    writing-mode: vertical-rl;
+    writing-mode: horizontal-tb;
     direction: ltr;
-    width: 8px;
-    height: 140px;
-    border-radius: 4px;
-    background: linear-gradient(to top, #fff var(--val, 50%), #ffffff20 var(--val, 50%));
+    width: 120px;
+    height: 5px;
+    flex: none;
+    border-radius: 3px;
+    background: linear-gradient(to right, #fff var(--val, 50%), #ffffff25 var(--val, 50%));
 }
 :global(.lfmusic-webkit) .volume-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 14px;
-    height: 14px;
+    width: 13px;
+    height: 13px;
     border-radius: 50%;
     background: #fff !important;
 }
