@@ -370,7 +370,7 @@ function onSeparatorKey(e: KeyboardEvent) {
                 <template v-for="item in settingItems" :key="item.key">
                     <label
                         class="settingElem"
-                        :class="{ phoneHiddenSetting: item.key === 'show_player_extra_block' }"
+                        :class="{ phoneHiddenSetting: item.key === 'show_player_extra_block' || item.key === 'discord_rpc_enabled' }"
                     >
                         <input type="checkbox" class="settingCheckbox"
                             :checked="settings[item.key]"

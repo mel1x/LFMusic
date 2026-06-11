@@ -1,6 +1,7 @@
 mod audio_features;
 mod audio_player;
 mod covers;
+mod discord_rpc;
 mod library;
 mod mpris;
 mod pins;
@@ -1151,6 +1152,19 @@ fn mpris_update_playback(state: String, position_secs: f64) {
     mpris::update_playback(&state, position_secs);
 }
 
+// ── Discord Rich Presence ─────────────────────────────────────────────────────
+
+// async — IPC с клиентом Discord (пайп/сокет) не должен блокировать main thread.
+#[tauri::command(async)]
+fn discord_update_presence(payload: discord_rpc::PresencePayload) -> bool {
+    discord_rpc::update_presence(payload)
+}
+
+#[tauri::command(async)]
+fn discord_clear_presence() {
+    discord_rpc::clear_presence();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -1331,6 +1345,9 @@ pub fn run() {
             // Системное медиа-управление (MPRIS, Linux)
             mpris_update_metadata,
             mpris_update_playback,
+            // Discord Rich Presence
+            discord_update_presence,
+            discord_clear_presence,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

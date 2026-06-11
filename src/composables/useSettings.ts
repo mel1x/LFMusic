@@ -20,6 +20,7 @@ export const settingItems = [
     { key: 'show_player_extra_block',  label: 'Отображение дополнительного блока у плеера', default: false },
     { key: 'show_github_badge',        label: 'Бейдж github в шапке',                       default: true },
     { key: 'dynamic_accent_color',     label: 'Динамический акцентный цвет',                default: true },
+    { key: 'discord_rpc_enabled',      label: 'Отображение в статусе discord',              default: true },
 ] as const
 
 export type SettingKey = typeof settingItems[number]['key']

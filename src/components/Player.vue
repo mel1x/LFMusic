@@ -36,6 +36,7 @@ import { isPhoneViewport, isWebKitRuntime } from '../composables/usePlatform';
 import { useI18n } from '../composables/useI18n';
 import { useAndroidMediaSession } from '../composables/useAndroidMediaSession';
 import { useLinuxMediaSession } from '../composables/useLinuxMediaSession';
+import { useDiscordRpc } from '../composables/useDiscordRpc';
 import { isCoverResolved } from '../composables/useCoverLoader';
 
 const win = getCurrentWindow();
@@ -144,6 +145,22 @@ const queueSourceName = computed(() => {
     }
     if (src.startsWith('search:')) return 'Поиска по каталогу';
     return 'Моей каталог';
+});
+
+// Подпись источника для Discord — как queueSourceName, но в именительном
+// падеже (queueSourceName согласован с префиксом «Сейчас играет из…»).
+const discordSourceLabel = computed(() => {
+    const src = activePlaylistSource.value;
+    if (src?.startsWith('search:')) return 'Поиск по каталогу';
+    return queueSourceName.value;
+});
+
+useDiscordRpc({
+    currentTrack,
+    playbackState,
+    positionSecs,
+    durationSecs,
+    sourceLabel: discordSourceLabel,
 });
 
 watch(
