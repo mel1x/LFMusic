@@ -106,6 +106,14 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
+// Любое целевое действие над результатами (воспроизведение, открытие,
+// разворачивание секции) означает, что текущий запрос оказался полезным —
+// сохраняем его в подсказки. Сам ввод/выбор подсказки сюда не входит.
+function rememberCurrentSearch() {
+    const trimmed = rawSearch.value.trim()
+    if (trimmed) addPastSearch(trimmed)
+}
+
 const query = computed(() => debouncedSearch.value.trim())
 const hasQuery = computed(() => !!query.value)
 
@@ -225,6 +233,7 @@ onUnmounted(() => {
 })
 
 function openArtist(a: ArtistResult) {
+    rememberCurrentSearch()
     router.push(`/artist/${encodeURIComponent(a.name)}`)
 }
 
@@ -256,6 +265,7 @@ const albumResults = computed<AlbumResult[]>(() => {
 })
 
 function openAlbum(a: AlbumResult) {
+    rememberCurrentSearch()
     router.push(`/album/${encodeURIComponent(a.name)}`)
 }
 
@@ -276,6 +286,7 @@ async function onPlayAlbum(e: MouseEvent, a: AlbumResult) {
     const map = new Map(trackList.value.map(t => [t.file_path, t]))
     const merged = tracks.map(t => map.get(t.file_path) ?? t)
     setPlaylistSource(sourceId, merged)
+    rememberCurrentSearch()
     await playTrack(merged[0], { searchStart: true })
 }
 
@@ -310,6 +321,7 @@ function onTrackCoverClick(track: TrackMetadata) {
         togglePlayPause()
         return
     }
+    rememberCurrentSearch()
     setPlaylistSource(trackSourceId.value, trackResults.value)
     playTrack(track, { searchStart: true, manualListStart: true })
 }
@@ -330,6 +342,7 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
         trackMenu.value = null
         return
     }
+    rememberCurrentSearch()
     const btn = e.currentTarget as HTMLElement
     const rect = btn.getBoundingClientRect()
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
@@ -407,6 +420,7 @@ watch(playlistResults, async (list) => {
 }, { immediate: true })
 
 function openPlaylist(pl: PlaylistInfo) {
+    rememberCurrentSearch()
     router.push(`/playlist/${pl.id}`)
 }
 
@@ -427,6 +441,7 @@ async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     const map = new Map(trackList.value.map(t => [t.file_path, t]))
     const merged = tracks.map(t => map.get(t.file_path) ?? t)
     setPlaylistSource(sourceId, merged)
+    rememberCurrentSearch()
     await playTrack(merged[0], { searchStart: true })
 }
 
@@ -616,7 +631,7 @@ function scrollToTop() {
                     >
                         <button
                             class="moreArtistsBtn"
-                            @click="artistsExpanded = !artistsExpanded"
+                            @click="artistsExpanded = !artistsExpanded; if (artistsExpanded) rememberCurrentSearch()"
                         >
                             <span class="moreArtistsLabel">{{ artistsExpanded ? 'Свернуть' : 'Показать всех' }}</span>
                             <span v-if="!artistsExpanded" class="moreArtistsCount">{{ artistResults.length }}</span>
@@ -717,7 +732,7 @@ function scrollToTop() {
                 <button
                     v-if="trackResults.length > 8"
                     class="moreTracksBtn"
-                    @click="tracksExpanded = !tracksExpanded"
+                    @click="tracksExpanded = !tracksExpanded; if (tracksExpanded) rememberCurrentSearch()"
                 >
                     {{ tracksExpanded ? 'Свернуть' : 'Больше' }}
                 </button>
@@ -1376,6 +1391,7 @@ function scrollToTop() {
 .playingAnim {
     position: absolute;
     left: 21px;
+    top: 21px;
     width: 16px;
     height: 16px;
     background: #fff;

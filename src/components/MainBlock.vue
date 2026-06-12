@@ -22,6 +22,7 @@ import { tracksCountText } from '../utils/format';
 const route = useRoute();
 const router = useRouter();
 const isCollectionsActive = computed(() => route.path.startsWith('/playlist') || route.path.startsWith('/album') || route.path.startsWith('/collections'));
+const isSettingsActive = computed(() => route.path.startsWith('/settings'));
 
 const { resolvedPins, unpin, movePinToTop, loadPins } = usePins();
 const { loadCoversForTracks, getTrackByPath } = usePlayer();
@@ -105,7 +106,7 @@ watch(resolvedPins, () => requestPinCovers());
         <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" /><span>Рекомендации</span></RouterLink>
         <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2.25" /><span>Коллекция</span></RouterLink>
         <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2.25" /><span>Каталог</span></RouterLink>
-        <RouterLink to="/settings" class="navLink"><SettingsIcon width="24" height="24" stroke-width="2.25" /><span>Настройки</span></RouterLink>
+        <RouterLink to="/settings" class="navLink" :class="{ 'router-link-active': isSettingsActive }"><SettingsIcon width="24" height="24" stroke-width="2.25" /><span>Настройки</span></RouterLink>
       </nav>
 
       <div class="pinsBlock" v-if="resolvedPins.length > 0">

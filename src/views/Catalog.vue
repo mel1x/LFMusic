@@ -457,7 +457,7 @@ function onCoverImgClick() {
             <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
             <div class="emptyText">Нет треков в каталоге</div>
             <div class="emptyDesc">Добавьте папки с треками в настройках, чтобы они появились здесь.</div>
-            <RouterLink to="/settings" class="emptyBtn">Настройки</RouterLink>
+            <RouterLink to="/settings/library" class="emptyBtn">Библиотека</RouterLink>
         </div>
         </Transition>
         <CatalogContextMenu
@@ -957,7 +957,8 @@ function onCoverImgClick() {
 }
 .playingAnim {
     position: absolute;
-    left: 19px;
+    left: 21px;
+    top: 21px;
     width: 16px;
     height: 16px;
     background: #fff;

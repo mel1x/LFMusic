@@ -593,9 +593,12 @@ function scrollToTop() {
         <div class="linesContent" :class="{ gateHidden: !coversReady }">
         <div class="pageLine">
             <div class="lineHat">
-                <div class="lineTitle" @click="router.push('/collections/playlists')">
-                    Мои плейлисты
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                <div class="lineTitleCol">
+                    <div class="lineTitle" @click="router.push('/collections/playlists')">
+                        Мои плейлисты
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                    </div>
+                    <div class="lineDesc">Подборки треков, собранные вами вручную</div>
                 </div>
                 <div class="lineControls">
                     <button class="prevBtn" :disabled="!playlistsLine.canPrev.value" @click="playlistsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
@@ -657,9 +660,12 @@ function scrollToTop() {
         </div>
         <div class="pageLine">
             <div class="lineHat">
-                <div class="lineTitle" @click="router.push('/collections/albums')">
-                    Альбомы
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                <div class="lineTitleCol">
+                    <div class="lineTitle" @click="router.push('/collections/albums')">
+                        Альбомы
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                    </div>
+                    <div class="lineDesc">Альбомы, найденные в вашей медиатеке</div>
                 </div>
                 <div class="lineControls">
                     <button class="prevBtn" :disabled="!albumsLine.canPrev.value" @click="albumsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
@@ -717,9 +723,12 @@ function scrollToTop() {
         </div>
         <div class="pageLine">
             <div class="lineHat">
-                <div class="lineTitle" @click="router.push('/collections/artists')">
-                    Исполнители
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                <div class="lineTitleCol">
+                    <div class="lineTitle" @click="router.push('/collections/artists')">
+                        Исполнители
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                    </div>
+                    <div class="lineDesc">Исполнители, найденные в вашей медиатеке</div>
                 </div>
                 <div class="lineControls">
                     <button class="prevBtn" :disabled="!artistsLine.canPrev.value" @click="artistsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
@@ -945,6 +954,20 @@ function scrollToTop() {
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
+}
+.lineTitleCol {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.lineDesc {
+    user-select: none;
+    color: hsla(0, 0%, 100%, 0.4);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.3;
+    margin-bottom: 6px;
 }
 .lineTitle {
     display: flex;

@@ -24,6 +24,10 @@ const routes = [
   { path: '/artist/:name', component: Artist, props: true },
   { path: '/artist/:name/tracks', component: ArtistTracks, props: true },
   { path: '/settings', component: () => import('./views/Settings.vue') },
+  { path: '/settings/appearance', component: () => import('./views/settings/Appearance.vue') },
+  { path: '/settings/playback', component: () => import('./views/settings/Playback.vue') },
+  { path: '/settings/library', component: () => import('./views/settings/Library.vue') },
+  { path: '/settings/general', component: () => import('./views/settings/General.vue') },
 ]
 
 export default createRouter({

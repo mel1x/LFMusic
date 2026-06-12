@@ -7,8 +7,10 @@ import { splitArtistsWithSeparators } from '../utils/format'
 const props = withDefaults(defineProps<{
     artist: string | null | undefined
     fallback?: string
+    tooltipPlacement?: 'auto' | 'top' | 'bottom'
 }>(), {
     fallback: 'Неизвестный исполнитель',
+    tooltipPlacement: 'auto',
 })
 
 const router = useRouter()
@@ -88,17 +90,35 @@ async function tryShowTooltip() {
     await nextTick()
     const tt = tooltipEl.value
     if (!tt) return
-    const ttW = tt.offsetWidth
-    const ttH = tt.offsetHeight
+    // getBoundingClientRect — визуальные (зумленные) координаты, как и rect выше;
+    // всё считаем в одном пространстве, затем делим на scale (тултип лежит в
+    // зумленном body). Иначе под зумом он уезжает (в т.ч. вниз при placement=top).
+    const ttRect = tt.getBoundingClientRect()
+    const ttW = ttRect.width
+    const ttH = ttRect.height
     const margin = 8
     let left = rect.left + rect.width / 2 - ttW / 2
-    let top = rect.top - ttH - margin
     if (left < margin) left = margin
     const maxLeft = window.innerWidth - ttW - margin
     if (left > maxLeft) left = Math.max(margin, maxLeft)
-    if (top < margin) top = rect.bottom + margin
-    tooltipLeft.value = left
-    tooltipTop.value = top
+
+    // Для принудительных сторон (плеер) держим тултип ближе к элементу — иначе
+    // на длинных артистах он висит слишком высоко.
+    const gap = props.tooltipPlacement === 'auto' ? margin : 3
+    const above = rect.top - ttH - gap
+    const below = rect.bottom + gap
+    let top: number
+    if (props.tooltipPlacement === 'top') {
+        top = Math.max(margin, above)
+    } else if (props.tooltipPlacement === 'bottom') {
+        top = below
+    } else {
+        top = above
+        if (top < margin) top = below
+    }
+    const scale = Number((window as any).__uiScale) || 1
+    tooltipLeft.value = left / scale
+    tooltipTop.value = top / scale
 }
 
 function onTriggerLeave() { scheduleHide() }
@@ -186,20 +206,19 @@ onUnmounted(() => {
     left: 0;
     top: 0;
     z-index: 1000001;
-    background: var(--dark-bg, #1a1a1a);
-    border: 1px solid hsla(0, 0%, 100%, 0.1);
-    border-radius: 8px;
-    padding: 6px 10px;
+    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+    border-radius: 12px;
+    padding: 7px 12px;
     font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 12px;
     font-weight: 500;
     line-height: 1.45;
-    color: hsla(0, 0%, 100%, 0.85);
+    color: hsla(0, 0%, 100%, 0.9);
     max-width: min(480px, calc(100vw - 24px));
     white-space: normal;
     word-break: break-word;
-    backdrop-filter: blur(12px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(17px);
+    box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
     user-select: none;
 }
 .ta-tt-link {

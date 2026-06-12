@@ -1026,6 +1026,7 @@ function onCoverImgClick() {
 .playingAnim {
     position: absolute;
     left: 21px;
+    top: 21px;
     width: 16px;
     height: 16px;
     background: #fff;

@@ -36,6 +36,30 @@ const loadingOriginal = ref(false)
 const saving = ref(false)
 const errorText = ref('')
 const modalCardEl = ref<HTMLElement | null>(null)
+
+// Поля «Название»/«Исполнитель» — это textarea, плавно растущие до 2 строк
+// при переполнении (вместо горизонтального скролла).
+const MAX_FIELD_LINES = 2
+function autoGrowField(el: HTMLTextAreaElement) {
+    el.style.height = 'auto'
+    const cs = getComputedStyle(el)
+    const lineHeight = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) * 1.35)
+    const extra = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+        + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth)
+    const maxH = lineHeight * MAX_FIELD_LINES + extra
+    el.style.height = Math.min(el.scrollHeight, maxH) + 'px'
+    el.style.overflowY = el.scrollHeight > maxH + 1 ? 'auto' : 'hidden'
+}
+const vAutogrow = {
+    mounted(el: HTMLTextAreaElement) { autoGrowField(el) },
+    updated(el: HTMLTextAreaElement) { autoGrowField(el) },
+}
+// Поля одно-строчные по смыслу — Enter не вставляет перенос (но Ctrl/⌘+Enter
+// всплывает в document-обработчик и сохраняет трек).
+function onFieldEnter(e: KeyboardEvent) {
+    if (e.ctrlKey || e.metaKey) return
+    e.preventDefault()
+}
 let sheetDragStartY = 0
 let sheetDragging = false
 
@@ -316,25 +340,29 @@ onUnmounted(() => {
                         <div class="fieldsColumn">
                             <label class="fieldGroup">
                                 <span class="fieldLabel">Название</span>
-                                <input
+                                <textarea
                                     v-model="titleInput"
-                                    type="text"
+                                    v-autogrow
+                                    rows="1"
                                     class="fieldInput"
                                     :placeholder="fileName"
                                     spellcheck="false"
                                     autocomplete="off"
-                                />
+                                    @keydown.enter="onFieldEnter"
+                                ></textarea>
                             </label>
                             <label class="fieldGroup">
                                 <span class="fieldLabel">Исполнитель</span>
-                                <input
+                                <textarea
                                     v-model="artistInput"
-                                    type="text"
+                                    v-autogrow
+                                    rows="1"
                                     class="fieldInput"
                                     placeholder="Неизвестный исполнитель"
                                     spellcheck="false"
                                     autocomplete="off"
-                                />
+                                    @keydown.enter="onFieldEnter"
+                                ></textarea>
                             </label>
                         </div>
                     </div>
@@ -596,15 +624,25 @@ onUnmounted(() => {
     user-select: none;
 }
 .fieldInput {
+    display: block;
+    box-sizing: border-box;
     width: 100%;
     padding: 10px 14px;
     border-radius: 12px;
     background-color: hsla(0, 0%, 100%, 0.04);
     color: hsla(0, 0%, 100%, 0.92);
+    font-family: inherit;
     font-size: 14px;
     font-weight: 500;
+    line-height: 1.35;
     border: 1px solid hsla(0, 0%, 100%, 0.04);
-    transition: background-color .18s ease, border-color .18s ease;
+    /* textarea, растущая до 2 строк: без ручного ресайза, с переносом по словам
+       и плавной анимацией высоты. */
+    resize: none;
+    overflow-y: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    transition: background-color .18s ease, border-color .18s ease, height .18s ease;
 }
 .fieldInput::placeholder {
     color: hsla(0, 0%, 100%, 0.3);

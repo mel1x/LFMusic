@@ -565,11 +565,13 @@ function createPlayer() {
       saveMixQueuePaths(tracks.map(t => t.file_path));
     }
     syncPlaybackOrder();
+    scheduleSaveState();
   }
 
   function toggleShuffle() {
     shuffled.value = !shuffled.value;
     syncPlaybackOrder();
+    scheduleSaveState();
   }
 
   function toggleRepeat() {
@@ -580,6 +582,7 @@ function createPlayer() {
         repeatEnabledCountDelta: 1,
       });
     }
+    scheduleSaveState();
   }
 
   // ── Computed ──────────────────────────────────────────────────────────────
@@ -794,6 +797,9 @@ function createPlayer() {
       beginStatsSession(metadata, 0, "Playing");
       recordTrackStartStatistics(metadata.file_path, options);
       showSettings.value = false;
+      // Источник/трек сменились — планируем сохранение (включение трека,
+      // переход по очереди, ручное переключение — всё проходит здесь).
+      scheduleSaveState();
     } catch (e: any) {
       // Удаляем недоступный трек из списка и пробуем следующий
       const failedIdx = trackList.value.findIndex(t => t.file_path === track.file_path);
@@ -892,6 +898,7 @@ function createPlayer() {
     const target = event.target as HTMLInputElement;
     const newVolume = parseFloat(target.value);
     volume.value = newVolume;
+    scheduleSaveState();
     try {
       await invoke("player_set_volume", { volume: newVolume });
     } catch (e: any) {
@@ -901,6 +908,7 @@ function createPlayer() {
 
   async function setVolume(newVolume: number) {
     volume.value = newVolume;
+    scheduleSaveState();
     try {
       await invoke("player_set_volume", { volume: newVolume });
     } catch (e: any) {
@@ -999,7 +1007,24 @@ function createPlayer() {
     }
   }
 
+  // Отложенное (debounced) сохранение состояния. При спаме событий
+  // (быстрое переключение треков, кручение громкости, навигация по страницам)
+  // перезаписываем только последний результат, а не каждое промежуточное.
+  let saveStateTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleSaveState() {
+    if (saveStateTimer) clearTimeout(saveStateTimer);
+    saveStateTimer = setTimeout(() => {
+      saveStateTimer = null;
+      void saveState();
+    }, 650);
+  }
+
   async function saveState() {
+    // Немедленное сохранение отменяет отложенное — оно уже неактуально.
+    if (saveStateTimer) {
+      clearTimeout(saveStateTimer);
+      saveStateTimer = null;
+    }
     await flushCurrentStatisticsProgress();
 
     // Вычисляем индекс текущего трека в источнике
@@ -1178,6 +1203,12 @@ function createPlayer() {
       startStatusPolling();
       startSmoothProgress();
     }
+
+    // Сохраняем открытую страницу при каждой навигации (debounced).
+    // Ставится после restoreState, чтобы восстановительный replace не сработал.
+    watch(() => router.currentRoute.value.path, () => {
+      scheduleSaveState();
+    });
 
     // Останавливаем поллинг, когда плеер не воспроизводит звук.
     stopStatusWatcher = watch(playbackState, (state: string) => {

@@ -15,12 +15,12 @@ function detectInitialLanguage(): Language {
 }
 
 export const settingItems = [
-    { key: 'crossfade_on_seek',        label: 'Плавная перемотка трека',                    default: true },
-    { key: 'crossfade_between_tracks', label: 'Плавный переход между треками',              default: true },
-    { key: 'show_player_extra_block',  label: 'Отображение дополнительного блока у плеера', default: false },
-    { key: 'show_github_badge',        label: 'Бейдж github в шапке',                       default: true },
-    { key: 'dynamic_accent_color',     label: 'Динамический акцентный цвет',                default: true },
-    { key: 'discord_rpc_enabled',      label: 'Отображение в статусе discord',              default: true },
+    { key: 'crossfade_on_seek',        label: 'Плавная перемотка трека',                    default: true,  description: 'При включении звучание трека будет плавно переходить при перемотке',                          warning: '' },
+    { key: 'crossfade_between_tracks', label: 'Плавный переход между треками',              default: true,  description: 'При включении звучание треков будет плавно переходить при переключении',                       warning: '' },
+    { key: 'show_player_extra_block',  label: 'Отображение дополнительного блока у плеера', default: false, description: 'Переключает отображение дополнительного блока слева от плеера',                                warning: 'Увеличивает потребление CPU примерно в x1.5-x4 раза' },
+    { key: 'show_github_badge',        label: 'Бейдж github в шапке',                       default: true,  description: 'Переключает отображение кнопки github в шапке приложения',                                     warning: '' },
+    { key: 'discord_rpc_enabled',      label: 'Отображение в статусе discord',              default: true,  description: 'При включении в вашем discord профиле будет отображаться информация о прослушивании',          warning: '' },
+    { key: 'dynamic_accent_color',     label: 'Динамическая цветовая тема',                 default: true,  description: 'Цвета интерфейса автоматически будут подстраиваться под обложку текущего трека',               warning: '' },
 ] as const
 
 export type SettingKey = typeof settingItems[number]['key']

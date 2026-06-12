@@ -575,9 +575,9 @@ function openQfCoverMenu(e: MouseEvent) {
                         />
                         <div class="asideMiniInfo">
                             <span class="asideVisualLabel">{{ t('player.now') }}</span>
-                            <span v-truncate class="asideVisualTitle">{{ trackTitle }}</span>
+                            <span v-truncate:top class="asideVisualTitle">{{ trackTitle }}</span>
                             <span class="asideVisualArtist">
-                                <TrackArtists :artist="currentTrack?.artist" />
+                                <TrackArtists :artist="currentTrack?.artist" tooltipPlacement="top" />
                             </span>
                         </div>
                     </div>
@@ -619,9 +619,9 @@ function openQfCoverMenu(e: MouseEvent) {
                     />
                     <div class="asideNextInfo">
                         <span class="asideNextLabel">{{ t('player.nextTrack') }}</span>
-                        <span v-truncate class="asideNextTitle">{{ nextTrackTitle }}</span>
+                        <span v-truncate:top class="asideNextTitle">{{ nextTrackTitle }}</span>
                         <span class="asideNextArtist">
-                            <TrackArtists :artist="nextTrack?.artist" />
+                            <TrackArtists :artist="nextTrack?.artist" tooltipPlacement="top" />
                         </span>
                     </div>
                 </button>
@@ -662,10 +662,10 @@ function openQfCoverMenu(e: MouseEvent) {
                     </div>
                     <div class="trackTitle" v-if="currentTrack">
                         <div class="topLine">
-                            <div v-truncate class="trackName">{{ trackTitle }}</div>
+                            <div v-truncate:top class="trackName">{{ trackTitle }}</div>
                             <button class="moreBtn" @mousedown.stop="openPlayerTrackMenu($event)" @click.stop><MoreIcon /></button>
                         </div>
-                        <div class="artistName"><TrackArtists :artist="currentTrack.artist" /></div>
+                        <div class="artistName"><TrackArtists :artist="currentTrack.artist" tooltipPlacement="top" /></div>
                     </div>
                     <div class="trackTitle" v-else>
                         <div class="topLine">
@@ -733,7 +733,8 @@ function openQfCoverMenu(e: MouseEvent) {
                         class="volumeControl"
                         @wheel.prevent="onVolumeScroll"
                     >
-                        <div class="volumeSliderPopup" v-if="!isWebKit">
+                        <div class="volumeSliderPopup" v-if="!isWebKit" :style="{ '--val': volumePercent + '%' }">
+                            <div class="volumeTrack" aria-hidden="true"></div>
                             <input
                                 type="range"
                                 class="volume-slider"
@@ -741,7 +742,6 @@ function openQfCoverMenu(e: MouseEvent) {
                                 max="1"
                                 step="0.01"
                                 :value="volume"
-                                :style="{ '--val': volumePercent + '%' }"
                                 @input.stop="onVolumeInput"
                                 orient="vertical"
                             />
@@ -1698,54 +1698,83 @@ function openQfCoverMenu(e: MouseEvent) {
     pointer-events: none;
 
     display: flex;
+    align-items: center;
+    justify-content: center;
     position: absolute;
     bottom: calc(100% - 4px);
     left: 50%;
     transform: translateX(-50%);
-    background: var(--dark-bg);
-    border: 1px solid #ffffff20;
-    border-radius: 24px;
-    padding: 16px 2px;
+    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+    border-radius: 18px;
+    padding: 12px 8px;
+    backdrop-filter: blur(17px);
+    box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
 
     z-index: 11;
     transition: opacity 0.2s ease, visibility 0.2s ease;
 }
+/* Невидимая зона ~24px вокруг поп-апа: пока мышь в ней — он не исчезает
+   (мост к иконке громкости снизу и буфер по бокам/сверху). Так как поп-ап —
+   потомок .volumeControl, наведение на эту зону держит :hover активным. */
 .volumeSliderPopup::after {
     content: '';
     position: absolute;
-    top: -15px;
-    bottom: -30px;
-    left: -15px;
-    right: -15px;
-    z-index: 0;
+    inset: -24px;
 }
 .volumeControl:hover .volumeSliderPopup {
     visibility: visible;
     opacity: 1;
     pointer-events: auto;
 }
+/* Видимый трек — отдельный div позади прозрачного input. Его ширина 5px со
+   скруглением (border-radius), что нельзя сделать с фоном-полоской на самом
+   input. Высота укорочена на размер thumb (11px): центр thumb доходит ровно до
+   верх/низа трека (на крайних значениях thumb чуть выходит за края), а граница
+   заливки совпадает с центром thumb. Заливка через --val (задан на поп-апе). */
+.volumeTrack {
+    pointer-events: none;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 5px;
+    height: calc(140px - 11px);
+    border-radius: 999px;
+    background: linear-gradient(
+        to top,
+        #fff var(--val, 50%),
+        hsla(0, 0%, 100%, 0.25) var(--val, 50%)
+    );
+    z-index: 0;
+}
 .volume-slider {
     position: relative;
     z-index: 1;
-    writing-mode: vertical-lr;
-    direction: rtl;
-    width: 32px;
-    height: 140px;
-    cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
-    border-radius: 6px;
-    background:
-  linear-gradient(to top, #fff var(--val, 50%), #ffffff20 var(--val, 50%)) center / 4px 100% no-repeat,
-  var(--dark-bg);
+    writing-mode: vertical-lr;
+    direction: rtl;
+    /* input шириной 24px = зона перетаскивания; thumb центрируется по ширине
+       input и совпадает с центрированным .volumeTrack. Фон прозрачный. */
+    width: 24px;
+    height: 140px;
+    cursor: pointer;
+    background: transparent;
+}
+.volume-slider::-webkit-slider-runnable-track {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    border: 0;
 }
 .volume-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 8px;
-    height: 8px;
+    width: 11px;
+    height: 11px;
     border-radius: 50%;
     background: #fff !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
 }
 /* Отдельный ГОРИЗОНТАЛЬНЫЙ поп-ап громкости только для Linux/WebKitGTK
    (рендерится по v-if="isWebKit"). Свои классы, без наследования вертикальной
@@ -1764,10 +1793,11 @@ function openQfCoverMenu(e: MouseEvent) {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--dark-bg);
-    border: 1px solid #ffffff20;
+    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
     border-radius: 16px;
     padding: 10px 0;
+    backdrop-filter: blur(17px);
+    box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
 
     z-index: 11;
     transition: opacity 0.2s ease, visibility 0.2s ease;
@@ -2084,13 +2114,13 @@ function openQfCoverMenu(e: MouseEvent) {
     bottom: calc(100% + 16px);
     left: 50%;
     transform: translateX(-50%);
-    background: var(--dark-bg);
-    border: 1px solid hsla(0, 0%, 100%, 0.1);
-    border-radius: 99999px;
-    padding: 8px 16px;
+    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+    border-radius: 16px;
+    padding: 8px 12px;
     white-space: nowrap;
     z-index: 100;
-    backdrop-filter: blur(12px);
+    backdrop-filter: blur(17px);
+    box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
     transition: opacity 0.2s ease, visibility 0.2s ease;
 }
 .codecTooltip-title {
@@ -2472,10 +2502,15 @@ function openQfCoverMenu(e: MouseEvent) {
 .qf-hover-icon {
     position: absolute;
     top: 50%;
-    left: 19px;
-    transform: translateY(-50%);
+    /* центр обложки: padding-left 6px + 44/2 = 28px */
+    left: 28px;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
     opacity: 0;
-    padding: 5px;
     border-radius: 9999px;
     color: #242424;
     background-color: hsla(0, 0%, 100%, 1.0);
@@ -3144,7 +3179,7 @@ function openQfCoverMenu(e: MouseEvent) {
     }
 
     .qf-hover-icon {
-        left: 18px;
+        left: 28px;
         opacity: 0;
     }
     .qf-queue-current .qf-hover-icon {
