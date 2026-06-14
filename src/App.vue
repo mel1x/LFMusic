@@ -13,7 +13,6 @@ import GithubIcon from './components/Icons/GithubIcon.vue';
 import TrackInfoModal from './components/TrackInfoModal.vue';
 import TrackEditModal from './components/TrackEditModal.vue';
 import { toast } from 'vue-sonner';
-import { isCoverResolved } from './composables/useCoverLoader';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
 import { useFolders } from './composables/useFolders';
@@ -30,7 +29,7 @@ const { language, t } = useI18n();
 const {
   saveState, currentTrack, currentAccentColor, isPlaying,
   togglePlayPause, playNext, playPrev, toggleShuffle, toggleRepeat,
-  shuffled, repeatMode, playbackOrder, currentTrackIndex, getTrackByPath, loadCoversForTracks,
+  shuffled, repeatMode, playbackOrder, currentTrackIndex, getTrackByPath,
 } = usePlayer();
 const { showTracksReadyModal, dismissTracksReadyModal } = useFolders();
 const { loadCustomCovers } = useCustomCovers();
@@ -443,18 +442,6 @@ const previewTracks = computed(() => ({
   next: queueTrack(1),
 }));
 
-// Подгружаем обложки тройки, чтобы превью можно было показать целиком.
-watch(previewTracks, ({ prev, current, next }) => {
-  const tracks = [prev, current, next].filter(Boolean);
-  if (tracks.length) loadCoversForTracks(tracks as any);
-}, { immediate: true });
-
-// Все 3 обложки считаются готовыми, когда каждая загружена или подтверждённо отсутствует.
-const previewReady = computed(() =>
-  [previewTracks.value.prev, previewTracks.value.current, previewTracks.value.next]
-    .every(t => !t || isCoverResolved(t)),
-);
-
 // Состояние воспроизведения → иконка кнопки play/pause в панели задач.
 watch(isPlaying, (playing) => {
   invoke('taskbar_set_playing', { playing }).catch(() => {});
@@ -465,14 +452,18 @@ watch([shuffled, repeatMode], ([sh, rep]) => {
   invoke('taskbar_set_modes', { shuffled: sh, repeatTrack: rep === 'track' }).catch(() => {});
 }, { immediate: true });
 
-// Превью в панели задач обновляем только когда все 3 обложки готовы —
-// иначе при перемешивании соседние обложки сначала пропадали бы и подгружались с задержкой.
+// Превью в панели задач: бэкенд сам читает обложки из кэша WebP-миниатюр по
+// file_path (без base64) и генерирует недостающие на лету, поэтому ждать
+// загрузки cover_art во фронтенде не нужно. Раньше превью держали, пока все 3
+// обложки не «готовы» во фронтенде — но обложка соседа (напр. последнего трека
+// как «предыдущего» для первого, по закольцованной очереди) могла никогда не
+// подгрузиться, если он за пределами видимой части каталога (его запрос
+// вытеснялся из общей очереди обложек), и слот «предыдущего» оставался пустым.
+// Шлём тройку сразу при любой смене — бэкенд отрисует все доступные обложки.
 let lastPreviewPaths: { prev: string | null; current: string | null; next: string | null } = {
   prev: null, current: null, next: null,
 };
-watch([previewTracks, previewReady], () => {
-  if (!previewReady.value) return; // держим прежнее превью, пока новые не загрузятся
-  const { prev, current, next } = previewTracks.value;
+watch(previewTracks, ({ prev, current, next }) => {
   const paths = {
     prev: prev?.file_path ?? null,
     current: current?.file_path ?? null,
@@ -488,10 +479,11 @@ watch([previewTracks, previewReady], () => {
   }
   lastPreviewPaths = paths;
 
+  // Бэкенд сам читает обложки из кэша WebP-миниатюр по file_path (без base64).
   invoke('taskbar_set_covers', {
-    prev: prev?.cover_art ?? null,
-    current: current?.cover_art ?? null,
-    next: next?.cover_art ?? null,
+    prev: prev?.file_path ?? null,
+    current: current?.file_path ?? null,
+    next: next?.file_path ?? null,
     transition,
   }).catch(() => {});
 }, { immediate: true });

@@ -22,6 +22,7 @@ import AnimatedCover from '../components/AnimatedCover.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
 import { useCoverGate } from '../composables/useCoverGate'
+import { useVirtualScroll } from '../composables/useVirtualScroll'
 
 const router = useRouter()
 
@@ -120,6 +121,7 @@ const hasQuery = computed(() => !!query.value)
 onMounted(() => {
     nextTick(() => searchInput.value?.focus())
     loadPlaylists()
+    window.addEventListener('resize', recomputeTracksOffset)
 })
 
 const {
@@ -306,9 +308,40 @@ const trackResults = computed<TrackMetadata[]>(() => {
 })
 
 const tracksExpanded = ref(false)
-const visibleTrackResults = computed(() =>
-    tracksExpanded.value ? trackResults.value : trackResults.value.slice(0, 8),
+
+// ── Виртуализация раскрытого списка треков ───────────────────────────────────
+// Раскрытый список («Больше») может содержать тысячи строк — рендерим окном
+// видимых через useVirtualScroll (как в Catalog). Скроллер — вся страница
+// (pageRootEl), смещение секции — её offsetTop внутри страницы (pageRoot имеет
+// position: relative). Фиксированная высота строки 58px согласована со scrollTop.
+const tracksListEl = ref<HTMLElement | null>(null)
+const tracksOffset = ref(0)
+
+const {
+    containerEl: pageRootEl,
+    onScroll: vsOnScroll,
+    visibleItems: vsVisibleTracks,
+    paddingTop: vsPaddingTop,
+    paddingBottom: vsPaddingBottom,
+} = useVirtualScroll(trackResults, { itemHeight: 58, buffer: 6, scrollOffset: tracksOffset })
+
+// Свёрнуто — первые 8; раскрыто — окно виртуализации.
+const renderedTracks = computed(() =>
+    tracksExpanded.value ? vsVisibleTracks.value : trackResults.value.slice(0, 8),
 )
+const tracksListStyle = computed(() =>
+    tracksExpanded.value
+        ? { paddingTop: vsPaddingTop.value + 'px', paddingBottom: vsPaddingBottom.value + 'px' }
+        : {},
+)
+
+function recomputeTracksOffset() {
+    tracksOffset.value = tracksListEl.value?.offsetTop ?? 0
+}
+
+watch([renderedTracks, tracksExpanded], () => {
+    nextTick(recomputeTracksOffset)
+})
 
 watch(trackResults, () => {
     tracksExpanded.value = false
@@ -348,7 +381,7 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
 
-watch(visibleTrackResults, (tracks) => {
+watch(renderedTracks, (tracks) => {
     if (tracks.length) loadCoversForTracks(tracks)
 }, { immediate: true })
 
@@ -516,6 +549,7 @@ function onGateAfterEnter() {
 onUnmounted(() => {
     albumsLine.unobserve()
     playlistsLine.unobserve()
+    window.removeEventListener('resize', recomputeTracksOffset)
 })
 
 // ── No results ─────────────────────────────────────────────────────────────
@@ -528,12 +562,13 @@ const noResults = computed(() => hasQuery.value &&
 
 // ── Sticky header ──────────────────────────────────────────────────────────
 
-const pageRootEl = ref<HTMLElement | null>(null)
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 200)
 
 function handleScroll(e: Event) {
     scrollY.value = (e.target as HTMLElement).scrollTop
+    recomputeTracksOffset()
+    vsOnScroll(e)
 }
 
 function scrollToTop() {
@@ -686,9 +721,9 @@ function scrollToTop() {
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Треки</div>
                 </div>
-                <div class="tracksList">
+                <div class="tracksList" ref="tracksListEl" :style="tracksListStyle">
                     <div
-                        v-for="track in visibleTrackResults"
+                        v-for="track in renderedTracks"
                         :key="track.file_path"
                         class="trackElem"
                         :class="{
@@ -793,6 +828,7 @@ function scrollToTop() {
 
 <style scoped>
 .pageRoot {
+    position: relative;
     padding: 20px 28px;
     display: flex;
     flex-direction: column;

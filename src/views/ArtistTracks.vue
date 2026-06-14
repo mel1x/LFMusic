@@ -39,10 +39,23 @@ const {
     clearCoverQueue,
 } = usePlayer()
 
-const artistName = computed(() => {
+const { artists: artistPlaylists, loadPlaylists } = usePlaylists()
+
+const rawArtistName = computed(() => {
     const raw = Array.isArray(route.params.name) ? route.params.name[0] : route.params.name
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
+
+// Плейлист исполнителя ищем регистронезависимо: бэкенд группирует артистов по
+// нижнему регистру имени, поэтому «Pyrokinesis» и «pyrokinesis» — один артист.
+const artistPlaylist = computed(() => {
+    const lower = rawArtistName.value.toLowerCase()
+    return artistPlaylists.value.find(p => p.name.toLowerCase() === lower)
+})
+
+// Каноничное имя артиста (как в плейлисте) — гарантирует один ник и одну
+// аватарку независимо от регистра в ссылке. До загрузки плейлистов — исходное.
+const artistName = computed(() => artistPlaylist.value?.name ?? rawArtistName.value)
 
 const { settings } = useSettings()
 
@@ -53,12 +66,6 @@ const artistTracks = computed<TrackMetadata[]>(() => {
 })
 
 const sourceId = computed(() => `artist:${artistName.value}`)
-
-const { artists: artistPlaylists, loadPlaylists } = usePlaylists()
-
-const artistPlaylist = computed(() =>
-    artistPlaylists.value.find(p => p.name === artistName.value)
-)
 
 const { getCustomCover } = useCustomCovers()
 

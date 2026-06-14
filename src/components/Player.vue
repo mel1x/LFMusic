@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, watchEffect } from 'vue';
+import { ref, computed, watch, watchEffect, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
@@ -223,6 +223,14 @@ const fsCoverA = ref<string | null>(null);
 const fsCoverB = ref<string | null>(null);
 const fsActiveBuffer = ref<'a' | 'b'>('a');
 
+// Размытый фон полноэкранного плеера декодирует обложку на весь вьюпорт — для
+// него берём миниатюру низкого разрешения (size=blur ≈ 96px) вместо 512px:
+// картинка всё равно размывается на 80px, а декод и память кратно меньше.
+function toBlurCover(url: string | null): string {
+    if (!url) return '';
+    return url.replace(/size=\d+/, 'size=blur');
+}
+
 watch(currentCoverArt, (newCover) => {
     if (!showOverlay.value) {
         fsCoverA.value = newCover;
@@ -287,15 +295,118 @@ const nextTrackTitle = computed(() => {
     return track.title || track.file_path.split(/[/\\]/).pop()?.replace(/\.[^/.]+$/, '') || t('player.untitled');
 });
 
-const VISUALIZER_BARS = Array.from({ length: 16 }, (_, i) => {
-    const wave = Math.sin((i + 1) * 1.37);
-    const height = 20 + Math.round(((wave + 1) / 2) * 54);
-    return {
-        id: i,
-        height,
-        speed: 0.72 + (i % 5) * 0.08,
-        delay: -i * 0.055,
-    };
+// ── Реальный визуализатор спектра (FFT из Rust-движка) ─────────────────
+// Бэкенд считает БПФ по реально воспроизводимому звуку и отдаёт N полос (0..1).
+// Опрашиваем его на кадрах rAF (~30 fps по данным) и сглаживаем переход к
+// целевым значениям на каждом кадре (~60 fps по рендеру): быстрый «удар»,
+// плавный спад — так визуализатор выглядит живым, без рывков.
+const SPECTRUM_BARS = 16;
+const SPECTRUM_INDICES = Array.from({ length: SPECTRUM_BARS }, (_, i) => i);
+const spectrumLevels = ref<number[]>(new Array(SPECTRUM_BARS).fill(0));
+
+const visualizerActive = computed(
+    () => settings.value.show_player_extra_block
+        && settings.value.player_extra_block_mode === 'visualizer',
+);
+
+let spectrumRaf: number | null = null;
+let spectrumTargets = new Array(SPECTRUM_BARS).fill(0);
+let spectrumLastFetch = 0;
+let spectrumFetching = false;
+
+async function fetchSpectrum() {
+    if (spectrumFetching) return;
+    spectrumFetching = true;
+    try {
+        const bars = await invoke<number[]>('player_get_spectrum', { bars: SPECTRUM_BARS });
+        if (Array.isArray(bars) && bars.length === SPECTRUM_BARS) {
+            spectrumTargets = bars;
+        }
+    } catch {
+        // Бэкенд недоступен (например, чистый Vite-режим) — оставляем нули.
+    } finally {
+        spectrumFetching = false;
+    }
+}
+
+function spectrumFrame(now: number) {
+    spectrumRaf = null;
+    const playing = isPlaying.value;
+
+    if (playing && now - spectrumLastFetch >= 33) {
+        spectrumLastFetch = now;
+        void fetchSpectrum();
+    }
+    if (!playing) {
+        spectrumTargets = spectrumTargets.map(() => 0);
+    }
+
+    const cur = spectrumLevels.value.slice();
+    let moving = false;
+    for (let i = 0; i < SPECTRUM_BARS; i++) {
+        const target = spectrumTargets[i] ?? 0;
+        const c = cur[i];
+        // Атака быстрее спада — пики «выстреливают», но не дёргаются вниз.
+        const k = target > c ? 0.5 : 0.16;
+        let next = c + (target - c) * k;
+        if (target === 0 && next < 0.001) next = 0;
+        cur[i] = next;
+        if (next > 0.004 || target > 0.004) moving = true;
+    }
+    spectrumLevels.value = cur;
+
+    if (playing || moving) {
+        spectrumRaf = requestAnimationFrame(spectrumFrame);
+    }
+}
+
+function startSpectrum() {
+    if (spectrumRaf == null) {
+        spectrumLastFetch = 0;
+        spectrumRaf = requestAnimationFrame(spectrumFrame);
+    }
+}
+
+function stopSpectrum() {
+    if (spectrumRaf != null) {
+        cancelAnimationFrame(spectrumRaf);
+        spectrumRaf = null;
+    }
+}
+
+// Включаем/выключаем снятие спектра в Rust-движке: при выключенном
+// визуализаторе бэкенд не тратит ничего на отвод звука и БПФ.
+watch(
+    visualizerActive,
+    (active) => {
+        void invoke('player_set_spectrum_enabled', { enabled: active }).catch(() => {});
+    },
+    { immediate: true },
+);
+
+watch(
+    [isPlaying, visualizerActive],
+    ([playing, active]) => {
+        if (active && playing) {
+            startSpectrum();
+        } else if (!active) {
+            stopSpectrum();
+            spectrumLevels.value = new Array(SPECTRUM_BARS).fill(0);
+        } else {
+            // Пауза/стоп при активном визуализаторе: даём полосам плавно осесть.
+            startSpectrum();
+        }
+    },
+    { immediate: true },
+);
+
+onMounted(() => {
+    if (visualizerActive.value && isPlaying.value) startSpectrum();
+});
+
+onBeforeUnmount(() => {
+    stopSpectrum();
+    void invoke('player_set_spectrum_enabled', { enabled: false }).catch(() => {});
 });
 
 // ── Queue cover loading ───────────────────────────────────────────────
@@ -584,14 +695,10 @@ function openQfCoverMenu(e: MouseEvent) {
                     <div class="asideVisualBottom">
                         <div class="asideBars" aria-hidden="true">
                             <span
-                                v-for="bar in VISUALIZER_BARS"
-                                :key="bar.id"
+                                v-for="i in SPECTRUM_INDICES"
+                                :key="i"
                                 class="asideBar"
-                                :style="{
-                                    '--bar-scale': bar.height / 100,
-                                    '--bar-speed': `${bar.speed}s`,
-                                    '--bar-delay': `${bar.delay}s`,
-                                }"
+                                :style="{ '--bar-scale': Math.max(0.04, spectrumLevels[i]) }"
                             ></span>
                         </div>
                         <!-- <div class="asideProgressTrack">
@@ -795,14 +902,14 @@ function openQfCoverMenu(e: MouseEvent) {
                 <div class="fs-bg">
                     <img
                         v-if="fsCoverA"
-                        :src="fsCoverA"
+                        :src="toBlurCover(fsCoverA)"
                         class="fs-bg-img"
                         :class="{ active: fsActiveBuffer === 'a' }"
                         draggable="false"
                     />
                     <img
                         v-if="fsCoverB"
-                        :src="fsCoverB"
+                        :src="toBlurCover(fsCoverB)"
                         class="fs-bg-img"
                         :class="{ active: fsActiveBuffer === 'b' }"
                         draggable="false"
@@ -1225,15 +1332,11 @@ function openQfCoverMenu(e: MouseEvent) {
     min-height: 4px;
     border-radius: 3px;
     background-color: hsla(0, 0%, 100%, 0.62);
-    transform: scaleY(var(--bar-scale));
+    /* Высоту (--bar-scale) задаёт JS на каждом кадре rAF по реальному БПФ. */
+    transform: scaleY(var(--bar-scale, 0.04));
     transform-origin: bottom;
-    animation: aside-eq var(--bar-speed) ease-in-out var(--bar-delay) infinite alternate;
-    animation-play-state: paused;
     opacity: 0.56;
     will-change: transform;
-}
-.asideVisualizer.playing .asideBar {
-    animation-play-state: running;
 }
 .asideVisualizer.idle .asideBar {
     opacity: 0.18;
@@ -1285,21 +1388,7 @@ function openQfCoverMenu(e: MouseEvent) {
     color: hsla(0, 0%, 100%, 0.72);
     transform: translateX(1px);
 }
-@keyframes aside-eq {
-    0% {
-        transform: scaleY(calc(var(--bar-scale) * 0.42));
-    }
-    45% {
-        transform: scaleY(var(--bar-scale));
-    }
-    100% {
-        transform: scaleY(calc(var(--bar-scale) * 0.62 + 0.08));
-    }
-}
 @media (prefers-reduced-motion: reduce) {
-    .asideBar {
-        animation: none;
-    }
     .asideProgressFill {
         transition: none;
     }

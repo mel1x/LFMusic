@@ -2,7 +2,7 @@ import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 export const STATIC_ACCENT_COLOR_DEFAULT = '#3D3D3D'
-export const ARTIST_SEPARATORS_DEFAULT: string[] = ['; ']
+export const ARTIST_SEPARATORS_DEFAULT: string[] = ['; ', ', ']
 export const PLAYER_EXTRA_BLOCK_MODE_DEFAULT: PlayerExtraBlockMode = 'visualizer'
 
 export type Language = 'ru' | 'en'

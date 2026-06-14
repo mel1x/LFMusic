@@ -28,7 +28,7 @@ symphonia = { version = "0.5", features = ["all"] }
 lofty = "0.22"
 base64 = "0.22"
 rusqlite = { version = "0.31", features = ["bundled"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 rayon = "1.10"
 
 # Discord Rich Presence — только десктоп (IPC с локальным клиентом Discord).
@@ -50,6 +50,7 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_Media",
+    "Win32_Storage_Xps",
 ] }
 
 # Dev-сборка: зависимости (image, lofty, symphonia и т.п.) в debug медленнее

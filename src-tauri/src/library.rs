@@ -4,9 +4,10 @@ use crate::statistics::{self, CollectionKind, TrackStatistics, TrackStatisticsDe
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::SystemTime;
@@ -101,12 +102,19 @@ pub fn split_artists(artist: &str, separators: &[String]) -> Vec<String> {
 pub struct MusicLibrary {
     conn: Connection,
     db_path: PathBuf,
+    /// Кэш накопителей центроида вкусов («Мой микс»). Считается лениво один раз
+    /// (O(N) скан истории) и далее обновляется инкрементально при завершении
+    /// прослушивания трека — см. [`MusicLibrary::update_centroid_for_listen`].
+    centroid_cache: RefCell<Option<CentroidAccumulators>>,
 }
 
 pub type AudioFeatureProgressEmitter = Arc<dyn Fn(usize, usize) + Send + Sync + 'static>;
 
 static AUDIO_FEATURE_WORKER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_FEATURE_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Помечается из фоновых/межпоточных операций (анализ фич, ре-скан), которые
+/// меняют состав истории. Кэш центроида сбрасывается при следующем чтении.
+static CENTROID_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
 
 fn current_audio_feature_generation() -> u64 {
     AUDIO_FEATURE_WORKER_GENERATION.load(Ordering::SeqCst)
@@ -249,6 +257,9 @@ fn spawn_audio_feature_analysis(
                 }
 
                 let _ = tx.commit();
+
+                // Появились новые аудио-фичи — центроид мог измениться.
+                CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
 
                 if !is_audio_feature_generation_current(generation) {
                     return;
@@ -423,8 +434,20 @@ impl MusicLibrary {
                  PRAGMA user_version = 2;",
             );
         }
+        // v3: байты кастомных обложек вынесены из SQLite в файлы track_covers/.
+        // В БД остаётся только сигнатура (cover_sig); cover_data обнуляется, БД
+        // ужимается VACUUM'ом. См. модуль `track_covers`.
+        let _ = conn.execute_batch("ALTER TABLE track_overrides ADD COLUMN cover_sig TEXT;");
+        if user_version < 3 {
+            Self::migrate_override_covers_to_files(&conn, &app_data_dir);
+            let _ = conn.execute_batch("PRAGMA user_version = 3;");
+        }
 
-        Ok(Self { conn, db_path })
+        Ok(Self {
+            conn,
+            db_path,
+            centroid_cache: RefCell::new(None),
+        })
     }
 
     pub fn resume_pending_audio_feature_analysis(
@@ -687,6 +710,8 @@ impl MusicLibrary {
         let _ = self.scan_folder_internal(&folder, true, audio_feature_progress, progress)?;
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
+        // Состав треков изменился — кэш центроида вкусов больше не актуален.
+        CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         Ok(self.get_all_tracks_light())
     }
 
@@ -727,6 +752,8 @@ impl MusicLibrary {
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
         let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
+        // Состав треков изменился — кэш центроида вкусов больше не актуален.
+        CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -779,6 +806,9 @@ impl MusicLibrary {
 
             tx.commit()
                 .map_err(|e| format!("Ошибка коммита: {}", e))?;
+
+            // Удалены треки (вместе с их статистикой) — центроид мог измениться.
+            CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         }
 
         Ok(count)
@@ -820,7 +850,7 @@ impl MusicLibrary {
                     t.album, t.genre, t.duration_secs,
                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                     COALESCE(o.accent_color, t.accent_color),
-                    o.cover_data,
+                    o.cover_sig,
                     af.bpm, af.loudness, af.energy, af.danceability,
                     af.spectral_centroid, af.track_key, af.audio_fingerprint
              FROM tracks t
@@ -848,9 +878,17 @@ impl MusicLibrary {
     }
 
     fn row_to_metadata_with_override(row: &rusqlite::Row) -> rusqlite::Result<TrackMetadata> {
-        let cover_override: Option<String> = row.get(13)?;
+        let file_path: String = row.get(0)?;
+        // Пользовательская (override) обложка отдаётся уменьшенной WebP-миниатюрой
+        // через протокол `lfmusic-cover` (без base64 в списке). Встроенная обложка
+        // догружается лениво через cover loader, поэтому здесь None.
+        // Колонка 13 — уже готовая сигнатура override-обложки (cover_sig), а не
+        // её сырые данные: URL миниатюры строится без чтения байтов и хеширования.
+        let cover_art = row
+            .get::<_, Option<String>>(13)?
+            .map(|sig| crate::thumbnails::cover_protocol_url(&file_path, &sig));
         Ok(TrackMetadata {
-            file_path: row.get(0)?,
+            file_path,
             title: row.get(1)?,
             artist: row.get(2)?,
             album: row.get(3)?,
@@ -862,7 +900,7 @@ impl MusicLibrary {
             channels: row.get::<_, Option<i32>>(9)?.map(|v| v as u8),
             bitrate: row.get(10)?,
             is_lossless: row.get::<_, i32>(11)? != 0,
-            cover_art: cover_override,
+            cover_art,
             accent_color: row.get(12)?,
             bpm: row.get(14)?,
             loudness: row.get(15)?,
@@ -885,7 +923,7 @@ impl MusicLibrary {
                         t.album, t.genre, t.duration_secs,
                         t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                         COALESCE(o.accent_color, t.accent_color),
-                        o.cover_data,
+                        o.cover_sig,
                         af.bpm, af.loudness, af.energy, af.danceability,
                         af.spectral_centroid, af.track_key, af.audio_fingerprint
                  FROM tracks t
@@ -983,6 +1021,8 @@ impl MusicLibrary {
             let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
         }
 
+        // Состав треков мог измениться — кэш центроида вкусов больше не актуален.
+        CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         Ok(self.get_all_tracks())
     }
 
@@ -1211,7 +1251,7 @@ impl MusicLibrary {
                     t.album, t.genre, t.duration_secs,
                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                     COALESCE(o.accent_color, t.accent_color),
-                    o.cover_data,
+                    o.cover_sig,
                     af.bpm, af.loudness, af.energy, af.danceability,
                     af.spectral_centroid, af.track_key, af.audio_fingerprint
              FROM playlist_tracks pt
@@ -1399,8 +1439,25 @@ impl MusicLibrary {
     }
 
     pub fn add_track_statistics_delta(&self, delta: TrackStatisticsDelta) -> Result<(), String> {
+        // Прослушивание трека меняет центроид вкусов — обновляем его кэш
+        // инкрементально (вместо O(N) пересчёта всей истории при выдаче «Микса»).
+        let listen_changed = delta.listen_count_delta != 0 && !delta.file_path.trim().is_empty();
+        let old_count = if listen_changed {
+            statistics::get_track_statistics(&self.conn, &delta.file_path)
+                .map(|s| s.listen_count)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         statistics::apply_track_delta(&self.conn, &delta)
-            .map_err(|e| format!("Ошибка записи статистики трека: {}", e))
+            .map_err(|e| format!("Ошибка записи статистики трека: {}", e))?;
+
+        if listen_changed {
+            let new_count = (old_count + delta.listen_count_delta).max(0);
+            self.update_centroid_for_listen(&delta.file_path, old_count, new_count);
+        }
+        Ok(())
     }
 
     pub fn get_track_statistics(&self, file_path: &str) -> Result<TrackStatistics, String> {
@@ -1719,6 +1776,46 @@ impl MusicLibrary {
         Ok(())
     }
 
+    /// Папка данных приложения (родитель файла БД) — где лежат файлы обложек.
+    fn app_data_dir(&self) -> &Path {
+        self.db_path.parent().unwrap_or_else(|| Path::new("."))
+    }
+
+    /// Разовая миграция: перенести встроенные в БД байты кастомных обложек
+    /// (`cover_data`) в файлы `track_covers/<sig>`, оставив в БД только сигнатуру.
+    fn migrate_override_covers_to_files(conn: &Connection, app_data_dir: &Path) {
+        let rows: Vec<(String, String)> = {
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT file_path, cover_data FROM track_overrides WHERE cover_data IS NOT NULL",
+            ) else {
+                return;
+            };
+            let mapped =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+            match mapped {
+                Ok(m) => m.filter_map(|r| r.ok()).collect(),
+                Err(_) => return,
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        for (file_path, data_url) in &rows {
+            let sig = crate::thumbnails::override_sig(data_url);
+            let Some(bytes) = crate::thumbnails::decode_data_url(data_url) else {
+                continue;
+            };
+            if crate::track_covers::write_cover(app_data_dir, &sig, &bytes).is_ok() {
+                let _ = conn.execute(
+                    "UPDATE track_overrides SET cover_sig = ?1, cover_data = NULL WHERE file_path = ?2",
+                    params![sig, file_path],
+                );
+            }
+        }
+        // Высвобождаем место, занятое удалёнными base64-данными.
+        let _ = conn.execute_batch("VACUUM;");
+    }
+
     /// Сохранить пользовательское переопределение метаданных трека.
     /// Переопределения переживают пересканирование и сбрасываются только
     /// при удалении папки трека из скоупа приложения.
@@ -1737,23 +1834,46 @@ impl MusicLibrary {
         let title = title.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
         let artist = artist.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
 
+        // Текущая сигнатура обложки (для очистки осиротевшего файла) и accent.
         let existing: Option<(Option<String>, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT cover_data, accent_color FROM track_overrides WHERE file_path = ?1",
+                "SELECT cover_sig, accent_color FROM track_overrides WHERE file_path = ?1",
                 params![file_path],
                 |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
             )
             .ok();
+        let old_sig = existing.as_ref().and_then(|(s, _)| s.clone());
 
-        let (final_cover, final_accent) = if keep_existing_cover {
-            existing.unwrap_or((None, None))
+        // Новую обложку (data-URL) пишем файлом в track_covers/, в БД кладём
+        // только её сигнатуру. При keep_existing_cover оставляем как есть.
+        let (final_sig, final_accent) = if keep_existing_cover {
+            (old_sig.clone(), existing.and_then(|(_, a)| a))
         } else {
-            (cover_data.map(|s| s.to_string()), accent_color.map(|s| s.to_string()))
+            match cover_data {
+                Some(data_url) => {
+                    let sig = crate::thumbnails::override_sig(data_url);
+                    if let Some(bytes) = crate::thumbnails::decode_data_url(data_url) {
+                        crate::track_covers::write_cover(self.app_data_dir(), &sig, &bytes)?;
+                        (Some(sig), accent_color.map(|s| s.to_string()))
+                    } else {
+                        return Err("Не удалось декодировать обложку".into());
+                    }
+                }
+                None => (None, accent_color.map(|s| s.to_string())),
+            }
         };
 
+        // Чистим старый файл обложки, если она сменилась/сброшена и больше ни
+        // на один трек не ссылается (обложки дедуплицированы по сигнатуре).
+        if old_sig != final_sig {
+            if let Some(ref sig) = old_sig {
+                self.remove_orphan_cover_file(sig, file_path);
+            }
+        }
+
         // Если все поля пусты — удаляем запись, чтобы LEFT JOIN отдал оригинал
-        if title.is_none() && artist.is_none() && final_cover.is_none() && final_accent.is_none() {
+        if title.is_none() && artist.is_none() && final_sig.is_none() && final_accent.is_none() {
             self.conn
                 .execute(
                     "DELETE FROM track_overrides WHERE file_path = ?1",
@@ -1765,21 +1885,42 @@ impl MusicLibrary {
 
         self.conn
             .execute(
-                "INSERT INTO track_overrides (file_path, title, artist, cover_data, accent_color)
+                "INSERT INTO track_overrides (file_path, title, artist, cover_sig, accent_color)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(file_path) DO UPDATE SET
                     title = excluded.title,
                     artist = excluded.artist,
-                    cover_data = excluded.cover_data,
+                    cover_sig = excluded.cover_sig,
                     accent_color = excluded.accent_color",
-                params![file_path, title, artist, final_cover, final_accent],
+                params![file_path, title, artist, final_sig, final_accent],
             )
             .map_err(|e| format!("Ошибка сохранения переопределения: {}", e))?;
         Ok(())
     }
 
+    /// Удалить файл обложки `sig`, если он больше не используется ни одним
+    /// треком (кроме `excluding_path`, чью запись мы как раз меняем/удаляем).
+    fn remove_orphan_cover_file(&self, sig: &str, excluding_path: &str) {
+        let still_used: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_overrides
+                 WHERE cover_sig = ?1 AND file_path != ?2",
+                params![sig, excluding_path],
+                |r| r.get(0),
+            )
+            .unwrap_or(1);
+        if still_used == 0 {
+            crate::track_covers::remove_cover(self.app_data_dir(), sig);
+        }
+    }
+
     /// Полностью удалить переопределение для трека (вернуть оригинальные значения)
     pub fn clear_track_override(&self, file_path: &str) -> Result<(), String> {
+        // Сначала подчищаем осиротевший файл обложки (если он больше ничей).
+        if let Some(sig) = self.get_override_cover_sig(file_path) {
+            self.remove_orphan_cover_file(&sig, file_path);
+        }
         self.conn
             .execute(
                 "DELETE FROM track_overrides WHERE file_path = ?1",
@@ -1800,6 +1941,8 @@ impl MusicLibrary {
         let _ = self
             .conn
             .execute("UPDATE tracks SET accent_color = NULL", []);
+        // Сносим папку с файлами кастомных обложек целиком — все записи удалены.
+        let _ = std::fs::remove_dir_all(crate::track_covers::covers_dir(self.app_data_dir()));
         Ok(count)
     }
 
@@ -1807,7 +1950,7 @@ impl MusicLibrary {
     pub fn has_override_cover(&self, file_path: &str) -> bool {
         self.conn
             .query_row(
-                "SELECT cover_data IS NOT NULL FROM track_overrides WHERE file_path = ?1",
+                "SELECT cover_sig IS NOT NULL FROM track_overrides WHERE file_path = ?1",
                 params![file_path],
                 |row| row.get::<_, i64>(0),
             )
@@ -1832,16 +1975,24 @@ impl MusicLibrary {
             .flatten()
     }
 
-    /// Получить data-URL пользовательской обложки (если установлена)
-    pub fn get_override_cover(&self, file_path: &str) -> Option<String> {
+    /// Сигнатура пользовательской обложки (если установлена). Это короткая строка
+    /// — ключ файла в `track_covers/` и параметр `?s=` в URL миниатюры.
+    pub fn get_override_cover_sig(&self, file_path: &str) -> Option<String> {
         self.conn
             .query_row(
-                "SELECT cover_data FROM track_overrides WHERE file_path = ?1",
+                "SELECT cover_sig FROM track_overrides WHERE file_path = ?1",
                 params![file_path],
                 |row| row.get::<_, Option<String>>(0),
             )
             .ok()
             .flatten()
+    }
+
+    /// Сырые байты пользовательской обложки (читаются с диска лениво — только
+    /// когда реально нужны: генерация миниатюры, расчёт акцентного цвета).
+    pub fn override_cover_bytes(&self, file_path: &str) -> Option<Vec<u8>> {
+        let sig = self.get_override_cover_sig(file_path)?;
+        crate::track_covers::read_cover(self.app_data_dir(), &sig)
     }
 
     /// Сохранить accent_color для трека в кэш
@@ -1855,18 +2006,17 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Кастомные обложки, у которых не вычислен акцентный цвет (сброшен
-    /// миграцией на новый алгоритм). Возвращает пары (file_path, data URL).
-    pub fn get_override_covers_without_accent(&self) -> Vec<(String, String)> {
+    /// Пути треков с кастомной обложкой, у которых не вычислен акцентный цвет
+    /// (сброшен миграцией на новый алгоритм). Сами байты обложки читаются
+    /// отдельно (`override_cover_bytes`) — уже без удержания лока библиотеки.
+    pub fn get_override_covers_without_accent(&self) -> Vec<String> {
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT file_path, cover_data FROM track_overrides
-             WHERE cover_data IS NOT NULL AND accent_color IS NULL",
+            "SELECT file_path FROM track_overrides
+             WHERE cover_sig IS NOT NULL AND accent_color IS NULL",
         ) else {
             return Vec::new();
         };
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        });
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0));
         match rows {
             Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
             Err(_) => Vec::new(),
@@ -1915,7 +2065,7 @@ impl MusicLibrary {
                           t.album, t.genre, t.duration_secs,
                           t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                           COALESCE(o.accent_color, t.accent_color),
-                          o.cover_data,
+                          o.cover_sig,
                           af.bpm, af.loudness, af.energy, af.danceability,
                           af.spectral_centroid, af.track_key, af.audio_fingerprint
                    FROM tracks t
@@ -1943,7 +2093,7 @@ impl MusicLibrary {
                           t.album, t.genre, t.duration_secs,
                           t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                           COALESCE(o.accent_color, t.accent_color),
-                          o.cover_data,
+                          o.cover_sig,
                           af.bpm, af.loudness, af.energy, af.danceability,
                           af.spectral_centroid, af.track_key, af.audio_fingerprint
                    FROM tracks t
@@ -2116,63 +2266,113 @@ impl MusicLibrary {
     /// Средний «характер» прослушанной музыки: взвешенные (по числу
     /// прослушиваний) средние и дисперсии аудио-фич. Используется, чтобы
     /// подбирать похожие («любимое») либо непохожие («незнакомое») треки.
+    ///
+    /// Берётся из кэша накопителей (см. [`MusicLibrary::centroid_accumulators`]),
+    /// поэтому повторные вызовы при выдаче рекомендаций не пересчитывают всю
+    /// историю заново.
     fn listening_centroid(&self) -> Option<ListeningCentroid> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT af.energy, af.danceability, af.bpm, af.spectral_centroid, af.loudness, s.listen_count
-                 FROM track_statistics s
-                 JOIN track_audio_features af ON af.file_path = s.file_path
-                 WHERE s.listen_count > 0 AND af.energy IS NOT NULL",
-            )
-            .ok()?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, Option<f64>>(0)?,
-                    row.get::<_, Option<f64>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                    row.get::<_, Option<f64>>(3)?,
-                    row.get::<_, Option<f64>>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })
-            .ok()?;
+        self.centroid_accumulators().to_centroid()
+    }
 
-        let mut n = 0_usize;
-        let mut wsum = 0.0_f64;
-        let (mut se, mut sd, mut sb, mut sc, mut sl) = (0.0, 0.0, 0.0, 0.0, 0.0);
-        let (mut se2, mut sd2, mut sb2, mut sc2, mut sl2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    /// Накопители центроида: либо из кэша, либо однократный O(N) пересчёт по БД.
+    /// Если межпоточный флаг отметил историю как изменившуюся (анализ фич,
+    /// ре-скан) — кэш сбрасывается и считается заново.
+    fn centroid_accumulators(&self) -> CentroidAccumulators {
+        if CENTROID_CACHE_DIRTY.swap(false, Ordering::SeqCst) {
+            self.centroid_cache.borrow_mut().take();
+        }
+        if let Some(acc) = self.centroid_cache.borrow().as_ref() {
+            return acc.clone();
+        }
+        let acc = self.compute_centroid_accumulators();
+        *self.centroid_cache.borrow_mut() = Some(acc.clone());
+        acc
+    }
+
+    /// Полный пересчёт накопителей по всей истории прослушиваний.
+    fn compute_centroid_accumulators(&self) -> CentroidAccumulators {
+        let mut acc = CentroidAccumulators::default();
+        let mut stmt = match self.conn.prepare(
+            "SELECT af.energy, af.danceability, af.bpm, af.spectral_centroid, af.loudness, s.listen_count
+             FROM track_statistics s
+             JOIN track_audio_features af ON af.file_path = s.file_path
+             WHERE s.listen_count > 0 AND af.energy IS NOT NULL",
+        ) {
+            Ok(s) => s,
+            Err(_) => return acc,
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<f64>>(0)?,
+                row.get::<_, Option<f64>>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+                row.get::<_, Option<f64>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(_) => return acc,
+        };
 
         for r in rows.flatten() {
             let (e, d, b, c, l) = match r {
                 (Some(e), Some(d), Some(b), Some(c), Some(l), _cnt) => (e, d, b, c, l),
                 _ => continue,
             };
-            let w = (r.5.max(1)) as f64;
-            n += 1;
-            wsum += w;
-            se += w * e;  se2 += w * e * e;
-            sd += w * d;  sd2 += w * d * d;
-            sb += w * b;  sb2 += w * b * b;
-            sc += w * c;  sc2 += w * c * c;
-            sl += w * l;  sl2 += w * l * l;
+            acc.apply(r.5.max(1) as f64, e, d, b, c, l, 1);
+        }
+        acc
+    }
+
+    /// Инкрементально обновить кэш центроида при изменении числа прослушиваний
+    /// одного трека. Вызывается из [`MusicLibrary::add_track_statistics_delta`]
+    /// в момент завершения воспроизведения.
+    fn update_centroid_for_listen(&self, file_path: &str, old_count: i64, new_count: i64) {
+        // Кэш ещё не загружен — пропускаем, он лениво пересчитается целиком.
+        if self.centroid_cache.borrow().is_none() {
+            return;
         }
 
-        if wsum <= 0.0 {
-            return None;
+        // Вес трека = его число прослушиваний (треки без прослушиваний не входят).
+        let old_w = if old_count > 0 { old_count.max(1) as f64 } else { 0.0 };
+        let new_w = if new_count > 0 { new_count.max(1) as f64 } else { 0.0 };
+        let dw = new_w - old_w;
+        if dw == 0.0 {
+            return;
         }
-        let mean = |s: f64| s / wsum;
-        let var = |s2: f64, m: f64| (s2 / wsum - m * m).max(0.0);
-        let (e, d, b, c, l) = (mean(se), mean(sd), mean(sb), mean(sc), mean(sl));
-        Some(ListeningCentroid {
-            n,
-            e, e_var: var(se2, e),
-            d, d_var: var(sd2, d),
-            b, b_var: var(sb2, b),
-            c, c_var: var(sc2, c),
-            l, l_var: var(sl2, l),
-        })
+
+        // Фичи трека должны быть полностью посчитаны — иначе он не участвует в
+        // центроиде (полный пересчёт такие треки пропускает).
+        let feats: Option<(f64, f64, f64, f64, f64)> = self
+            .conn
+            .query_row(
+                "SELECT energy, danceability, bpm, spectral_centroid, loudness
+                 FROM track_audio_features
+                 WHERE file_path = ?1
+                   AND energy IS NOT NULL AND danceability IS NOT NULL AND bpm IS NOT NULL
+                   AND spectral_centroid IS NOT NULL AND loudness IS NOT NULL",
+                params![file_path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .ok();
+        let (e, d, b, c, l) = match feats {
+            Some(f) => f,
+            None => return,
+        };
+
+        // Изменение числа уникальных треков в центроиде.
+        let dn = if old_count <= 0 && new_count > 0 {
+            1
+        } else if old_count > 0 && new_count <= 0 {
+            -1
+        } else {
+            0
+        };
+
+        if let Some(acc) = self.centroid_cache.borrow_mut().as_mut() {
+            acc.apply(dw, e, d, b, c, l, dn);
+        }
     }
 
     /// Публичный профиль вкуса для раздела статистики.
@@ -2270,7 +2470,7 @@ impl MusicLibrary {
                      t.album, t.genre, t.duration_secs,
                      t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
                      COALESCE(o.accent_color, t.accent_color),
-                     o.cover_data,
+                     o.cover_sig,
                      af.bpm, af.loudness, af.energy, af.danceability,
                      af.spectral_centroid, af.track_key, af.audio_fingerprint
               FROM tracks t
@@ -2324,6 +2524,55 @@ impl MusicLibrary {
             )
             .map_err(|e| format!("Ошибка сохранения порядка треков: {}", e))?;
         Ok(())
+    }
+}
+
+/// Накопители для инкрементального расчёта центроида вкусов: взвешенные суммы
+/// и суммы квадратов аудио-фич (вес = число прослушиваний). Из них один раз
+/// выводятся средние и дисперсии, см. [`CentroidAccumulators::to_centroid`].
+#[derive(Clone, Default)]
+struct CentroidAccumulators {
+    /// Число уникальных треков в центроиде.
+    n: i64,
+    /// Сумма весов (Σ listen_count).
+    wsum: f64,
+    se: f64, se2: f64,
+    sd: f64, sd2: f64,
+    sb: f64, sb2: f64,
+    sc: f64, sc2: f64,
+    sl: f64, sl2: f64,
+}
+
+impl CentroidAccumulators {
+    /// Добавить (или, при отрицательном весе/`dn`, убрать) вклад трека.
+    #[allow(clippy::too_many_arguments)]
+    fn apply(&mut self, w: f64, e: f64, d: f64, b: f64, c: f64, l: f64, dn: i64) {
+        self.n += dn;
+        self.wsum += w;
+        self.se += w * e; self.se2 += w * e * e;
+        self.sd += w * d; self.sd2 += w * d * d;
+        self.sb += w * b; self.sb2 += w * b * b;
+        self.sc += w * c; self.sc2 += w * c * c;
+        self.sl += w * l; self.sl2 += w * l * l;
+    }
+
+    fn to_centroid(&self) -> Option<ListeningCentroid> {
+        if self.wsum <= 0.0 {
+            return None;
+        }
+        let mean = |s: f64| s / self.wsum;
+        let var = |s2: f64, m: f64| (s2 / self.wsum - m * m).max(0.0);
+        let (e, d, b, c, l) = (
+            mean(self.se), mean(self.sd), mean(self.sb), mean(self.sc), mean(self.sl),
+        );
+        Some(ListeningCentroid {
+            n: self.n.max(0) as usize,
+            e, e_var: var(self.se2, e),
+            d, d_var: var(self.sd2, d),
+            b, b_var: var(self.sb2, b),
+            c, c_var: var(self.sc2, c),
+            l, l_var: var(self.sl2, l),
+        })
     }
 }
 
@@ -2424,6 +2673,113 @@ mod tests {
             emissions.lock().expect("emissions lock").is_empty(),
             "resume should stay silent when all tracks are already analyzed"
         );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Вставить трек с полным набором аудио-фич и числом прослушиваний.
+    fn insert_listened_track(
+        library: &MusicLibrary,
+        path: &str,
+        listen_count: i64,
+        feats: (f64, f64, f64, f64, f64),
+    ) {
+        library
+            .conn
+            .execute(
+                "INSERT INTO tracks
+                 (file_path, folder_path, title, artist, album, duration_secs, format,
+                  sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
+                 VALUES (?1, '/music', 'T', 'A', 'Al', 180.0, 'flac', 44100, 16, 2, 320, 0, 1, 1)",
+                params![path],
+            )
+            .expect("track insert");
+        library
+            .conn
+            .execute(
+                "INSERT INTO track_audio_features
+                 (file_path, energy, danceability, bpm, spectral_centroid, loudness,
+                  analyzed_modified_secs, analyzer_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+                params![
+                    path,
+                    feats.0,
+                    feats.1,
+                    feats.2,
+                    feats.3,
+                    feats.4,
+                    AUDIO_FEATURE_ANALYZER_VERSION
+                ],
+            )
+            .expect("features insert");
+        library
+            .conn
+            .execute(
+                "INSERT INTO track_statistics (file_path, listen_count) VALUES (?1, ?2)",
+                params![path, listen_count],
+            )
+            .expect("stats insert");
+    }
+
+    fn assert_profiles_close(a: &TasteProfile, b: &TasteProfile) {
+        assert_eq!(a.analyzed_tracks, b.analyzed_tracks, "track count");
+        let close = |x: Option<f64>, y: Option<f64>, label: &str| match (x, y) {
+            (Some(x), Some(y)) => assert!(
+                (x - y).abs() < 1e-6,
+                "{label}: incremental {x} != full {y}"
+            ),
+            (None, None) => {}
+            _ => panic!("{label}: one side is None"),
+        };
+        close(a.energy, b.energy, "energy");
+        close(a.danceability, b.danceability, "danceability");
+        close(a.bpm, b.bpm, "bpm");
+        close(a.spectral_centroid, b.spectral_centroid, "spectral_centroid");
+        close(a.loudness, b.loudness, "loudness");
+    }
+
+    #[test]
+    fn centroid_cache_matches_full_recompute_after_incremental_updates() {
+        let dir = temp_library_dir("centroid_cache");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        library
+            .conn
+            .execute("INSERT INTO folders(path) VALUES ('/music')", [])
+            .expect("folder insert");
+
+        insert_listened_track(&library, "/music/a.flac", 2, (0.8, 0.6, 128.0, 3200.0, -8.0));
+        insert_listened_track(&library, "/music/b.flac", 5, (0.3, 0.4, 90.0, 1500.0, -14.0));
+
+        // Первый вызов загружает кэш накопителей (O(N) скан).
+        let _ = library.taste_profile();
+
+        // Инкрементальные обновления через завершение прослушиваний.
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/music/a.flac".to_string(),
+                listen_count_delta: 3,
+                ..Default::default()
+            })
+            .expect("delta a");
+        // Новый трек, ранее не входивший в центроид (listen_count 0 -> 1).
+        insert_listened_track(&library, "/music/c.flac", 0, (0.5, 0.55, 110.0, 2400.0, -11.0));
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/music/c.flac".to_string(),
+                listen_count_delta: 1,
+                ..Default::default()
+            })
+            .expect("delta c");
+
+        let incremental = library.taste_profile();
+
+        // Сбрасываем кэш и считаем профиль с нуля — должен совпасть.
+        library.centroid_cache.borrow_mut().take();
+        let full = library.taste_profile();
+
+        assert_eq!(incremental.analyzed_tracks, 3, "three tracks listened");
+        assert_profiles_close(&incremental, &full);
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

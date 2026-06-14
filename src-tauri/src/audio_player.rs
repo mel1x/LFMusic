@@ -1,5 +1,6 @@
 use base64::Engine;
 
+use crate::spectrum::SpectrumAnalyzer;
 use lofty::picture::PictureType;
 use lofty::prelude::*;
 use lofty::probe::Probe;
@@ -496,6 +497,76 @@ impl<S: Source<Item = f32>> Source for FadeOut<S> {
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
+// ── AnalyzerSource ────────────────────────────────────────────────────────────
+
+/// Прозрачная обёртка-«отвод»: пропускает сэмплы без изменений, попутно сводя
+/// кадры в моно и подавая блоки в общий `SpectrumAnalyzer` для БПФ-визуализации.
+/// Ставится поверх EQ (и fade-in), чтобы спектр отражал реально слышимый сигнал.
+struct AnalyzerSource<S: Source<Item = f32>> {
+    source: S,
+    analyzer: Arc<SpectrumAnalyzer>,
+    channels: u16,
+    sample_rate: u32,
+    ch_idx: u16,
+    frame_sum: f32,
+    block: Vec<f32>,
+}
+
+impl<S: Source<Item = f32>> AnalyzerSource<S> {
+    /// Размер блока моно-сэмплов между подачами в анализатор: реже берём
+    /// мьютекс (~раз в 256 кадров), не теряя плавности на 60 fps.
+    const BLOCK: usize = 256;
+
+    fn new(source: S, analyzer: Arc<SpectrumAnalyzer>) -> Self {
+        let channels = source.channels().max(1);
+        let sample_rate = source.sample_rate();
+        Self {
+            source,
+            analyzer,
+            channels,
+            sample_rate,
+            ch_idx: 0,
+            frame_sum: 0.0,
+            block: Vec::with_capacity(Self::BLOCK),
+        }
+    }
+}
+
+impl<S: Source<Item = f32>> Iterator for AnalyzerSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let sample = self.source.next()?;
+
+        // Визуализатор выключен — пропускаем звук как есть, без снятия спектра.
+        if !self.analyzer.is_enabled() {
+            return Some(sample);
+        }
+
+        self.frame_sum += sample;
+        self.ch_idx += 1;
+        if self.ch_idx >= self.channels {
+            let mono = self.frame_sum / self.channels as f32;
+            self.frame_sum = 0.0;
+            self.ch_idx = 0;
+            self.block.push(mono);
+            if self.block.len() >= Self::BLOCK {
+                self.analyzer.push_mono(&self.block, self.sample_rate);
+                self.block.clear();
+            }
+        }
+
+        Some(sample)
+    }
+}
+
+impl<S: Source<Item = f32>> Source for AnalyzerSource<S> {
+    fn current_frame_len(&self) -> Option<usize> { self.source.current_frame_len() }
+    fn channels(&self) -> u16 { self.channels }
+    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
+}
+
 // ── Вспомогательные функции ─────────────────────────────────────────────────
 
 /// Извлечь обложку из lofty тега (CoverFront или первая доступная)
@@ -767,7 +838,11 @@ fn normalize_accent_hsl(hue: f64, sat: f64, light: f64) -> (u8, u8, u8) {
 }
 
 /// Извлечь обложку и акцентный цвет из lofty тега
-fn cover_data_from_tag(tag: &lofty::tag::Tag) -> (Option<String>, Option<String>) {
+/// Из тега: есть ли встроенная обложка + акцентный цвет (вычисляется по её
+/// байтам, нужен один раз и кэшируется в БД). Полную обложку в base64 больше
+/// не формируем — для показа используется уменьшенная WebP-миниатюра через
+/// протокол `lfmusic-cover` (см. модуль `thumbnails`).
+fn cover_meta_from_tag(tag: &lofty::tag::Tag) -> (bool, Option<String>) {
     let picture = tag
         .pictures()
         .iter()
@@ -775,21 +850,11 @@ fn cover_data_from_tag(tag: &lofty::tag::Tag) -> (Option<String>, Option<String>
         .or_else(|| tag.pictures().first());
 
     let Some(picture) = picture else {
-        return (None, None);
+        return (false, None);
     };
 
-    let data = picture.data();
-    let accent = extract_accent_color(data);
-
-    let mime = picture
-        .mime_type()
-        .map(|m| m.to_string())
-        .unwrap_or_else(|| "image/jpeg".to_string());
-
-    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
-    let cover = format!("data:{};base64,{}", mime, b64);
-
-    (Some(cover), accent)
+    let accent = extract_accent_color(picture.data());
+    (true, accent)
 }
 
 /// Извлечь сэмплы из AudioBufferRef в вектор f32
@@ -907,6 +972,7 @@ fn audio_thread_loop(
     _stream: OutputStream, // должен жить пока работает поток
     stream_handle: OutputStreamHandle,
     eq_settings: Arc<RwLock<EqSettings>>,
+    spectrum: Arc<SpectrumAnalyzer>,
 ) {
     let mut sink: Option<Sink> = None;
     // Предыдущий fade-out sink — при новом crossfade старый немедленно останавливается,
@@ -922,7 +988,10 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = SymphoniaSource::new_with_seek(&file_path, seek_secs)?;
-                    new_sink.append(EqSource::new(source, eq_settings.clone()));
+                    new_sink.append(AnalyzerSource::new(
+                        EqSource::new(source, eq_settings.clone()),
+                        spectrum.clone(),
+                    ));
                     sink = Some(new_sink);
                     Ok(())
                 })();
@@ -945,6 +1014,7 @@ fn audio_thread_loop(
                 if let Some(ref s) = sink { s.stop(); }
                 sink = None;
                 if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
+                spectrum.set_active(false);
             }
 
             AudioCmd::SetVolume(vol) => {
@@ -958,7 +1028,10 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = SymphoniaSource::new_with_seek(&file_path, position_secs)?;
-                    new_sink.append(EqSource::new(source, eq_settings.clone()));
+                    new_sink.append(AnalyzerSource::new(
+                        EqSource::new(source, eq_settings.clone()),
+                        spectrum.clone(),
+                    ));
                     if was_paused { new_sink.pause(); }
                     sink = Some(new_sink);
                     Ok(())
@@ -995,10 +1068,10 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = SymphoniaSource::new_with_seek(&file_path, position_secs)?;
-                    new_sink.append(
-                        EqSource::new(source, eq_settings.clone())
-                            .fade_in(dur),
-                    );
+                    new_sink.append(AnalyzerSource::new(
+                        EqSource::new(source, eq_settings.clone()).fade_in(dur),
+                        spectrum.clone(),
+                    ));
                     if was_paused { new_sink.pause(); }
                     sink = Some(new_sink);
                     Ok(())
@@ -1024,10 +1097,10 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = SymphoniaSource::new_with_seek(&file_path, seek_secs)?;
-                    new_sink.append(
-                        EqSource::new(source, eq_settings.clone())
-                            .fade_in(dur),
-                    );
+                    new_sink.append(AnalyzerSource::new(
+                        EqSource::new(source, eq_settings.clone()).fade_in(dur),
+                        spectrum.clone(),
+                    ));
                     sink = Some(new_sink);
                     Ok(())
                 })();
@@ -1056,6 +1129,7 @@ pub struct AudioPlayer {
     playback_started_at: Option<Instant>,
     accumulated_position: f64,
     eq_settings: Arc<RwLock<EqSettings>>,
+    spectrum: Arc<SpectrumAnalyzer>,
 }
 
 impl AudioPlayer {
@@ -1065,6 +1139,8 @@ impl AudioPlayer {
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(0);
         let eq_settings = Arc::new(RwLock::new(EqSettings::default()));
         let eq_for_thread = eq_settings.clone();
+        let spectrum = Arc::new(SpectrumAnalyzer::new());
+        let spectrum_for_thread = spectrum.clone();
 
         std::thread::Builder::new()
             .name("audio-output".into())
@@ -1072,7 +1148,7 @@ impl AudioPlayer {
                 match OutputStream::try_default() {
                     Ok((stream, handle)) => {
                         let _ = init_tx.send(Ok(()));
-                        audio_thread_loop(cmd_rx, stream, handle, eq_for_thread);
+                        audio_thread_loop(cmd_rx, stream, handle, eq_for_thread, spectrum_for_thread);
                     }
                     Err(e) => {
                         let _ = init_tx.send(Err(format!(
@@ -1096,7 +1172,18 @@ impl AudioPlayer {
             playback_started_at: None,
             accumulated_position: 0.0,
             eq_settings,
+            spectrum,
         })
+    }
+
+    /// Текущие частотные полосы спектра (0..1), посчитанные по реальному звуку.
+    pub fn spectrum_bars(&self, bars: usize) -> Vec<f32> {
+        self.spectrum.compute_bars(bars)
+    }
+
+    /// Включить/выключить снятие спектра (по состоянию блока-визуализатора).
+    pub fn set_spectrum_enabled(&self, enabled: bool) {
+        self.spectrum.set_enabled(enabled);
     }
 
     // ── Внутренние хелперы ──────────────────────────────────────────────────
@@ -1126,13 +1213,40 @@ impl AudioPlayer {
 
     // ── Статические методы (метаданные) ─────────────────────────────────────
 
-    /// Извлечь обложку трека как data URL (полного размера)
+    /// Извлечь обложку трека как data URL (полного размера).
+    /// Используется только для превью «сбросить обложку» в модалке редактирования
+    /// (нужен оригинал из тегов в обход пользовательского переопределения).
     pub fn extract_cover_art(file_path: &str) -> Option<String> {
         let tagged_file = Probe::open(PathBuf::from(file_path)).ok()?.read().ok()?;
         let tag = tagged_file
             .primary_tag()
             .or_else(|| tagged_file.first_tag())?;
         cover_art_from_tag(tag)
+    }
+
+    /// Проверить наличие встроенной обложки (дёшево — без извлечения байтов).
+    pub fn has_embedded_cover(file_path: &str) -> bool {
+        let Ok(tagged_file) = Probe::open(PathBuf::from(file_path)).and_then(|p| p.read()) else {
+            return false;
+        };
+        match tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+            Some(tag) => !tag.pictures().is_empty(),
+            None => false,
+        }
+    }
+
+    /// Сырые байты встроенной обложки (для генерации WebP-миниатюры).
+    pub fn extract_cover_bytes(file_path: &str) -> Option<Vec<u8>> {
+        let tagged_file = Probe::open(PathBuf::from(file_path)).ok()?.read().ok()?;
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())?;
+        let picture = tag
+            .pictures()
+            .iter()
+            .find(|p| p.pic_type() == PictureType::CoverFront)
+            .or_else(|| tag.pictures().first())?;
+        Some(picture.data().to_vec())
     }
 
     /// Извлечь метаданные без обложки и акцентного цвета (для сканирования библиотеки)
@@ -1213,9 +1327,15 @@ impl AudioPlayer {
                     album = tag.album().map(|s| s.to_string());
                     genre = tag.genre().map(|s| s.to_string());
                     if with_cover {
-                        let (cover, accent) = cover_data_from_tag(tag);
-                        cover_art = cover;
+                        let (has_cover, accent) = cover_meta_from_tag(tag);
                         accent_color = accent;
+                        if has_cover {
+                            // Обложка отдаётся миниатюрой через протокол, без base64.
+                            cover_art = Some(crate::thumbnails::cover_protocol_url(
+                                file_path,
+                                &crate::thumbnails::embedded_sig(file_path),
+                            ));
+                        }
                     }
                 }
 

@@ -7,7 +7,7 @@ use crate::audio_player::EqSettings;
 use crate::SettingsState;
 
 /// Разделители исполнителей по умолчанию
-pub const DEFAULT_ARTIST_SEPARATORS: &[&str] = &["; "];
+pub const DEFAULT_ARTIST_SEPARATORS: &[&str] = &["; ", ", "];
 
 /// Настройки приложения: произвольные опции + эквалайзер в одном файле
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]

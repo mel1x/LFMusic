@@ -17,7 +17,6 @@ mod imp {
     use std::sync::{Condvar, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use image::RgbaImage;
     use tauri::{AppHandle, Emitter, Manager};
 
@@ -42,8 +41,10 @@ mod imp {
         DefSubclassProc, ITaskbarList3, SetWindowSubclass, TaskbarList, THB_FLAGS, THB_ICON,
         THB_TOOLTIP, THBF_ENABLED, THUMBBUTTON, THUMBBUTTONMASK,
     };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, RegisterWindowMessageW, HICON, ICONINFO, WM_COMMAND,
+        CreateIconIndirect, GetClientRect, IsIconic, RegisterWindowMessageW, HICON, ICONINFO,
+        PW_RENDERFULLCONTENT, WM_COMMAND,
     };
 
     // ── Идентификаторы кнопок ────────────────────────────────────────────────
@@ -75,7 +76,16 @@ mod imp {
     const LEVEL_BRIGHT: u8 = 255;
     const LEVEL_DIM: u8 = 160;
     // Рабочий размер обложек в превью — кадры рендерятся из него, не из оригинала.
-    const WORK_SIZE: u32 = 256;
+    // Запас по разрешению: даже центральная обложка (×PLAY_SCALE) на крупных
+    // эскизах масштабируется вниз, без апскейла и «мыла».
+    const WORK_SIZE: u32 = 384;
+
+    // Дефолтная обложка для треков без встроенной/кастомной картинки — та же,
+    // что показывает фронтенд (src/assets/trackCover.webp). Благодаря ей слот
+    // соседа (напр. «предыдущий» = последний трек по закольцованной очереди)
+    // никогда не остаётся пустым, а превью не «ломается» в обычное окно при
+    // переходе на трек без обложки.
+    const DEFAULT_COVER: &[u8] = include_bytes!("../../src/assets/trackCover.webp");
 
     // ── Глобальное состояние (только Send-данные) ────────────────────────────
     static APP: OnceLock<AppHandle> = OnceLock::new();
@@ -366,7 +376,7 @@ mod imp {
     /// запечено в мастере (альфа масштабируется вместе с картинкой), поэтому
     /// на кадр анимации остаётся только один дешёвый ресайз.
     fn prep_cover(img: &Img, side: u32) -> RgbaImage {
-        image::imageops::resize(img, side, side, image::imageops::FilterType::Triangle)
+        image::imageops::resize(img, side, side, image::imageops::FilterType::CatmullRom)
     }
 
     /// Плавное замедление на концах (smoothstep).
@@ -375,11 +385,16 @@ mod imp {
         t * t * (3.0 - 2.0 * t)
     }
 
-    /// Геометрия раскладки: (gap, сторона базовой обложки `s`, шаг между центрами).
+    /// Геометрия раскладки: (вертикальный отступ, сторона базовой обложки `s`,
+    /// шаг между центрами). Горизонтальный зазор между обложками шире
+    /// вертикального — так превью выглядит просторнее.
     fn layout(ch: u32) -> (f32, f32, f32) {
-        let gap = ((ch as f32) * 0.06).max(2.0);
-        let s = ((ch as f32) - 2.0 * gap).max(1.0);
-        (gap, s, s + gap)
+        // Отступ подобран так, чтобы центральная обложка при play-увеличении
+        // (×PLAY_SCALE) ровно вписывалась в высоту, а не обрезалась.
+        let margin = ((ch as f32) * 0.045).max(2.0);
+        let s = ((ch as f32) - 2.0 * margin).max(1.0);
+        let hgap = ((ch as f32) * 0.16).max(4.0);
+        (margin, s, s + hgap)
     }
 
     /// Рисует одну обложку в позиции слота `slot` (0 — центр, ±1 — соседи).
@@ -624,6 +639,69 @@ mod imp {
         }
     }
 
+    /// Снимок настоящего окна для Aero Peek (большое превью при наведении на
+    /// эскиз в панели задач). Захватывает содержимое окна вместе с веб-вью через
+    /// `PrintWindow(PW_RENDERFULLCONTENT)`. Возвращает `None`, если окно свёрнуто
+    /// или снять кадр не удалось — тогда вызывающий откатывается на обложки.
+    unsafe fn capture_window(h: HWND) -> Option<HBITMAP> {
+        if IsIconic(h).as_bool() {
+            return None; // у свёрнутого окна нет содержимого для снимка
+        }
+        let mut rc = RECT::default();
+        GetClientRect(h, &mut rc).ok()?;
+        let w = (rc.right - rc.left).max(1);
+        let ht = (rc.bottom - rc.top).max(1);
+
+        let screen = GetDC(None);
+        if screen.is_invalid() {
+            return None;
+        }
+        let memdc = CreateCompatibleDC(Some(screen));
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -ht, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0, // BI_RGB
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let hbm = CreateDIBSection(Some(memdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok();
+        let result = (|| {
+            let hbm = hbm?;
+            if bits.is_null() {
+                return None;
+            }
+            let old = SelectObject(memdc, HGDIOBJ(hbm.0));
+            // PW_RENDERFULLCONTENT захватывает в т.ч. содержимое WebView2 (DComp).
+            let ok = PrintWindow(h, memdc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
+            SelectObject(memdc, old);
+            if !ok {
+                return None;
+            }
+            // GDI не выставляет альфу — форсим непрозрачность, иначе DWM может
+            // показать прозрачный/чёрный кадр.
+            let px = std::slice::from_raw_parts_mut(bits as *mut u8, (w * ht * 4) as usize);
+            for chunk in px.chunks_exact_mut(4) {
+                chunk[3] = 255;
+            }
+            Some(hbm)
+        })();
+
+        if result.is_none() {
+            if let Some(hbm) = hbm {
+                let _ = DeleteObject(HGDIOBJ(hbm.0));
+            }
+        }
+        let _ = DeleteDC(memdc);
+        ReleaseDC(None, screen);
+        result
+    }
+
     // ── Оконная subclass-процедура ───────────────────────────────────────────
     unsafe extern "system" fn subclass_proc(
         h: HWND,
@@ -666,7 +744,10 @@ mod imp {
                 return LRESULT(0);
             }
             WM_DWMSENDICONICLIVEPREVIEW => {
-                if let Some(hbm) = make_thumbnail(640, 400) {
+                // Aero Peek показывает настоящее окно, а не увеличенные обложки.
+                // Если окно свёрнуто и снять кадр нельзя — откатываемся на обложки.
+                let hbm = capture_window(h).or_else(|| make_thumbnail(640, 400));
+                if let Some(hbm) = hbm {
                     let _ = DwmSetIconicLivePreviewBitmap(h, hbm, None, Default::default());
                     let _ = DeleteObject(HGDIOBJ(hbm.0));
                 }
@@ -821,10 +902,13 @@ mod imp {
             return;
         }
 
-        let decode = |url: Option<String>| -> Option<Img> {
-            let url = url?;
-            let b64 = url.split(',').nth(1)?;
-            let bytes = STANDARD.decode(b64).ok()?;
+        let decode = |file_path: Option<String>| -> Option<Img> {
+            let file_path = file_path?;
+            // prev/current/next приходят как file_path; обложку берём из кэша
+            // WebP-миниатюр (или генерируем) — без base64 в IPC. Если у трека
+            // обложки нет — подставляем дефолтную картинку, чтобы слот не пустовал.
+            let bytes = crate::thumbnails::cover_bytes(app, &file_path, 512)
+                .unwrap_or_else(|| DEFAULT_COVER.to_vec());
             let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
             // Готовим «мастер» один раз: рабочий размер + скруглённые углы.
             // Кадры анимации дальше только масштабируют его — иначе покадровый
@@ -833,17 +917,20 @@ mod imp {
                 &img,
                 WORK_SIZE,
                 WORK_SIZE,
-                image::imageops::FilterType::Triangle,
+                image::imageops::FilterType::Lanczos3,
             );
-            round_corners(&mut img, WORK_SIZE as f32 * 0.14);
+            round_corners(&mut img, WORK_SIZE as f32 * 0.10);
             Some(img)
         };
+        // Есть ли играющий трек — независимо от наличия обложки (для force-iconic).
+        let has_current_track = current.is_some();
         let new = Covers {
             prev: decode(prev),
             current: decode(current),
             next: decode(next),
         };
-        let has_current = new.current.is_some();
+        // Удалось ли получить кадр центральной обложки (для запуска анимации).
+        let has_current_cover = new.current.is_some();
         let kind = match transition.as_str() {
             "forward" => Anim::SlideFwd,
             "backward" => Anim::SlideBack,
@@ -858,7 +945,7 @@ mod imp {
         {
             let had_current = cur.current.is_some();
             *old = std::mem::replace(&mut *cur, new);
-            if had_current && has_current && kind != Anim::None {
+            if had_current && has_current_cover && kind != Anim::None {
                 *tr = (kind, Some(Instant::now()));
                 animate = true;
             } else {
@@ -868,7 +955,7 @@ mod imp {
 
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.run_on_main_thread(move || {
-                set_force_iconic(has_current);
+                set_force_iconic(has_current_track);
                 let h = hwnd();
                 if !h.0.is_null() {
                     unsafe {

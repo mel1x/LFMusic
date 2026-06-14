@@ -38,7 +38,8 @@ export function useLinuxMediaSession(options: LinuxMediaSessionOptions) {
       title: track ? trackTitle(track) : null,
       artist: track?.artist || null,
       album: track?.album || null,
-      cover: options.currentCoverArt.value || null,
+      // Бэкенд строит file:// на кэшированную WebP-миниатюру по file_path.
+      filePath: track?.file_path || null,
       durationSecs: Math.max(0, options.durationSecs.value || 0),
     }).catch(() => {})
   }

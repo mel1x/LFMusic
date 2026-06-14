@@ -7,8 +7,11 @@ mod mpris;
 mod pins;
 mod player_state;
 mod settings;
+mod spectrum;
 pub mod statistics;
 mod taskbar;
+mod thumbnails;
+mod track_covers;
 mod window_state;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
@@ -160,8 +163,10 @@ fn apply_accent_color(
         metadata.spectral_centroid = t.spectral_centroid;
         metadata.key = t.key.clone();
         metadata.audio_fingerprint = t.audio_fingerprint.clone();
-        if let Some(cover) = lib.get_override_cover(file_path) {
-            metadata.cover_art = Some(cover);
+        // Пользовательская обложка имеет приоритет; встроенная уже проставлена
+        // миниатюрой-URL в get_metadata (см. get_metadata_inner).
+        if let Some(sig) = lib.get_override_cover_sig(file_path) {
+            metadata.cover_art = Some(thumbnails::cover_protocol_url(file_path, &sig));
         }
     }
 
@@ -276,6 +281,23 @@ fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> 
     Ok(player.get_status())
 }
 
+/// Частотные полосы спектра текущего звука (0..1) для визуализатора.
+/// Опрашивается фронтендом на кадрах rAF (30/60 fps).
+#[tauri::command]
+fn player_get_spectrum(state: State<PlayerState>, bars: usize) -> Result<Vec<f32>, String> {
+    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(player.spectrum_bars(bars))
+}
+
+/// Включить/выключить снятие спектра — фронтенд синхронизирует с видимостью
+/// блока-визуализатора, чтобы при выключенном визуализаторе не было лишней работы.
+#[tauri::command]
+fn player_set_spectrum_enabled(state: State<PlayerState>, enabled: bool) -> Result<(), String> {
+    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    player.set_spectrum_enabled(enabled);
+    Ok(())
+}
+
 // Тяжёлые команды помечены (async): выполняются в пуле потоков, а не на
 // главном потоке — иначе чтение тегов/обложек блокирует событийный цикл окна.
 #[tauri::command(async)]
@@ -288,17 +310,16 @@ fn get_track_metadata(
     Ok(metadata)
 }
 
+/// Вернуть URL обложки трека (кастомный протокол `lfmusic-cover`, миниатюра)
+/// или `null`, если обложки нет. Дёшево: lookup override в БД + проверка тега;
+/// сама миниатюра генерируется лениво обработчиком протокола при показе.
 #[tauri::command(async)]
 fn get_cover_art(
     library: State<LibraryState>,
     file_path: String,
 ) -> Result<Option<String>, String> {
-    if let Ok(lib) = library.0.lock() {
-        if let Some(cover) = lib.get_override_cover(&file_path) {
-            return Ok(Some(cover));
-        }
-    }
-    Ok(AudioPlayer::extract_cover_art(&file_path))
+    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(thumbnails::cover_url(&lib, &file_path))
 }
 
 /// Прочитать оригинальную обложку из файла, игнорируя пользовательские
@@ -1048,16 +1069,21 @@ fn fetch_track_with_override(
         lib.get_track(file_path)
     };
     if let Some(mut t) = from_lib {
-        if t.cover_art.is_none() {
-            t.cover_art = AudioPlayer::extract_cover_art(file_path);
+        // Маппер вернул URL только для override-обложки; для встроенной — None,
+        // подставляем её миниатюру-URL.
+        if t.cover_art.is_none() && AudioPlayer::has_embedded_cover(file_path) {
+            t.cover_art = Some(thumbnails::cover_protocol_url(
+                file_path,
+                &thumbnails::embedded_sig(file_path),
+            ));
         }
         return Ok(t);
     }
 
     let mut metadata = AudioPlayer::get_metadata(file_path)?;
     let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    if let Some(cover) = lib.get_override_cover(file_path) {
-        metadata.cover_art = Some(cover);
+    if let Some(sig) = lib.get_override_cover_sig(file_path) {
+        metadata.cover_art = Some(thumbnails::cover_protocol_url(file_path, &sig));
     }
     if let Some(accent) = lib.get_accent_color(file_path) {
         metadata.accent_color = Some(accent);
@@ -1138,13 +1164,14 @@ fn taskbar_set_covers(
 
 #[tauri::command]
 fn mpris_update_metadata(
+    app: tauri::AppHandle,
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
-    cover: Option<String>,
+    file_path: Option<String>,
     duration_secs: f64,
 ) {
-    mpris::update_metadata(title, artist, album, cover, duration_secs);
+    mpris::update_metadata(&app, title, artist, album, file_path, duration_secs);
 }
 
 #[tauri::command]
@@ -1173,6 +1200,14 @@ pub fn run() {
     let player = AudioPlayer::new().expect("Не удалось инициализировать аудиоплеер");
 
     tauri::Builder::default()
+        // Кастомный протокол обложек: отдаёт уменьшенные WebP-миниатюры по
+        // file_path (генерируются лениво и кэшируются на диск), без base64 в IPC.
+        .register_asynchronous_uri_scheme_protocol(
+            "lfmusic-cover",
+            |ctx, request, responder| {
+                thumbnails::protocol_handler(ctx, request, responder);
+            },
+        )
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -1238,9 +1273,14 @@ pub fn run() {
                     let Ok(lib) = state.0.lock() else { return };
                     lib.get_override_covers_without_accent()
                 };
-                for (file_path, data_url) in pending {
-                    let Some(b64) = data_url.split(',').nth(1) else { continue };
-                    let Ok(bytes) = STANDARD.decode(b64) else { continue };
+                for file_path in pending {
+                    // Байты обложки читаем под коротким локом, декодируем — без него.
+                    let bytes = {
+                        let state = handle.state::<LibraryState>();
+                        let Ok(lib) = state.0.lock() else { continue };
+                        lib.override_cover_bytes(&file_path)
+                    };
+                    let Some(bytes) = bytes else { continue };
                     let Some(color) = audio_player::extract_accent_color(&bytes) else {
                         continue;
                     };
@@ -1268,6 +1308,8 @@ pub fn run() {
             player_seek,
             player_seek_crossfade,
             player_get_status,
+            player_get_spectrum,
+            player_set_spectrum_enabled,
             get_track_metadata,
             get_cover_art,
             get_original_cover_art,

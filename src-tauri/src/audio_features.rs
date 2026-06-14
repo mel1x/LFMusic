@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
 use symphonia::core::audio::{AudioBufferRef, Signal};
@@ -30,17 +32,17 @@ pub struct AudioFeatures {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct Complex {
+pub(crate) struct Complex {
     re: f32,
     im: f32,
 }
 
 impl Complex {
-    fn new(re: f32, im: f32) -> Self {
+    pub(crate) fn new(re: f32, im: f32) -> Self {
         Self { re, im }
     }
 
-    fn magnitude(self) -> f32 {
+    pub(crate) fn magnitude(self) -> f32 {
         (self.re * self.re + self.im * self.im).sqrt()
     }
 }
@@ -391,19 +393,51 @@ fn spectral_stats(samples: &[f32], sample_rate: u32) -> SpectralStats {
     }
 }
 
-fn hann_window(size: usize) -> Vec<f32> {
-    (0..size)
-        .map(|i| {
-            let phase = 2.0 * std::f32::consts::PI * i as f32 / (size - 1) as f32;
-            0.5 - 0.5 * phase.cos()
+thread_local! {
+    /// Предрасчитанные twiddle-факторы W_n^k = exp(-2πi·k/n) для k∈[0, n/2),
+    /// ключ — размер БПФ. Считаются один раз на размер и переиспользуются на
+    /// каждом кадре визуализатора/анализа — вместо вычисления cos/sin в цикле
+    /// бабочек на каждый вызов.
+    static TWIDDLES: RefCell<HashMap<usize, Vec<Complex>>> = RefCell::new(HashMap::new());
+    /// Кэш окон Ханна по размеру (cos считается один раз на размер).
+    static HANN: RefCell<HashMap<usize, Vec<f32>>> = RefCell::new(HashMap::new());
+}
+
+/// Построить таблицу twiddle-факторов для БПФ размера `n` (n/2 значений).
+fn build_twiddles(n: usize) -> Vec<Complex> {
+    (0..n / 2)
+        .map(|k| {
+            let angle = -2.0 * std::f32::consts::PI * k as f32 / n as f32;
+            Complex::new(angle.cos(), angle.sin())
         })
         .collect()
 }
 
-fn fft_radix2(buffer: &mut [Complex]) {
+pub(crate) fn hann_window(size: usize) -> Vec<f32> {
+    HANN.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(size)
+            .or_insert_with(|| {
+                (0..size)
+                    .map(|i| {
+                        let phase = 2.0 * std::f32::consts::PI * i as f32 / (size - 1) as f32;
+                        0.5 - 0.5 * phase.cos()
+                    })
+                    .collect()
+            })
+            .clone()
+    })
+}
+
+pub(crate) fn fft_radix2(buffer: &mut [Complex]) {
     let n = buffer.len();
     debug_assert!(n.is_power_of_two());
+    if n < 2 {
+        return;
+    }
 
+    // Перестановка по обратному биту (in-place).
     let mut j = 0usize;
     for i in 1..n {
         let mut bit = n >> 1;
@@ -417,22 +451,27 @@ fn fft_radix2(buffer: &mut [Complex]) {
         }
     }
 
-    let mut len = 2usize;
-    while len <= n {
-        let angle = -2.0 * std::f32::consts::PI / len as f32;
-        let w_len = Complex::new(angle.cos(), angle.sin());
-        for i in (0..n).step_by(len) {
-            let mut w = Complex::new(1.0, 0.0);
-            for k in 0..len / 2 {
-                let u = buffer[i + k];
-                let v = multiply(buffer[i + k + len / 2], w);
-                buffer[i + k] = Complex::new(u.re + v.re, u.im + v.im);
-                buffer[i + k + len / 2] = Complex::new(u.re - v.re, u.im - v.im);
-                w = multiply(w, w_len);
+    // Бабочки с предрасчитанными twiddle-факторами. Для стадии длины `len`
+    // нужный фактор exp(-2πi·k/len) = table[k·(n/len)], где table[m]=exp(-2πi·m/n).
+    TWIDDLES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let table = cache.entry(n).or_insert_with(|| build_twiddles(n));
+        let mut len = 2usize;
+        while len <= n {
+            let half = len / 2;
+            let stride = n / len;
+            for i in (0..n).step_by(len) {
+                for k in 0..half {
+                    let w = table[k * stride];
+                    let u = buffer[i + k];
+                    let v = multiply(buffer[i + k + half], w);
+                    buffer[i + k] = Complex::new(u.re + v.re, u.im + v.im);
+                    buffer[i + k + half] = Complex::new(u.re - v.re, u.im - v.im);
+                }
             }
+            len <<= 1;
         }
-        len <<= 1;
-    }
+    });
 }
 
 fn multiply(a: Complex, b: Complex) -> Complex {
