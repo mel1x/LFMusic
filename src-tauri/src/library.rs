@@ -24,6 +24,13 @@ pub struct FolderInfo {
     pub exists: bool,
 }
 
+/// Жанр + количество треков (для фильтр-чипов каталога).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenreCount {
+    pub name: String,
+    pub count: u32,
+}
+
 /// Тип плейлиста
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PlaylistKind {
@@ -106,6 +113,9 @@ pub struct MusicLibrary {
     /// (O(N) скан истории) и далее обновляется инкрементально при завершении
     /// прослушивания трека — см. [`MusicLibrary::update_centroid_for_listen`].
     centroid_cache: RefCell<Option<CentroidAccumulators>>,
+    /// In-memory индекс поиска по каталогу (приведённые к нижнему регистру поля).
+    /// Строится лениво из БД, сбрасывается по флагу [`SEARCH_INDEX_DIRTY`].
+    search_index: RefCell<Option<Vec<crate::catalog_search::SearchEntry>>>,
 }
 
 pub type AudioFeatureProgressEmitter = Arc<dyn Fn(usize, usize) + Send + Sync + 'static>;
@@ -115,6 +125,10 @@ static AUDIO_FEATURE_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Помечается из фоновых/межпоточных операций (анализ фич, ре-скан), которые
 /// меняют состав истории. Кэш центроида сбрасывается при следующем чтении.
 static CENTROID_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
+/// Помечается при изменении состава треков или их полей (название/исполнитель/
+/// альбом/жанр/путь). In-memory индекс поиска по каталогу пересобирается при
+/// следующем чтении. Стартовое значение `true` — индекс строится лениво.
+static SEARCH_INDEX_DIRTY: AtomicBool = AtomicBool::new(true);
 
 fn current_audio_feature_generation() -> u64 {
     AUDIO_FEATURE_WORKER_GENERATION.load(Ordering::SeqCst)
@@ -260,6 +274,7 @@ fn spawn_audio_feature_analysis(
 
                 // Появились новые аудио-фичи — центроид мог измениться.
                 CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
 
                 if !is_audio_feature_generation_current(generation) {
                     return;
@@ -324,11 +339,13 @@ impl MusicLibrary {
                  bitrate       INTEGER,
                  is_lossless   INTEGER NOT NULL DEFAULT 0,
                  modified_secs INTEGER NOT NULL DEFAULT 0,
-                 sort_order    INTEGER NOT NULL DEFAULT 0
+                 sort_order    INTEGER NOT NULL DEFAULT 0,
+                 accent_color  TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_tracks_folder ON tracks(folder_path);
              CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
              CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album);
+             CREATE INDEX IF NOT EXISTS idx_tracks_genre  ON tracks(genre);
 
              CREATE TABLE IF NOT EXISTS track_audio_features (
                  file_path              TEXT PRIMARY KEY NOT NULL,
@@ -367,7 +384,7 @@ impl MusicLibrary {
                  file_path     TEXT PRIMARY KEY NOT NULL,
                  title         TEXT,
                  artist        TEXT,
-                 cover_data    TEXT,
+                 cover_sig     TEXT,
                  accent_color  TEXT
              );
              CREATE TABLE IF NOT EXISTS album_track_order (
@@ -380,73 +397,11 @@ impl MusicLibrary {
         statistics::create_tables(&conn)
             .map_err(|e| format!("Ошибка создания таблиц статистики: {}", e))?;
 
-        // Миграции: добавляем столбцы только если их ещё нет
-        let existing_columns: HashSet<String> = {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(tracks)")
-                .map_err(|e| format!("Ошибка PRAGMA table_info: {}", e))?;
-            let cols = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .map_err(|e| format!("Ошибка чтения столбцов: {}", e))?;
-            cols.filter_map(|r| r.ok()).collect()
-        };
-
-        if !existing_columns.contains("sort_order") {
-            let _ = conn.execute_batch(
-                "ALTER TABLE tracks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;"
-            );
-        }
-
-        if !existing_columns.contains("genre") {
-            conn.execute_batch(
-                "ALTER TABLE tracks ADD COLUMN genre TEXT;"
-            ).map_err(|e| format!("Ошибка миграции genre: {}", e))?;
-            // Сбрасываем modified_secs только один раз — при добавлении столбца
-            conn.execute_batch(
-                "UPDATE tracks SET modified_secs = 0;"
-            ).map_err(|e| format!("Ошибка сброса modified_secs: {}", e))?;
-        }
-
-        if !existing_columns.contains("accent_color") {
-            let _ = conn.execute_batch(
-                "ALTER TABLE tracks ADD COLUMN accent_color TEXT;"
-            );
-        }
-
-        // Версионированные миграции кэша через PRAGMA user_version.
-        // v1: пересчёт accent_color по обновлённому алгоритму извлечения.
-        let user_version: i32 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap_or(0);
-        if user_version < 1 {
-            let _ = conn.execute_batch(
-                "UPDATE tracks SET accent_color = NULL; PRAGMA user_version = 1;",
-            );
-        }
-        // v2: новый алгоритм акцентного цвета (гистограмма оттенков,
-        // анти-жёлтый и анти-кислотный фильтры). Кэш треков пересчитается
-        // лениво при воспроизведении, цвета кастомных обложек —
-        // фоновой задачей при старте (см. setup в lib.rs).
-        if user_version < 2 {
-            let _ = conn.execute_batch(
-                "UPDATE tracks SET accent_color = NULL;
-                 UPDATE track_overrides SET accent_color = NULL WHERE cover_data IS NOT NULL;
-                 PRAGMA user_version = 2;",
-            );
-        }
-        // v3: байты кастомных обложек вынесены из SQLite в файлы track_covers/.
-        // В БД остаётся только сигнатура (cover_sig); cover_data обнуляется, БД
-        // ужимается VACUUM'ом. См. модуль `track_covers`.
-        let _ = conn.execute_batch("ALTER TABLE track_overrides ADD COLUMN cover_sig TEXT;");
-        if user_version < 3 {
-            Self::migrate_override_covers_to_files(&conn, &app_data_dir);
-            let _ = conn.execute_batch("PRAGMA user_version = 3;");
-        }
-
         Ok(Self {
             conn,
             db_path,
             centroid_cache: RefCell::new(None),
+            search_index: RefCell::new(None),
         })
     }
 
@@ -712,6 +667,7 @@ impl MusicLibrary {
         self.rebuild_artist_playlists(artist_separators)?;
         // Состав треков изменился — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
         Ok(self.get_all_tracks_light())
     }
 
@@ -754,6 +710,7 @@ impl MusicLibrary {
         let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
         // Состав треков изменился — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -809,6 +766,7 @@ impl MusicLibrary {
 
             // Удалены треки (вместе с их статистикой) — центроид мог измениться.
             CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
         }
 
         Ok(count)
@@ -912,6 +870,191 @@ impl MusicLibrary {
         })
     }
 
+    // ── Серверная пагинация каталога + поиск (in-memory индекс) ────────────────
+
+    /// ORDER BY канонического порядка каталога (совпадает с get_all_tracks_inner).
+    const CATALOG_ORDER_BY: &'static str = " ORDER BY
+                 t.sort_order DESC,
+                 CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
+                 LOWER(COALESCE(o.artist, t.artist)),
+                 LOWER(COALESCE(t.album, '')),
+                 LOWER(COALESCE(o.title, t.title, t.file_path))";
+
+    /// Построить in-memory индекс поиска из БД в каноническом порядке.
+    fn build_search_index(&self) -> Vec<crate::catalog_search::SearchEntry> {
+        let sql = format!(
+            "SELECT t.file_path,
+                    COALESCE(o.title, t.title),
+                    COALESCE(o.artist, t.artist),
+                    t.album, t.genre
+             FROM tracks t
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path{}",
+            Self::CATALOG_ORDER_BY
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let title: Option<String> = row.get(1)?;
+            let artist: Option<String> = row.get(2)?;
+            let album: Option<String> = row.get(3)?;
+            let genre: Option<String> = row.get(4)?;
+            Ok(crate::catalog_search::SearchEntry::new(
+                path, title, artist, album, genre,
+            ))
+        });
+        match rows {
+            Ok(r) => r.filter_map(|x| x.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Гарантирует актуальность индекса (пересборка по dirty-флагу / при отсутствии).
+    fn ensure_search_index(&self) {
+        if SEARCH_INDEX_DIRTY.swap(false, Ordering::SeqCst) {
+            self.search_index.borrow_mut().take();
+        }
+        if self.search_index.borrow().is_none() {
+            let built = self.build_search_index();
+            *self.search_index.borrow_mut() = Some(built);
+        }
+    }
+
+    /// Ранжированные пути по запросу (+ опциональный фильтр по жанру).
+    fn ranked_paths(&self, genre: Option<&str>, search: &str, limit: Option<usize>) -> Vec<String> {
+        self.ensure_search_index();
+        let guard = self.search_index.borrow();
+        let entries = match guard.as_ref() {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+        let ranked = crate::catalog_search::rank(entries, search, genre);
+        let iter = ranked.into_iter().map(|e| e.path.clone());
+        match limit {
+            Some(n) => iter.take(n).collect(),
+            None => iter.collect(),
+        }
+    }
+
+    /// Прямой SQL-запрос путей каталога в каноническом порядке (без поиска),
+    /// с опциональным точным фильтром по жанру (индекс idx_tracks_genre).
+    fn catalog_paths_sql(&self, genre: Option<&str>) -> Vec<String> {
+        let base = "SELECT t.file_path
+                    FROM tracks t
+                    LEFT JOIN track_overrides o ON o.file_path = t.file_path";
+        let sql = match genre {
+            Some(_) => format!("{} WHERE t.genre = ?1{}", base, Self::CATALOG_ORDER_BY),
+            None => format!("{}{}", base, Self::CATALOG_ORDER_BY),
+        };
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        // Замыкания query_map с разными аргументами имеют разные типы, поэтому
+        // собираем результат в Vec прямо внутри каждой ветки.
+        match genre {
+            Some(g) => match stmt.query_map(params![g], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows.filter_map(|x| x.ok()).collect(),
+                Err(_) => Vec::new(),
+            },
+            None => match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows.filter_map(|x| x.ok()).collect(),
+                Err(_) => Vec::new(),
+            },
+        }
+    }
+
+    /// Упорядоченные пути каталога с учётом фильтра по жанру и поисковому запросу.
+    /// Поиск (если непустой) использует in-memory ранжирование; иначе — прямой SQL.
+    pub fn get_catalog_paths(&self, genre: Option<&str>, search: Option<&str>) -> Vec<String> {
+        let search_q = search.map(|s| s.trim()).filter(|s| !s.is_empty());
+        match search_q {
+            Some(q) => self.ranked_paths(genre, q, None),
+            None => self.catalog_paths_sql(genre),
+        }
+    }
+
+    /// Пакетная материализация метаданных по списку путей (с overrides + audio-features).
+    /// Порядок результата совпадает с порядком входных путей; отсутствующие пропускаются.
+    pub fn get_tracks_by_paths(&self, paths: &[String]) -> Vec<TrackMetadata> {
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        let mut by_path: HashMap<String, TrackMetadata> = HashMap::new();
+        for chunk in paths.chunks(900) {
+            let placeholders = std::iter::repeat("?")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT t.file_path,
+                        COALESCE(o.title, t.title),
+                        COALESCE(o.artist, t.artist),
+                        t.album, t.genre, t.duration_secs,
+                        t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
+                        COALESCE(o.accent_color, t.accent_color),
+                        o.cover_sig,
+                        af.bpm, af.loudness, af.energy, af.danceability,
+                        af.spectral_centroid, af.track_key, af.audio_fingerprint
+                 FROM tracks t
+                 LEFT JOIN track_overrides o ON o.file_path = t.file_path
+                 LEFT JOIN track_audio_features af ON af.file_path = t.file_path
+                 WHERE t.file_path IN ({})",
+                placeholders
+            );
+            let mut stmt = match self.conn.prepare(&sql) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let params_vec: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            // Собираем строки в пределах жизни `stmt`, чтобы заём не «утёк» из блока.
+            let metas: Vec<TrackMetadata> =
+                match stmt.query_map(params_vec.as_slice(), |row| {
+                    Self::row_to_metadata_with_override(row)
+                }) {
+                    Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                    Err(_) => Vec::new(),
+                };
+            for meta in metas {
+                by_path.insert(meta.file_path.clone(), meta);
+            }
+        }
+        paths.iter().filter_map(|p| by_path.remove(p)).collect()
+    }
+
+    /// Ранжированные треки по запросу (для секции «Треки» страницы поиска).
+    pub fn search_tracks(&self, query: &str, limit: Option<usize>) -> Vec<TrackMetadata> {
+        let paths = self.ranked_paths(None, query, limit);
+        self.get_tracks_by_paths(&paths)
+    }
+
+    /// Список жанров с количеством треков (count > 1, по убыванию) — как в Catalog.vue.
+    pub fn list_genres(&self) -> Vec<GenreCount> {
+        let sql = "SELECT genre, COUNT(*) AS cnt
+                   FROM tracks
+                   WHERE genre IS NOT NULL AND genre != ''
+                   GROUP BY genre
+                   HAVING cnt > 1
+                   ORDER BY cnt DESC";
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok(GenreCount {
+                name: row.get(0)?,
+                count: row.get::<_, i64>(1)? as u32,
+            })
+        });
+        match rows {
+            Ok(r) => r.filter_map(|x| x.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Получить один трек по пути с применением переопределений
     pub fn get_track(&self, file_path: &str) -> Option<TrackMetadata> {
         let mut stmt = self
@@ -952,6 +1095,8 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка обновления sort_order: {}", e))?;
 
         if changed > 0 {
+            // Изменился sort_order → канонический порядок каталога устарел.
+            SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
             self.add_track_statistics_delta(TrackStatisticsDelta {
                 file_path: file_path.to_string(),
                 move_to_top_count_delta: 1,
@@ -1023,6 +1168,7 @@ impl MusicLibrary {
 
         // Состав треков мог измениться — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
         Ok(self.get_all_tracks())
     }
 
@@ -1781,41 +1927,6 @@ impl MusicLibrary {
         self.db_path.parent().unwrap_or_else(|| Path::new("."))
     }
 
-    /// Разовая миграция: перенести встроенные в БД байты кастомных обложек
-    /// (`cover_data`) в файлы `track_covers/<sig>`, оставив в БД только сигнатуру.
-    fn migrate_override_covers_to_files(conn: &Connection, app_data_dir: &Path) {
-        let rows: Vec<(String, String)> = {
-            let Ok(mut stmt) = conn.prepare(
-                "SELECT file_path, cover_data FROM track_overrides WHERE cover_data IS NOT NULL",
-            ) else {
-                return;
-            };
-            let mapped =
-                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
-            match mapped {
-                Ok(m) => m.filter_map(|r| r.ok()).collect(),
-                Err(_) => return,
-            }
-        };
-        if rows.is_empty() {
-            return;
-        }
-        for (file_path, data_url) in &rows {
-            let sig = crate::thumbnails::override_sig(data_url);
-            let Some(bytes) = crate::thumbnails::decode_data_url(data_url) else {
-                continue;
-            };
-            if crate::track_covers::write_cover(app_data_dir, &sig, &bytes).is_ok() {
-                let _ = conn.execute(
-                    "UPDATE track_overrides SET cover_sig = ?1, cover_data = NULL WHERE file_path = ?2",
-                    params![sig, file_path],
-                );
-            }
-        }
-        // Высвобождаем место, занятое удалёнными base64-данными.
-        let _ = conn.execute_batch("VACUUM;");
-    }
-
     /// Сохранить пользовательское переопределение метаданных трека.
     /// Переопределения переживают пересканирование и сбрасываются только
     /// при удалении папки трека из скоупа приложения.
@@ -1830,6 +1941,8 @@ impl MusicLibrary {
         accent_color: Option<&str>,
         keep_existing_cover: bool,
     ) -> Result<(), String> {
+        // Меняются title/artist → индекс поиска устарел.
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
         // Нормализуем пустые строки в None — пустое поле = «использовать оригинал».
         let title = title.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
         let artist = artist.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
@@ -1917,6 +2030,7 @@ impl MusicLibrary {
 
     /// Полностью удалить переопределение для трека (вернуть оригинальные значения)
     pub fn clear_track_override(&self, file_path: &str) -> Result<(), String> {
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
         // Сначала подчищаем осиротевший файл обложки (если он больше ничей).
         if let Some(sig) = self.get_override_cover_sig(file_path) {
             self.remove_orphan_cover_file(&sig, file_path);
@@ -1934,6 +2048,7 @@ impl MusicLibrary {
     /// Также сбрасывает кэшированный accent_color, чтобы следующее воспроизведение
     /// пересчитало его из оригинальной обложки файла.
     pub fn clear_all_track_overrides(&self) -> Result<usize, String> {
+        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
         let count = self
             .conn
             .execute("DELETE FROM track_overrides", [])
@@ -2003,34 +2118,6 @@ impl MusicLibrary {
                 params![color, file_path],
             )
             .map_err(|e| format!("Ошибка сохранения accent_color: {}", e))?;
-        Ok(())
-    }
-
-    /// Пути треков с кастомной обложкой, у которых не вычислен акцентный цвет
-    /// (сброшен миграцией на новый алгоритм). Сами байты обложки читаются
-    /// отдельно (`override_cover_bytes`) — уже без удержания лока библиотеки.
-    pub fn get_override_covers_without_accent(&self) -> Vec<String> {
-        let Ok(mut stmt) = self.conn.prepare(
-            "SELECT file_path FROM track_overrides
-             WHERE cover_sig IS NOT NULL AND accent_color IS NULL",
-        ) else {
-            return Vec::new();
-        };
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0));
-        match rows {
-            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    /// Записать пересчитанный акцентный цвет кастомной обложки.
-    pub fn set_override_accent_color(&self, file_path: &str, color: &str) -> Result<(), String> {
-        self.conn
-            .execute(
-                "UPDATE track_overrides SET accent_color = ?1 WHERE file_path = ?2",
-                params![color, file_path],
-            )
-            .map_err(|e| format!("Ошибка сохранения accent_color обложки: {}", e))?;
         Ok(())
     }
 

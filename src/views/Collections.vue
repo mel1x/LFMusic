@@ -35,7 +35,7 @@ const {
     moveArtistToTop,
 } = usePlaylists();
 const {
-    trackList,
+    catalogCount,
     getTrackByPath,
     loadCoversForTracks,
     isPlaying,
@@ -260,7 +260,7 @@ watch(
 );
 
 watch(
-    () => trackList.value.length,
+    catalogCount,
     () => {
         for (const pl of userPlaylists.value) {
             if (pl.track_count === 0) continue;
@@ -344,8 +344,7 @@ async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     }
     const tracks = await getPlaylistTracks(pl.id);
     if (tracks.length === 0) return;
-    const map = new Map(trackList.value.map(t => [t.file_path, t]));
-    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
     setPlaylistSource(`playlist:${pl.id}`, merged);
     await playTrack(merged[0]);
 }
@@ -420,8 +419,7 @@ async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
     if (album.trackCount === 0) return;
     const tracks = await getPlaylistTracks(album.id);
     if (tracks.length === 0) return;
-    const map = new Map(trackList.value.map(t => [t.file_path, t]));
-    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
     setPlaylistSource(`album:${album.name}`, merged);
     await playTrack(merged[0]);
 }
@@ -526,8 +524,7 @@ async function onPlayArtist(e: MouseEvent, artist: ArtistEntry) {
     if (artist.trackCount === 0) return;
     const tracks = await getPlaylistTracks(artist.id);
     if (tracks.length === 0) return;
-    const map = new Map(trackList.value.map(t => [t.file_path, t]));
-    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
     setPlaylistSource(`artist:${artist.name}`, merged);
     await playTrack(merged[0]);
 }

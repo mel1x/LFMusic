@@ -35,7 +35,8 @@ const route = useRoute()
 const router = useRouter()
 
 const {
-    trackMap,
+    getTrackByPath,
+    cacheTracks,
     currentTrack,
     isPlaying,
     activePlaylistSource,
@@ -45,8 +46,6 @@ const {
     formatTime,
     loadCoversForTracks,
     clearCoverQueue,
-    sourceTrackList,
-    syncPlaybackOrder,
 } = usePlayer();
 
 const { playlists, loadPlaylists, getPlaylistTracks, removeTrackFromPlaylist, deletePlaylist, renamePlaylist } = usePlaylists();
@@ -65,14 +64,14 @@ const playlistTrackPaths = ref<string[]>([])
 async function reloadPlaylistTracks() {
     if (!Number.isFinite(playlistId.value)) return
     const tracks = await getPlaylistTracks(playlistId.value)
+    cacheTracks(tracks)
     playlistTrackPaths.value = tracks.map(t => t.file_path)
 }
 
 const playlistTracks = computed<TrackMetadata[]>(() => {
-    const map = trackMap.value
     const out: TrackMetadata[] = []
     for (const p of playlistTrackPaths.value) {
-        const t = map.get(p)
+        const t = getTrackByPath(p)
         if (t) out.push(t)
     }
     return out
@@ -84,7 +83,7 @@ const { getCustomCover } = useCustomCovers()
 
 const firstCoverTrack = computed(() => {
     const firstPath = playlistTrackPaths.value[0] ?? playlist.value?.first_file_path
-    return firstPath ? trackMap.value.get(firstPath) : undefined
+    return firstPath ? getTrackByPath(firstPath) : undefined
 })
 
 const playlistCover = computed(() => {
@@ -289,8 +288,8 @@ async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
     playlistTrackPaths.value.unshift(track.file_path)
     await invoke('playlist_move_track_to_top', { playlistId: playlistId.value, filePath: track.file_path })
     if (isPlaylistActive.value) {
-        sourceTrackList.value = playlistTracks.value.slice()
-        syncPlaybackOrder()
+        // Пересобираем источник (пути + объекты) из переупорядоченного плейлиста.
+        setPlaylistSource(sourceId.value, playlistTracks.value.slice())
     }
     window.dispatchEvent(new CustomEvent('lfmusic:playlist-track-moved-to-top', { detail: { playlistId: playlistId.value } }))
 }

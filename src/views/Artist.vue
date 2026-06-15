@@ -11,10 +11,9 @@ import defaultTrackCover from '../assets/trackCover.webp'
 
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists } from '../composables/usePlaylists'
-import { useSettings } from '../composables/useSettings'
 import { createRipple } from '../composables/useRipple'
 import { isPhoneViewport } from '../composables/usePlatform'
-import { tracksCountText, artistTagMatches, listenCountText } from '../utils/format'
+import { tracksCountText, listenCountText } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue'
 import TrackArtists from '../components/TrackArtists.vue'
@@ -32,7 +31,6 @@ const route = useRoute()
 const router = useRouter()
 
 const {
-    trackList,
     currentTrack,
     isPlaying,
     activePlaylistSource,
@@ -41,10 +39,11 @@ const {
     setPlaylistSource,
     formatTime,
     loadCoversForTracks,
+    getTrackByPath,
+    cacheTracks,
 } = usePlayer()
 
 const { albums: albumPlaylists, artists: artistPlaylists, loadPlaylists, getPlaylistTracks } = usePlaylists()
-const { settings } = useSettings()
 
 const rawArtistName = computed(() => {
     const raw = Array.isArray(route.params.name) ? route.params.name[0] : route.params.name
@@ -62,11 +61,20 @@ const artistPlaylist = computed(() => {
 // аватарку независимо от регистра в ссылке. До загрузки плейлистов — исходное.
 const artistName = computed(() => artistPlaylist.value?.name ?? rawArtistName.value)
 
-const artistTracks = computed<TrackMetadata[]>(() => {
-    const target = artistName.value
-    const seps = settings.value.artist_separators
-    return trackList.value.filter(t => artistTagMatches(t.artist, target, seps))
-})
+// Треки исполнителя — из плейлиста исполнителя (бэкенд группирует по артисту).
+const artistTracks = ref<TrackMetadata[]>([])
+async function loadArtistTracks() {
+    const pl = artistPlaylist.value
+    if (!pl) { artistTracks.value = []; return }
+    try {
+        const tracks = await getPlaylistTracks(pl.id)
+        cacheTracks(tracks)
+        artistTracks.value = tracks
+    } catch {
+        artistTracks.value = []
+    }
+}
+watch([artistPlaylist, artistName], loadArtistTracks, { immediate: true })
 
 const sourceId = computed(() => `artist:${artistName.value}`)
 
@@ -77,7 +85,7 @@ const artistCover = computed(() => {
     if (custom) return custom
     const path = artistPlaylist.value?.first_file_path
     if (!path) return defaultTrackCover
-    const t = trackList.value.find(x => x.file_path === path)
+    const t = getTrackByPath(path)
     return t?.cover_art || defaultTrackCover
 })
 
@@ -108,7 +116,7 @@ const artistAlbums = computed<AlbumEntry[]>(() => {
         .filter(pl => albumNames.has(pl.name))
         .map(pl => {
             const t = pl.first_file_path
-                ? trackList.value.find(x => x.file_path === pl.first_file_path)
+                ? getTrackByPath(pl.first_file_path)
                 : undefined
             return {
                 id: pl.id,
@@ -158,7 +166,7 @@ function requestCovers() {
     const pending: TrackMetadata[] = []
     const headPath = artistPlaylist.value?.first_file_path
     if (headPath) {
-        const t = trackList.value.find(x => x.file_path === headPath)
+        const t = getTrackByPath(headPath)
         if (t && !t.cover_art) pending.push(t)
     }
     for (const t of previewTracks.value) {
@@ -166,7 +174,7 @@ function requestCovers() {
     }
     for (const a of artistAlbums.value) {
         if (!a.firstPath) continue
-        const t = trackList.value.find(x => x.file_path === a.firstPath)
+        const t = getTrackByPath(a.firstPath)
         if (t && !t.cover_art) pending.push(t)
     }
     if (pending.length) loadCoversForTracks(pending)
@@ -179,7 +187,7 @@ onMounted(async () => {
     requestCovers()
 })
 
-watch(() => trackList.value.length, () => requestCovers())
+watch(() => artistTracks.value.length, () => requestCovers())
 watch(artistName, () => requestCovers())
 
 // ── Albums line scroll ─────────────────────────────────────────────────────
@@ -322,8 +330,7 @@ async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
     if (album.trackCount === 0) return
     const tracks = await getPlaylistTracks(album.id)
     if (tracks.length === 0) return
-    const map = new Map(trackList.value.map(t => [t.file_path, t]))
-    const merged = tracks.map(t => map.get(t.file_path) ?? t)
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     setPlaylistSource(`album:${album.name}`, merged)
     await playTrack(merged[0])
 }

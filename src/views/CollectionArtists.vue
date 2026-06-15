@@ -21,7 +21,7 @@ import { useCoverGate } from '../composables/useCoverGate';
 
 const router = useRouter();
 const {
-    trackList,
+    catalogCount,
     getTrackByPath,
     loadCoversForTracks,
     isPlaying,
@@ -155,8 +155,7 @@ async function onPlayArtist(e: MouseEvent, artist: ArtistEntry) {
     if (artist.trackCount === 0) return;
     const tracks = await getPlaylistTracks(artist.id);
     if (tracks.length === 0) return;
-    const map = new Map(trackList.value.map(t => [t.file_path, t]));
-    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
     setPlaylistSource(`artist:${artist.name}`, merged);
     await playTrack(merged[0]);
 }
@@ -292,7 +291,7 @@ onUnmounted(() => {
     observedEls.clear();
 });
 
-watch(() => trackList.value.length, () => {
+watch(catalogCount, () => {
     if (!gridEl.value) return;
     ensureObserver();
     refreshMargin();

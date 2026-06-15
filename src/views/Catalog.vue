@@ -7,7 +7,6 @@ import PauseIcon from '../components/Icons/PauseIcon.vue';
 import defaultCover from '../assets/trackCover.webp';
 import cover from '../assets/cover.webp';
 import SearchIcon from '../components/Icons/SearchIcon.vue';
-import { searchRanked } from '../composables/useSearch';
 
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
@@ -27,13 +26,16 @@ import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
 
 const {
-    trackList,
+    catalogCount,
     currentTrack,
     isPlaying,
     activePlaylistSource,
     playTrack,
     togglePlayPause,
-    setPlaylistSource,
+    setCatalogSource,
+    moveCatalogTrackToTop,
+    getTrackByPath,
+    fetchTracksByPaths,
     formatTime,
     loadCoversForTracks,
     clearCoverQueue,
@@ -50,18 +52,15 @@ const genreBarEl = ref<HTMLElement | null>(null)
 const canScrollLeft = ref(false)
 const canScrollRight = ref(false)
 
-const genreList = computed(() => {
-    const counts = new Map<string, number>()
-    for (const t of trackList.value) {
-        if (t.genre) {
-            counts.set(t.genre, (counts.get(t.genre) || 0) + 1)
-        }
+// Список жанров (с количеством) — агрегат из SQLite.
+const genreList = ref<{ name: string; count: number }[]>([])
+async function loadGenres() {
+    try {
+        genreList.value = await invoke<{ name: string; count: number }[]>('library_list_genres')
+    } catch {
+        genreList.value = []
     }
-    return [...counts.entries()]
-        .filter(([, count]) => count > 1)
-        .sort((a, b) => b[1] - a[1])
-        .map(([name, count]) => ({ name, count }))
-})
+}
 
 function toggleGenre(genre: string) {
     selectedGenre.value = selectedGenre.value === genre ? null : genre
@@ -120,23 +119,25 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-const filteredTracks = computed(() => {
-    let list = trackList.value
-    if (selectedGenre.value) {
-        list = list.filter(t => t.genre === selectedGenre.value)
+// Отфильтрованные пути каталога (жанр + поиск) приходят с бэкенда (SQLite-индекс
+// по жанру + перенесённое ранжирование поиска). Виртуальный скролл идёт по путям,
+// метаданные видимого окна материализуются по требованию через кэш.
+const filteredPaths = ref<string[]>([])
+let filterReqId = 0
+async function refreshFilteredPaths() {
+    const reqId = ++filterReqId
+    const genre = selectedGenre.value || undefined
+    const search = debouncedSearch.value.trim() || undefined
+    try {
+        const paths = await invoke<string[]>('library_get_catalog_paths', { genre, search })
+        if (reqId === filterReqId) filteredPaths.value = paths
+    } catch {
+        if (reqId === filterReqId) filteredPaths.value = []
     }
-    const q = debouncedSearch.value.trim()
-    if (!q) return list
-    return searchRanked(
-        list,
-        q,
-        (t) => {
-            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
-            return [t.title || '', t.artist || '', t.album || '', fileName]
-        },
-        { formatPath: (t) => t.file_path },
-    )
-})
+}
+watch([debouncedSearch, selectedGenre], refreshFilteredPaths)
+// Перезапрашиваем при изменении состава каталога (добавление/удаление папок).
+watch(catalogCount, () => { void loadGenres(); void refreshFilteredPaths() })
 
 // ── Header height (for virtual scroll offset) ─────────────────────────────
 
@@ -145,6 +146,8 @@ const scrollHeaderHeight = ref(0)
 let headerResizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
+    void loadGenres()
+
     if (scrollHeaderRef.value) {
         scrollHeaderHeight.value = scrollHeaderRef.value.offsetHeight
         headerResizeObserver = new ResizeObserver(() => {
@@ -161,12 +164,11 @@ onMounted(() => {
     const source = activePlaylistSource.value
     if (source && source.startsWith('catalog:genre:')) {
         selectedGenre.value = source.slice('catalog:genre:'.length)
-        // Скроллим до чипа жанра и загружаем обложки после рендера
-        setTimeout(() => {
-            scrollToActiveGenre()
-            loadCoversForTracks(visibleTracks.value)
-        }, 100)
+        // Скроллим до чипа жанра после рендера (watch сам перезапросит пути).
+        setTimeout(() => scrollToActiveGenre(), 100)
     }
+    // Первичная загрузка отфильтрованных путей (полный каталог при пустом фильтре).
+    void refreshFilteredPaths()
 })
 
 onUnmounted(() => {
@@ -178,19 +180,48 @@ onUnmounted(() => {
 const {
     containerEl: trackListEl,
     onScroll,
-    visibleItems: visibleTracks,
+    visibleItems: visiblePaths,
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
+} = useVirtualScroll(filteredPaths, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
+
+// Заглушка для ещё не подгруженного пути — сохраняет 1 строку на путь окна,
+// чтобы высота виртуального списка не «съезжала» при быстрой прокрутке.
+// Когда метаданные приедут в кэш, computed пересоберётся и заменит заглушку.
+function stubTrack(path: string): TrackMetadata {
+    return {
+        file_path: path, title: null, artist: null, album: null, genre: null,
+        duration_secs: null, format: '', sample_rate: null, bit_depth: null,
+        channels: null, bitrate: null, is_lossless: false, cover_art: null,
+        accent_color: null, bpm: null, loudness: null, energy: null,
+        danceability: null, spectral_centroid: null, key: null, audio_fingerprint: null,
+    }
+}
+
+// Объекты видимого окна (резолв из кэша; промахи — заглушка + фоновая дозагрузка).
+const visibleTracks = computed<TrackMetadata[]>(() =>
+    visiblePaths.value.map(p => getTrackByPath(p) ?? stubTrack(p))
+)
 
 // Reset scroll on search/genre change
 watch([debouncedSearch, selectedGenre], () => {
     resetScroll()
 })
 
+// Материализуем метаданные видимого окна одним пакетным запросом.
+watch(visiblePaths, (paths) => {
+    if (paths.length) void fetchTracksByPaths(paths)
+}, { immediate: true })
+
 // Hold back first paint until the first 20 covers have resolved.
-const { ready: coversReady } = useCoverGate(() => filteredTracks.value.slice(0, 20))
+const gateTracks = computed<TrackMetadata[]>(() =>
+    filteredPaths.value.slice(0, 20).map(p => getTrackByPath(p)).filter((t): t is TrackMetadata => !!t)
+)
+watch(() => filteredPaths.value.slice(0, 20), (paths) => {
+    if (paths.length) void fetchTracksByPaths(paths)
+}, { immediate: true })
+const { ready: coversReady } = useCoverGate(() => gateTracks.value)
 
 // Load covers for visible tracks (skip during scroll-to-top)
 const isScrollingToTop = ref(false)
@@ -213,9 +244,9 @@ function onPlayCatalog() {
     if (isCatalogActive.value && currentTrack.value) {
         togglePlayPause()
     } else {
-        setPlaylistSource(catalogSourceId.value, filteredTracks.value)
-        if (filteredTracks.value.length > 0) {
-            playTrack(filteredTracks.value[0])
+        setCatalogSource(catalogSourceId.value, filteredPaths.value)
+        if (filteredPaths.value.length > 0) {
+            playTrack(filteredPaths.value[0])
         }
     }
 }
@@ -278,12 +309,9 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 }
 
 async function moveTrackToTop(track: TrackMetadata) {
-    const idx = trackList.value.findIndex(t => t.file_path === track.file_path)
-    if (idx > 0) {
-        const [item] = trackList.value.splice(idx, 1)
-        trackList.value.unshift(item)
-    }
-    await invoke('library_move_track_to_top', { filePath: track.file_path })
+    await moveCatalogTrackToTop(track.file_path)
+    // Перезапрашиваем порядок страницы (sort_order изменился на бэкенде).
+    await refreshFilteredPaths()
 }
 
 // ── Track click ─────────────────────────────────────────────────────────
@@ -300,7 +328,7 @@ function onCoverClick(track: TrackMetadata) {
         togglePlayPause()
         return
     }
-    setPlaylistSource(catalogSourceId.value, filteredTracks.value)
+    setCatalogSource(catalogSourceId.value, filteredPaths.value)
     playTrack(track, { manualListStart: true })
 }
 
@@ -333,8 +361,8 @@ function onCoverImgClick() {
                     <div class="info">
                         <div class="listType">Библиотека</div>
                         <h2 v-truncate class="listName">Мой каталог</h2>
-                        <div class="badges" v-if="trackList.length > 0">
-                            <div class="badge" v-tooltip="'Количество треков в каталоге'">{{ tracksCountText(trackList.length) }}</div>
+                        <div class="badges" v-if="catalogCount > 0">
+                            <div class="badge" v-tooltip="'Количество треков в каталоге'">{{ tracksCountText(catalogCount) }}</div>
                         </div>
                     </div>
                     <div class="controls">
@@ -396,10 +424,10 @@ function onCoverImgClick() {
             </div>
         </div>
         <Transition name="gate-fade" mode="out-in">
-        <LoadingSpinner v-if="filteredTracks.length > 0 && !coversReady" key="gate-spinner" />
+        <LoadingSpinner v-if="filteredPaths.length > 0 && !coversReady" key="gate-spinner" />
         <div
             class="tracksList"
-            v-else-if="filteredTracks.length > 0"
+            v-else-if="filteredPaths.length > 0"
             key="gate-list"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
@@ -448,12 +476,12 @@ function onCoverImgClick() {
             </div>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
-        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0" key="gate-empty-search">
+        <div class="emptyState" v-else-if="debouncedSearch && filteredPaths.length === 0" key="gate-empty-search">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Ничего не найдено</div>
             <div class="emptyDesc">Попробуйте изменить критерии поиска или добавить папки с треками в настройках.</div>
         </div>
-        <div class="emptyState" v-else-if="trackList.length === 0" key="gate-empty-lib">
+        <div class="emptyState" v-else-if="catalogCount === 0" key="gate-empty-lib">
             <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
             <div class="emptyText">Нет треков в каталоге</div>
             <div class="emptyDesc">Добавьте папки с треками в настройках, чтобы они появились здесь.</div>

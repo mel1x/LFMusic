@@ -11,12 +11,11 @@ import defaultTrackCover from '../assets/trackCover.webp'
 
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists } from '../composables/usePlaylists'
-import { useSettings } from '../composables/useSettings'
 import { createRipple } from '../composables/useRipple'
 import { isPhoneViewport } from '../composables/usePlatform'
 import { useVirtualScroll } from '../composables/useVirtualScroll'
 import { searchRanked } from '../composables/useSearch'
-import { tracksCountText, artistTagMatches } from '../utils/format'
+import { tracksCountText } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import TrackArtists from '../components/TrackArtists.vue'
 import CoverEditor from '../components/CoverEditor.vue'
@@ -27,7 +26,6 @@ const route = useRoute()
 const router = useRouter()
 
 const {
-    trackList,
     currentTrack,
     isPlaying,
     activePlaylistSource,
@@ -37,9 +35,11 @@ const {
     formatTime,
     loadCoversForTracks,
     clearCoverQueue,
+    getTrackByPath,
+    cacheTracks,
 } = usePlayer()
 
-const { artists: artistPlaylists, loadPlaylists } = usePlaylists()
+const { artists: artistPlaylists, loadPlaylists, getPlaylistTracks } = usePlaylists()
 
 const rawArtistName = computed(() => {
     const raw = Array.isArray(route.params.name) ? route.params.name[0] : route.params.name
@@ -57,13 +57,20 @@ const artistPlaylist = computed(() => {
 // аватарку независимо от регистра в ссылке. До загрузки плейлистов — исходное.
 const artistName = computed(() => artistPlaylist.value?.name ?? rawArtistName.value)
 
-const { settings } = useSettings()
-
-const artistTracks = computed<TrackMetadata[]>(() => {
-    const target = artistName.value
-    const seps = settings.value.artist_separators
-    return trackList.value.filter(t => artistTagMatches(t.artist, target, seps))
-})
+// Треки исполнителя — из плейлиста исполнителя (бэкенд группирует по артисту).
+const artistTracks = ref<TrackMetadata[]>([])
+async function loadArtistTracks() {
+    const pl = artistPlaylist.value
+    if (!pl) { artistTracks.value = []; return }
+    try {
+        const tracks = await getPlaylistTracks(pl.id)
+        cacheTracks(tracks)
+        artistTracks.value = tracks
+    } catch {
+        artistTracks.value = []
+    }
+}
+watch([artistPlaylist, artistName], loadArtistTracks, { immediate: true })
 
 const sourceId = computed(() => `artist:${artistName.value}`)
 
@@ -74,7 +81,7 @@ const artistCover = computed(() => {
     if (custom) return custom
     const path = artistPlaylist.value?.first_file_path
     if (!path) return defaultTrackCover
-    const t = trackList.value.find(x => x.file_path === path)
+    const t = getTrackByPath(path)
     return t?.cover_art || defaultTrackCover
 })
 
@@ -129,7 +136,7 @@ onMounted(async () => {
     if (artistPlaylists.value.length === 0) await loadPlaylists()
     const headPath = artistPlaylist.value?.first_file_path
     if (headPath) {
-        const t = trackList.value.find(x => x.file_path === headPath)
+        const t = getTrackByPath(headPath)
         if (t && !t.cover_art) loadCoversForTracks([t])
     }
     if (scrollHeaderRef.value) {

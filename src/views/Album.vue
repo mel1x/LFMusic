@@ -29,7 +29,6 @@ const route = useRoute()
 const router = useRouter()
 
 const {
-    trackList,
     currentTrack,
     isPlaying,
     activePlaylistSource,
@@ -40,11 +39,10 @@ const {
     loadCoversForTracks,
     clearCoverQueue,
     getTrackByPath,
-    sourceTrackList,
-    syncPlaybackOrder,
+    cacheTracks,
 } = usePlayer();
 
-const { albums: albumPlaylists, loadPlaylists } = usePlaylists();
+const { albums: albumPlaylists, loadPlaylists, getPlaylistTracks } = usePlaylists();
 
 const albumName = computed(() => {
     const raw = Array.isArray(route.params.name) ? route.params.name[0] : route.params.name
@@ -56,10 +54,27 @@ const { loadOrder: loadAlbumOrder, applyOrder: applyAlbumOrder, setOrder: setAlb
 // Загружаем порядок из БД при открытии альбома (и при смене маршрута).
 watch(albumName, (name) => { if (name) loadAlbumOrder(name) }, { immediate: true })
 
-const albumTracks = computed<TrackMetadata[]>(() => {
-    const tracks = trackList.value.filter(t => (t.album || '').trim() === albumName.value);
-    return applyAlbumOrder(albumName.value, tracks);
-})
+// Треки альбома — из плейлиста альбома (бэкенд), а не из полного trackList.
+const albumPlaylistForTracks = computed(() =>
+    albumPlaylists.value.find(p => p.name === albumName.value) || null
+)
+const albumTracksRaw = ref<TrackMetadata[]>([])
+async function loadAlbumTracks() {
+    const pl = albumPlaylistForTracks.value
+    if (!pl) { albumTracksRaw.value = []; return }
+    try {
+        const tracks = await getPlaylistTracks(pl.id)
+        cacheTracks(tracks)
+        albumTracksRaw.value = tracks
+    } catch {
+        albumTracksRaw.value = []
+    }
+}
+watch([albumPlaylistForTracks, albumName], loadAlbumTracks, { immediate: true })
+
+const albumTracks = computed<TrackMetadata[]>(() =>
+    applyAlbumOrder(albumName.value, albumTracksRaw.value)
+)
 
 const albumArtist = computed(() =>
     albumTracks.value[0]?.artist || 'Неизвестный исполнитель'
@@ -272,8 +287,8 @@ async function moveTrackToTopOfAlbum(track: TrackMetadata) {
     paths.unshift(track.file_path)
     await setAlbumOrder(albumName.value, paths)
     if (isAlbumActive.value) {
-        sourceTrackList.value = albumTracks.value.slice()
-        syncPlaybackOrder()
+        // Пересобираем источник из переупорядоченных треков альбома.
+        setPlaylistSource(sourceId.value, albumTracks.value.slice())
     }
 }
 

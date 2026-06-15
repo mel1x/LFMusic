@@ -461,6 +461,109 @@ impl Source for SymphoniaSource {
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
+// ── BufferedSymphoniaSource ─────────────────────────────────────────────────
+
+/// Сколько декодированных пакетов-блоков удерживается в кольцевом буфере.
+/// Блок — сэмплы одного пакета (FLAC ~4096 кадров, MP3 ~1152, Opus ~960).
+/// 64 блока дают ~1–3 с упреждающего декодирования и поглощают рывки чтения с
+/// диска (флешка, сетевой диск), оставаясь скромными по памяти (< ~2 МБ).
+const DECODE_QUEUE_BLOCKS: usize = 64;
+
+/// Конвейерный источник: декодирование пакетов вынесено в фоновый поток
+/// `audio-decode`, который наполняет ограниченную SPSC-очередь готовыми
+/// сэмплами. Аудио-поток (`next()`) лишь забирает готовые блоки из памяти,
+/// поэтому медленное чтение или декодирование высокобитрейтного FLAC/WAV больше
+/// не вызывает заиканий и щелчков: при насыщенном буфере `next()` никогда не
+/// упирается в диск.
+///
+/// Время жизни источника = один отрезок воспроизведения. При смене трека,
+/// seek'е или остановке rodio роняет источник → `rx` закрывается → блокирующий
+/// `send()` в фоновом потоке возвращает ошибку, поток завершается и освобождает
+/// файл. Отдельный стоп-флаг и `join` не нужны.
+struct BufferedSymphoniaSource {
+    sample_rate: u32,
+    channels: u16,
+    rx: mpsc::Receiver<Vec<f32>>,
+    current: Vec<f32>,
+    pos: usize,
+}
+
+impl BufferedSymphoniaSource {
+    fn new_with_seek(file_path: &str, seek_secs: f64) -> Result<Self, String> {
+        // Открываем файл и создаём декодер синхронно: так сразу узнаём частоту
+        // дискретизации и число каналов (нужны rodio до старта потока), а ошибки
+        // открытия/seek возвращаем вызывающему как и раньше.
+        let mut inner = SymphoniaSource::new_with_seek(file_path, seek_secs)?;
+        let sample_rate = inner.sample_rate;
+        let channels = inner.channels;
+
+        // Ограниченная очередь = backpressure: при полном буфере декодер засыпает
+        // на `send()`, при опустевшем — consumer ждёт на `recv()`.
+        let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(DECODE_QUEUE_BLOCKS);
+
+        std::thread::Builder::new()
+            .name("audio-decode".into())
+            .spawn(move || {
+                while inner.decode_next_packet() {
+                    // Забираем готовый блок без копирования; следующий декод
+                    // переиспользует уже пустой `current_samples`.
+                    let block = std::mem::take(&mut inner.current_samples);
+                    if block.is_empty() {
+                        continue;
+                    }
+                    if tx.send(block).is_err() {
+                        // Consumer уничтожен (смена трека/seek/stop) — выходим.
+                        return;
+                    }
+                }
+                // EOF/фатальная ошибка декодера: `tx` роняется здесь, и consumer
+                // получит `Err` из `recv()` после вычерпывания остатка очереди.
+            })
+            .map_err(|e| format!("Не удалось запустить поток декодирования: {}", e))?;
+
+        Ok(Self {
+            sample_rate,
+            channels,
+            rx,
+            current: Vec::new(),
+            pos: 0,
+        })
+    }
+}
+
+impl Iterator for BufferedSymphoniaSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.pos >= self.current.len() {
+            // Ждём готовый блок. На штатной нагрузке буфер почти всегда непуст,
+            // поэтому реального ожидания диска тут нет; блокировка случается лишь
+            // при недогрузке и эквивалентна прежнему синхронному декодированию,
+            // но без щелчков при нормальной работе.
+            match self.rx.recv() {
+                Ok(block) => {
+                    self.current = block;
+                    self.pos = 0;
+                }
+                Err(_) => return None,
+            }
+        }
+        let sample = self.current[self.pos];
+        self.pos += 1;
+        Some(sample)
+    }
+}
+
+impl Source for BufferedSymphoniaSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        let remaining = self.current.len() - self.pos;
+        if remaining > 0 { Some(remaining) } else { None }
+    }
+    fn channels(&self) -> u16 { self.channels }
+    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn total_duration(&self) -> Option<Duration> { None }
+}
+
 // ── FadeOut ─────────────────────────────────────────────────────────────────
 
 struct FadeOut<S: Source<Item = f32>> {
@@ -987,7 +1090,7 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
-                    let source = SymphoniaSource::new_with_seek(&file_path, seek_secs)?;
+                    let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()),
                         spectrum.clone(),
@@ -1027,7 +1130,7 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
-                    let source = SymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                    let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()),
                         spectrum.clone(),
@@ -1053,7 +1156,7 @@ fn audio_thread_loop(
                     let fade_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка fade-out sink: {}", e))?;
                     fade_sink.set_volume(volume);
-                    let fade_source = SymphoniaSource::new_with_seek(&file_path, current_pos)?;
+                    let fade_source = BufferedSymphoniaSource::new_with_seek(&file_path, current_pos)?;
                     fade_sink.append(FadeOut::new(
                         EqSource::new(fade_source, eq_settings.clone()),
                         dur,
@@ -1067,7 +1170,7 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
-                    let source = SymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                    let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()).fade_in(dur),
                         spectrum.clone(),
@@ -1096,7 +1199,7 @@ fn audio_thread_loop(
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
-                    let source = SymphoniaSource::new_with_seek(&file_path, seek_secs)?;
+                    let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()).fade_in(dur),
                         spectrum.clone(),

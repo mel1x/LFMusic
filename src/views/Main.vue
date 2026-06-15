@@ -23,7 +23,7 @@ import { formatTotalDuration, tracksCountText } from '../utils/format';
 const router = useRouter();
 
 const {
-    trackList,
+    catalogPaths,
     currentTrack,
     isPlaying,
     shuffled,
@@ -33,7 +33,9 @@ const {
     loadCoversForTracks,
     playTrack,
     togglePlayPause,
-    setPlaylistSource,
+    setMixSourceFromPaths,
+    cacheTracks,
+    fetchTracksByPaths,
 } = usePlayer();
 
 // ── Mix settings («Моя волна» style tuning) ──────────────────────────────────
@@ -55,36 +57,37 @@ const currentMood = computed(() => moods.find(m => m.id === selectedMood.value) 
 const isMixActive = computed(() => activePlaylistSource.value === 'mix');
 const isMixPlaying = computed(() => isMixActive.value && isPlaying.value);
 
-const hasLibrary = computed(() => trackList.value.length > 0);
+const hasLibrary = computed(() => catalogPaths.value.length > 0);
 
 const mixOptions = computed<RecommendationOptions>(() => ({
     familiarity: familiarity.value,
     losslessOnly: losslessOnly.value || undefined,
 }));
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-/** Заменяет треки из БД на «живые» объекты из библиотеки (с обложками). */
-function mergeWithLibrary(tracks: TrackMetadata[]): TrackMetadata[] {
-    const map = new Map(trackList.value.map(t => [t.file_path, t]));
-    return tracks.map(t => map.get(t.file_path) ?? t);
-}
-
 // ── Mix playback ────────────────────────────────────────────────────────────
 
-async function buildMixTracks(mood: string): Promise<TrackMetadata[]> {
+/** Пути очереди микса. Рекомендации (движок учитывает всю библиотеку) → их пути;
+ *  если рекомендаций нет — фолбэк на ВЕСЬ каталог вперемешку (только пути, объекты
+ *  резолвятся лениво через кэш). */
+async function buildMixPaths(mood: string): Promise<string[]> {
     let recs: TrackMetadata[] = [];
     try {
         recs = await getRecommendations(mood, 80, mixOptions.value);
     } catch {
         recs = [];
     }
-    let merged = mergeWithLibrary(recs);
-    // Если для выбранных настроек нет подходящих треков — берём всю библиотеку.
-    if (merged.length === 0) {
-        merged = [...trackList.value].sort(() => Math.random() - 0.5);
+    if (recs.length > 0) {
+        cacheTracks(recs);
+        return recs.map(t => t.file_path);
     }
-    return merged;
+    // Фолбэк: вся библиотека вперемешку (как было до пагинации).
+    return [...catalogPaths.value].sort(() => Math.random() - 0.5);
+}
+
+/** Прогрев обложек первых N путей очереди (резолв в объекты + загрузка обложек). */
+async function warmCovers(paths: string[]) {
+    const tracks = await fetchTracksByPaths(paths);
+    if (tracks.length) loadCoversForTracks(tracks);
 }
 
 /**
@@ -98,7 +101,7 @@ async function startMix(mood: string, keepCurrent = false) {
     if (!hasLibrary.value || isBuildingMix.value) return;
     isBuildingMix.value = true;
     try {
-        const fresh = await buildMixTracks(mood);
+        const fresh = await buildMixPaths(mood);
         if (fresh.length === 0) return;
 
         // Детерминированная очередь волны (без глобального шаффла).
@@ -106,22 +109,22 @@ async function startMix(mood: string, keepCurrent = false) {
 
         if (keepCurrent && isMixActive.value && currentTrack.value && currentTrackIndex.value >= 0) {
             // Мягкое обновление: текущий трек продолжает играть, хвост пересобирается.
-            const keep = playbackOrder.value.slice(0, currentTrackIndex.value + 1);
-            const keepPaths = new Set(keep.map(t => t.file_path));
-            const tail = fresh.filter(t => !keepPaths.has(t.file_path));
-            setPlaylistSource('mix', [...keep, ...tail]);
-            loadCoversForTracks(tail.slice(0, 24));
+            const keepPaths = playbackOrder.value.slice(0, currentTrackIndex.value + 1);
+            const keepSet = new Set(keepPaths);
+            const tail = fresh.filter(p => !keepSet.has(p));
+            setMixSourceFromPaths([...keepPaths, ...tail]);
+            void warmCovers(tail.slice(0, 24));
         } else {
             // Новая волна: если рекомендации снова поставили играющий трек первым,
             // убираем его с первой позиции, чтобы текущий трек гарантированно сменился.
             const currentPath = currentTrack.value?.file_path;
-            if (currentPath && fresh.length > 1 && fresh[0].file_path === currentPath) {
+            if (currentPath && fresh.length > 1 && fresh[0] === currentPath) {
                 const j = 1 + Math.floor(Math.random() * (fresh.length - 1));
                 [fresh[0], fresh[j]] = [fresh[j], fresh[0]];
             }
-            setPlaylistSource('mix', fresh);
+            setMixSourceFromPaths(fresh);
             await playTrack(fresh[0], { manualListStart: true });
-            loadCoversForTracks(fresh.slice(0, 24));
+            void warmCovers(fresh.slice(0, 24));
         }
     } finally {
         isBuildingMix.value = false;

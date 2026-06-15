@@ -24,7 +24,7 @@ import { useCoverGate } from '../composables/useCoverGate';
 const router = useRouter();
 const { userPlaylists, loadPlaylists, createPlaylist, getPlaylistTracks, deletePlaylist, movePlaylistToTop } = usePlaylists();
 const {
-    trackList,
+    catalogCount,
     getTrackByPath,
     loadCoversForTracks,
     isPlaying,
@@ -196,7 +196,7 @@ onUnmounted(() => {
     observedEls.clear();
 });
 
-watch(() => trackList.value.length, () => {
+watch(catalogCount, () => {
     if (!gridEl.value) return;
     ensureObserver();
     refreshMargin();
@@ -269,8 +269,7 @@ async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     }
     const tracks = await getPlaylistTracks(pl.id);
     if (tracks.length === 0) return;
-    const map = new Map(trackList.value.map(t => [t.file_path, t]));
-    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
     setPlaylistSource(`playlist:${pl.id}`, merged);
     await playTrack(merged[0]);
 }

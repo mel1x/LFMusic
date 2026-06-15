@@ -96,7 +96,7 @@ export function usePins() {
 }
 
 function createPins() {
-  const { trackList, getTrackByPath } = usePlayer();
+  const { catalogPaths, getTrackByPath } = usePlayer();
   const { playlists, albums, artists } = usePlaylists();
   const { getCustomCover } = useCustomCovers();
 
@@ -143,16 +143,17 @@ function createPins() {
     const key = String(p.key);
     const customCover = getCustomCover(p.kind, key);
     if (p.kind === "catalog") {
-      const first = trackList.value.find((t) => !!t.cover_art) || trackList.value[0];
+      const firstPath = catalogPaths.value[0] ?? null;
+      const first = firstPath ? getTrackByPath(firstPath) : undefined;
       return {
         kind: p.kind,
         key,
         name: p.name,
         cover: customCover ?? first?.cover_art ?? null,
-        trackCount: trackList.value.length,
+        trackCount: catalogPaths.value.length,
         route: "/catalog",
         exists: true,
-        firstPath: first?.file_path ?? null,
+        firstPath,
       };
     }
     if (p.kind === "playlist") {

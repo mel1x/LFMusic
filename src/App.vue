@@ -1,149 +1,44 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, watch, watchEffect } from 'vue';
+import { ref, onMounted, onUnmounted, watchEffect } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import MaximizeIcon from './components/Icons/MaximizeIcon.vue';
-import MinimizeIcon from './components/Icons/MinimizeIcon.vue';
-import CloseIcon from './components/Icons/CloseIcon.vue';
 
 import MainBlock from './components/MainBlock.vue';
 import Player from './components/Player.vue';
-import GithubIcon from './components/Icons/GithubIcon.vue';
+import TitleBar from './components/TitleBar.vue';
 import TrackInfoModal from './components/TrackInfoModal.vue';
 import TrackEditModal from './components/TrackEditModal.vue';
-import { toast } from 'vue-sonner';
+import AndroidPermissionWarning from './components/AndroidPermissionWarning.vue';
+import TracksReadyModal from './components/TracksReadyModal.vue';
+import FullscreenCover from './components/FullscreenCover.vue';
+
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
-import { useFolders } from './composables/useFolders';
 import { useCustomCovers } from './composables/useCustomCovers';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
-import { isAndroidRuntime, isPhoneViewport, updateRuntimeClasses } from './composables/usePlatform';
+import { useUiScale } from './composables/useUiScale';
+import { useAccentTheme } from './composables/useAccentTheme';
+import { useTaskbar } from './composables/useTaskbar';
+import { useAndroidShell } from './composables/useAndroidShell';
+import { isAndroidRuntime, isPhoneViewport } from './composables/usePlatform';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
-const { settings, load } = useSettings();
-const { language, t } = useI18n();
-const {
-  saveState, currentTrack, currentAccentColor, isPlaying,
-  togglePlayPause, playNext, playPrev, toggleShuffle, toggleRepeat,
-  shuffled, repeatMode, playbackOrder, currentTrackIndex, getTrackByPath,
-} = usePlayer();
-const { showTracksReadyModal, dismissTracksReadyModal } = useFolders();
+const { load } = useSettings();
+const { language } = useI18n();
+const { currentTrack, isPlaying, saveState } = usePlayer();
 const { loadCustomCovers } = useCustomCovers();
 
-const fullscreenCoverSrc = ref<string | null>(null);
+// Кросс-секционные системы вынесены в composables (поведение без изменений):
+// масштабирование UI, динамическое темирование, панель задач, Android-оболочка.
+useUiScale();
+useAccentTheme();
+useTaskbar();
+useAndroidShell();
 
-function showFullscreenCover(src: string) {
-  fullscreenCoverSrc.value = src;
-}
-
-function hideFullscreenCover() {
-  fullscreenCoverSrc.value = null;
-}
-
-function handleFullscreenCoverEvent(e: Event) {
-  const detail = (e as CustomEvent<string>).detail;
-  if (detail) {
-    showFullscreenCover(detail);
-  }
-}
-
-interface AudioFeatureProgressPayload {
-  current: number;
-  total: number;
-  percent: number;
-  active: boolean;
-}
-
-interface AndroidPermissionStatus {
-  mediaGranted: boolean;
-  notificationsGranted: boolean;
-  notificationsRequired: boolean;
-}
-
-interface AndroidSafeInsets {
-  top: number;
-  right: number;
-  bottom: number;
-  left: number;
-}
-
-const BASE_W = 1460;
-const BASE_H = 860;
-const MIN_SCALE = 0.78;
-const MAX_SCALE = 2.0;
-let resizeRaf: number | null = null;
-let unlistenAudioFeatureProgress: UnlistenFn | null = null;
-let unlistenTaskbarMedia: UnlistenFn | null = null;
-let featureProgressHideTimer: ReturnType<typeof setTimeout> | null = null;
-let androidInsetsRetryTimer: ReturnType<typeof setTimeout> | null = null;
-let androidInsetsRetryCount = 0;
-
-function resetUiScale() {
-  const body = document.body;
-  (body.style as any).zoom = '';
-  body.style.width = '100vw';
-  body.style.height = '100dvh';
-  document.documentElement.style.setProperty('--ui-scale', '1');
-  document.documentElement.style.setProperty('--overlay-scale', '1');
-  document.documentElement.style.setProperty('--overlay-scale', '1');
-  (window as any).__uiScale = 1;
-}
-
-// Полноэкранные fixed-оверлеи (модалки, затемнённые фоны) масштабируем через
-// отдельную переменную --overlay-scale. В Chromium (WebView2) `zoom` не влияет на
-// vw, поэтому 100vw-оверлей внутри отмасштабированного body перекрывает вьюпорт в
-// `scale` раз — делим на это. Замеряем коэффициент напрямую, а не берём scale
-// вслепую. (На WebKitGTK zoom не используется вовсе — там путь resetUiScale.)
-function measureOverlayScale(fallback: number) {
-  let divisor = fallback;
-  try {
-    const probe = document.createElement('div');
-    probe.style.cssText =
-      'position:fixed;left:0;top:0;width:100vw;height:0;visibility:hidden;pointer-events:none;margin:0;padding:0;border:0';
-    document.body.appendChild(probe);
-    const measured = probe.getBoundingClientRect().width;
-    document.body.removeChild(probe);
-    const vw = window.innerWidth;
-    if (measured > 0 && vw > 0) divisor = measured / vw;
-  } catch {
-    // На ошибке оставляем fallback (scale) — поведение как раньше.
-  }
-  if (!isFinite(divisor) || divisor <= 0) divisor = fallback;
-  document.documentElement.style.setProperty('--overlay-scale', String(divisor));
-}
-
-function applyUiScale() {
-  resizeRaf = null;
-  updateRuntimeClasses();
-
-  if (isPhoneViewport()) {
-    resetUiScale();
-    return;
-  }
-
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  const raw = Math.min(w / BASE_W, h / BASE_H);
-  const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, raw));
-  const body = document.body;
-  (body.style as any).zoom = String(scale);
-  body.style.width = (w / scale) + 'px';
-  body.style.height = (h / scale) + 'px';
-  document.documentElement.style.setProperty('--ui-scale', String(scale));
-  (window as any).__uiScale = scale;
-  measureOverlayScale(scale);
-  measureOverlayScale(scale);
-}
-
-function scheduleUiScale() {
-  if (resizeRaf !== null) return;
-  resizeRaf = requestAnimationFrame(applyUiScale);
-}
-
+// ── Splash ──────────────────────────────────────────────────────────────────
 const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
 if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
 
@@ -157,84 +52,11 @@ function onSplashEnded() {
   }, 600);
 }
 
-const featureProgressVisible = ref(false);
-const androidPermissionStatus = ref<AndroidPermissionStatus | null>(null);
-const featureProgress = ref<AudioFeatureProgressPayload>({
-  current: 0,
-  total: 0,
-  percent: 0,
-  active: false,
-});
-
-const featureProgressPercent = computed(() => {
-  return Math.max(0, Math.min(100, featureProgress.value.percent || 0));
-});
-
-const featureProgressNumberWidth = computed(() => {
-  const p = featureProgress.value;
-  const digits = Math.max(1, String(Math.max(p.current, p.total)).length);
-  return `${digits * 0.68}em`;
-});
-
-const featureProgressIsDone = computed(() => {
-  const p = featureProgress.value;
-  return p.total > 0 && (!p.active || p.current >= p.total);
-});
-
-const featureProgressTooltipHeading = computed(() => {
-  const p = featureProgress.value;
-  if (p.total <= 0) return t('audioFeatures.progressPendingTitle');
-  if (!p.active || p.current >= p.total) {
-    return t('audioFeatures.progressDoneTitle');
-  }
-  return t('audioFeatures.progressActiveTitle');
-});
-
-const featureProgressTooltipText = computed(() => {
-  const p = featureProgress.value;
-  if (p.total <= 0) return t('audioFeatures.progressStarting');
-  if (!p.active || p.current >= p.total) {
-    return t('audioFeatures.progressDone', { total: p.total });
-  }
-  return t('audioFeatures.progressActive', { current: p.current, total: p.total });
-});
-
-const featureProgressAriaLabel = computed(() => {
-  return `${featureProgressTooltipHeading.value}. ${featureProgressTooltipText.value}`;
-});
-
-const missingAndroidPermissions = computed(() => {
-  const status = androidPermissionStatus.value;
-  if (!isAndroidRuntime() || !status) return [];
-
-  const missing: string[] = [];
-  if (!status.mediaGranted) missing.push('доступ к медиафайлам');
-  if (status.notificationsRequired && !status.notificationsGranted) missing.push('уведомления');
-  return missing;
-});
-
-const showAndroidPermissionWarning = computed(() => missingAndroidPermissions.value.length > 0);
-
-const androidPermissionWarningText = computed(() => {
-  const missing = missingAndroidPermissions.value;
-  if (missing.length === 0) return '';
-  return `Не выданы разрешения: ${missing.join(', ')}. Без них LFMusic не сможет полноценно читать локальную музыку и показывать управление плеером в уведомлениях.`;
-});
-
-// Перехват F5 / Ctrl+R — сохраняем состояние перед перезагрузкой
+// ── Глобальные клавиши / блокировка контекстного меню ─────────────────────────
+// Перехват F5 / Ctrl+R — сохраняем состояние перед перезагрузкой.
+// (Escape для модалок «треки готовы» и оверлея обложки теперь обрабатывается
+// в самих компонентах TracksReadyModal / FullscreenCover.)
 async function handleReloadKey(e: KeyboardEvent) {
-  if (e.key === 'Escape' && showTracksReadyModal.value) {
-    e.preventDefault();
-    dismissTracksReadyModal();
-    return;
-  }
-
-  if (e.key === 'Escape' && fullscreenCoverSrc.value) {
-    e.preventDefault();
-    hideFullscreenCover();
-    return;
-  }
-
   // F11 — переключение полноэкранного режима окна (как в браузере).
   // Логика на стороне Rust: при входе снимает maximized (иначе на Windows
   // переход maximized→fullscreen ломается) и восстанавливает его при выходе.
@@ -261,279 +83,17 @@ function handleContextMenu(e: MouseEvent) {
   e.preventDefault();
 }
 
-function onTracksReadyBackdrop(e: MouseEvent) {
-  if (e.target === e.currentTarget) dismissTracksReadyModal();
-}
-
-function publishAndroidFeatureProgress(payload: AudioFeatureProgressPayload) {
-  if (!isAndroidRuntime()) return false;
-  const bridge = window.LFMusicAndroid?.updateAudioFeatureProgress;
-  if (!bridge) return false;
-
-  bridge(JSON.stringify({
-    current: payload.current,
-    total: payload.total,
-    percent: payload.percent,
-    active: payload.active,
-    title: featureProgressTooltipHeading.value,
-    text: featureProgressTooltipText.value,
-  }));
-  return true;
-}
-
-function applyAndroidPermissionStatus(status: AndroidPermissionStatus) {
-  androidPermissionStatus.value = {
-    mediaGranted: Boolean(status.mediaGranted),
-    notificationsGranted: Boolean(status.notificationsGranted),
-    notificationsRequired: Boolean(status.notificationsRequired),
-  };
-}
-
-function refreshAndroidPermissions() {
-  if (!isAndroidRuntime()) return;
-  const raw = window.LFMusicAndroid?.getPermissionStatus?.();
-  if (!raw) return;
-
-  try {
-    applyAndroidPermissionStatus(JSON.parse(raw) as AndroidPermissionStatus);
-  } catch {
-    androidPermissionStatus.value = null;
-  }
-}
-
-function requestAndroidPermissions() {
-  window.LFMusicAndroid?.requestRequiredPermissionsFromJs?.();
-  setTimeout(refreshAndroidPermissions, 500);
-}
-
-function applyAndroidInsets(insets: AndroidSafeInsets) {
-  const root = document.documentElement.style;
-  root.setProperty('--android-safe-top', `${Math.max(0, insets.top || 0)}px`);
-  root.setProperty('--android-safe-right', `${Math.max(0, insets.right || 0)}px`);
-  root.setProperty('--android-safe-bottom', `${Math.max(0, insets.bottom || 0)}px`);
-  root.setProperty('--android-safe-left', `${Math.max(0, insets.left || 0)}px`);
-}
-
-function refreshAndroidInsets() {
-  if (!isAndroidRuntime()) return;
-  const raw = window.LFMusicAndroid?.getSystemInsets?.();
-  if (!raw) return;
-
-  try {
-    applyAndroidInsets(JSON.parse(raw) as AndroidSafeInsets);
-  } catch {
-    // Native inset updates are best-effort; CSS env() and fallback values stay in place.
-  }
-}
-
-function scheduleAndroidInsetsRefresh() {
-  if (!isAndroidRuntime()) return;
-  refreshAndroidInsets();
-  if (androidInsetsRetryCount >= 12) return;
-  androidInsetsRetryCount += 1;
-  if (androidInsetsRetryTimer) clearTimeout(androidInsetsRetryTimer);
-  androidInsetsRetryTimer = setTimeout(scheduleAndroidInsetsRefresh, androidInsetsRetryCount < 5 ? 120 : 350);
-}
-
-function onAndroidPermissionsEvent(event: Event) {
-  const detail = (event as CustomEvent<AndroidPermissionStatus>).detail;
-  if (!detail) return;
-  applyAndroidPermissionStatus(detail);
-}
-
-function onAndroidInsetsEvent(event: Event) {
-  const detail = (event as CustomEvent<AndroidSafeInsets>).detail;
-  if (detail) applyAndroidInsets(detail);
-  refreshAndroidInsets();
-}
-
-function onVisibilityChange() {
-  if (document.visibilityState === 'visible') {
-    refreshAndroidPermissions();
-    scheduleAndroidInsetsRefresh();
-  }
-}
-
-function onWindowFocus() {
-  refreshAndroidPermissions();
-  scheduleAndroidInsetsRefresh();
-}
-
 onMounted(() => {
   load();
   startDomI18n();
   loadCustomCovers();
-  applyUiScale();
-  refreshAndroidPermissions();
-  scheduleAndroidInsetsRefresh();
-  void listen<AudioFeatureProgressPayload>('audio_feature_progress', (event) => {
-    const payload = event.payload;
-    featureProgress.value = payload;
-
-    if (featureProgressHideTimer) {
-      clearTimeout(featureProgressHideTimer);
-      featureProgressHideTimer = null;
-    }
-
-    if (publishAndroidFeatureProgress(payload)) {
-      featureProgressVisible.value = false;
-      return;
-    }
-
-    featureProgressVisible.value = payload.total > 0;
-    if (payload.total > 0 && (!payload.active || payload.current >= payload.total)) {
-      featureProgressHideTimer = setTimeout(() => {
-        featureProgressVisible.value = false;
-      }, 2200);
-    }
-  }).then((unlisten) => {
-    unlistenAudioFeatureProgress = unlisten;
-    return invoke<number>('library_resume_audio_features');
-  }).catch(() => {
-    // Продолжение фоновой подготовки не должно мешать запуску интерфейса.
-  });
-  window.addEventListener('resize', scheduleUiScale);
-  window.addEventListener('focus', onWindowFocus);
-  window.addEventListener('lfmusic:android-permissions', onAndroidPermissionsEvent as EventListener);
-  window.addEventListener('lfmusic:android-insets', onAndroidInsetsEvent as EventListener);
-  window.addEventListener('lfmusic:show-fullscreen-cover', handleFullscreenCoverEvent as EventListener);
-  window.visualViewport?.addEventListener('resize', scheduleUiScale);
-  window.visualViewport?.addEventListener('resize', scheduleAndroidInsetsRefresh);
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
-  document.addEventListener('visibilitychange', onVisibilityChange);
-
-  // Кнопки-миниатюры панели задач (Windows) → действия плеера.
-  // Для shuffle/repeat показываем те же тосты, что и кнопки в плеере.
-  void listen<string>('taskbar_media', (event) => {
-    switch (event.payload) {
-      case 'shuffle':
-        toggleShuffle();
-        toast.info(shuffled.value ? 'Случайный порядок' : 'Воспроизведение подряд');
-        break;
-      case 'prev': playPrev(); break;
-      case 'playpause': togglePlayPause(); break;
-      case 'next': playNext(); break;
-      case 'repeat':
-        toggleRepeat();
-        toast.warning(repeatMode.value === 'track' ? 'Повтор трека' : 'Повтор плейлиста');
-        break;
-    }
-  }).then((unlisten) => { unlistenTaskbarMedia = unlisten; }).catch(() => {});
 });
-
-// Соседние треки в очереди (свежие объекты из trackMap — учёт ленивой подгрузки).
-// Очередь закольцована: кнопки prev/next на краях оборачиваются (см. playPrev/playNext),
-// поэтому превью тоже берёт соседей по кругу, а не оставляет пустой слот на стыке —
-// иначе в shuffle (где текущий трек стоит в начале playbackOrder) обложка предыдущего
-// не показывалась, пока не переключишься назад.
-function queueTrack(offset: number) {
-  const len = playbackOrder.value.length;
-  const i = currentTrackIndex.value;
-  if (i < 0 || len === 0) return null;
-  const wrapped = (((i + offset) % len) + len) % len;
-  if (wrapped === i) return null; // очередь из одного трека — соседей нет
-  const t = playbackOrder.value[wrapped];
-  return t ? (getTrackByPath(t.file_path) ?? t) : null;
-}
-const previewTracks = computed(() => ({
-  prev: queueTrack(-1),
-  current: currentTrack.value ? (getTrackByPath(currentTrack.value.file_path) ?? currentTrack.value) : null,
-  next: queueTrack(1),
-}));
-
-// Состояние воспроизведения → иконка кнопки play/pause в панели задач.
-watch(isPlaying, (playing) => {
-  invoke('taskbar_set_playing', { playing }).catch(() => {});
-}, { immediate: true });
-
-// Состояния shuffle/repeat → иконки кнопок в панели задач.
-watch([shuffled, repeatMode], ([sh, rep]) => {
-  invoke('taskbar_set_modes', { shuffled: sh, repeatTrack: rep === 'track' }).catch(() => {});
-}, { immediate: true });
-
-// Превью в панели задач: бэкенд сам читает обложки из кэша WebP-миниатюр по
-// file_path (без base64) и генерирует недостающие на лету, поэтому ждать
-// загрузки cover_art во фронтенде не нужно. Раньше превью держали, пока все 3
-// обложки не «готовы» во фронтенде — но обложка соседа (напр. последнего трека
-// как «предыдущего» для первого, по закольцованной очереди) могла никогда не
-// подгрузиться, если он за пределами видимой части каталога (его запрос
-// вытеснялся из общей очереди обложек), и слот «предыдущего» оставался пустым.
-// Шлём тройку сразу при любой смене — бэкенд отрисует все доступные обложки.
-let lastPreviewPaths: { prev: string | null; current: string | null; next: string | null } = {
-  prev: null, current: null, next: null,
-};
-watch(previewTracks, ({ prev, current, next }) => {
-  const paths = {
-    prev: prev?.file_path ?? null,
-    current: current?.file_path ?? null,
-    next: next?.file_path ?? null,
-  };
-
-  // Определяем тип анимации: вперёд (next стал центром), назад (prev стал центром), иначе fade.
-  let transition: 'forward' | 'backward' | 'fade' | 'none' = 'none';
-  if (lastPreviewPaths.current && paths.current) {
-    if (paths.current === lastPreviewPaths.next) transition = 'forward';
-    else if (paths.current === lastPreviewPaths.prev) transition = 'backward';
-    else transition = 'fade';
-  }
-  lastPreviewPaths = paths;
-
-  // Бэкенд сам читает обложки из кэша WebP-миниатюр по file_path (без base64).
-  invoke('taskbar_set_covers', {
-    prev: prev?.file_path ?? null,
-    current: current?.file_path ?? null,
-    next: next?.file_path ?? null,
-    transition,
-  }).catch(() => {});
-}, { immediate: true });
 
 onUnmounted(() => {
-  window.removeEventListener('resize', scheduleUiScale);
-  window.removeEventListener('focus', onWindowFocus);
-  window.removeEventListener('lfmusic:android-permissions', onAndroidPermissionsEvent as EventListener);
-  window.removeEventListener('lfmusic:android-insets', onAndroidInsetsEvent as EventListener);
-  window.removeEventListener('lfmusic:show-fullscreen-cover', handleFullscreenCoverEvent as EventListener);
-  window.visualViewport?.removeEventListener('resize', scheduleUiScale);
-  window.visualViewport?.removeEventListener('resize', scheduleAndroidInsetsRefresh);
-  if (resizeRaf !== null) {
-    cancelAnimationFrame(resizeRaf);
-    resizeRaf = null;
-  }
-  if (featureProgressHideTimer) {
-    clearTimeout(featureProgressHideTimer);
-    featureProgressHideTimer = null;
-  }
-  if (androidInsetsRetryTimer) {
-    clearTimeout(androidInsetsRetryTimer);
-    androidInsetsRetryTimer = null;
-  }
-  if (unlistenAudioFeatureProgress) {
-    unlistenAudioFeatureProgress();
-    unlistenAudioFeatureProgress = null;
-  }
-  if (unlistenTaskbarMedia) {
-    unlistenTaskbarMedia();
-    unlistenTaskbarMedia = null;
-  }
   document.removeEventListener('keydown', handleReloadKey);
   document.removeEventListener('contextmenu', handleContextMenu);
-  document.removeEventListener('visibilitychange', onVisibilityChange);
-});
-
-watchEffect(() => {
-  const hex = settings.value.dynamic_accent_color
-    ? (currentAccentColor.value ?? '#1a1a1a')
-    : settings.value.static_accent_color;
-  const { h, s, l } = hexToHSL(hex);
-  const chromeHex = hslToHex(h, Math.min(s, 50), 8);
-  const root = document.documentElement.style;
-  root.setProperty('--accent-h', `${h}`);
-  root.setProperty('--accent-s', `${s}%`);
-  root.setProperty('--accent-l', `${l}%`);
-  root.setProperty('--accent-color', h === 0 && s === 0 ? '#353535' : `hsl(${h}, ${s}%, ${l}%)`);
-  root.setProperty('--mobile-chrome-color', chromeHex);
-  window.LFMusicAndroid?.updateSystemBars?.(chromeHex);
 });
 
 // Заголовок окна: текущий трек во время воспроизведения, иначе «LFMusic».
@@ -546,57 +106,6 @@ watchEffect(() => {
   }
   win.setTitle(title);
 });
-
-function hexToHSL(hex: string) {
-  const r = parseInt(hex.slice(1, 3), 16) / 255;
-  const g = parseInt(hex.slice(3, 5), 16) / 255;
-  const b = parseInt(hex.slice(5, 7), 16) / 255;
-
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  let h = 0, s = 0;
-
-  if (max !== min) {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-    else if (max === g) h = ((b - r) / d + 2) / 6;
-    else h = ((r - g) / d + 4) / 6;
-  }
-
-  return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
-}
-
-function hslToHex(h: number, s: number, l: number) {
-  s /= 100;
-  l /= 100;
-
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
-  const m = l - c / 2;
-  let r = 0;
-  let g = 0;
-  let b = 0;
-
-  if (h < 60) [r, g, b] = [c, x, 0];
-  else if (h < 120) [r, g, b] = [x, c, 0];
-  else if (h < 180) [r, g, b] = [0, c, x];
-  else if (h < 240) [r, g, b] = [0, x, c];
-  else if (h < 300) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
-
-  const toHex = (value: number) => Math.round((value + m) * 255).toString(16).padStart(2, '0');
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
-const minimizeWindow = () => win.minimize();
-// Через backend: в полноэкранном режиме (F11) клик выходит из него и
-// разворачивает окно, иначе — обычное переключение maximized.
-const maximizeWindow = () => invoke('toggle_window_maximize');
-const closeWindow = async () => {
-  await saveState();
-  win.close();
-};
 </script>
 
 <template>
@@ -606,100 +115,14 @@ const closeWindow = async () => {
       <source :src="splashVideoMp4" type="video/mp4" />
     </video>
   </div>
-  <div class="hat" data-tauri-drag-region>
-    <div class="winTitle">
-      <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
-      <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.artist || 'Неизвестный исполнитель') : 'by mel1x' }}</div>
-    </div>
-    <div class="winControls">
-      <div
-        v-if="featureProgressVisible"
-        class="featureWorkerProgress"
-        :aria-label="featureProgressAriaLabel"
-      >
-        <div class="featureWorkerTrack">
-          <div class="featureWorkerFill" :style="{ width: featureProgressPercent + '%' }"></div>
-        </div>
-        <span class="featureWorkerPercent">{{ Math.round(featureProgressPercent) }}%</span>
-        <div class="featureWorkerTooltip" role="tooltip">
-          <div class="featureWorkerTooltipTitle">{{ featureProgressTooltipHeading }}</div>
-          <div class="featureWorkerTooltipText">
-            <template v-if="featureProgress.total <= 0">
-              {{ t('audioFeatures.progressStarting') }}
-            </template>
-            <template v-else-if="featureProgressIsDone">
-              {{ t('audioFeatures.progressDonePrefix') }}
-              <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
-              {{ t('audioFeatures.progressDoneSuffix') }}
-            </template>
-            <template v-else>
-              {{ t('audioFeatures.progressActivePrefix') }}
-              <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.current }}</span>
-              {{ t('audioFeatures.progressActiveMiddle') }}
-              <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
-              {{ t('audioFeatures.progressActiveSuffix') }}
-            </template>
-          </div>
-        </div>
-      </div>
-      <a v-if="settings.show_github_badge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
-      <button class="controlsButton" @click="minimizeWindow"><MinimizeIcon /></button>
-      <button class="controlsButton" @click="maximizeWindow"><MaximizeIcon /></button>
-      <button class="controlsButton close" @click="closeWindow"><CloseIcon /></button>
-    </div>
-  </div>
+  <TitleBar />
   <MainBlock :key="`main-${language}`" class="mainFrame" />
   <Player :key="`player-${language}`" />
   <TrackInfoModal :key="`info-${language}`" />
   <TrackEditModal :key="`edit-${language}`" />
-  <div v-if="showAndroidPermissionWarning" class="androidPermissionWarning" role="alertdialog" aria-modal="true">
-    <div class="androidPermissionCard">
-      <div class="androidPermissionKicker">Требуются разрешения</div>
-      <div class="androidPermissionTitle">LFMusic нужен доступ</div>
-      <div class="androidPermissionText">{{ androidPermissionWarningText }}</div>
-      <div class="androidPermissionActions">
-        <button class="androidPermissionButton primary" type="button" @click="requestAndroidPermissions">
-          Выдать разрешения
-        </button>
-        <button class="androidPermissionButton" type="button" @click="refreshAndroidPermissions">
-          Проверить снова
-        </button>
-      </div>
-    </div>
-  </div>
-  <Teleport to="body">
-    <Transition name="scan-ready">
-      <div
-        v-if="showTracksReadyModal"
-        class="scanReadyBackdrop"
-        @mousedown="onTracksReadyBackdrop"
-      >
-        <div class="scanReadyModal" @mousedown.stop>
-          <div class="scanReadyTitle">{{ t('audioFeatures.tracksReadyTitle') }}</div>
-          <div class="scanReadyText">
-            {{ t('audioFeatures.tracksReadyText') }}
-          </div>
-          <button class="scanReadyButton" @click="dismissTracksReadyModal">{{ t('audioFeatures.tracksReadyButton') }}</button>
-        </div>
-      </div>
-    </Transition>
-  </Teleport>
-  <Teleport to="body">
-    <Transition name="fullscreen-cover-fade">
-      <div
-        v-if="fullscreenCoverSrc"
-        class="fullscreenCoverBackdrop"
-        @click="hideFullscreenCover"
-      >
-        <div class="fullscreenCoverContainer" @click.stop>
-          <img :src="fullscreenCoverSrc" class="fullscreenCoverImage" alt="fullscreen cover" />
-          <button class="fullscreenCoverCloseBtn" @click="hideFullscreenCover">
-            <CloseIcon width="24" height="24" />
-          </button>
-        </div>
-      </div>
-    </Transition>
-  </Teleport>
+  <AndroidPermissionWarning />
+  <TracksReadyModal />
+  <FullscreenCover />
 </template>
 
 <style>
@@ -737,10 +160,11 @@ const closeWindow = async () => {
   font-weight: 500;
   cursor: default;
   user-select: none;
-  transition: transform 400ms ease, opacity 400ms ease, background-color .24s ease;
-  will-change: transform;
-  backface-visibility: hidden;
-  transform: translate3d(0, 0, 0);
+  /* НЕ задаём здесь transform / transition: ими управляет сам vue-sonner на
+     элементе [data-sonner-toast] (transform: var(--y) — выезд/стек, transition с
+     height — анимация появления). Свой transform/transition тут перекрыл бы их
+     (равная специфичность, но это правило идёт позже) и ломал бы высоту и
+     анимацию появления тоста. */
 }
 .toast [data-close-button] {
   order: 99;
@@ -832,185 +256,6 @@ body {
   overflow: hidden;
   transition: .24s ease;
 }
-.hat {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  height: 38px;
-  background: var(--dark-bg);
-  transition: .24s ease;
-}
-.winTitle {
-  margin-top: 8px;
-  padding: 0px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.mainTitle {
-  user-select: none;
-  font-size: 15px;
-  font-weight: 800;
-  color: #fff;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;  
-  letter-spacing: -0.025em;
-}
-.authorTitle {
-  user-select: none;
-  font-size: 11px;
-  line-height: 1;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: hsla(var(--accent-h), var(--accent-s), 80%, 0.55);
-  transition: .24s ease;
-}
-.winControls {
-  height: 100%;
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: center;
-}
-.featureWorkerProgress {
-  position: relative;
-  width: 176px;
-  height: 25px;
-  margin-right: 10px;
-  padding: 0 8px;
-  border-radius: 999px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 25%, 1), hsla(var(--accent-h), var(--accent-s), 15%, 1));
-  color: hsla(0, 0%, 100%, 0.84);
-  cursor: help;
-  transition: background-color .24s ease, border-color .24s ease;
-}
-.featureWorkerProgress:hover {
-  border-color: hsla(0, 0%, 100%, 0.14);
-}
-.featureWorkerTrack {
-  position: relative;
-  flex: 1;
-  height: 4px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: hsla(0, 0%, 100%, 0.13);
-}
-.featureWorkerFill {
-  height: 100%;
-  min-width: 4px;
-  border-radius: inherit;
-  background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%, 0.95);
-  transition: width .28s ease;
-}
-.featureWorkerPercent {
-  min-width: 30px;
-  text-align: right;
-  font-size: 11px;
-  line-height: 1;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  user-select: none;
-}
-.featureWorkerTooltip {
-  position: absolute;
-  top: calc(100% + 9px);
-  right: 0;
-  width: 290px;
-  padding: 11px 12px 12px;
-  border-radius: 14px;
-  background: hsla(var(--accent-h), min(var(--accent-s), 42%), 10%, 0.98);
-  border: 1px solid hsla(0, 0%, 100%, 0.1);
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.36);
-  color: #fff;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-3px);
-  transition: opacity .16s ease, transform .16s ease;
-  z-index: 20;
-}
-.featureWorkerTooltip::before {
-  content: '';
-  position: absolute;
-  top: -5px;
-  right: 24px;
-  width: 10px;
-  height: 10px;
-  transform: rotate(45deg);
-  background: inherit;
-  border-left: 1px solid hsla(0, 0%, 100%, 0.1);
-  border-top: 1px solid hsla(0, 0%, 100%, 0.1);
-}
-.featureWorkerProgress:hover .featureWorkerTooltip {
-  opacity: 1;
-  transform: translateY(0);
-}
-.featureWorkerTooltipTitle {
-  position: relative;
-  font-size: 12px;
-  line-height: 1.2;
-  font-weight: 800;
-  color: hsla(0, 0%, 100%, 0.95);
-  user-select: none;
-}
-.featureWorkerTooltipText {
-  position: relative;
-  min-height: 34px;
-  margin-top: 5px;
-  font-size: 12px;
-  line-height: 1.42;
-  font-weight: 500;
-  color: hsla(0, 0%, 100%, 0.66);
-  user-select: none;
-}
-.featureWorkerTooltipNumber {
-  display: inline-block;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  color: hsla(0, 0%, 100%, 0.82);
-}
-.winControls a {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 3px;
-  justify-content: center;
-  color: #ffffffd5;
-  font-size: 12px;
-  font-weight: 600;
-  margin-right: 20px;
-  padding: 2px 8px 3px 3px;
-  border-radius: 16px;
-  background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 25%, 1), hsla(var(--accent-h), var(--accent-s), 15%, 1));
-  transition: .24s ease;
-}
-.controlsButton {
-  cursor: pointer;
-  width: 46px;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  background-color: transparent;
-  transition: background-color 0.14s ease-in-out;
-
-  &:hover {
-    background-color: #ffffff0d;
-  }
-}
-.controlsButton.close {
-  transition: background-color 0.19s ease-in-out;
-
-  &:hover {
-    background-color: #f23f42;
-  }
-}
 #app {
   display: flex;
   flex-direction: column;
@@ -1018,145 +263,10 @@ body {
   width: 100%;
   height: 100%;
 }
-.hat {
-  flex-shrink: 0;
-}
 .mainFrame {
   width: 100%;
   flex: 1;
   min-height: 0;
-}
-.scanReadyBackdrop {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: calc(100vw / var(--overlay-scale, 1));
-  height: calc(100vh / var(--overlay-scale, 1));
-  width: calc(100vw / var(--overlay-scale, 1));
-  height: calc(100vh / var(--overlay-scale, 1));
-  z-index: 1000001;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: hsla(0, 0%, 0%, 0.42);
-  backdrop-filter: blur(5px);
-}
-.scanReadyModal {
-  width: 430px;
-  max-width: calc(100vw - 42px);
-  padding: 26px 26px 18px;
-  border-radius: 28px;
-  background: linear-gradient(165deg, var(--light-bg), hsla(var(--accent-h), var(--accent-s), 10%, 0.98));
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
-  display: flex;
-  flex-direction: column;
-  gap: 11px;
-}
-.scanReadyTitle {
-  font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 22px;
-  line-height: 1.15;
-  font-weight: 800;
-  color: hsla(0, 0%, 100%, 0.95);
-  user-select: none;
-}
-.scanReadyText {
-  font-size: 15px;
-  line-height: 1.45;
-  font-weight: 500;
-  color: hsla(0, 0%, 100%, 0.64);
-  user-select: none;
-}
-.scanReadyButton {
-  align-self: flex-end;
-  margin-top: 8px;
-  padding: 7px 16px;
-  border-radius: 18px;
-  background: hsla(0, 0%, 100%, 0.08);
-  color: hsla(0, 0%, 100%, 0.9);
-  font-size: 14px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background-color .2s ease, color .2s ease;
-}
-.scanReadyButton:hover {
-  background: hsla(0, 0%, 100%, 0.14);
-  color: #fff;
-}
-.scan-ready-enter-active, .scan-ready-leave-active {
-  transition: opacity .18s ease;
-}
-.scan-ready-enter-active .scanReadyModal, .scan-ready-leave-active .scanReadyModal {
-  transition: transform .18s ease, opacity .18s ease;
-}
-.scan-ready-enter-from, .scan-ready-leave-to {
-  opacity: 0;
-}
-.scan-ready-enter-from .scanReadyModal, .scan-ready-leave-to .scanReadyModal {
-  transform: scale(0.96) translateY(4px);
-  opacity: 0;
-}
-
-.androidPermissionWarning {
-  position: fixed;
-  inset: 0;
-  z-index: 1000001;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: calc(var(--safe-top) + 18px) calc(var(--safe-right) + 18px) calc(var(--safe-bottom) + 18px) calc(var(--safe-left) + 18px);
-  background: hsla(0, 0%, 0%, 0.58);
-  backdrop-filter: blur(18px);
-}
-.androidPermissionCard {
-  width: min(420px, 100%);
-  border: 1px solid hsla(0, 0%, 100%, 0.1);
-  border-radius: 24px;
-  padding: 22px;
-  background: hsl(var(--accent-h), min(var(--accent-s), 48%), 11%);
-  box-shadow: 0 26px 80px hsla(0, 0%, 0%, 0.5);
-  color: #fff;
-}
-.androidPermissionKicker {
-  margin-bottom: 8px;
-  font-size: 12px;
-  line-height: 1.2;
-  font-weight: 800;
-  letter-spacing: 0;
-  color: hsla(0, 0%, 100%, 0.5);
-}
-.androidPermissionTitle {
-  font-size: 24px;
-  line-height: 1.12;
-  font-weight: 900;
-}
-.androidPermissionText {
-  margin-top: 12px;
-  font-size: 14px;
-  line-height: 1.45;
-  font-weight: 600;
-  color: hsla(0, 0%, 100%, 0.72);
-}
-.androidPermissionActions {
-  display: flex;
-  gap: 10px;
-  margin-top: 20px;
-}
-.androidPermissionButton {
-  min-height: 44px;
-  flex: 1 1 0;
-  min-width: 0;
-  border-radius: 14px;
-  padding: 10px 14px;
-  background: hsla(0, 0%, 100%, 0.1);
-  color: hsla(0, 0%, 100%, 0.88);
-  font-size: 13px;
-  font-weight: 800;
-  cursor: pointer;
-}
-.androidPermissionButton.primary {
-  background: #fff;
-  color: #0f0f0f;
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
@@ -1303,7 +413,7 @@ body {
     width: 100%;
     height: 100%;
     border-radius: 0;
-    
+
     &:hover {
       transform: scale(1) !important;
     }
@@ -1563,88 +673,5 @@ body {
     white-space: normal !important;
     overflow-wrap: anywhere !important;
   }
-}
-
-/* Fullscreen Cover Overlay */
-.fullscreenCoverBackdrop {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: calc(100vw / var(--overlay-scale, 1));
-  height: calc(100dvh / var(--overlay-scale, 1));
-  width: calc(100vw / var(--overlay-scale, 1));
-  height: calc(100dvh / var(--overlay-scale, 1));
-  background-color: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 99999;
-}
-.fullscreenCoverContainer {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  max-width: 80dvw;
-  max-height: 80dvh;
-}
-.fullscreenCoverImage {
-  width: 70vmin;
-  height: 70vmin;
-  object-fit: cover;
-  border-radius: 24px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
-  border: none;
-  outline: none;
-  user-select: none;
-  pointer-events: auto;
-}
-.fullscreenCoverCloseBtn {
-  position: fixed;
-  top: 24px;
-  right: 24px;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background-color: rgba(255, 255, 255, 0.1);
-  border: none;
-  outline: none;
-  color: rgba(255, 255, 255, 0.8);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background-color .24s ease, color .24s ease;
-  z-index: 100000;
-}
-.fullscreenCoverCloseBtn:hover {
-  background-color: rgba(255, 255, 255, 0.2);
-  color: #fff;
-}
-.fullscreenCoverCloseBtn:active {
-  background-color: rgba(255, 255, 255, 0.3);
-}
-
-.fullscreen-cover-fade-enter-active,
-.fullscreen-cover-fade-leave-active {
-  transition: opacity 0.28s ease;
-}
-.fullscreen-cover-fade-enter-active .fullscreenCoverImage,
-.fullscreen-cover-fade-leave-active .fullscreenCoverImage {
-  transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.fullscreen-cover-fade-enter-from {
-  opacity: 0;
-}
-.fullscreen-cover-fade-enter-from .fullscreenCoverImage {
-  transform: scale(0.9) translateY(10px);
-}
-.fullscreen-cover-fade-leave-to {
-  opacity: 0;
-}
-.fullscreen-cover-fade-leave-to .fullscreenCoverImage {
-  transform: scale(0.95);
 }
 </style>

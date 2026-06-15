@@ -1,5 +1,6 @@
 mod audio_features;
 mod audio_player;
+mod catalog_search;
 mod covers;
 mod discord_rpc;
 mod library;
@@ -16,7 +17,7 @@ mod window_state;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use library::{AudioFeatureProgressEmitter, FolderInfo, MusicLibrary, PlaylistInfo};
+use library::{AudioFeatureProgressEmitter, FolderInfo, GenreCount, MusicLibrary, PlaylistInfo};
 use player_state::SavedPlayerState;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -505,6 +506,54 @@ fn library_remove_folder(
 fn library_get_tracks(state: State<LibraryState>) -> Result<Vec<TrackMetadata>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_all_tracks())
+}
+
+/// Упорядоченные пути каталога с фильтром по жанру и/или поисковому запросу.
+/// Возвращает только `file_path` (лёгкий список идентичности для виртуального
+/// скролла и источника воспроизведения каталога).
+#[tauri::command(async)]
+fn library_get_catalog_paths(
+    state: State<LibraryState>,
+    genre: Option<String>,
+    search: Option<String>,
+) -> Result<Vec<String>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_catalog_paths(genre.as_deref(), search.as_deref()))
+}
+
+/// Пакетная материализация метаданных по списку путей (видимое окно каталога,
+/// дозагрузка промахов кэша). Порядок результата совпадает с порядком `paths`.
+#[tauri::command(async)]
+fn library_get_tracks_by_paths(
+    state: State<LibraryState>,
+    paths: Vec<String>,
+) -> Result<Vec<TrackMetadata>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_tracks_by_paths(&paths))
+}
+
+/// Список жанров с количеством треков (для фильтр-чипов каталога).
+#[tauri::command(async)]
+fn library_list_genres(state: State<LibraryState>) -> Result<Vec<GenreCount>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.list_genres())
+}
+
+/// Ранжированный поиск треков по каталогу (секция «Треки» страницы поиска).
+/// Сохраняет поведение фронтендового searchRanked (точное → нечёткое →
+/// раскладка → формат).
+#[tauri::command(async)]
+fn library_search(
+    state: State<LibraryState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<TrackMetadata>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.search_tracks(q, limit))
 }
 
 #[tauri::command]
@@ -1263,33 +1312,6 @@ pub fn run() {
 
             app.manage(LibraryState(Mutex::new(library)));
 
-            // Акцентные цвета кастомных обложек, сброшенные миграцией на новый
-            // алгоритм, пересчитываем в фоне — не задерживая запуск окна.
-            // Декодирование изображений идёт без удержания лока библиотеки.
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let pending = {
-                    let state = handle.state::<LibraryState>();
-                    let Ok(lib) = state.0.lock() else { return };
-                    lib.get_override_covers_without_accent()
-                };
-                for file_path in pending {
-                    // Байты обложки читаем под коротким локом, декодируем — без него.
-                    let bytes = {
-                        let state = handle.state::<LibraryState>();
-                        let Ok(lib) = state.0.lock() else { continue };
-                        lib.override_cover_bytes(&file_path)
-                    };
-                    let Some(bytes) = bytes else { continue };
-                    let Some(color) = audio_player::extract_accent_color(&bytes) else {
-                        continue;
-                    };
-                    let state = handle.state::<LibraryState>();
-                    let Ok(lib) = state.0.lock() else { continue };
-                    let _ = lib.set_override_accent_color(&file_path, &color);
-                }
-            });
-
             Ok(())
         })
         .manage(PlayerState(RwLock::new(player)))
@@ -1320,6 +1342,10 @@ pub fn run() {
             library_add_android_music_folders,
             library_remove_folder,
             library_get_tracks,
+            library_get_catalog_paths,
+            library_get_tracks_by_paths,
+            library_list_genres,
+            library_search,
             library_resume_audio_features,
             library_audio_features_status,
             library_move_track_to_top,

@@ -107,7 +107,14 @@ pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
              full_listen_count          INTEGER NOT NULL DEFAULT 0,
              updated_at                 INTEGER NOT NULL DEFAULT (unixepoch()),
              PRIMARY KEY (collection_kind, collection_key)
-         );",
+         );
+         -- Индексы под сортировки истории/рекомендаций: без них get_recently_played
+         -- (ORDER BY updated_at DESC) и get_most_played (ORDER BY listen_count DESC)
+         -- на большой медиатеке сканируют всю таблицу и сортируют во временных файлах.
+         CREATE INDEX IF NOT EXISTS idx_track_statistics_updated_at
+             ON track_statistics(updated_at);
+         CREATE INDEX IF NOT EXISTS idx_track_statistics_listen_count
+             ON track_statistics(listen_count);",
     )
 }
 

@@ -10,7 +10,7 @@ import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { isPhoneViewport } from '../composables/usePlatform'
 
 const { isOpen, currentTrack, closeTrackEdit } = useTrackEditModal()
-const { refreshLibrary, trackList, currentTrack: playerCurrentTrack } = usePlayer()
+const { refreshLibrary, getTrackByPath, cacheTracks, currentTrack: playerCurrentTrack } = usePlayer()
 
 interface OriginalTrack {
     title: string | null
@@ -205,11 +205,15 @@ async function onSave() {
         }
         const updated = await invoke<TrackMetadata>('track_set_override', args)
 
-        // Обновляем in-memory список треков, чтобы UI среагировал моментально
-        const idx = trackList.value.findIndex(t => t.file_path === filePath)
-        if (idx !== -1) {
-            trackList.value[idx] = { ...trackList.value[idx], ...updated }
-        }
+        // Обновляем запись в кэше, чтобы UI среагировал моментально.
+        // `updated` — авторитетный снимок (override уже применён, cover_art = URL
+        // override/встроенной обложки или null при сбросе). Если трек уже в кэше —
+        // перезаписываем поля на месте (Object.assign корректно применяет и сброс
+        // обложки в null, в отличие от merge-логики cacheTrack). Если в кэше нет
+        // (вытеснен LRU / не открывался) — кладём свежую запись.
+        const cached = getTrackByPath(filePath)
+        if (cached) Object.assign(cached, updated)
+        else cacheTracks([updated])
         if (playerCurrentTrack.value?.file_path === filePath) {
             playerCurrentTrack.value = { ...playerCurrentTrack.value, ...updated }
         }

@@ -10,6 +10,7 @@ import MoreIcon from '../components/Icons/MoreIcon.vue'
 import defaultTrackCover from '../assets/trackCover.webp'
 import defaultPlaylistCover from '../assets/playlistCover.webp'
 
+import { invoke } from '@tauri-apps/api/core'
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists'
 import { searchRanked } from '../composables/useSearch'
@@ -125,7 +126,6 @@ onMounted(() => {
 })
 
 const {
-    trackList,
     currentTrack,
     isPlaying,
     activePlaylistSource,
@@ -135,6 +135,7 @@ const {
     formatTime,
     loadCoversForTracks,
     getTrackByPath,
+    cacheTracks,
 } = usePlayer()
 
 const {
@@ -285,8 +286,7 @@ async function onPlayAlbum(e: MouseEvent, a: AlbumResult) {
     if (a.trackCount === 0) return
     const tracks = await getPlaylistTracks(a.id)
     if (tracks.length === 0) return
-    const map = new Map(trackList.value.map(t => [t.file_path, t]))
-    const merged = tracks.map(t => map.get(t.file_path) ?? t)
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     setPlaylistSource(sourceId, merged)
     rememberCurrentSearch()
     await playTrack(merged[0], { searchStart: true })
@@ -294,18 +294,22 @@ async function onPlayAlbum(e: MouseEvent, a: AlbumResult) {
 
 // ── Tracks ─────────────────────────────────────────────────────────────────
 
-const trackResults = computed<TrackMetadata[]>(() => {
-    if (!hasQuery.value) return []
-    return searchRanked(
-        trackList.value,
-        query.value,
-        (t) => {
-            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
-            return [t.title || '', t.artist || '', t.album || '', fileName]
-        },
-        { formatPath: (t) => t.file_path },
-    )
-})
+// Поиск треков — на бэкенде (то же ранжирование, перенесённое в Rust).
+const trackResults = ref<TrackMetadata[]>([])
+let trackSearchReqId = 0
+watch(query, async (q) => {
+    const reqId = ++trackSearchReqId
+    if (!q) { trackResults.value = []; return }
+    try {
+        const res = await invoke<TrackMetadata[]>('library_search', { query: q })
+        if (reqId === trackSearchReqId) {
+            trackResults.value = res
+            cacheTracks(res)
+        }
+    } catch {
+        if (reqId === trackSearchReqId) trackResults.value = []
+    }
+}, { immediate: true })
 
 const tracksExpanded = ref(false)
 
@@ -435,13 +439,10 @@ async function refreshPlaylistCover(pl: PlaylistInfo) {
         playlistCovers.value[pl.id] = null
         return
     }
-    const inList = trackList.value.find(t => t.file_path === first.file_path)
-    if (inList) {
-        if (!inList.cover_art) loadCoversForTracks([inList])
-        playlistCovers.value[pl.id] = inList.cover_art
-    } else {
-        playlistCovers.value[pl.id] = first.cover_art
-    }
+    cacheTracks([first])
+    const live = getTrackByPath(first.file_path) ?? first
+    if (!live.cover_art) loadCoversForTracks([live])
+    playlistCovers.value[pl.id] = live.cover_art
 }
 
 watch(playlistResults, async (list) => {
@@ -471,8 +472,7 @@ async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     if (pl.track_count === 0) return
     const tracks = await getPlaylistTracks(pl.id)
     if (tracks.length === 0) return
-    const map = new Map(trackList.value.map(t => [t.file_path, t]))
-    const merged = tracks.map(t => map.get(t.file_path) ?? t)
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     setPlaylistSource(sourceId, merged)
     rememberCurrentSearch()
     await playTrack(merged[0], { searchStart: true })

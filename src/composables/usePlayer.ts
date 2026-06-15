@@ -1,4 +1,4 @@
-import { ref, computed, watch, effectScope } from "vue";
+import { ref, shallowRef, reactive, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useSettings } from "./useSettings";
@@ -7,7 +7,6 @@ import { saveMixQueuePaths, loadMixQueuePaths } from "./useMix";
 import { usePlaylists } from "./usePlaylists";
 import { useCoverLoader } from "./useCoverLoader";
 import { emitTrackStatisticsUpdated } from "./useStatistics";
-import { artistTagMatches } from "../utils/format";
 import router from "../router";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -166,7 +165,10 @@ const volume = ref(1.0);
 const positionSecs = ref(0);
 const isLoading = ref(false);
 const errorMessage = ref("");
-const trackList = ref<TrackMetadata[]>([]);
+// Лёгкий упорядоченный список путей всего каталога (канонический порядок БД).
+// Заменяет прежний полный реактивный массив объектов: идентичность/счётчик/
+// источник очереди каталога без хранения 10k тяжёлых реактивных объектов.
+const catalogPaths = shallowRef<string[]>([]);
 const isSeeking = ref(false);
 const seekValue = ref(0);
 let statusInterval: ReturnType<typeof setInterval> | null = null;
@@ -216,11 +218,11 @@ function stopSmoothProgress() {
 // Shuffle / Repeat
 const shuffled = ref(false);
 const repeatMode = ref<"queue" | "track">("queue");
-// playbackOrder — плоская очередь воспроизведения.
+// playbackOrder — плоская очередь воспроизведения (пути file_path).
 // В режиме shuffle хвост очереди дозаполняется заранее сгенерированными
 // решафл-проходами, чтобы всегда было видно не менее QUEUE_LOOKAHEAD
-// треков после текущего.
-const playbackOrder = ref<TrackMetadata[]>([]);
+// треков после текущего. Хранит только пути — объекты резолвятся через кэш.
+const playbackOrder = shallowRef<string[]>([]);
 // Явный указатель на позицию текущего трека в playbackOrder.
 // Нужен, потому что в shuffle-режиме тот же трек может встречаться
 // в нескольких проходах — findIndex не годится.
@@ -231,8 +233,125 @@ const showSettings = ref(false);
 
 // Источник воспроизведения: 'catalog' | 'playlist:ID' | null
 const activePlaylistSource = ref<string | null>(null);
-// Треки текущего активного источника (для плейлистов — отдельный список)
+// Объекты треков текущего НЕ-каталожного источника (плейлист/альбом/артист/микс).
+// Ограничены по размеру, поэтому держим объекты целиком; для каталога не используется
+// (там источник — пути из catalogPaths/sourcePaths).
 const sourceTrackList = ref<TrackMetadata[]>([]);
+// Упорядоченные пути активного источника (драйвер очереди для ЛЮБОГО источника).
+// Каталог → отфильтрованные/полные пути; иначе → пути из sourceTrackList.
+const sourcePaths = shallowRef<string[]>([]);
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Реактивный LRU-кэш метаданных треков (материализация по требованию)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Реактивная Map: добавление записи дотриггеривает computed, которые резолвили
+// путь через getTrackByPath и получили undefined (Vue 3 отслеживает доступ по
+// ключу, в т.ч. промахи). Хранит и метаданные, и лениво подгруженные обложки —
+// вытеснение по LRU ограничивает суммарную память (главное — base64-обложки).
+const trackCache = reactive(new Map<string, TrackMetadata>());
+const TRACK_CACHE_LIMIT = 3000;
+// Неактивная (нереактивная) метка последнего доступа — для LRU без лишних
+// срабатываний реактивности.
+const cacheAccessTick = new Map<string, number>();
+let cacheTick = 0;
+
+const inFlightTrackFetches = new Set<string>();
+let pendingFetchPaths: string[] = [];
+let fetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Пути, которые нельзя вытеснять: текущий трек + небольшое окно очереди вокруг него. */
+function pinnedCachePaths(): Set<string> {
+  const pinned = new Set<string>();
+  if (currentTrack.value) pinned.add(currentTrack.value.file_path);
+  const order = playbackOrder.value;
+  const idx = currentOrderIndex.value;
+  if (idx >= 0) {
+    // Окно вокруг текущего: пара назад + лукэхед очереди вперёд (с запасом).
+    const from = Math.max(0, idx - 2);
+    const to = Math.min(order.length, idx + 12);
+    for (let i = from; i < to; i++) pinned.add(order[i]);
+  }
+  return pinned;
+}
+
+function maybeEvictCache() {
+  if (trackCache.size <= TRACK_CACHE_LIMIT) return;
+  const pinned = pinnedCachePaths();
+  // Сортируем кандидатов (не закреплённые) по возрастанию метки доступа.
+  const candidates = [...trackCache.keys()].filter(p => !pinned.has(p));
+  candidates.sort((a, b) => (cacheAccessTick.get(a) ?? 0) - (cacheAccessTick.get(b) ?? 0));
+  // Вытесняем пачкой до ~90% лимита, чтобы не дёргать вытеснение часто.
+  const target = Math.floor(TRACK_CACHE_LIMIT * 0.9);
+  let toRemove = trackCache.size - target;
+  for (const path of candidates) {
+    if (toRemove <= 0) break;
+    trackCache.delete(path);
+    cacheAccessTick.delete(path);
+    toRemove--;
+  }
+}
+
+/** Положить метаданные в кэш (не затирая уже подгруженную обложку/accent живого объекта). */
+function cacheTrack(track: TrackMetadata) {
+  const existing = trackCache.get(track.file_path);
+  if (existing) {
+    // Обновляем поля, но сохраняем уже загруженную обложку/accent, если новые пусты.
+    if (!track.cover_art && existing.cover_art) track.cover_art = existing.cover_art;
+    if (!track.accent_color && existing.accent_color) track.accent_color = existing.accent_color;
+    Object.assign(existing, track);
+  } else {
+    trackCache.set(track.file_path, track);
+  }
+  cacheAccessTick.set(track.file_path, ++cacheTick);
+  maybeEvictCache();
+}
+
+function cacheTracks(tracks: TrackMetadata[]) {
+  for (const t of tracks) cacheTrack(t);
+}
+
+function flushTrackFetches() {
+  fetchTimer = null;
+  const batch = pendingFetchPaths;
+  pendingFetchPaths = [];
+  const paths = batch.filter(p => !trackCache.has(p));
+  if (paths.length === 0) return;
+  for (const p of paths) inFlightTrackFetches.add(p);
+  invoke<TrackMetadata[]>("library_get_tracks_by_paths", { paths })
+    .then(tracks => { cacheTracks(tracks); })
+    .catch(() => {})
+    .finally(() => { for (const p of paths) inFlightTrackFetches.delete(p); });
+}
+
+function scheduleTrackFetch(filePath: string) {
+  if (trackCache.has(filePath) || inFlightTrackFetches.has(filePath)) return;
+  if (!pendingFetchPaths.includes(filePath)) pendingFetchPaths.push(filePath);
+  if (!fetchTimer) fetchTimer = setTimeout(flushTrackFetches, 16);
+}
+
+/** Синхронный доступ из кэша; при промахе — фоновая дозагрузка (computed пересчитается). */
+function getTrackByPath(filePath: string): TrackMetadata | undefined {
+  const hit = trackCache.get(filePath);
+  if (hit) {
+    cacheAccessTick.set(filePath, ++cacheTick);
+    return hit;
+  }
+  scheduleTrackFetch(filePath);
+  return undefined;
+}
+
+/** Явная пакетная материализация путей (видимое окно каталога). Возвращает промис. */
+async function fetchTracksByPaths(paths: string[]): Promise<TrackMetadata[]> {
+  const missing = paths.filter(p => !trackCache.has(p));
+  if (missing.length > 0) {
+    try {
+      const tracks = await invoke<TrackMetadata[]>("library_get_tracks_by_paths", { paths: missing });
+      cacheTracks(tracks);
+    } catch { /* ignore */ }
+  }
+  return paths.map(p => trackCache.get(p)).filter((t): t is TrackMetadata => !!t);
+}
 
 // Initialization flag
 let initialized = false;
@@ -265,29 +384,23 @@ function createPlayer() {
     folderAddError,
   } = useFolders();
 
-  const { loadPlaylists, getPlaylistTracks } = usePlaylists();
+  const { loadPlaylists, getPlaylistTracks, playlists: allPlaylists } = usePlaylists();
 
-  // ── Track map для O(1) поиска по file_path ──────────────────────────────
-
-  const trackMap = computed(() => new Map(trackList.value.map(t => [t.file_path, t])));
-  const trackIndexMap = computed(() => new Map(trackList.value.map((t, index) => [t.file_path, index])));
-
-  function getTrackByPath(filePath: string): TrackMetadata | undefined {
-    return trackMap.value.get(filePath);
-  }
-
-  function getTrackIndex(filePath: string): number {
-    return trackIndexMap.value.get(filePath) ?? -1;
-  }
+  // ── Доступ к трекам по пути (через LRU-кэш, см. модульный блок выше) ───────
+  // getTrackByPath / cacheTracks / fetchTracksByPaths определены на уровне модуля.
 
   // ── Shuffle/Repeat helpers ────────────────────────────────────────────────
 
-  /** Список треков текущего источника воспроизведения */
-  function getActiveSourceTracks(): TrackMetadata[] {
-    if (activePlaylistSource.value && activePlaylistSource.value !== 'catalog') {
-      return sourceTrackList.value;
-    }
-    return trackList.value;
+  /** Пути треков текущего источника воспроизведения (драйвер очереди). */
+  function getActiveSourcePaths(): string[] {
+    return sourcePaths.value;
+  }
+
+  /** Установить источник из объектов треков (плейлист/альбом/артист/микс). */
+  function setSourceTracks(tracks: TrackMetadata[]) {
+    sourceTrackList.value = tracks;
+    sourcePaths.value = tracks.map(t => t.file_path);
+    cacheTracks(tracks);
   }
 
   function sendTrackStatisticsDelta(delta: TrackStatisticsDelta): Promise<void> {
@@ -429,9 +542,9 @@ function createPlayer() {
     return null;
   }
 
-  function syncCollectionStatsSource(sourceId: string | null, tracks: TrackMetadata[]) {
+  function syncCollectionStatsSource(sourceId: string | null, paths: string[]) {
     const ref = collectionRefFromSource(sourceId);
-    const trackPaths = Array.from(new Set(tracks.map(t => t.file_path).filter(Boolean)));
+    const trackPaths = Array.from(new Set(paths.filter(Boolean)));
     if (!ref || trackPaths.length === 0) {
       collectionStatsSession = null;
       return;
@@ -475,8 +588,8 @@ function createPlayer() {
     return Math.max(0, playbackOrder.value.length - idx - 1);
   }
 
-  /** Случайная перестановка массива (Fisher–Yates), без мутации исходного. */
-  function shufflePermutation(source: TrackMetadata[]): TrackMetadata[] {
+  /** Случайная перестановка путей (Fisher–Yates), без мутации исходного. */
+  function shufflePermutation(source: string[]): string[] {
     const arr = source.slice();
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -492,17 +605,17 @@ function createPlayer() {
    *  треком предыдущего (если в источнике > 1 трека). */
   function ensureLookahead() {
     if (!shuffled.value) return;
-    const source = getActiveSourceTracks();
+    const source = getActiveSourcePaths();
     if (source.length === 0) return;
 
     while (upcomingCount() < QUEUE_LOOKAHEAD) {
       const full = playbackOrder.value;
       const lastPath = full.length > 0
-        ? full[full.length - 1].file_path
+        ? full[full.length - 1]
         : currentTrack.value?.file_path ?? null;
 
       const perm = shufflePermutation(source);
-      if (source.length > 1 && lastPath && perm[0].file_path === lastPath) {
+      if (source.length > 1 && lastPath && perm[0] === lastPath) {
         const j = 1 + Math.floor(Math.random() * (perm.length - 1));
         [perm[0], perm[j]] = [perm[j], perm[0]];
       }
@@ -521,44 +634,44 @@ function createPlayer() {
     currentOrderIndex.value -= cut;
   }
 
-  /** Находит позицию трека в playbackOrder ближайшую к текущей (forward-first). */
+  /** Находит позицию пути в playbackOrder ближайшую к текущей (forward-first). */
   function locateInOrder(filePath: string): number {
     const order = playbackOrder.value;
     const from = Math.max(0, currentOrderIndex.value);
     for (let i = from; i < order.length; i++) {
-      if (order[i].file_path === filePath) return i;
+      if (order[i] === filePath) return i;
     }
     for (let i = 0; i < from; i++) {
-      if (order[i].file_path === filePath) return i;
+      if (order[i] === filePath) return i;
     }
     return -1;
   }
 
-  /** Полностью пересобирает playbackOrder из активного источника. */
+  /** Полностью пересобирает playbackOrder из активного источника (пути). */
   function syncPlaybackOrder() {
+    const source = getActiveSourcePaths();
     if (!shuffled.value) {
-      playbackOrder.value = getActiveSourceTracks();
+      playbackOrder.value = source;
       currentOrderIndex.value = currentTrack.value
-        ? playbackOrder.value.findIndex(t => t.file_path === currentTrack.value!.file_path)
+        ? source.indexOf(currentTrack.value.file_path)
         : -1;
-      syncCollectionStatsSource(activePlaylistSource.value, getActiveSourceTracks());
+      syncCollectionStatsSource(activePlaylistSource.value, source);
       return;
     }
 
-    const current = currentTrack.value;
-    const source = getActiveSourceTracks();
-    const currentInSource = !!current && source.some(t => t.file_path === current.file_path);
-    const head = currentInSource && current ? [current] : [];
+    const currentPath = currentTrack.value?.file_path ?? null;
+    const currentInSource = !!currentPath && source.includes(currentPath);
+    const head = currentInSource && currentPath ? [currentPath] : [];
     playbackOrder.value = head;
     currentOrderIndex.value = currentInSource ? 0 : -1;
     ensureLookahead();
     syncCollectionStatsSource(activePlaylistSource.value, source);
   }
 
-  /** Установить треки плейлиста как источник воспроизведения */
+  /** Установить треки плейлиста/альбома/артиста/микса как источник воспроизведения */
   function setPlaylistSource(sourceId: string, tracks: TrackMetadata[]) {
     activePlaylistSource.value = sourceId;
-    sourceTrackList.value = tracks;
+    setSourceTracks(tracks);
     // Очередь «Моего микса» существует только во фронтенде — сохраняем её,
     // чтобы восстановить после перезапуска приложения.
     if (sourceId === "mix") {
@@ -566,6 +679,43 @@ function createPlayer() {
     }
     syncPlaybackOrder();
     scheduleSaveState();
+  }
+
+  /** Установить каталог (возможно отфильтрованный) как источник: только пути. */
+  function setCatalogSource(sourceId: string, paths: string[]) {
+    activePlaylistSource.value = sourceId;
+    sourceTrackList.value = [];
+    sourcePaths.value = paths;
+    syncPlaybackOrder();
+    scheduleSaveState();
+  }
+
+  /** Установить очередь «Моего микса» из путей (вся библиотека учитывается без
+   *  материализации всех объектов — они резолвятся лениво через кэш). */
+  function setMixSourceFromPaths(paths: string[]) {
+    activePlaylistSource.value = "mix";
+    sourceTrackList.value = [];
+    sourcePaths.value = paths;
+    // Очередь микса существует только во фронтенде — сохраняем для восстановления.
+    saveMixQueuePaths(paths);
+    syncPlaybackOrder();
+    scheduleSaveState();
+  }
+
+  /** Переместить трек в начало каталога (sort_order на бэкенде + локальный порядок). */
+  async function moveCatalogTrackToTop(filePath: string) {
+    await invoke("library_move_track_to_top", { filePath });
+    const moveFront = (arr: string[]): string[] => {
+      const i = arr.indexOf(filePath);
+      if (i <= 0) return arr;
+      const next = arr.slice();
+      next.splice(i, 1);
+      next.unshift(filePath);
+      return next;
+    };
+    catalogPaths.value = moveFront(catalogPaths.value);
+    if (isCatalogActiveSource()) sourcePaths.value = moveFront(sourcePaths.value);
+    syncPlaybackOrder();
   }
 
   function toggleShuffle() {
@@ -652,9 +802,7 @@ function createPlayer() {
   // ── Cover loader ────────────────────────────────────────────────────────
 
   const { loadCoversForTracks, clearQueue: clearCoverQueue } = useCoverLoader({
-    trackList,
     getTrackByPath,
-    getTrackIndex,
   });
 
   // ── Утилиты (публичные) ───────────────────────────────────────────────────
@@ -668,13 +816,21 @@ function createPlayer() {
 
   // ── Загрузка библиотеки ───────────────────────────────────────────────────
 
+  /** True, если активный источник — каталог (или его нет). */
+  function isCatalogActiveSource(): boolean {
+    const src = activePlaylistSource.value;
+    return !src || src.startsWith("catalog");
+  }
+
   async function loadLibrary() {
     try {
       isLoading.value = true;
       errorMessage.value = "";
       await initFolders();
       await invoke("library_cleanup");
-      trackList.value = await invoke<TrackMetadata[]>("library_get_tracks");
+      catalogPaths.value = await invoke<string[]>("library_get_catalog_paths", {});
+      // По умолчанию источник воспроизведения — весь каталог.
+      if (isCatalogActiveSource()) sourcePaths.value = catalogPaths.value;
       shuffled.value = false;
       syncPlaybackOrder();
       await loadPlaylists();
@@ -687,13 +843,16 @@ function createPlayer() {
 
   async function refreshLibrary() {
     try {
-      const tracks = await invoke<TrackMetadata[]>("library_get_tracks");
+      const paths = await invoke<string[]>("library_get_catalog_paths", {});
       const prevTrack = currentTrack.value;
-      trackList.value = tracks;
+      catalogPaths.value = paths;
+      if (isCatalogActiveSource()) sourcePaths.value = paths;
       syncPlaybackOrder();
       await loadPlaylists();
 
-      if (prevTrack && !tracks.some(t => t.file_path === prevTrack.file_path)) {
+      // Каталог — это все треки библиотеки, поэтому отсутствие пути означает,
+      // что трек удалён из библиотеки.
+      if (prevTrack && !paths.includes(prevTrack.file_path)) {
         await invoke("player_stop");
         playbackState.value = "Stopped";
         currentTrack.value = null;
@@ -748,7 +907,8 @@ function createPlayer() {
 
   // ── Управление плеером ────────────────────────────────────────────────────
 
-  async function playTrack(track: TrackMetadata, options: PlayTrackOptions = {}) {
+  async function playTrack(track: TrackMetadata | string, options: PlayTrackOptions = {}) {
+    const filePath = typeof track === "string" ? track : track.file_path;
     try {
       isLoading.value = true;
       errorMessage.value = "";
@@ -757,19 +917,19 @@ function createPlayer() {
       }
       const useCrossfade = settings.value.crossfade_between_tracks && playbackState.value === "Playing";
       const metadata = useCrossfade
-        ? await invoke<TrackMetadata>("player_play_crossfade", { filePath: track.file_path, crossfadeSecs: 0.25 })
-        : await invoke<TrackMetadata>("player_play", { filePath: track.file_path });
+        ? await invoke<TrackMetadata>("player_play_crossfade", { filePath, crossfadeSecs: 0.25 })
+        : await invoke<TrackMetadata>("player_play", { filePath });
 
       if (!metadata.cover_art) {
-        const inList = getTrackByPath(track.file_path);
-        if (inList?.cover_art) metadata.cover_art = inList.cover_art;
+        const cached = getTrackByPath(filePath);
+        if (cached?.cover_art) metadata.cover_art = cached.cover_art;
         else {
-          invoke<string | null>("get_cover_art", { filePath: track.file_path })
+          invoke<string | null>("get_cover_art", { filePath })
             .then(art => {
               if (art) {
-                const idx = getTrackIndex(track.file_path);
-                if (idx !== -1) trackList.value[idx].cover_art = art;
-                if (currentTrack.value?.file_path === track.file_path)
+                const cachedTrack = trackCache.get(filePath);
+                if (cachedTrack) cachedTrack.cover_art = art;
+                if (currentTrack.value?.file_path === filePath)
                   currentTrack.value.cover_art = art;
               }
             })
@@ -778,6 +938,8 @@ function createPlayer() {
       }
 
       currentTrack.value = metadata;
+      // Кэшируем свежие метаданные (для резолва в очереди/списках).
+      cacheTrack(metadata);
       // Обновляем указатель на позицию в playbackOrder
       if (options.orderIndex !== undefined && options.orderIndex >= 0 && options.orderIndex < playbackOrder.value.length) {
         currentOrderIndex.value = options.orderIndex;
@@ -787,11 +949,6 @@ function createPlayer() {
       // В shuffle-режиме гарантируем, что хвост очереди достаточно заполнен,
       // чтобы всегда корректно показать 8 треков в UI.
       if (shuffled.value) ensureLookahead();
-      // Сохраняем accent_color в trackList, чтобы pollStatus не затирал его
-      if (metadata.accent_color) {
-        const idx = getTrackIndex(metadata.file_path);
-        if (idx !== -1) trackList.value[idx].accent_color = metadata.accent_color;
-      }
       playbackState.value = "Playing";
       positionSecs.value = 0;
       beginStatsSession(metadata, 0, "Playing");
@@ -801,14 +958,13 @@ function createPlayer() {
       // переход по очереди, ручное переключение — всё проходит здесь).
       scheduleSaveState();
     } catch (e: any) {
-      // Удаляем недоступный трек из списка и пробуем следующий
-      const failedIdx = trackList.value.findIndex(t => t.file_path === track.file_path);
+      // Убираем недоступный трек из очереди и пробуем следующий
+      const failedIdx = playbackOrder.value.indexOf(filePath);
       if (failedIdx !== -1) {
-        trackList.value.splice(failedIdx, 1);
-        syncPlaybackOrder();
+        playbackOrder.value = playbackOrder.value.filter((_, i) => i !== failedIdx);
       }
       if (!options.skipAttempt && playbackOrder.value.length > 0) {
-        const nextIdx = Math.min(failedIdx, playbackOrder.value.length - 1);
+        const nextIdx = Math.min(failedIdx === -1 ? 0 : failedIdx, playbackOrder.value.length - 1);
         if (nextIdx >= 0) {
           await playTrack(playbackOrder.value[nextIdx], { skipAttempt: true, finishPrevious: false });
           return;
@@ -964,13 +1120,14 @@ function createPlayer() {
 
       if (status.current_file_path) {
         if (currentTrack.value?.file_path !== status.current_file_path) {
-          const inList = getTrackByPath(status.current_file_path!);
-          if (inList) {
-            currentTrack.value = inList;
-            beginStatsSession(inList, status.position_secs, status.state);
+          const cached = trackCache.get(status.current_file_path);
+          if (cached) {
+            currentTrack.value = cached;
+            beginStatsSession(cached, status.position_secs, status.state);
           } else {
             const meta = await invoke<TrackMetadata>("get_track_metadata", { filePath: status.current_file_path });
             currentTrack.value = meta;
+            cacheTrack(meta);
             beginStatsSession(meta, status.position_secs, status.state);
           }
         }
@@ -1027,11 +1184,10 @@ function createPlayer() {
     }
     await flushCurrentStatisticsProgress();
 
-    // Вычисляем индекс текущего трека в источнике
+    // Вычисляем индекс текущего трека в источнике (по путям)
     let trackIndex: number | null = null;
     if (currentTrack.value) {
-      const source = getActiveSourceTracks();
-      const idx = source.findIndex(t => t.file_path === currentTrack.value!.file_path);
+      const idx = getActiveSourcePaths().indexOf(currentTrack.value.file_path);
       trackIndex = idx >= 0 ? idx : null;
     }
 
@@ -1074,47 +1230,49 @@ function createPlayer() {
       repeatMode.value = (saved.repeat_mode === "track" ? "track" : "queue");
       activePlaylistSource.value = saved.active_playlist_source ?? null;
 
-      // Для плейлиста — дозагружаем его треки, чтобы playbackOrder не был пустым
+      // Восстанавливаем источник воспроизведения через бэкенд (без полного trackList).
       const src = activePlaylistSource.value;
+      const fallbackToCatalog = () => {
+        activePlaylistSource.value = null;
+        sourceTrackList.value = [];
+        sourcePaths.value = catalogPaths.value;
+      };
       if (src && src.startsWith("playlist:")) {
         const pid = Number(src.slice("playlist:".length));
         if (Number.isFinite(pid)) {
           try {
-            const pathOnly = await getPlaylistTracks(pid);
-            const map = new Map(trackList.value.map(t => [t.file_path, t]));
-            sourceTrackList.value = pathOnly
-              .map(t => map.get(t.file_path) ?? t)
-              .filter(Boolean) as TrackMetadata[];
+            const tracks = await getPlaylistTracks(pid);
+            if (tracks.length) setSourceTracks(tracks);
+            else fallbackToCatalog();
           } catch (err) {
             console.error("Ошибка восстановления треков плейлиста:", err);
-            activePlaylistSource.value = null;
-            sourceTrackList.value = [];
+            fallbackToCatalog();
           }
+        } else {
+          fallbackToCatalog();
         }
       } else if (src && src.startsWith("album:")) {
         const name = src.slice("album:".length);
-        const tracks = trackList.value.filter(t => (t.album || '').trim() === name);
-        sourceTrackList.value = tracks.sort((a, b) => a.file_path.localeCompare(b.file_path, undefined, { numeric: true, sensitivity: 'base' }));
-        if (sourceTrackList.value.length === 0) {
-          activePlaylistSource.value = null;
-        }
+        const pl = allPlaylists.value.find(p => p.kind === "Album" && p.name === name);
+        const tracks = pl ? await getPlaylistTracks(pl.id) : [];
+        if (tracks.length) setSourceTracks(tracks);
+        else fallbackToCatalog();
       } else if (src && src.startsWith("artist:")) {
         const name = src.slice("artist:".length);
-        const seps = settings.value.artist_separators;
-        sourceTrackList.value = trackList.value.filter(t => artistTagMatches(t.artist, name, seps));
-        if (sourceTrackList.value.length === 0) {
-          activePlaylistSource.value = null;
-        }
+        const pl = allPlaylists.value.find(p => p.kind === "Artist" && p.name === name);
+        const tracks = pl ? await getPlaylistTracks(pl.id) : [];
+        if (tracks.length) setSourceTracks(tracks);
+        else fallbackToCatalog();
       } else if (src === "mix") {
         // Просчитанная очередь микса хранится во фронтенде (localStorage).
-        sourceTrackList.value = loadMixQueuePaths()
-          .map(p => getTrackByPath(p))
-          .filter((t): t is TrackMetadata => !!t);
-        if (sourceTrackList.value.length === 0) {
-          activePlaylistSource.value = null;
-        }
+        const mixPaths = loadMixQueuePaths();
+        const tracks = mixPaths.length ? await fetchTracksByPaths(mixPaths) : [];
+        if (tracks.length) setSourceTracks(tracks);
+        else fallbackToCatalog();
       } else {
+        // Каталог / поиск / без источника — играем по полному каталогу.
         sourceTrackList.value = [];
+        sourcePaths.value = catalogPaths.value;
       }
       syncPlaybackOrder();
     } catch (e) {
@@ -1130,7 +1288,8 @@ function createPlayer() {
     }
 
     if (!saved.current_track_path) return;
-    const track = getTrackByPath(saved.current_track_path);
+    const restored = await fetchTracksByPaths([saved.current_track_path]);
+    const track = restored[0];
     if (!track) return;
 
     const rawPos = saved.position_secs;
@@ -1145,18 +1304,14 @@ function createPlayer() {
       if (!metadata.cover_art && track.cover_art) {
         metadata.cover_art = track.cover_art;
       }
-      if (metadata.accent_color) {
-        const idx = getTrackIndex(metadata.file_path);
-        if (idx !== -1) trackList.value[idx].accent_color = metadata.accent_color;
-      }
       currentTrack.value = metadata;
+      cacheTrack(metadata);
       // В shuffle playbackOrder уже сгенерирован, но currentOrderIndex=-1.
       // Ставим current первым и дозаполняем хвост, чтобы очередь была корректной.
       if (shuffled.value) {
-        const source = getActiveSourceTracks();
-        const inSource = source.some(t => t.file_path === metadata.file_path);
+        const inSource = getActiveSourcePaths().includes(metadata.file_path);
         if (inSource) {
-          playbackOrder.value = [metadata];
+          playbackOrder.value = [metadata.file_path];
           currentOrderIndex.value = 0;
           ensureLookahead();
         } else {
@@ -1235,6 +1390,8 @@ function createPlayer() {
   // Start init immediately on first import
   init();
 
+  const catalogCount = computed(() => catalogPaths.value.length);
+
   return {
     // Состояние плеера
     currentTrack,
@@ -1243,7 +1400,9 @@ function createPlayer() {
     positionSecs,
     isLoading,
     errorMessage,
-    trackList,
+    catalogPaths,
+    catalogCount,
+    sourcePaths,
     playbackOrder,
     isSeeking,
     seekValue,
@@ -1283,7 +1442,8 @@ function createPlayer() {
     formatTime,
     getTrackDisplayName,
     getTrackByPath,
-    trackMap,
+    cacheTracks,
+    fetchTracksByPaths,
     folderDisplayName,
 
     // Действия
@@ -1307,7 +1467,10 @@ function createPlayer() {
     toggleRepeat,
     syncPlaybackOrder,
     setPlaylistSource,
-    getActiveSourceTracks,
+    setCatalogSource,
+    setMixSourceFromPaths,
+    moveCatalogTrackToTop,
+    getActiveSourcePaths,
     loadCoversForTracks,
     clearCoverQueue,
     saveState,

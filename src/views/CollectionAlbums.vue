@@ -22,7 +22,7 @@ import { useCoverGate } from '../composables/useCoverGate';
 const router = useRouter();
 const route = useRoute();
 const {
-    trackList,
+    catalogCount,
     getTrackByPath,
     loadCoversForTracks,
     isPlaying,
@@ -274,7 +274,7 @@ onUnmounted(() => {
 
 // When the library populates after this page mounted, re-observe so the
 // observer fires again for cards still in view — they now have track data.
-watch(() => trackList.value.length, () => {
+watch(catalogCount, () => {
     if (!gridEl.value) return;
     ensureObserver();
     refreshMargin();
@@ -302,8 +302,7 @@ async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
     if (album.trackCount === 0) return;
     const tracks = await getPlaylistTracks(album.id);
     if (tracks.length === 0) return;
-    const map = new Map(trackList.value.map(t => [t.file_path, t]));
-    const merged = tracks.map(t => map.get(t.file_path) ?? t);
+    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
     setPlaylistSource(`album:${album.name}`, merged);
     await playTrack(merged[0]);
 }
