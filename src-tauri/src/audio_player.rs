@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -321,9 +322,6 @@ enum AudioCmd {
         crossfade_secs: f64,
         resp: Resp,
     },
-    IsEmpty {
-        resp: mpsc::SyncSender<bool>,
-    },
 }
 
 // ── SymphoniaSource ─────────────────────────────────────────────────────────
@@ -608,6 +606,11 @@ impl<S: Source<Item = f32>> Source for FadeOut<S> {
 struct AnalyzerSource<S: Source<Item = f32>> {
     source: S,
     analyzer: Arc<SpectrumAnalyzer>,
+    /// Флаг «трек доиграл»: выставляется в `true`, когда обёрнутый источник
+    /// исчерпан (EOF). Живёт в `AudioPlayer` как `sink_empty` — главный поток
+    /// читает его одной атомарной загрузкой вместо блокирующего опроса sink'а
+    /// через канал аудио-потока.
+    finished: Arc<AtomicBool>,
     channels: u16,
     sample_rate: u32,
     ch_idx: u16,
@@ -620,12 +623,13 @@ impl<S: Source<Item = f32>> AnalyzerSource<S> {
     /// мьютекс (~раз в 256 кадров), не теряя плавности на 60 fps.
     const BLOCK: usize = 256;
 
-    fn new(source: S, analyzer: Arc<SpectrumAnalyzer>) -> Self {
+    fn new(source: S, analyzer: Arc<SpectrumAnalyzer>, finished: Arc<AtomicBool>) -> Self {
         let channels = source.channels().max(1);
         let sample_rate = source.sample_rate();
         Self {
             source,
             analyzer,
+            finished,
             channels,
             sample_rate,
             ch_idx: 0,
@@ -639,7 +643,15 @@ impl<S: Source<Item = f32>> Iterator for AnalyzerSource<S> {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        let sample = self.source.next()?;
+        let sample = match self.source.next() {
+            Some(s) => s,
+            None => {
+                // EOF: помечаем sink опустевшим. Флаг сбрасывается в `false`
+                // при создании нового sink'а в аудио-потоке.
+                self.finished.store(true, Ordering::Relaxed);
+                return None;
+            }
+        };
 
         // Визуализатор выключен — пропускаем звук как есть, без снятия спектра.
         if !self.analyzer.is_enabled() {
@@ -1076,6 +1088,7 @@ fn audio_thread_loop(
     stream_handle: OutputStreamHandle,
     eq_settings: Arc<RwLock<EqSettings>>,
     spectrum: Arc<SpectrumAnalyzer>,
+    sink_empty: Arc<AtomicBool>,
 ) {
     let mut sink: Option<Sink> = None;
     // Предыдущий fade-out sink — при новом crossfade старый немедленно останавливается,
@@ -1091,9 +1104,11 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
+                    sink_empty.store(false, Ordering::Relaxed);
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()),
                         spectrum.clone(),
+                        sink_empty.clone(),
                     ));
                     sink = Some(new_sink);
                     Ok(())
@@ -1118,6 +1133,7 @@ fn audio_thread_loop(
                 sink = None;
                 if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
                 spectrum.set_active(false);
+                sink_empty.store(true, Ordering::Relaxed);
             }
 
             AudioCmd::SetVolume(vol) => {
@@ -1131,9 +1147,11 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                    sink_empty.store(false, Ordering::Relaxed);
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()),
                         spectrum.clone(),
+                        sink_empty.clone(),
                     ));
                     if was_paused { new_sink.pause(); }
                     sink = Some(new_sink);
@@ -1171,9 +1189,11 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                    sink_empty.store(false, Ordering::Relaxed);
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()).fade_in(dur),
                         spectrum.clone(),
+                        sink_empty.clone(),
                     ));
                     if was_paused { new_sink.pause(); }
                     sink = Some(new_sink);
@@ -1200,19 +1220,16 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
+                    sink_empty.store(false, Ordering::Relaxed);
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()).fade_in(dur),
                         spectrum.clone(),
+                        sink_empty.clone(),
                     ));
                     sink = Some(new_sink);
                     Ok(())
                 })();
                 let _ = resp.send(result);
-            }
-
-            AudioCmd::IsEmpty { resp } => {
-                let empty = sink.as_ref().map(|s| s.empty()).unwrap_or(true);
-                let _ = resp.send(empty);
             }
         }
     }
@@ -1233,6 +1250,10 @@ pub struct AudioPlayer {
     accumulated_position: f64,
     eq_settings: Arc<RwLock<EqSettings>>,
     spectrum: Arc<SpectrumAnalyzer>,
+    /// Опустел ли текущий sink (трек доиграл/остановлен). Обновляется
+    /// аудио-потоком асинхронно: главный поток читает статус без блокирующего
+    /// round-trip'а через канал.
+    sink_empty: Arc<AtomicBool>,
 }
 
 impl AudioPlayer {
@@ -1244,6 +1265,9 @@ impl AudioPlayer {
         let eq_for_thread = eq_settings.clone();
         let spectrum = Arc::new(SpectrumAnalyzer::new());
         let spectrum_for_thread = spectrum.clone();
+        // true = ничего не играет; выставляется в false при старте трека.
+        let sink_empty = Arc::new(AtomicBool::new(true));
+        let sink_empty_for_thread = sink_empty.clone();
 
         std::thread::Builder::new()
             .name("audio-output".into())
@@ -1251,7 +1275,14 @@ impl AudioPlayer {
                 match OutputStream::try_default() {
                     Ok((stream, handle)) => {
                         let _ = init_tx.send(Ok(()));
-                        audio_thread_loop(cmd_rx, stream, handle, eq_for_thread, spectrum_for_thread);
+                        audio_thread_loop(
+                            cmd_rx,
+                            stream,
+                            handle,
+                            eq_for_thread,
+                            spectrum_for_thread,
+                            sink_empty_for_thread,
+                        );
                     }
                     Err(e) => {
                         let _ = init_tx.send(Err(format!(
@@ -1276,6 +1307,7 @@ impl AudioPlayer {
             accumulated_position: 0.0,
             eq_settings,
             spectrum,
+            sink_empty,
         })
     }
 
@@ -1306,12 +1338,10 @@ impl AudioPlayer {
         let _ = self.cmd_tx.send(cmd);
     }
 
+    /// Опустел ли текущий sink. Неблокирующая атомарная загрузка флага,
+    /// обновляемого аудио-потоком (см. `AnalyzerSource` / `audio_thread_loop`).
     fn is_sink_empty(&self) -> bool {
-        let (tx, rx) = mpsc::sync_channel(1);
-        if self.cmd_tx.send(AudioCmd::IsEmpty { resp: tx }).is_err() {
-            return true;
-        }
-        rx.recv().unwrap_or(true)
+        self.sink_empty.load(Ordering::Relaxed)
     }
 
     // ── Статические методы (метаданные) ─────────────────────────────────────

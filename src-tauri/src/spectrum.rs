@@ -7,9 +7,12 @@
 //! (30/60 fps). Для каждого запроса по последнему окну буфера считается БПФ
 //! и сворачивается в `bars` логарифмически разнесённых частотных полос.
 
-use crate::audio_features::{fft_radix2, hann_window, Complex};
+use crate::audio_features::hann_window;
+use rustfft::num_complex::Complex32;
+use rustfft::{Fft, FftPlanner};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Размер окна БПФ (степень двойки). При 44.1 кГц это ~46 мс сигнала —
 /// достаточно для разрешения низов и при этом отзывчиво на кадрах 60 fps.
@@ -135,17 +138,52 @@ impl SpectrumAnalyzer {
     }
 }
 
+/// Спланированный rustfft на текущий размер окна. Планировщик кэширует план
+/// внутри, поэтому повторные вызовы (на каждом кадре) дёшевы; SIMD-ядро
+/// (SSE/AVX/NEON) выбирается под CPU автоматически.
+fn fft_plan(n: usize) -> Arc<dyn Fft<f32>> {
+    static PLANNER: OnceLock<Mutex<FftPlanner<f32>>> = OnceLock::new();
+    PLANNER
+        .get_or_init(|| Mutex::new(FftPlanner::new()))
+        .lock()
+        .map(|mut p| p.plan_fft_forward(n))
+        .expect("FFT planner poisoned")
+}
+
+thread_local! {
+    /// Кэш окна Ханна (пара «размер → окно»): косинусы считаются один раз, а не
+    /// на каждом кадре rAF.
+    static HANN_CACHE: RefCell<(usize, Vec<f32>)> = const { RefCell::new((0, Vec::new())) };
+    /// Переиспользуемый scratch-буфер rustfft — без аллокаций на кадр.
+    static FFT_SCRATCH: RefCell<Vec<Complex32>> = const { RefCell::new(Vec::new()) };
+}
+
 fn compute_bars_from_samples(samples: &[f32], sample_rate: u32, bars: usize) -> Vec<f32> {
     let n = samples.len();
     if n == 0 || sample_rate == 0 {
         return vec![0.0; bars];
     }
 
-    let window = hann_window(n);
-    let mut buffer: Vec<Complex> = (0..n)
-        .map(|i| Complex::new(samples[i] * window[i], 0.0))
-        .collect();
-    fft_radix2(&mut buffer);
+    let mut buffer: Vec<Complex32> = HANN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.0 != n {
+            *cache = (n, hann_window(n));
+        }
+        let window = &cache.1;
+        (0..n)
+            .map(|i| Complex32::new(samples[i] * window[i], 0.0))
+            .collect()
+    });
+
+    let fft = fft_plan(n);
+    FFT_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let need = fft.get_inplace_scratch_len();
+        if scratch.len() < need {
+            scratch.resize(need, Complex32::default());
+        }
+        fft.process_with_scratch(&mut buffer, &mut scratch[..need]);
+    });
 
     let half = n / 2;
     let bin_hz = sample_rate as f32 / n as f32;
@@ -163,7 +201,7 @@ fn compute_bars_from_samples(samples: &[f32], sample_rate: u32, bars: usize) -> 
         let mut sum = 0.0f32;
         for bin in bin_lo..bin_hi {
             // Нормируем магнитуду на размер окна, чтобы шкала не зависела от FFT_SIZE.
-            sum += buffer[bin].magnitude() / n as f32;
+            sum += buffer[bin].norm() / n as f32;
         }
         let avg = sum / (bin_hi - bin_lo) as f32;
 
