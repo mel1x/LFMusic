@@ -329,7 +329,7 @@ function onMoveToTop(track: TrackMetadata) {
     width: 100%;
     height: 104px;
     border-radius: 14px;
-    background-color: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 1);
+    background-color: hsla(var(--player-accent-h), min(var(--player-accent-s), 60%), var(--player-accent-l), 1);
     transition: .24s ease;
 }
 .progress-bar-bg {
@@ -408,7 +408,7 @@ function onMoveToTop(track: TrackMetadata) {
     width: 42px;
     height: 42px;
     color: #fff;
-    background: hsla(var(--accent-h), var(--accent-s), 20%, 1);
+    background: hsla(var(--player-accent-h), var(--player-accent-s), 20%, 1);
     border-radius: 50%;
     cursor: pointer;
     transition: background-color .24s, opacity .3s ease-in-out;
@@ -416,7 +416,7 @@ function onMoveToTop(track: TrackMetadata) {
     opacity: 0;
 
     &:hover {
-        background-color: hsla(var(--accent-h), var(--accent-s), 35%, 0.9);
+        background-color: hsla(var(--player-accent-h), var(--player-accent-s), 35%, 0.9);
     }
 }
 .trackCover {
@@ -548,7 +548,7 @@ function onMoveToTop(track: TrackMetadata) {
     background-color: #ffffff;
     transition: transform .24s ease-in-out;
     transform-origin: center;
-    color: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 1);
+    color: hsla(var(--player-accent-h), min(var(--player-accent-s), 60%), var(--player-accent-l), 1);
     transform: translateZ(0);
     will-change: transform;
     backface-visibility: hidden;
@@ -652,7 +652,7 @@ function onMoveToTop(track: TrackMetadata) {
     bottom: calc(100% + 16px);
     left: 50%;
     transform: translateX(-50%);
-    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+    background-color: hsla(var(--player-accent-h), var(--player-accent-s), var(--player-accent-l), 0.15);
     border-radius: 16px;
     padding: 8px 12px;
     white-space: nowrap;
@@ -670,7 +670,7 @@ function onMoveToTop(track: TrackMetadata) {
 .codecTooltip-details {
     font-size: 11px;
     font-weight: 500;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+    color: hsla(var(--player-accent-h), calc(var(--player-accent-s) * 0.4), 80%, 0.5);
 }
 .volumeControl {
     user-select: none;
@@ -716,7 +716,7 @@ function onMoveToTop(track: TrackMetadata) {
     bottom: calc(100% - 4px);
     left: 50%;
     transform: translateX(-50%);
-    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+    background-color: hsla(var(--player-accent-h), var(--player-accent-s), var(--player-accent-l), 0.15);
     border-radius: 18px;
     padding: 12px 8px;
     backdrop-filter: blur(17px);
@@ -805,7 +805,7 @@ function onMoveToTop(track: TrackMetadata) {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+    background-color: hsla(var(--player-accent-h), var(--player-accent-s), var(--player-accent-l), 0.15);
     border-radius: 16px;
     padding: 10px 0;
     backdrop-filter: blur(17px);
@@ -884,7 +884,7 @@ function onMoveToTop(track: TrackMetadata) {
     .playerControls {
         height: 100%;
         border-radius: 16px;
-        background-color: hsla(var(--accent-h), min(var(--accent-s), 50%), 14%, 0.98);
+        background-color: hsla(var(--player-accent-h), min(var(--player-accent-s), 50%), 14%, 0.98);
     }
 
     .progress-bg {

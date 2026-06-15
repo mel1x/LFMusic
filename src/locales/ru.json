@@ -38,5 +38,14 @@
     "tracksReadyTitle": "Треки уже можно слушать!",
     "tracksReadyText": "Сканирование треков завершено. В фоне первый раз идет подготовка к рекомендациям, это не мешает воспроизведению, но сильно нагружает CPU!",
     "tracksReadyButton": "Понятно"
+  },
+  "stats": {
+    "characterSentence": "Преимущественно {traits} музыка",
+    "traitEnergetic": "энергичная",
+    "traitCalm": "спокойная",
+    "traitDanceable": "танцевальная",
+    "traitFast": "быстрая",
+    "traitSlow": "неторопливая",
+    "traitBalanced": "сбалансированная"
   }
 }

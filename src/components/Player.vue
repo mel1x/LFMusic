@@ -106,12 +106,12 @@ useDiscordRpc({
         background:
             radial-gradient(
                 ellipse 100% 75% at 50% 0%,
-                hsla(var(--accent-h), min(var(--accent-s), 70%), 58%, 0.24),
+                hsla(var(--player-accent-h), min(var(--player-accent-s), 70%), 58%, 0.24),
                 transparent 95%
             ),
-            hsla(var(--accent-h), min(var(--accent-s), 50%), 8%, 0.72) !important;
+            hsla(var(--player-accent-h), min(var(--player-accent-s), 50%), 8%, 0.72) !important;
         backdrop-filter: blur(20px);
-        border-top: 1px solid hsla(var(--accent-h), min(var(--accent-s), 90%), 75%, 0.15);
+        border-top: 1px solid hsla(var(--player-accent-h), min(var(--player-accent-s), 90%), 75%, 0.15);
     }
 }
 </style>

@@ -222,6 +222,13 @@ html {
      чтобы все три тона --accent-color / --dark-bg / --light-bg стакались. */
   --dark-bg: hsl(var(--accent-h), min(var(--accent-s), 50%), 8%);
   --light-bg: hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 1);
+  /* Отдельный «быстрый» акцент для блока плеера: те же значения, но анимируются
+     по своему (более короткому) таймингу в useAccentTheme, чтобы плеер менялся
+     первым. Фолбэк на общий акцент — на случай до первого кадра анимации. */
+  --player-accent-h: var(--accent-h);
+  --player-accent-s: var(--accent-s);
+  --player-accent-l: var(--accent-l);
+  --player-light-bg: hsla(var(--player-accent-h), min(var(--player-accent-s), 45%), 15%, 1);
   --android-safe-top: 0px;
   --android-safe-right: 0px;
   --android-safe-bottom: 0px;

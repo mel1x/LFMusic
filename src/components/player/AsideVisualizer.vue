@@ -156,7 +156,7 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
                 :class="{ playing: isPlaying, idle: !currentTrack }"
                 :style="{
                     backgroundImage: currentCoverArt
-                        ? `linear-gradient(90deg, hsla(var(--accent-h), min(var(--accent-s), 45%), 14%, 0.96) 0%, hsla(var(--accent-h), min(var(--accent-s), 45%), 16%, 0.86) 54%, hsla(var(--accent-h), min(var(--accent-s), 45%), 18%, 0.72) 100%), url(${currentCoverArt})`
+                        ? `linear-gradient(90deg, hsla(var(--player-accent-h), min(var(--player-accent-s), 45%), 14%, 0.96) 0%, hsla(var(--player-accent-h), min(var(--player-accent-s), 45%), 16%, 0.86) 54%, hsla(var(--player-accent-h), min(var(--player-accent-s), 45%), 18%, 0.72) 100%), url(${currentCoverArt})`
                         : undefined,
                 }"
             >
@@ -196,7 +196,7 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
                 :disabled="!nextTrack"
                 :style="{
                     backgroundImage: nextTrack?.cover_art
-                        ? `linear-gradient(90deg, hsla(var(--accent-h), min(var(--accent-s), 45%), 14%, 0.96) 0%, hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 0.84) 55%, hsla(var(--accent-h), min(var(--accent-s), 45%), 18%, 0.7) 100%), url(${nextTrack.cover_art})`
+                        ? `linear-gradient(90deg, hsla(var(--player-accent-h), min(var(--player-accent-s), 45%), 14%, 0.96) 0%, hsla(var(--player-accent-h), min(var(--player-accent-s), 45%), 15%, 0.84) 55%, hsla(var(--player-accent-h), min(var(--player-accent-s), 45%), 18%, 0.7) 100%), url(${nextTrack.cover_art})`
                         : undefined,
                 }"
                 @click="playNext()"
@@ -229,7 +229,7 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
     width: 100%;
     height: 100%;
     border-radius: 14px;
-    background-color: var(--light-bg);
+    background-color: var(--player-light-bg);
     border: 1px solid #ffffff04;
     overflow: hidden;
 }
@@ -238,7 +238,7 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
     width: 100%;
     height: 100%;
     border-radius: 13px;
-    background-color: var(--light-bg);
+    background-color: var(--player-light-bg);
     background-size: cover;
     background-position: center;
     box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
@@ -278,7 +278,7 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
     font-size: 11px;
     font-weight: 600;
     line-height: 1.1;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.35), 82%, 0.52);
+    color: hsla(var(--player-accent-h), calc(var(--player-accent-s) * 0.35), 82%, 0.52);
 }
 .asideVisualTitle,
 .asideNextTitle {

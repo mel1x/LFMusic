@@ -18,9 +18,11 @@ import {
     type TasteProfile,
     type SummaryStats,
 } from '../composables/useStatistics';
-import { formatTotalDuration, tracksCountText } from '../utils/format';
+import { formatTotalDuration } from '../utils/format';
+import { useI18n } from '../composables/useI18n';
 
 const router = useRouter();
+const { t } = useI18n();
 
 const {
     catalogPaths,
@@ -199,38 +201,83 @@ const metrics = computed(() => {
     const bpm = t.bpm ?? 0;
     const loud = t.loudness ?? 0;
     return [
-        { key: 'Энергичность', value: pct(t.energy), display: `${pct(t.energy)}%` },
-        { key: 'Танцевальность', value: pct(t.danceability), display: `${pct(t.danceability)}%` },
-        { key: 'Яркость звучания', value: pct((t.spectral_centroid ?? 0) / 4000), display: `${pct((t.spectral_centroid ?? 0) / 4000)}%` },
-        { key: 'Темп', value: pct((bpm - 50) / 140), display: `${Math.round(bpm)} BPM` },
-        { key: 'Громкость', value: pct((loud + 30) / 30), display: `${loud.toFixed(1)} dB` },
+        { key: 'Энергичность', short: 'Энергия', value: pct(t.energy), display: `${pct(t.energy)}%` },
+        { key: 'Танцевальность', short: 'Танец', value: pct(t.danceability), display: `${pct(t.danceability)}%` },
+        { key: 'Яркость', short: 'Яркость', value: pct((t.spectral_centroid ?? 0) / 4000), display: `${pct((t.spectral_centroid ?? 0) / 4000)}%` },
+        { key: 'Темп', short: 'Темп', value: pct((bpm - 50) / 140), display: `${Math.round(bpm)} BPM` },
+        { key: 'Громкость', short: 'Громкость', value: pct((loud + 30) / 30), display: `${loud.toFixed(1)} dB` },
     ];
 });
 
-const character = computed(() => {
-    const t = taste.value;
-    if (!t || !hasTaste.value) return '';
-    const parts: string[] = [];
-    const e = t.energy ?? 0, d = t.danceability ?? 0, b = t.bpm ?? 0;
-    if (e >= 0.55) parts.push('энергичная');
-    else if (e < 0.4) parts.push('спокойная');
-    if (d >= 0.6) parts.push('танцевальная');
-    if (b >= 130) parts.push('быстрая');
-    else if (b > 0 && b < 95) parts.push('неторопливая');
-    if (parts.length === 0) parts.push('сбалансированная');
-    return `Преимущественно ${parts.join(', ')} музыка`;
+// ── Радар характера звучания (SVG spider chart) ──────────────────────────────
+const RADAR = { w: 360, h: 248, cx: 180, cy: 118, r: 86, labelR: 110 };
+
+const radarAxes = computed(() => {
+    const n = metrics.value.length || 5;
+    return metrics.value.map((m, i) => {
+        const ang = (-90 + (360 / n) * i) * Math.PI / 180;
+        const cos = Math.cos(ang), sin = Math.sin(ang);
+        return {
+            short: m.short,
+            display: m.display,
+            value: m.value,
+            cos, sin,
+            ax: RADAR.cx + RADAR.r * cos,
+            ay: RADAR.cy + RADAR.r * sin,
+            px: RADAR.cx + RADAR.r * (m.value / 100) * cos,
+            py: RADAR.cy + RADAR.r * (m.value / 100) * sin,
+            lx: RADAR.cx + RADAR.labelR * cos,
+            ly: RADAR.cy + RADAR.labelR * sin + (sin < -0.5 ? 0 : 4),
+            anchor: cos > 0.25 ? 'start' : cos < -0.25 ? 'end' : 'middle',
+        };
+    });
 });
 
-const favoriteDaypart = computed(() => {
+const radarPolygon = computed(() =>
+    radarAxes.value.map(a => `${a.px.toFixed(1)},${a.py.toFixed(1)}`).join(' ')
+);
+
+const radarRings = computed(() =>
+    [0.25, 0.5, 0.75, 1].map(f =>
+        radarAxes.value.map(a => {
+            const x = RADAR.cx + RADAR.r * f * a.cos;
+            const y = RADAR.cy + RADAR.r * f * a.sin;
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(' ')
+    )
+);
+
+const character = computed(() => {
+    const tp = taste.value;
+    if (!tp || !hasTaste.value) return '';
+    const keys: string[] = [];
+    const e = tp.energy ?? 0, d = tp.danceability ?? 0, b = tp.bpm ?? 0;
+    if (e >= 0.55) keys.push('stats.traitEnergetic');
+    else if (e < 0.4) keys.push('stats.traitCalm');
+    if (d >= 0.6) keys.push('stats.traitDanceable');
+    if (b >= 130) keys.push('stats.traitFast');
+    else if (b > 0 && b < 95) keys.push('stats.traitSlow');
+    if (keys.length === 0) keys.push('stats.traitBalanced');
+    const traits = keys.map(k => t(k)).join(', ');
+    return t('stats.characterSentence', { traits });
+});
+
+// Разбивка прослушиваний по времени суток для мини-графика.
+const dayparts = computed(() => {
     const s = summary.value;
-    if (!s) return '—';
-    const arr = [
-        { k: 'Утро', v: s.morning_listens },
-        { k: 'День', v: s.day_listens },
-        { k: 'Вечер', v: s.evening_listens },
-        { k: 'Ночь', v: s.night_listens },
-    ].sort((a, b) => b.v - a.v);
-    return arr[0].v > 0 ? arr[0].k : '—';
+    const raw = [
+        { k: 'Утро', v: s?.morning_listens ?? 0 },
+        { k: 'День', v: s?.day_listens ?? 0 },
+        { k: 'Вечер', v: s?.evening_listens ?? 0 },
+        { k: 'Ночь', v: s?.night_listens ?? 0 },
+    ];
+    const max = Math.max(1, ...raw.map(d => d.v));
+    const top = raw.reduce((a, b) => (b.v > a.v ? b : a));
+    return raw.map(d => ({
+        ...d,
+        h: Math.round((d.v / max) * 100),
+        peak: d.v > 0 && d.k === top.k,
+    }));
 });
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -266,17 +313,27 @@ onUnmounted(() => {
 
             <!-- ── «Мой микс»: персональная волна на всю страницу ───────────── -->
             <div v-if="hasLibrary" class="mixStage" :class="{ playing: isMixPlaying }">
+                <!-- Центральный визуал: светящийся орб волны с вращающейся дугой
+                     и расходящейся рябью от «источника звука». -->
                 <div class="mixVisual">
-                    <!-- Рябь от «источника звука»: кольца расходятся, когда волна
-                         играет; на паузе замирают концентрической композицией. -->
                     <div class="mixRings" aria-hidden="true">
-                        <span v-for="i in 4" :key="i" class="mixRing"></span>
+                        <span v-for="i in 5" :key="i" class="mixRing"></span>
                     </div>
-                    <div class="mixCover" aria-hidden="true">
-                        <Transition name="mood-swap" mode="out-in">
-                            <MoodIcon :key="currentMood.id" class="mixMoodIcon" :name="currentMood.id" />
-                        </Transition>
+                    <div class="orb" aria-hidden="true">
+                        <div class="orbCore">
+                            <Transition name="mood-swap" mode="out-in">
+                                <MoodIcon :key="currentMood.id" class="mixMoodIcon" :name="currentMood.id" />
+                            </Transition>
+                        </div>
                     </div>
+
+                    <!-- Что сейчас в волне -->
+                    <Transition name="chip-fade">
+                        <div v-if="isMixActive && currentTrack" class="nowChip">
+                            <span class="eqMini" :class="{ paused: !isPlaying }"><i></i><i></i><i></i></span>
+                            <span v-truncate class="nowChipText">{{ currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</span>
+                        </div>
+                    </Transition>
                 </div>
 
                 <div class="mixType">Персональная волна</div>
@@ -318,6 +375,24 @@ onUnmounted(() => {
                     >
                         <TuneIcon width="18" height="18" />
                     </button>
+                </div>
+
+                <!-- Быстрый выбор настроения (детальные настройки — в сайдбаре) -->
+                <div class="moodStrip">
+                    <div class="moodStripLabel">Настроение</div>
+                    <div class="moodChips">
+                        <button
+                            v-for="mood in moods"
+                            :key="mood.id"
+                            class="moodChip"
+                            :class="{ active: selectedMood === mood.id }"
+                            @click="selectMood(mood.id)"
+                            v-tooltip:top="mood.short_desc"
+                        >
+                            <MoodIcon :name="mood.id" width="15" height="15" />
+                            <span>{{ mood.label }}</span>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -406,40 +481,85 @@ onUnmounted(() => {
                         <template v-else-if="hasTaste">
                             <div class="statsHead">
                                 <div class="statsKicker">Музыкальный профиль</div>
-                                <div class="statsTitle">Ваш средний характер</div>
+                                <div class="statsTitle">Ваш характер</div>
                                 <div class="statsSubtitle">{{ character }}.</div>
+                            </div>
+
+                            <div class="statCards">
+                                <div class="statCard">
+                                    <span class="statCardIcon">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M4 14v-1a8 8 0 0 1 16 0v1"/>
+                                            <rect x="2.5" y="14" width="4.5" height="6.5" rx="2"/>
+                                            <rect x="17" y="14" width="4.5" height="6.5" rx="2"/>
+                                        </svg>
+                                    </span>
+                                    <div class="statCardValue">{{ summary ? summary.total_listens.toLocaleString('ru-RU') : 0 }}</div>
+                                    <div class="statCardLabel">Прослушиваний</div>
+                                </div>
+                                <div class="statCard">
+                                    <span class="statCardIcon">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <circle cx="12" cy="12" r="9"/>
+                                            <path d="M12 7v5l3.5 2"/>
+                                        </svg>
+                                    </span>
+                                    <div class="statCardValue">{{ summary ? formatTotalDuration(summary.total_listened_secs) : '0 мин' }}</div>
+                                    <div class="statCardLabel">За музыкой</div>
+                                </div>
+                                <div class="statCard">
+                                    <span class="statCardIcon">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M3 12h3l3 7 4-15 3 8h5"/>
+                                        </svg>
+                                    </span>
+                                    <div class="statCardValue">{{ analyzedTracks.toLocaleString('ru-RU') }} треков</div>
+                                    <div class="statCardLabel">Проанализировано</div>
+                                </div>
                             </div>
 
                             <div class="statsSection">
                                 <div class="statsSectionLabel">Характер звучания</div>
-                                <div class="metricRows">
-                                    <div v-for="m in metrics" :key="m.key" class="metricRow">
-                                        <span class="metricName">{{ m.key }}</span>
-                                        <span class="metricTrack"><span class="metricFill" :style="{ width: m.value + '%' }"></span></span>
-                                        <span class="metricVal">{{ m.display }}</span>
-                                    </div>
+                                <div class="radarWrap">
+                                    <svg class="radar" :viewBox="`0 0 ${RADAR.w} ${RADAR.h}`">
+                                        <polygon
+                                            v-for="(ring, i) in radarRings"
+                                            :key="'ring' + i"
+                                            :points="ring"
+                                            class="radarRing"
+                                        />
+                                        <line
+                                            v-for="(a, i) in radarAxes"
+                                            :key="'axis' + i"
+                                            :x1="RADAR.cx" :y1="RADAR.cy" :x2="a.ax" :y2="a.ay"
+                                            class="radarAxis"
+                                        />
+                                        <polygon :points="radarPolygon" class="radarShape" />
+                                        <circle
+                                            v-for="(a, i) in radarAxes"
+                                            :key="'dot' + i"
+                                            :cx="a.px" :cy="a.py" r="3.4"
+                                            class="radarDot"
+                                        />
+                                        <g v-for="(a, i) in radarAxes" :key="'lbl' + i">
+                                            <text :x="a.lx" :y="a.ly" :text-anchor="a.anchor" class="radarLabel">{{ a.short }}</text>
+                                            <text :x="a.lx" :y="a.ly + 15" :text-anchor="a.anchor" class="radarValue">{{ a.display }}</text>
+                                        </g>
+                                    </svg>
                                 </div>
                             </div>
 
                             <div class="statsSection">
-                                <div class="statsSectionLabel">Прослушивание</div>
-                                <div class="summaryRows">
-                                    <div class="summaryRow">
-                                        <span class="summaryLabel">Прослушивания</span>
-                                        <span class="summaryVal">{{ summary ? summary.total_listens : 0 }}</span>
-                                    </div>
-                                    <div class="summaryRow">
-                                        <span class="summaryLabel">Время за музыкой</span>
-                                        <span class="summaryVal">{{ summary ? formatTotalDuration(summary.total_listened_secs) : '0 мин' }}</span>
-                                    </div>
-                                    <div class="summaryRow">
-                                        <span class="summaryLabel">Любимое время суток</span>
-                                        <span class="summaryVal">{{ favoriteDaypart }}</span>
+                                <div class="statsSectionLabel">Когда вы слушаете</div>
+                                <div class="daypartChart">
+                                    <div v-for="d in dayparts" :key="d.k" class="daypartCol" :class="{ peak: d.peak }">
+                                        <div class="daypartBarTrack">
+                                            <div class="daypartBar" :style="{ height: Math.max(d.h, 4) + '%' }"></div>
+                                        </div>
+                                        <span class="daypartName">{{ d.k }}</span>
                                     </div>
                                 </div>
                             </div>
-
-                            <div class="statsFootNote">Проанализировано {{ tracksCountText(analyzedTracks) }} с аудио-анализом</div>
                         </template>
 
                         <div v-else class="statsEmpty">
@@ -468,7 +588,7 @@ onUnmounted(() => {
     justify-content: center;
     width: 100%;
     height: 100%;
-    padding: 20px 28px;
+    padding: 24px 28px;
     box-sizing: border-box;
     background-color: var(--light-bg);
     background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
@@ -502,39 +622,41 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 1);
 }
 
-/* ── Сцена волны ────────────────────────────────────────────────────────── */
+/* ── Сцена волны (центрированная, на весь viewport) ─────────────────────── */
 .mixStage {
     position: relative;
+    z-index: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
     width: 100%;
+    max-width: 760px;
 }
 
-/* Визуальный центр: генеративная обложка волны + расходящаяся рябь. */
+/* ── Центральный визуал: светящийся орб + рябь ──────────────────────────── */
 .mixVisual {
     position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 30px;
+    margin-bottom: 34px;
 }
-/* Мягкий свет от «источника звука» позади обложки. */
+/* Мягкий свет от «источника звука» позади орба. */
 .mixVisual::before {
     content: "";
     position: absolute;
     top: 50%;
     left: 50%;
-    width: 680px;
-    height: 680px;
-    margin: -340px 0 0 -340px;
+    width: 720px;
+    height: 720px;
+    margin: -360px 0 0 -360px;
     border-radius: 50%;
-    background: radial-gradient(circle, hsla(var(--accent-h), var(--accent-s), 58%, 0.12), transparent 62%);
+    background: radial-gradient(circle, hsla(var(--accent-h), var(--accent-s), 58%, 0.16), transparent 60%);
     pointer-events: none;
 }
 .mixRings {
-    --pulse-size: 620px;
+    --pulse-size: 660px;
     position: absolute;
     top: 50%;
     left: 50%;
@@ -549,83 +671,168 @@ onUnmounted(() => {
     width: var(--pulse-size);
     height: var(--pulse-size);
     border-radius: 50%;
-    border: 1.5px solid hsla(var(--accent-h), var(--accent-s), 65%, 0.4);
+    border: 1.5px solid hsla(var(--accent-h), var(--accent-s), 65%, 0.35);
     box-sizing: border-box;
-    animation: mixRipple 5s ease-out infinite;
+    animation: mixRipple 6s ease-out infinite;
     animation-play-state: paused;
 }
 .mixRing:nth-child(1) { animation-delay: 0s; }
-.mixRing:nth-child(2) { animation-delay: -1.25s; }
-.mixRing:nth-child(3) { animation-delay: -2.5s; }
-.mixRing:nth-child(4) { animation-delay: -3.75s; }
+.mixRing:nth-child(2) { animation-delay: -1.2s; }
+.mixRing:nth-child(3) { animation-delay: -2.4s; }
+.mixRing:nth-child(4) { animation-delay: -3.6s; }
+.mixRing:nth-child(5) { animation-delay: -4.8s; }
 .mixStage.playing .mixRing { animation-play-state: running; }
 @keyframes mixRipple {
-    from { transform: scale(0.34); opacity: 0.9; }
+    from { transform: scale(0.26); opacity: 0.85; }
     to { transform: scale(1); opacity: 0; }
 }
 
-.mixCover {
+/* Орб */
+.orb {
     position: relative;
     z-index: 1;
-    width: 230px;
-    height: 230px;
-    border-radius: 22px;
+    width: 248px;
+    height: 248px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: orbFloat 7s ease-in-out infinite;
+}
+@keyframes orbFloat {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-9px); }
+}
+
+/* Светящееся ядро орба. */
+.orbCore {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     overflow: hidden;
     background:
-        radial-gradient(130% 130% at 20% 15%, hsla(var(--accent-h), var(--accent-s), 58%, 0.5), transparent 58%),
-        radial-gradient(150% 150% at 85% 92%, hsla(var(--accent-h), var(--accent-s), 42%, 0.38), transparent 62%),
+        radial-gradient(120% 120% at 30% 22%, hsla(var(--accent-h), var(--accent-s), 64%, 0.6), transparent 58%),
+        radial-gradient(135% 135% at 78% 95%, hsla(var(--accent-h), var(--accent-s), 44%, 0.55), transparent 60%),
         hsl(var(--accent-h), min(var(--accent-s), 52%), 13%);
     box-shadow:
-        inset 0 1px 0 hsla(0, 0%, 100%, 0.07),
-        0 24px 60px hsla(var(--accent-h), min(var(--accent-s), 50%), 6%, 0.5);
-    user-select: none;
+        inset 0 2px 1px hsla(0, 0%, 100%, 0.16),
+        inset 0 -26px 50px hsla(var(--accent-h), min(var(--accent-s), 50%), 6%, 0.55),
+        0 30px 70px hsla(var(--accent-h), min(var(--accent-s), 50%), 6%, 0.5);
+    transition: transform .5s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.mixStage.playing .orbCore { transform: scale(1.04); }
+/* Блик сверху. */
+.orbCore::before {
+    content: "";
+    position: absolute;
+    top: 8%;
+    left: 16%;
+    width: 56%;
+    height: 40%;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 40%, hsla(0, 0%, 100%, 0.22), transparent 70%);
+    pointer-events: none;
 }
 .mixMoodIcon {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 64px;
-    height: 64px;
-    margin: -32px 0 0 -32px;
-    color: hsla(0, 0%, 100%, 0.92);
-    filter: drop-shadow(0 2px 14px hsla(var(--accent-h), var(--accent-s), 25%, 0.55));
+    position: relative;
+    z-index: 1;
+    width: 78px;
+    height: 78px;
+    color: hsla(0, 0%, 100%, 0.95);
+    filter: drop-shadow(0 3px 18px hsla(var(--accent-h), var(--accent-s), 22%, 0.6));
 }
 .mood-swap-enter-active,
 .mood-swap-leave-active { transition: opacity .2s ease, transform .2s ease; }
 .mood-swap-enter-from { opacity: 0; transform: scale(0.82); }
 .mood-swap-leave-to { opacity: 0; transform: scale(1.12); }
 
+/* Чип «что сейчас в волне» — плавает под орбом. */
+.nowChip {
+    position: absolute;
+    z-index: 3;
+    bottom: -16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 9px;
+    max-width: 280px;
+    padding: 7px 15px 7px 12px;
+    border-radius: 999px;
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 44%), 16%);
+    box-shadow: 0 10px 28px hsla(var(--accent-h), min(var(--accent-s), 50%), 4%, 0.5);
+}
+.nowChipText {
+    user-select: none;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.9);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+.eqMini {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    gap: 2.5px;
+    height: 13px;
+    flex-shrink: 0;
+}
+.eqMini i {
+    display: block;
+    width: 2.5px;
+    height: 4px;
+    border-radius: 2px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 72%, 1);
+    animation: eqBar 0.9s ease-in-out infinite;
+}
+.eqMini i:nth-child(1) { animation-delay: 0s; }
+.eqMini i:nth-child(2) { animation-delay: 0.3s; }
+.eqMini i:nth-child(3) { animation-delay: 0.6s; }
+.eqMini.paused i { animation-play-state: paused; height: 4px; }
+@keyframes eqBar {
+    0%, 100% { height: 3px; }
+    50% { height: 13px; }
+}
+.chip-fade-enter-active,
+.chip-fade-leave-active { transition: opacity .25s ease, transform .25s ease; }
+.chip-fade-enter-from,
+.chip-fade-leave-to { opacity: 0; transform: translate(-50%, 8px); }
+
 /* ── Текстовый блок волны ───────────────────────────────────────────────── */
 .mixType {
-    position: relative;
-    z-index: 1;
     user-select: none;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    color: hsla(var(--accent-h), var(--accent-s), 72%, 0.85);
 }
 .mixName {
-    position: relative;
-    z-index: 1;
     user-select: none;
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 54px;
+    font-size: 56px;
     font-weight: 900;
-    color: hsla(0, 0%, 100%, 0.95);
-    line-height: 1.05;
-    letter-spacing: -1.5px;
-    margin: 4px 0 0;
+    color: hsla(0, 0%, 100%, 0.96);
+    line-height: 1.03;
+    letter-spacing: -1.6px;
+    margin: 8px 0 0;
 }
 .mixDesc {
-    position: relative;
-    z-index: 1;
     user-select: none;
-    margin: 12px 0 0;
+    margin: 14px auto 0;
     font-size: 15px;
     line-height: 1.55;
     color: hsla(0, 0%, 100%, 0.55);
-    max-width: 560px;
+    max-width: 520px;
     min-height: 23px;
 }
 .desc-fade-enter-active,
@@ -634,8 +841,6 @@ onUnmounted(() => {
 .desc-fade-leave-to { opacity: 0; transform: translateY(-4px); }
 
 .mixBadges {
-    position: relative;
-    z-index: 1;
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;
@@ -666,14 +871,11 @@ onUnmounted(() => {
 
 /* ── Контролы волны ─────────────────────────────────────────────────────── */
 .mixControls {
-    position: relative;
-    z-index: 1;
     display: flex;
     flex-direction: row;
     align-items: center;
-    justify-content: center;
     gap: 10px;
-    margin-top: 26px;
+    margin-top: 28px;
 }
 .playListBtn {
     user-select: none;
@@ -728,8 +930,71 @@ onUnmounted(() => {
     color: #fff;
 }
 
+/* ── Быстрый выбор настроения ───────────────────────────────────────────── */
+.moodStrip {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    margin-top: 34px;
+}
+.moodStripLabel {
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.38);
+}
+.moodStripLabel::before,
+.moodStripLabel::after {
+    content: "";
+    width: 28px;
+    height: 1px;
+    background-color: hsla(0, 0%, 100%, 0.12);
+}
+.moodChips {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    max-width: 620px;
+}
+.moodChip {
+    user-select: none;
+    cursor: pointer;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 14px 8px 12px;
+    border: none;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.05);
+    color: hsla(0, 0%, 100%, 0.6);
+    font-size: 12.5px;
+    font-weight: 600;
+    transition: .2s ease;
+}
+.moodChip svg { opacity: 0.7; transition: opacity .2s ease; }
+.moodChip:hover {
+    background-color: hsla(0, 0%, 100%, 0.09);
+    color: hsla(0, 0%, 100%, 0.95);
+}
+.moodChip:hover svg { opacity: 0.95; }
+.moodChip.active {
+    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.92);
+    color: #fff;
+}
+.moodChip.active svg { opacity: 1; }
+
 /* ── Empty state ────────────────────────────────────────────────────────── */
 .emptyState {
+    flex: 1;
     display: flex;
     gap: 10px;
     flex-direction: column;
@@ -1033,22 +1298,28 @@ onUnmounted(() => {
 .panel-enter-from .settingsPanel, .panel-leave-to .settingsPanel { transform: translateX(calc(100% + 12px)); }
 
 /* ── Responsive ─────────────────────────────────────────────────────────── */
+@media (max-height: 800px) {
+    .orb { width: 208px; height: 208px; }
+    .mixVisual { margin-bottom: 26px; }
+    .mixMoodIcon { width: 66px; height: 66px; }
+    .mixName { font-size: 48px; }
+    .moodStrip { margin-top: 26px; }
+}
+
 @media (max-width: 1100px) and (min-width: 721px) {
-    .mixCover { width: 200px; height: 200px; }
-    .mixRings { --pulse-size: 520px; }
-    .mixVisual::before { width: 560px; height: 560px; margin: -280px 0 0 -280px; }
-    .mixMoodIcon { width: 56px; height: 56px; margin: -28px 0 0 -28px; }
-    .mixName { font-size: 46px; }
+    .mixName { font-size: 48px; }
+    .mixRings { --pulse-size: 560px; }
+    .mixVisual::before { width: 600px; height: 600px; margin: -300px 0 0 -300px; }
 }
 
 @media (max-width: 720px) {
     .pageRoot { padding: 16px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
-    .mixVisual { margin-bottom: 24px; }
-    .mixCover { width: 168px; height: 168px; border-radius: 18px; }
-    .mixRings { --pulse-size: 400px; }
-    .mixVisual::before { width: 440px; height: 440px; margin: -220px 0 0 -220px; }
-    .mixMoodIcon { width: 48px; height: 48px; margin: -24px 0 0 -24px; }
+    .mixVisual { margin-bottom: 28px; }
+    .orb { width: 184px; height: 184px; }
+    .mixMoodIcon { width: 58px; height: 58px; }
+    .mixRings { --pulse-size: 420px; }
+    .mixVisual::before { width: 460px; height: 460px; margin: -230px 0 0 -230px; }
     .mixName { font-size: 38px; letter-spacing: -1px; }
     .mixDesc { font-size: 14px; max-width: 100%; }
     .playListBtn { min-width: 150px; min-height: 42px; padding: 13px 22px; font-size: 13px; }
@@ -1076,14 +1347,16 @@ onUnmounted(() => {
 }
 .statsModal {
     position: relative;
-    width: 480px;
+    width: 500px;
     max-width: 100%;
-    max-height: 86vh;
+    max-height: 88vh;
     overflow-y: auto;
-    padding: 28px 28px 22px;
-    border-radius: 24px;
-    background-color: hsl(var(--accent-h), min(var(--accent-s), 48%), 12%);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    padding: 28px 30px 24px;
+    border-radius: 26px;
+    background:
+        radial-gradient(130% 90% at 50% -10%, hsla(var(--accent-h), var(--accent-s), 40%, 0.18), transparent 55%),
+        hsl(var(--accent-h), min(var(--accent-s), 48%), 12%);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
     border: none;
     outline: none;
     box-sizing: border-box;
@@ -1170,81 +1443,169 @@ onUnmounted(() => {
     user-select: none;
 }
 
-/* Sound character: metric rows */
-.metricRows {
+/* Sound character: radar (spider) chart */
+.radarWrap {
+    position: relative;
     display: flex;
-    flex-direction: column;
-    gap: 13px;
-}
-.metricRow {
-    display: grid;
-    grid-template-columns: 132px minmax(0, 1fr) 76px;
     align-items: center;
-    gap: 14px;
+    justify-content: center;
+    margin: -4px 0 2px;
 }
-@media (max-width: 520px) {
-    .metricRow {
-        grid-template-columns: 110px minmax(0, 1fr) 70px;
-        gap: 10px;
-    }
+/* Мягкий accent-свет за радаром — в духе орба на странице. */
+.radarWrap::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 220px;
+    height: 220px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: radial-gradient(circle, hsla(var(--accent-h), var(--accent-s), 58%, 0.18), transparent 62%);
+    pointer-events: none;
 }
-.metricName {
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.75);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+.radar {
+    position: relative;
+    width: 100%;
+    max-width: 360px;
+    height: auto;
+    overflow: visible;
 }
-.metricTrack {
-    display: block;
-    height: 5px;
-    border-radius: 9999px;
-    background: hsla(0, 0%, 100%, 0.07);
-    overflow: hidden;
+.radarRing {
+    fill: none;
+    stroke: hsla(0, 0%, 100%, 0.08);
+    stroke-width: 1;
 }
-.metricFill {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background-color: hsla(var(--accent-h), var(--accent-s), 58%, 1);
-    transition: width .7s cubic-bezier(0.22, 1, 0.36, 1);
+.radarRing:last-of-type { stroke: hsla(0, 0%, 100%, 0.14); }
+.radarAxis {
+    stroke: hsla(0, 0%, 100%, 0.07);
+    stroke-width: 1;
 }
-.metricVal {
-    font-size: 12.5px;
+.radarShape {
+    fill: hsla(var(--accent-h), var(--accent-s), 58%, 0.28);
+    stroke: hsla(var(--accent-h), var(--accent-s), 64%, 1);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 12px hsla(var(--accent-h), var(--accent-s), 55%, 0.45));
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: radarPop .6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes radarPop {
+    from { transform: scale(0.6); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+.radarDot {
+    fill: #fff;
+    stroke: hsla(var(--accent-h), var(--accent-s), 50%, 1);
+    stroke-width: 2;
+}
+.radarLabel {
+    fill: hsla(0, 0%, 100%, 0.9);
+    font-size: 12px;
     font-weight: 700;
-    color: hsla(0, 0%, 100%, 0.92);
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.radarValue {
+    fill: hsla(var(--accent-h), var(--accent-s), 74%, 0.95);
+    font-size: 11px;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
-    text-align: right;
-    white-space: nowrap;
 }
 
-/* Listening summary rows */
-.summaryRows {
+/* Hero stat cards */
+.statCards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-top: 22px;
+}
+.statCard {
+    position: relative;
     display: flex;
     flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 14px 14px 13px;
+    border-radius: 18px;
+    background:
+        radial-gradient(140% 120% at 100% 0%, hsla(var(--accent-h), var(--accent-s), 56%, 0.14), transparent 58%),
+        hsla(0, 0%, 100%, 0.045);
+    box-shadow: inset 0 1px 0 hsla(0, 0%, 100%, 0.05);
+    overflow: hidden;
 }
-.summaryRow {
+.statCardIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    margin-bottom: 10px;
+    border-radius: 10px;
+    background: hsla(var(--accent-h), var(--accent-s), 55%, 0.16);
+    color: hsla(var(--accent-h), var(--accent-s), 74%, 1);
+}
+.statCardIcon svg { width: 17px; height: 17px; }
+.statCardValue {
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    font-weight: 800;
+    color: #fff;
+    letter-spacing: -0.3px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+}
+.statCardLabel {
+    margin-top: auto;
+    padding-top: 4px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.45);
+    user-select: none;
+}
+
+/* When you listen: daypart bar chart */
+.daypartChart {
     display: flex;
     flex-direction: row;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 9px 0;
+    align-items: flex-end;
+    gap: 12px;
+    height: 110px;
 }
-.summaryRow:first-child { padding-top: 0; }
-.summaryRow + .summaryRow { border-top: 1px solid hsla(0, 0%, 100%, 0.07); }
-.summaryLabel {
-    font-size: 13px;
-    color: hsla(0, 0%, 100%, 0.55);
+.daypartCol {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    height: 100%;
 }
-.summaryVal {
-    font-size: 14px;
-    font-weight: 700;
-    color: #fff;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
+.daypartBarTrack {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
 }
+.daypartBar {
+    width: 100%;
+    max-width: 56px;
+    min-height: 4px;
+    border-radius: 9px;
+    background: hsla(0, 0%, 100%, 0.1);
+    transition: height .7s cubic-bezier(0.22, 1, 0.36, 1), background .3s ease;
+}
+.daypartCol.peak .daypartBar {
+    background-image: linear-gradient(to top, hsla(var(--accent-h), var(--accent-s), 46%, 1), hsla(var(--accent-h), var(--accent-s), 64%, 1));
+    box-shadow: 0 6px 18px hsla(var(--accent-h), var(--accent-s), 50%, 0.35);
+}
+.daypartName {
+    font-size: 12px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.45);
+    user-select: none;
+}
+.daypartCol.peak .daypartName { color: hsla(0, 0%, 100%, 0.95); }
 
 .statsFootNote {
     margin-top: 26px;
