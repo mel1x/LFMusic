@@ -88,8 +88,8 @@ const categories = [
     align-items: center;
     gap: 20px;
     width: 100%;
-    padding: 20px 16px;
-    border-radius: 14px;
+    padding: 12px 20px 12px 24px;
+    border-radius: 999px;
     cursor: pointer;
     transition: background-color .2s ease;
 }

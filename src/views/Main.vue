@@ -455,41 +455,7 @@ onUnmounted(() => {
                                 <div class="statsSubtitle">{{ character }}.</div>
                             </div>
 
-                            <div class="statCards">
-                                <div class="statCard">
-                                    <span class="statCardIcon">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M4 14v-1a8 8 0 0 1 16 0v1"/>
-                                            <rect x="2.5" y="14" width="4.5" height="6.5" rx="2"/>
-                                            <rect x="17" y="14" width="4.5" height="6.5" rx="2"/>
-                                        </svg>
-                                    </span>
-                                    <div class="statCardValue">{{ summary ? summary.total_listens.toLocaleString('ru-RU') : 0 }}</div>
-                                    <div class="statCardLabel">Прослушиваний</div>
-                                </div>
-                                <div class="statCard">
-                                    <span class="statCardIcon">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                            <circle cx="12" cy="12" r="9"/>
-                                            <path d="M12 7v5l3.5 2"/>
-                                        </svg>
-                                    </span>
-                                    <div class="statCardValue">{{ summary ? formatTotalDuration(summary.total_listened_secs) : '0 мин' }}</div>
-                                    <div class="statCardLabel">За музыкой</div>
-                                </div>
-                                <div class="statCard">
-                                    <span class="statCardIcon">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M3 12h3l3 7 4-15 3 8h5"/>
-                                        </svg>
-                                    </span>
-                                    <div class="statCardValue">{{ analyzedTracks.toLocaleString('ru-RU') }} треков</div>
-                                    <div class="statCardLabel">Проанализировано</div>
-                                </div>
-                            </div>
-
                             <div class="statsSection">
-                                <div class="statsSectionLabel">Характер звучания</div>
                                 <div class="radarWrap">
                                     <svg class="radar" :viewBox="`0 0 ${RADAR.w} ${RADAR.h}`">
                                         <polygon
@@ -516,6 +482,41 @@ onUnmounted(() => {
                                             <text :x="a.lx" :y="a.ly + 15" :text-anchor="a.anchor" class="radarValue">{{ a.display }}</text>
                                         </g>
                                     </svg>
+                                </div>
+                            </div>
+
+                            <div class="statCards">
+                                <div class="statCard">
+                                    <span class="statCardIcon">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M4 14v-1a8 8 0 0 1 16 0v1"/>
+                                            <rect x="2.5" y="14" width="4.5" height="6.5" rx="2"/>
+                                            <rect x="17" y="14" width="4.5" height="6.5" rx="2"/>
+                                        </svg>
+                                    </span>
+                                    <div class="statCardValue">{{ summary ? summary.total_listens.toLocaleString('ru-RU') : 0 }}</div>
+                                    <div class="statCardLabel">Прослушиваний</div>
+                                </div>
+                                <div class="statCard">
+                                    <span class="statCardIcon">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M3 12h3l3 7 4-15 3 8h5"/>
+                                        </svg>
+                                    </span>
+                                    <div class="statCardValue">{{ analyzedTracks.toLocaleString('ru-RU') }} треков</div>
+                                    <div class="statCardLabel">Проанализировано</div>
+                                </div>
+                                <div class="statCard wide">
+                                    <span class="statCardIcon">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <circle cx="12" cy="12" r="9"/>
+                                            <path d="M12 7v5l3.5 2"/>
+                                        </svg>
+                                    </span>
+                                    <div class="statCardText">
+                                        <div class="statCardValue">{{ summary ? formatTotalDuration(summary.total_listened_secs) : '0 мин' }}</div>
+                                        <div class="statCardLabel">За музыкой</div>
+                                    </div>
                                 </div>
                             </div>
                         </template>
@@ -1250,15 +1251,6 @@ onUnmounted(() => {
 .statsSection {
     margin-top: 28px;
 }
-.statsSectionLabel {
-    font-size: 11.5px;
-    font-weight: 800;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    color: hsla(0, 0%, 100%, 0.38);
-    margin-bottom: 14px;
-    user-select: none;
-}
 
 /* Sound character: radar (spider) chart */
 .radarWrap {
@@ -1330,10 +1322,10 @@ onUnmounted(() => {
     font-variant-numeric: tabular-nums;
 }
 
-/* Hero stat cards */
+/* Hero stat cards: верхняя строка — 2 карточки, нижняя — одна широкая. */
 .statCards {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: 1fr 1fr;
     gap: 10px;
     margin-top: 22px;
 }
@@ -1379,6 +1371,32 @@ onUnmounted(() => {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.45);
     user-select: none;
+}
+
+/* Широкая нижняя карточка (время прослушивания): иконка слева, текст справа. */
+.statCard.wide {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+    padding: 15px 18px;
+}
+.statCard.wide .statCardIcon {
+    margin-bottom: 0;
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+}
+.statCard.wide .statCardIcon svg { width: 20px; height: 20px; }
+.statCardText {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.statCard.wide .statCardLabel {
+    margin-top: 0;
+    padding-top: 0;
 }
 
 .statsFootNote {
