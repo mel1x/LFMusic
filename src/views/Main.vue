@@ -550,7 +550,14 @@ onUnmounted(() => {
     padding: 24px 28px;
     box-sizing: border-box;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    /* Окружающий accent-свет: мягкие засветки сверху и снизу + лёгкая виньетка.
+       Привязаны к краям, поэтому читаются как освещение сцены, а не «шар».
+       Всё на accent-переменных — фон подстраивается под цвет текущего трека. */
+    background-image:
+        radial-gradient(120% 75% at 50% -12%, hsla(var(--accent-h), var(--accent-s), 62%, 0.20), transparent 60%),
+        radial-gradient(100% 58% at 50% 116%, hsla(var(--accent-h), var(--accent-s), 55%, 0.17), transparent 62%),
+        radial-gradient(72% 58% at 50% 44%, hsla(var(--accent-h), var(--accent-s), 55%, 0.06), transparent 75%),
+        radial-gradient(140% 125% at 50% 50%, transparent 50%, hsla(var(--accent-h), min(var(--accent-s), 40%), 5%, 0.55) 100%);
     background-repeat: no-repeat;
     overflow: hidden;
 }
@@ -1121,15 +1128,18 @@ onUnmounted(() => {
     .moodStrip { margin-top: 26px; }
 }
 
-@media (max-width: 1100px) and (min-width: 721px) {
+@media (max-width: 1100px) and (min-width: 769px) {
     .mixName { font-size: 42px; }
 }
 
-@media (max-width: 720px) {
-    .pageRoot { padding: 16px; }
+/* Телефоны (канонический брейкпоинт приложения, как в остальных вью). */
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .pageRoot { padding: 16px 10px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
     .mixName { font-size: 34px; letter-spacing: -0.8px; }
-    .mixDesc { font-size: 14px; max-width: 100%; }
+    /* Описание не во всю ширину: добавляем собственный отступ, чтобы текст
+       не упирался в края даже при маленьком padding страницы. */
+    .mixDesc { font-size: 14px; max-width: 100%; padding: 0 18px; box-sizing: border-box; }
     .playListBtn { min-width: 150px; min-height: 42px; padding: 13px 22px; font-size: 13px; }
     .roundBtn { width: 46px; height: 46px; }
     /* Настройки микса — на весь экран, без отступов по краям. */
@@ -1412,7 +1422,7 @@ onUnmounted(() => {
 .stats-enter-from .statsModal, .stats-leave-to .statsModal { transform: scale(0.96) translateY(6px); opacity: 0; }
 
 /* Телефоны: модалка статистики на весь экран, без отступов по краям. */
-@media (max-width: 720px) {
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .statsBackdrop { padding: 0; }
     .statsModal {
         width: 100%;
