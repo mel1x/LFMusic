@@ -56,6 +56,10 @@ const isBuildingMix = ref(false);
 
 const currentMood = computed(() => moods.find(m => m.id === selectedMood.value) ?? moods[0]);
 
+// Чипы настроений раскладываются на две центрированные строки (3 + остаток).
+const moodRowSplit = Math.ceil(moods.length / 2);
+const moodRows = [moods.slice(0, moodRowSplit), moods.slice(moodRowSplit)];
+
 const isMixActive = computed(() => activePlaylistSource.value === 'mix');
 const isMixPlaying = computed(() => isMixActive.value && isPlaying.value);
 
@@ -262,24 +266,6 @@ const character = computed(() => {
     return t('stats.characterSentence', { traits });
 });
 
-// Разбивка прослушиваний по времени суток для мини-графика.
-const dayparts = computed(() => {
-    const s = summary.value;
-    const raw = [
-        { k: 'Утро', v: s?.morning_listens ?? 0 },
-        { k: 'День', v: s?.day_listens ?? 0 },
-        { k: 'Вечер', v: s?.evening_listens ?? 0 },
-        { k: 'Ночь', v: s?.night_listens ?? 0 },
-    ];
-    const max = Math.max(1, ...raw.map(d => d.v));
-    const top = raw.reduce((a, b) => (b.v > a.v ? b : a));
-    return raw.map(d => ({
-        ...d,
-        h: Math.round((d.v / max) * 100),
-        peak: d.v > 0 && d.k === top.k,
-    }));
-});
-
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 function onKeydown(e: KeyboardEvent) {
@@ -302,99 +288,83 @@ onUnmounted(() => {
         <div class="pageRoot">
             <!-- ── Музыкальный профиль ──────────────────────────────────────── -->
             <button class="statsBtn" @click="openStats" v-tooltip:bottom="'Ваш музыкальный профиль'">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M3 3v16a2 2 0 0 0 2 2h16"/>
                     <path d="M18 17V9"/>
                     <path d="M13 17V5"/>
                     <path d="M8 17v-3"/>
                 </svg>
-                <span>Статистика</span>
             </button>
 
             <!-- ── «Мой микс»: персональная волна на всю страницу ───────────── -->
-            <div v-if="hasLibrary" class="mixStage" :class="{ playing: isMixPlaying }">
-                <!-- Центральный визуал: светящийся орб волны с вращающейся дугой
-                     и расходящейся рябью от «источника звука». -->
-                <div class="mixVisual">
-                    <div class="mixRings" aria-hidden="true">
-                        <span v-for="i in 5" :key="i" class="mixRing"></span>
-                    </div>
-                    <div class="orb" aria-hidden="true">
-                        <div class="orbCore">
-                            <Transition name="mood-swap" mode="out-in">
-                                <MoodIcon :key="currentMood.id" class="mixMoodIcon" :name="currentMood.id" />
+            <template v-if="hasLibrary">
+                <!-- Блок с текстом и кнопками — по центру свободной высоты страницы. -->
+                <div class="stageArea">
+                    <div class="mixStage">
+                        <div class="mixHeader">
+                            <div class="mixType">Персональная волна</div>
+                            <h1 class="mixName">Мой микс</h1>
+                            <Transition name="desc-fade" mode="out-in">
+                                <p class="mixDesc" :key="currentMood.id">{{ currentMood.desc }}</p>
                             </Transition>
                         </div>
-                    </div>
 
-                    <!-- Что сейчас в волне -->
-                    <Transition name="chip-fade">
-                        <div v-if="isMixActive && currentTrack" class="nowChip">
-                            <span class="eqMini" :class="{ paused: !isPlaying }"><i></i><i></i><i></i></span>
-                            <span v-truncate class="nowChipText">{{ currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</span>
+                        <div class="mixControls">
+                            <button
+                                class="playListBtn"
+                                :class="{ building: isBuildingMix }"
+                                :disabled="!hasLibrary"
+                                @click="onPlayMix"
+                            >
+                                <PauseIcon v-if="isMixPlaying" width="16" height="16" />
+                                <PlayIcon v-else width="15" height="15" style="margin-left:1px;" />
+                                <span>{{ isMixPlaying ? 'Пауза' : 'Слушать' }}</span>
+                            </button>
+                            <button
+                                class="roundBtn"
+                                :disabled="!hasLibrary"
+                                @click="onShuffleMix"
+                                v-tooltip:bottom="'Перемешать микс'"
+                            >
+                                <ShuffleIcon width="18" height="18" />
+                            </button>
+                            <button
+                                class="roundBtn"
+                                :class="{ active: settingsOpen }"
+                                @click="settingsOpen = true"
+                                v-tooltip:bottom="'Настройки микса'"
+                            >
+                                <TuneIcon width="18" height="18" />
+                            </button>
                         </div>
-                    </Transition>
+
+                        <div class="mixMeta">
+                            <button class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">{{ familiarityLabel }}</button>
+                            <button v-if="losslessOnly" class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">Lossless</button>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="mixType">Персональная волна</div>
-                <h1 class="mixName">Мой микс</h1>
-                <Transition name="desc-fade" mode="out-in">
-                    <p class="mixDesc" :key="currentMood.id">{{ currentMood.desc }}</p>
-                </Transition>
-
-                <div class="mixBadges">
-                    <div class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">{{ currentMood.label }}</div>
-                    <div class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">{{ familiarityLabel }}</div>
-                    <div v-if="losslessOnly" class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">Lossless</div>
-                </div>
-
-                <div class="mixControls">
-                    <button
-                        class="playListBtn"
-                        :class="{ building: isBuildingMix }"
-                        :disabled="!hasLibrary"
-                        @click="onPlayMix"
-                    >
-                        <PauseIcon v-if="isMixPlaying" width="16" height="16" />
-                        <PlayIcon v-else width="15" height="15" style="margin-left:1px;" />
-                        <span>{{ isMixPlaying ? 'Пауза' : 'Слушать' }}</span>
-                    </button>
-                    <button
-                        class="roundBtn"
-                        :disabled="!hasLibrary"
-                        @click="onShuffleMix"
-                        v-tooltip:bottom="'Перемешать микс'"
-                    >
-                        <ShuffleIcon width="18" height="18" />
-                    </button>
-                    <button
-                        class="roundBtn"
-                        :class="{ active: settingsOpen }"
-                        @click="settingsOpen = true"
-                        v-tooltip:bottom="'Настройки микса'"
-                    >
-                        <TuneIcon width="18" height="18" />
-                    </button>
-                </div>
-
-                <!-- Быстрый выбор настроения (детальные настройки — в сайдбаре) -->
+                <!-- Настроение — внизу страницы, две центрированные строки. -->
                 <div class="moodStrip">
                     <div class="moodStripLabel">Настроение</div>
                     <div class="moodChips">
-                        <button
-                            v-for="mood in moods"
-                            :key="mood.id"
-                            class="moodChip"
-                            :class="{ active: selectedMood === mood.id }"
-                            @click="selectMood(mood.id)"
-                            v-tooltip:top="mood.short_desc"
-                        >
-                            <MoodIcon :name="mood.id" width="15" height="15" />
-                            <span>{{ mood.label }}</span>
-                        </button>
+                        <div v-for="(row, r) in moodRows" :key="r" class="moodChipsRow">
+                            <button
+                                v-for="mood in row"
+                                :key="mood.id"
+                                class="moodChip"
+                                :class="{ active: selectedMood === mood.id }"
+                                @click="selectMood(mood.id)"
+                                v-tooltip:top="mood.short_desc"
+                            >
+                                <MoodIcon :name="mood.id" width="15" height="15" />
+                                <span>{{ mood.label }}</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
-            </div>
+            </template>
 
             <!-- ── Empty state (no library) ────────────────────────────────── -->
             <div v-else class="emptyState">
@@ -548,18 +518,6 @@ onUnmounted(() => {
                                     </svg>
                                 </div>
                             </div>
-
-                            <div class="statsSection">
-                                <div class="statsSectionLabel">Когда вы слушаете</div>
-                                <div class="daypartChart">
-                                    <div v-for="d in dayparts" :key="d.k" class="daypartCol" :class="{ peak: d.peak }">
-                                        <div class="daypartBarTrack">
-                                            <div class="daypartBar" :style="{ height: Math.max(d.h, 4) + '%' }"></div>
-                                        </div>
-                                        <span class="daypartName">{{ d.k }}</span>
-                                    </div>
-                                </div>
-                            </div>
                         </template>
 
                         <div v-else class="statsEmpty">
@@ -585,7 +543,7 @@ onUnmounted(() => {
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     width: 100%;
     height: 100%;
     padding: 24px 28px;
@@ -596,7 +554,17 @@ onUnmounted(() => {
     overflow: hidden;
 }
 
-/* ── «Статистика» ───────────────────────────────────────────────────────── */
+/* Блок с текстом/кнопками центрируется в свободной высоте над настроениями. */
+.stageArea {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ── «Статистика» (круглая кнопка-иконка) ───────────────────────────────── */
 .statsBtn {
     position: absolute;
     top: 20px;
@@ -605,16 +573,15 @@ onUnmounted(() => {
     user-select: none;
     cursor: pointer;
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 8px;
-    padding: 9px 16px;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
     border: none;
-    border-radius: 999px;
+    border-radius: 50%;
     background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.75);
-    font-size: 13px;
-    font-weight: 600;
     transition: .24s ease;
 }
 .statsBtn:hover {
@@ -634,179 +601,12 @@ onUnmounted(() => {
     max-width: 760px;
 }
 
-/* ── Центральный визуал: светящийся орб + рябь ──────────────────────────── */
-.mixVisual {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin-bottom: 34px;
-}
-/* Мягкий свет от «источника звука» позади орба. */
-.mixVisual::before {
-    content: "";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 720px;
-    height: 720px;
-    margin: -360px 0 0 -360px;
-    border-radius: 50%;
-    background: radial-gradient(circle, hsla(var(--accent-h), var(--accent-s), 58%, 0.16), transparent 60%);
-    pointer-events: none;
-}
-.mixRings {
-    --pulse-size: 660px;
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 0;
-    height: 0;
-    pointer-events: none;
-}
-.mixRing {
-    position: absolute;
-    top: calc(var(--pulse-size) / -2);
-    left: calc(var(--pulse-size) / -2);
-    width: var(--pulse-size);
-    height: var(--pulse-size);
-    border-radius: 50%;
-    border: 1.5px solid hsla(var(--accent-h), var(--accent-s), 65%, 0.35);
-    box-sizing: border-box;
-    animation: mixRipple 6s ease-out infinite;
-    animation-play-state: paused;
-}
-.mixRing:nth-child(1) { animation-delay: 0s; }
-.mixRing:nth-child(2) { animation-delay: -1.2s; }
-.mixRing:nth-child(3) { animation-delay: -2.4s; }
-.mixRing:nth-child(4) { animation-delay: -3.6s; }
-.mixRing:nth-child(5) { animation-delay: -4.8s; }
-.mixStage.playing .mixRing { animation-play-state: running; }
-@keyframes mixRipple {
-    from { transform: scale(0.26); opacity: 0.85; }
-    to { transform: scale(1); opacity: 0; }
-}
-
-/* Орб */
-.orb {
-    position: relative;
-    z-index: 1;
-    width: 248px;
-    height: 248px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    animation: orbFloat 7s ease-in-out infinite;
-}
-@keyframes orbFloat {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-9px); }
-}
-
-/* Светящееся ядро орба. */
-.orbCore {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    background:
-        radial-gradient(120% 120% at 30% 22%, hsla(var(--accent-h), var(--accent-s), 64%, 0.6), transparent 58%),
-        radial-gradient(135% 135% at 78% 95%, hsla(var(--accent-h), var(--accent-s), 44%, 0.55), transparent 60%),
-        hsl(var(--accent-h), min(var(--accent-s), 52%), 13%);
-    box-shadow:
-        inset 0 2px 1px hsla(0, 0%, 100%, 0.16),
-        inset 0 -26px 50px hsla(var(--accent-h), min(var(--accent-s), 50%), 6%, 0.55),
-        0 30px 70px hsla(var(--accent-h), min(var(--accent-s), 50%), 6%, 0.5);
-    transition: transform .5s cubic-bezier(0.32, 0.72, 0, 1);
-}
-.mixStage.playing .orbCore { transform: scale(1.04); }
-/* Блик сверху. */
-.orbCore::before {
-    content: "";
-    position: absolute;
-    top: 8%;
-    left: 16%;
-    width: 56%;
-    height: 40%;
-    border-radius: 50%;
-    background: radial-gradient(circle at 50% 40%, hsla(0, 0%, 100%, 0.22), transparent 70%);
-    pointer-events: none;
-}
-.mixMoodIcon {
-    position: relative;
-    z-index: 1;
-    width: 78px;
-    height: 78px;
-    color: hsla(0, 0%, 100%, 0.95);
-    filter: drop-shadow(0 3px 18px hsla(var(--accent-h), var(--accent-s), 22%, 0.6));
-}
-.mood-swap-enter-active,
-.mood-swap-leave-active { transition: opacity .2s ease, transform .2s ease; }
-.mood-swap-enter-from { opacity: 0; transform: scale(0.82); }
-.mood-swap-leave-to { opacity: 0; transform: scale(1.12); }
-
-/* Чип «что сейчас в волне» — плавает под орбом. */
-.nowChip {
-    position: absolute;
-    z-index: 3;
-    bottom: -16px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 9px;
-    max-width: 280px;
-    padding: 7px 15px 7px 12px;
-    border-radius: 999px;
-    background-color: hsl(var(--accent-h), min(var(--accent-s), 44%), 16%);
-    box-shadow: 0 10px 28px hsla(var(--accent-h), min(var(--accent-s), 50%), 4%, 0.5);
-}
-.nowChipText {
-    user-select: none;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
-}
-.eqMini {
-    display: flex;
-    flex-direction: row;
-    align-items: flex-end;
-    gap: 2.5px;
-    height: 13px;
-    flex-shrink: 0;
-}
-.eqMini i {
-    display: block;
-    width: 2.5px;
-    height: 4px;
-    border-radius: 2px;
-    background-color: hsla(var(--accent-h), var(--accent-s), 72%, 1);
-    animation: eqBar 0.9s ease-in-out infinite;
-}
-.eqMini i:nth-child(1) { animation-delay: 0s; }
-.eqMini i:nth-child(2) { animation-delay: 0.3s; }
-.eqMini i:nth-child(3) { animation-delay: 0.6s; }
-.eqMini.paused i { animation-play-state: paused; height: 4px; }
-@keyframes eqBar {
-    0%, 100% { height: 3px; }
-    50% { height: 13px; }
-}
-.chip-fade-enter-active,
-.chip-fade-leave-active { transition: opacity .25s ease, transform .25s ease; }
-.chip-fade-enter-from,
-.chip-fade-leave-to { opacity: 0; transform: translate(-50%, 8px); }
-
 /* ── Текстовый блок волны ───────────────────────────────────────────────── */
+.mixHeader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
 .mixType {
     user-select: none;
     font-size: 12px;
@@ -819,12 +619,12 @@ onUnmounted(() => {
     user-select: none;
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 56px;
+    font-size: 46px;
     font-weight: 900;
     color: hsla(0, 0%, 100%, 0.96);
-    line-height: 1.03;
-    letter-spacing: -1.6px;
-    margin: 8px 0 0;
+    line-height: 1.04;
+    letter-spacing: -1.2px;
+    margin: 10px 0 0;
 }
 .mixDesc {
     user-select: none;
@@ -840,24 +640,26 @@ onUnmounted(() => {
 .desc-fade-enter-from { opacity: 0; transform: translateY(4px); }
 .desc-fade-leave-to { opacity: 0; transform: translateY(-4px); }
 
-.mixBadges {
+.mixMeta {
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
-    margin-top: 18px;
+    margin-top: 16px;
     max-width: 100%;
 }
 .badge {
     user-select: none;
     cursor: pointer;
-    padding: 4px 10px;
+    border: none;
+    font-family: inherit;
+    padding: 5px 12px;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.7);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
     transition: .24s ease;
     max-width: 100%;
     white-space: nowrap;
@@ -932,11 +734,12 @@ onUnmounted(() => {
 
 /* ── Быстрый выбор настроения ───────────────────────────────────────────── */
 .moodStrip {
+    flex-shrink: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 12px;
-    margin-top: 34px;
+    margin-top: 16px;
 }
 .moodStripLabel {
     user-select: none;
@@ -958,11 +761,18 @@ onUnmounted(() => {
 }
 .moodChips {
     display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    max-width: 620px;
+}
+/* Каждая строка настроений центрируется независимо. */
+.moodChipsRow {
+    display: flex;
     flex-direction: row;
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
-    max-width: 620px;
 }
 .moodChip {
     user-select: none;
@@ -1132,11 +942,11 @@ onUnmounted(() => {
     align-items: center;
     gap: 12px;
     width: 100%;
-    padding: 10px 12px;
+    padding: 10px 18px 10px 10px;
     border: none;
     outline: none;
     box-shadow: none;
-    border-radius: 14px;
+    border-radius: 999px;
     background: rgba(255, 255, 255, 0.03);
     text-align: left;
     transition: background 0.2s ease;
@@ -1160,7 +970,7 @@ onUnmounted(() => {
     justify-content: center;
     width: 34px;
     height: 34px;
-    border-radius: 10px;
+    border-radius: 999px;
     background: rgba(255, 255, 255, 0.05);
     color: hsla(var(--accent-h), var(--accent-s), 70%, 1);
     transition: background .2s ease, color .2s ease;
@@ -1223,29 +1033,36 @@ onUnmounted(() => {
 }
 .moodRow.active .moodRadioDot { transform: scale(1); }
 
+/* Сегментированный переключатель в стиле «режим блока» из настроек:
+   тёмная дорожка с inset-обводкой, активная опция — белая на прозрачном. */
 .segmented {
     display: flex;
     flex-direction: row;
-    gap: 4px;
-    padding: 4px;
-    border-radius: 14px;
-    background: hsla(0, 0%, 100%, 0.04);
+    gap: 2px;
+    padding: 3px;
+    border-radius: 999px;
+    background-color: var(--dark-bg);
 }
 .segment {
     flex: 1;
     cursor: pointer;
-    padding: 10px 6px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 10px;
     border: none;
-    border-radius: 10px;
-    background: transparent;
-    color: hsla(0, 0%, 100%, 0.6);
-    font-size: 12.5px;
-    font-weight: 700;
-    transition: .2s ease;
+    border-radius: 999px;
+    background-color: transparent;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.35), 84%, 0.58);
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: background-color .18s ease, color .18s ease;
 }
-.segment:hover { color: hsla(0, 0%, 100%, 0.9); }
+.segment:hover { color: hsla(0, 0%, 100%, 0.82); }
 .segment.active {
-    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.9);
+    background-color: hsla(0, 0%, 100%, 0.09);
     color: #fff;
 }
 
@@ -1257,9 +1074,9 @@ onUnmounted(() => {
     justify-content: space-between;
     gap: 16px;
     width: 100%;
-    padding: 14px 16px;
+    padding: 14px 20px;
     border: none;
-    border-radius: 14px;
+    border-radius: 999px;
     background: hsla(0, 0%, 100%, 0.03);
     text-align: left;
     transition: background .2s ease;
@@ -1299,32 +1116,32 @@ onUnmounted(() => {
 
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-height: 800px) {
-    .orb { width: 208px; height: 208px; }
-    .mixVisual { margin-bottom: 26px; }
-    .mixMoodIcon { width: 66px; height: 66px; }
-    .mixName { font-size: 48px; }
+    .mixName { font-size: 40px; }
     .moodStrip { margin-top: 26px; }
 }
 
 @media (max-width: 1100px) and (min-width: 721px) {
-    .mixName { font-size: 48px; }
-    .mixRings { --pulse-size: 560px; }
-    .mixVisual::before { width: 600px; height: 600px; margin: -300px 0 0 -300px; }
+    .mixName { font-size: 42px; }
 }
 
 @media (max-width: 720px) {
     .pageRoot { padding: 16px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
-    .mixVisual { margin-bottom: 28px; }
-    .orb { width: 184px; height: 184px; }
-    .mixMoodIcon { width: 58px; height: 58px; }
-    .mixRings { --pulse-size: 420px; }
-    .mixVisual::before { width: 460px; height: 460px; margin: -230px 0 0 -230px; }
-    .mixName { font-size: 38px; letter-spacing: -1px; }
+    .mixName { font-size: 34px; letter-spacing: -0.8px; }
     .mixDesc { font-size: 14px; max-width: 100%; }
     .playListBtn { min-width: 150px; min-height: 42px; padding: 13px 22px; font-size: 13px; }
     .roundBtn { width: 46px; height: 46px; }
-    .settingsPanel { width: auto; left: 12px; min-width: 0; }
+    /* Настройки микса — на весь экран, без отступов по краям. */
+    .settingsPanel {
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        width: auto;
+        max-width: none;
+        min-width: 0;
+        border-radius: 0;
+    }
 }
 </style>
 
@@ -1564,49 +1381,6 @@ onUnmounted(() => {
     user-select: none;
 }
 
-/* When you listen: daypart bar chart */
-.daypartChart {
-    display: flex;
-    flex-direction: row;
-    align-items: flex-end;
-    gap: 12px;
-    height: 110px;
-}
-.daypartCol {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    height: 100%;
-}
-.daypartBarTrack {
-    flex: 1;
-    width: 100%;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-}
-.daypartBar {
-    width: 100%;
-    max-width: 56px;
-    min-height: 4px;
-    border-radius: 9px;
-    background: hsla(0, 0%, 100%, 0.1);
-    transition: height .7s cubic-bezier(0.22, 1, 0.36, 1), background .3s ease;
-}
-.daypartCol.peak .daypartBar {
-    background-image: linear-gradient(to top, hsla(var(--accent-h), var(--accent-s), 46%, 1), hsla(var(--accent-h), var(--accent-s), 64%, 1));
-    box-shadow: 0 6px 18px hsla(var(--accent-h), var(--accent-s), 50%, 0.35);
-}
-.daypartName {
-    font-size: 12px;
-    font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.45);
-    user-select: none;
-}
-.daypartCol.peak .daypartName { color: hsla(0, 0%, 100%, 0.95); }
-
 .statsFootNote {
     margin-top: 26px;
     font-size: 12px;
@@ -1618,4 +1392,16 @@ onUnmounted(() => {
 .stats-enter-active .statsModal, .stats-leave-active .statsModal { transition: transform .24s cubic-bezier(0.32, 0.72, 0, 1), opacity .24s ease; }
 .stats-enter-from, .stats-leave-to { opacity: 0; }
 .stats-enter-from .statsModal, .stats-leave-to .statsModal { transform: scale(0.96) translateY(6px); opacity: 0; }
+
+/* Телефоны: модалка статистики на весь экран, без отступов по краям. */
+@media (max-width: 720px) {
+    .statsBackdrop { padding: 0; }
+    .statsModal {
+        width: 100%;
+        max-width: none;
+        height: 100%;
+        max-height: none;
+        border-radius: 0;
+    }
+}
 </style>
