@@ -15,6 +15,7 @@ import FullscreenCover from './components/FullscreenCover.vue';
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
 import { useCustomCovers } from './composables/useCustomCovers';
+import { useExternalSources } from './composables/useExternalSources';
 import { startDomI18n } from './composables/useDomI18n';
 import { useI18n } from './composables/useI18n';
 import { useUiScale } from './composables/useUiScale';
@@ -30,6 +31,7 @@ const { load } = useSettings();
 const { language } = useI18n();
 const { currentTrack, isPlaying, saveState } = usePlayer();
 const { loadCustomCovers } = useCustomCovers();
+const { loadCachedAvatars } = useExternalSources();
 
 // Кросс-секционные системы вынесены в composables (поведение без изменений):
 // масштабирование UI, динамическое темирование, панель задач, Android-оболочка.
@@ -87,6 +89,7 @@ onMounted(() => {
   load();
   startDomI18n();
   loadCustomCovers();
+  loadCachedAvatars();
   document.addEventListener('keydown', handleReloadKey);
   document.addEventListener('contextmenu', handleContextMenu);
 });

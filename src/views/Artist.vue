@@ -21,6 +21,7 @@ import { usePins } from '../composables/usePins'
 import CoverEditor from '../components/CoverEditor.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
+import { useExternalSources } from '../composables/useExternalSources'
 import {
     TRACK_STATISTICS_UPDATED_EVENT,
     sumListenCount,
@@ -79,10 +80,15 @@ watch([artistPlaylist, artistName], loadArtistTracks, { immediate: true })
 const sourceId = computed(() => `artist:${artistName.value}`)
 
 const { getCustomCover: getCustomCoverFn } = useCustomCovers()
+const { avatarFor } = useExternalSources()
 
 const artistCover = computed(() => {
     const custom = getCustomCoverFn('artist', artistName.value)
     if (custom) return custom
+    // Внешняя аватарка (если включена настройка) имеет приоритет над обложкой
+    // первого трека — она точнее представляет исполнителя.
+    const external = avatarFor(artistName.value)
+    if (external) return external
     const path = artistPlaylist.value?.first_file_path
     if (!path) return defaultTrackCover
     const t = getTrackByPath(path)

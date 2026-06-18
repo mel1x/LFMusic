@@ -21,6 +21,11 @@ export const settingItems = [
     { key: 'show_github_badge',        label: 'Бейдж github в шапке',                       default: true,  description: 'Переключает отображение кнопки github в шапке приложения',                                     warning: '' },
     { key: 'discord_rpc_enabled',      label: 'Отображение в статусе discord',              default: true,  description: 'При включении в вашем discord профиле будет отображаться информация о прослушивании',          warning: '' },
     { key: 'dynamic_accent_color',     label: 'Динамическая цветовая тема',                 default: true,  description: 'Цвета интерфейса автоматически будут подстраиваться под обложку текущего трека',               warning: '' },
+    { key: 'external_album_order',     label: 'Получать порядок треков в альбоме',          default: false, description: 'Расставляет треки локальных альбомов в правильном порядке из внешних источников',               warning: 'Требует подключения к интернету' },
+    { key: 'external_supplement_missing', label: 'Дополнять плейлисты недостающими треками', default: false, description: 'Показывает в альбомах отсутствующие в библиотеке треки полупрозрачными (не воспроизводятся и не идут в очередь)', warning: 'Требует подключения к интернету' },
+    { key: 'external_track_covers',    label: 'Искать обложки для треков без обложки',      default: false, description: 'Если у трека нет встроенной обложки — подставляет обложку альбома из внешних источников',         warning: 'Требует подключения к интернету' },
+    { key: 'external_artist_avatars',  label: 'Получать аватарки исполнителей',             default: false, description: 'Подставляет аватарки исполнителей из внешних открытых источников',                              warning: 'Требует подключения к интернету' },
+    { key: 'show_downloads_page',      label: 'Страница «Скачивание» в меню',               default: true,  description: 'Показывать раздел «Скачивание» в боковом меню (только на ПК)',                                  warning: '' },
 ] as const
 
 export type SettingKey = typeof settingItems[number]['key']

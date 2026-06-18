@@ -24,6 +24,8 @@ import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
 import { useAlbumTrackOrder } from '../composables/useAlbumTrackOrder';
+import { useExternalSources, type AlbumLayout, type AlbumLayoutEntry } from '../composables/useExternalSources';
+import { useSettings } from '../composables/useSettings';
 
 const route = useRoute()
 const router = useRouter()
@@ -59,15 +61,25 @@ const albumPlaylistForTracks = computed(() =>
     albumPlaylists.value.find(p => p.name === albumName.value) || null
 )
 const albumTracksRaw = ref<TrackMetadata[]>([])
+// Имя альбома, для которого треки уже загружены (для гейта первой отрисовки).
+const tracksLoadedFor = ref<string | null>(null)
 async function loadAlbumTracks() {
+    const name = albumName.value
     const pl = albumPlaylistForTracks.value
+    // Плейлисты ещё не загружены — ждём (готовым не помечаем).
     if (!pl) { albumTracksRaw.value = []; return }
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
-        albumTracksRaw.value = tracks
+        if (albumName.value === name) {
+            albumTracksRaw.value = tracks
+            tracksLoadedFor.value = name
+        }
     } catch {
-        albumTracksRaw.value = []
+        if (albumName.value === name) {
+            albumTracksRaw.value = []
+            tracksLoadedFor.value = name
+        }
     }
 }
 watch([albumPlaylistForTracks, albumName], loadAlbumTracks, { immediate: true })
@@ -81,6 +93,163 @@ const albumArtist = computed(() =>
 )
 
 const sourceId = computed(() => `album:${albumName.value}`)
+
+// ── Внешний порядок треков + фантомные (не скачанные) треки ──────────────────
+const { settings } = useSettings()
+const { getAlbumLayout } = useExternalSources()
+
+const albumLayout = ref<AlbumLayout | null>(null)
+// Имя альбома, для которого внешний макет уже получен (ok/none/ошибка).
+const layoutSettledFor = ref<string | null>(null)
+
+const layoutOk = computed(() =>
+    albumLayout.value?.status === 'ok' && (albumLayout.value?.entries.length ?? 0) > 0
+)
+// Внешний порядок треков активен (переставляем локальные треки).
+const externalOrderActive = computed(() => settings.value.external_album_order && layoutOk.value)
+// Дополнение недостающими треками активно (показываем фантомы).
+const supplementActive = computed(() => settings.value.external_supplement_missing && layoutOk.value)
+// Нужен ли вообще внешний макет.
+const layoutNeeded = computed(() =>
+    settings.value.external_album_order || settings.value.external_supplement_missing
+)
+
+async function refreshAlbumLayout() {
+    const name = albumName.value
+    albumLayout.value = null
+    layoutSettledFor.value = null
+    if (!layoutNeeded.value || !name) return
+    const layout = await getAlbumLayout(name)
+    // Защита от гонки: альбом мог смениться, пока шёл запрос.
+    if (albumName.value === name) {
+        albumLayout.value = layout
+        layoutSettledFor.value = name
+    }
+}
+watch(
+    [albumName, () => settings.value.external_album_order, () => settings.value.external_supplement_missing],
+    refreshAlbumLayout,
+    { immediate: true },
+)
+
+// ── Гейт первой отрисовки ────────────────────────────────────────────────────
+// Альбом не показываем сразу: ждём загрузки треков и (если включён внешний
+// порядок) внешнего макета — чтобы порядок и фантомы были видны сразу, без
+// «прыжка». Но не дольше 2.5с — тогда показываем что есть.
+const PAGE_LOAD_TIMEOUT_MS = 2500
+
+const tracksReady = computed(() => tracksLoadedFor.value === albumName.value)
+const layoutReady = computed(() =>
+    !layoutNeeded.value || layoutSettledFor.value === albumName.value
+)
+
+const pageReady = ref(false)
+let pageReadyTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearPageReadyTimer() {
+    if (pageReadyTimer) { clearTimeout(pageReadyTimer); pageReadyTimer = null }
+}
+
+watch(albumName, () => {
+    pageReady.value = false
+    clearPageReadyTimer()
+    pageReadyTimer = setTimeout(() => { pageReady.value = true; pageReadyTimer = null }, PAGE_LOAD_TIMEOUT_MS)
+}, { immediate: true })
+
+watch([tracksReady, layoutReady], () => {
+    if (!pageReady.value && tracksReady.value && layoutReady.value) {
+        pageReady.value = true
+        clearPageReadyTimer()
+    }
+}, { immediate: true })
+
+// Единый элемент списка: реальный локальный трек либо «фантом» (есть в каноне
+// альбома, но отсутствует в библиотеке — показывается полупрозрачным).
+interface AlbumRow {
+    phantom: boolean
+    key: string
+    track: TrackMetadata | null
+    title: string
+    artist: string
+    duration_secs: number | null
+}
+
+function filenameOf(t: TrackMetadata): string {
+    return t.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || ''
+}
+
+function realRow(t: TrackMetadata): AlbumRow {
+    return {
+        phantom: false,
+        key: t.file_path,
+        track: t,
+        title: t.title || filenameOf(t),
+        artist: t.artist || '',
+        duration_secs: t.duration_secs ?? null,
+    }
+}
+
+function phantomRow(e: AlbumLayoutEntry, idx: number): AlbumRow {
+    return {
+        phantom: true,
+        key: `phantom:${idx}:${e.disc}:${e.position}:${e.title}`,
+        track: null,
+        title: e.title,
+        artist: e.artist,
+        duration_secs: e.duration_secs,
+    }
+}
+
+const rawByPath = computed(() => {
+    const m = new Map<string, TrackMetadata>()
+    for (const t of albumTracksRaw.value) m.set(t.file_path, t)
+    return m
+})
+
+// Полный упорядоченный список строк (без учёта поиска). Зависит от двух
+// независимых настроек: внешний порядок (переставляет локальные треки) и
+// дополнение недостающими (показывает фантомы).
+const orderedRows = computed<AlbumRow[]>(() => {
+    const layout = albumLayout.value
+    const order = externalOrderActive.value
+    const supplement = supplementActive.value
+
+    // Ни порядок, ни дополнение не активны — обычное поведение.
+    if ((!order && !supplement) || !layout) {
+        return albumTracks.value.map(realRow)
+    }
+
+    if (order) {
+        // Канонический порядок. Фантомы — только если включено дополнение.
+        const rows: AlbumRow[] = []
+        const used = new Set<string>()
+        for (const e of layout.entries) {
+            const local = e.file_path ? rawByPath.value.get(e.file_path) : undefined
+            if (local) {
+                used.add(local.file_path)
+                rows.push(realRow(local))
+            } else if (supplement) {
+                rows.push(phantomRow(e, rows.length))
+            }
+        }
+        // Локальные треки, которых нет в каноне (бонус-треки и т.п.) — в конец.
+        for (const t of albumTracks.value) {
+            if (!used.has(t.file_path)) rows.push(realRow(t))
+        }
+        return rows
+    }
+
+    // Дополнение без переупорядочивания: локальный порядок + недостающие в конец.
+    const rows = albumTracks.value.map(realRow)
+    const localPaths = new Set(albumTracksRaw.value.map(t => t.file_path))
+    let idx = rows.length
+    for (const e of layout.entries) {
+        if (!e.file_path || !localPaths.has(e.file_path)) {
+            rows.push(phantomRow(e, idx++))
+        }
+    }
+    return rows
+})
 
 const { getCustomCover } = useCustomCovers()
 
@@ -146,19 +315,24 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-const filteredTracks = computed(() => {
+const displayRows = computed<AlbumRow[]>(() => {
     const q = debouncedSearch.value.trim()
-    if (!q) return albumTracks.value
+    if (!q) return orderedRows.value
     return searchRanked(
-        albumTracks.value,
+        orderedRows.value,
         q,
-        (t) => {
-            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
-            return [t.title || '', t.artist || '', fileName]
+        (r) => {
+            const fileName = r.track ? filenameOf(r.track) : ''
+            return [r.title || '', r.artist || '', fileName]
         },
-        { formatPath: (t) => t.file_path },
+        { formatPath: (r) => r.key },
     )
 })
+
+// Только проигрываемые (реальные) треки — для очереди и кнопки «Слушать».
+const playableTracks = computed<TrackMetadata[]>(() =>
+    displayRows.value.filter(r => !r.phantom).map(r => r.track!)
+)
 
 // ── Header height ─────────────────────────────────────────────────────────
 
@@ -180,6 +354,7 @@ onMounted(() => {
 
 onUnmounted(() => {
     headerResizeObserver?.disconnect()
+    clearPageReadyTimer()
 })
 
 // ── Virtual scroll ──────────────────────────────────────────────────────────
@@ -191,7 +366,7 @@ const {
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
+} = useVirtualScroll(displayRows, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
 
 watch(debouncedSearch, () => resetScroll())
 watch(albumName, () => resetScroll())
@@ -199,11 +374,13 @@ watch(albumName, () => resetScroll())
 const isScrollingToTop = ref(false)
 
 // Hold back first paint until the first 20 covers have resolved.
-const { ready: coversReady } = useCoverGate(() => filteredTracks.value.slice(0, 20))
+const { ready: coversReady } = useCoverGate(() =>
+    displayRows.value.filter(r => !r.phantom).slice(0, 20).map(r => r.track!)
+)
 
-watch(visibleTracks, (tracks) => {
+watch(visibleTracks, (rows) => {
     if (!isScrollingToTop.value) {
-        loadCoversForTracks(tracks)
+        loadCoversForTracks(rows.filter(r => !r.phantom).map(r => r.track!))
     }
 }, { immediate: true })
 
@@ -217,9 +394,9 @@ function onPlayAlbum() {
     if (isAlbumActive.value) {
         togglePlayPause()
     } else {
-        if (filteredTracks.value.length === 0) return
-        setPlaylistSource(sourceId.value, filteredTracks.value)
-        playTrack(filteredTracks.value[0])
+        if (playableTracks.value.length === 0) return
+        setPlaylistSource(sourceId.value, playableTracks.value)
+        playTrack(playableTracks.value[0])
     }
 }
 
@@ -232,7 +409,7 @@ function handleScroll(e: Event) {
     scrollY.value = (e.target as HTMLElement).scrollTop
     if (isScrollingToTop.value && scrollY.value <= 10) {
         isScrollingToTop.value = false
-        loadCoversForTracks(visibleTracks.value)
+        loadCoversForTracks(visibleTracks.value.filter(r => !r.phantom).map(r => r.track!))
     }
     onScroll(e)
 }
@@ -245,9 +422,10 @@ function scrollToTop() {
 
 // ── Track click ─────────────────────────────────────────────────────────────
 
-function onTrackClick(e: MouseEvent, track: TrackMetadata) {
+function onRowClick(e: MouseEvent, row: AlbumRow) {
+    if (row.phantom || !row.track) return
     if (isPhoneViewport()) {
-        onCoverClick(track)
+        onCoverClick(row.track)
         return
     }
     createRipple(e)
@@ -258,7 +436,7 @@ function onCoverClick(track: TrackMetadata) {
         togglePlayPause()
         return
     }
-    setPlaylistSource(sourceId.value, filteredTracks.value)
+    setPlaylistSource(sourceId.value, playableTracks.value)
     playTrack(track, { manualListStart: true })
 }
 
@@ -368,57 +546,76 @@ function onCoverImgClick() {
             </div>
         </div>
         <Transition name="gate-fade" mode="out-in">
-        <LoadingSpinner v-if="filteredTracks.length > 0 && !coversReady" key="gate-spinner" />
+        <LoadingSpinner v-if="!pageReady || (displayRows.length > 0 && !coversReady)" key="gate-spinner" />
         <div
             class="tracksList"
-            v-else-if="filteredTracks.length > 0"
+            v-else-if="displayRows.length > 0"
             key="gate-list"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
-            <div
-                v-for="track in visibleTracks"
-                :key="track.file_path"
-                class="trackElem"
-                :class="{
-                    active: isAlbumActive && currentTrack?.file_path === track.file_path,
-                    activePaused: isAlbumActive && currentTrack?.file_path === track.file_path && !isPlaying,
-                }"
-                @click="onTrackClick($event, track)"
-            >
-                <div class="hoverIcon" @click.stop="onCoverClick(track)">
-                    <PauseIcon
-                        v-if="isAlbumActive && currentTrack?.file_path === track.file_path && isPlaying"
-                        width="10" height="10"
-                        style="margin-left:0.5px;"
-                    />
-                    <PlayIcon
-                        v-else
-                        width="10" height="10"
-                        style="margin-left:1px;padding-top:0;"
-                    />
-                </div>
+            <template v-for="row in visibleTracks" :key="row.key">
+                <!-- Фантомный (не скачанный) трек: полупрозрачный, без взаимодействия -->
                 <div
-                    v-if="isAlbumActive && currentTrack?.file_path === track.file_path"
-                    class="playingAnim"
-                ></div>
-                <div class="trackCover" @click.stop="onCoverClick(track)">
-                    <img
-                        :src="track.cover_art || defaultTrackCover"
-                        alt=""
-                        draggable="false"
-                        class="trackCoverImg"
-                    />
+                    v-if="row.phantom"
+                    class="trackElem phantom"
+                >
+                    <div class="trackCover phantomCover">
+                        <img :src="albumCover" alt="" draggable="false" class="trackCoverImg" />
+                    </div>
+                    <div class="trackInfo">
+                        <div v-truncate class="trackName">{{ row.title }}</div>
+                        <div class="trackArtist"><TrackArtists :artist="row.artist" /></div>
+                    </div>
+                    <div class="phantomBadge" v-tooltip="'Трека нет в вашей библиотеке'">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M5.782 5.782A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.307-.193"/><path d="M21.532 16.5A4.5 4.5 0 0 0 17.5 10h-1.79A7.008 7.008 0 0 0 10 5.07"/></svg>
+                    </div>
+                    <div class="trackTime">{{ row.duration_secs ? formatTime(row.duration_secs) : '' }}</div>
                 </div>
-                <div class="trackInfo">
-                    <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
-                    <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
+                <!-- Обычный локальный трек -->
+                <div
+                    v-else
+                    class="trackElem"
+                    :class="{
+                        active: isAlbumActive && currentTrack?.file_path === row.track!.file_path,
+                        activePaused: isAlbumActive && currentTrack?.file_path === row.track!.file_path && !isPlaying,
+                    }"
+                    @click="onRowClick($event, row)"
+                >
+                    <div class="hoverIcon" @click.stop="onCoverClick(row.track!)">
+                        <PauseIcon
+                            v-if="isAlbumActive && currentTrack?.file_path === row.track!.file_path && isPlaying"
+                            width="10" height="10"
+                            style="margin-left:0.5px;"
+                        />
+                        <PlayIcon
+                            v-else
+                            width="10" height="10"
+                            style="margin-left:1px;padding-top:0;"
+                        />
+                    </div>
+                    <div
+                        v-if="isAlbumActive && currentTrack?.file_path === row.track!.file_path"
+                        class="playingAnim"
+                    ></div>
+                    <div class="trackCover" @click.stop="onCoverClick(row.track!)">
+                        <img
+                            :src="row.track!.cover_art || defaultTrackCover"
+                            alt=""
+                            draggable="false"
+                            class="trackCoverImg"
+                        />
+                    </div>
+                    <div class="trackInfo">
+                        <div v-truncate class="trackName">{{ row.title }}</div>
+                        <div class="trackArtist"><TrackArtists :artist="row.track!.artist" /></div>
+                    </div>
+                    <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === row.track!.file_path }">{{ row.duration_secs ? formatTime(row.duration_secs) : '' }}</div>
+                    <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === row.track!.file_path }" @mousedown.stop="openTrackMenu($event, row.track!)" @click.stop><MoreIcon width="26" height="26" /></div>
                 </div>
-                <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
-            </div>
+            </template>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
-        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0" key="gate-empty-search">
+        <div class="emptyState" v-else-if="debouncedSearch && displayRows.length === 0" key="gate-empty-search">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Ничего не найдено</div>
             <div class="emptyDesc">Попробуйте изменить критерии поиска.</div>
@@ -435,7 +632,7 @@ function onCoverImgClick() {
             :x="trackMenu.x"
             :y="trackMenu.y"
             :track="trackMenu.track"
-            :canMoveToTop="true"
+            :canMoveToTop="!externalOrderActive"
             alignRight
             centerY
             @close="trackMenu = null"
@@ -934,5 +1131,38 @@ function onCoverImgClick() {
     font-size: 13px;
     font-weight: 400;
     color: hsla(0, 0%, 100%, 0.3);
+}
+
+/* ── Фантомные (не скачанные) треки ──────────────────────────────────────── */
+/* Прозрачность не на всю строку (чтобы не путать с активным треком, у которого
+   полупрозрачная обложка): обложку фантома делаем заметно прозрачнее, текст
+   приглушаем умеренно — он остаётся читаемым. */
+.trackElem.phantom {
+    cursor: default;
+}
+.trackElem.phantom:hover {
+    background-color: hsla(0, 0%, 100%, 0.02);
+}
+.trackElem.phantom .trackCover {
+    background-color: #1a1a1a;
+    opacity: 0.25;
+}
+.trackElem.phantom .trackName,
+.trackElem.phantom .trackArtist,
+.trackElem.phantom .trackTime,
+.trackElem.phantom .phantomBadge {
+    opacity: 0.55;
+}
+.phantomBadge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: hsla(0, 0%, 100%, 0.4);
+    flex-shrink: 0;
+    margin-left: auto;
+    margin-right: 4px;
+}
+.trackElem.phantom .trackTime {
+    margin-left: 0;
 }
 </style>

@@ -1,31 +1,30 @@
 import { reactive, watch, type ComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
+import { useExternalSources } from "./useExternalSources";
 
 const MAX_CONCURRENT_COVERS = 3;
-const loadingCovers = new Set<string>();
-let activeCoverRequests = 0;
+// Ограничение пула ожидающих: текущий экран всегда в приоритете, самые старые
+// (вне экрана) запросы отбрасываются и запрашиваются заново при возврате.
+const MAX_PENDING_COVERS = 150;
+// Промах кэша метаданных: трек ещё не материализован — повторяем чуть позже.
+const COVER_MISS_RETRIES = 6;
+const COVER_MISS_RETRY_MS = 150;
 
 /** Резолвер живого объекта трека по пути (обычно `getTrackByPath` из usePlayer). */
 type TrackResolver = (filePath: string) => TrackMetadata | undefined;
 
-/**
- * Элемент очереди несёт собственный резолвер, захваченный в момент постановки.
- * Раньше резолвер хранился в одной глобальной переменной `opts`, которую
- * перезаписывал каждый новый экран; асинхронные ответы `get_cover_art`,
- * запущенные старым экраном, по завершении обращались к чужому резолверу.
- * Привязка резолвера к элементу очереди устраняет эту утечку состояния:
- * каждый запрос разрешается ровно тем экраном, который его поставил.
- */
-interface CoverQueueItem {
-    filePath: string;
-    resolve: TrackResolver;
-}
+// Очередь с приоритетом по «свежести»: последний запрошенный путь грузится
+// первым, повторный запрос поднимает приоритет — загрузка следует за текущим
+// экраном, а не идёт строго с начала списка.
+const order: string[] = []; // ожидающие пути, конец массива = высший приоритет
+const items = new Map<string, TrackResolver>();
+const running = new Set<string>();
+const missRetries = new Map<string, number>();
+let active = 0;
 
-let coverQueue: CoverQueueItem[] = [];
-
-// Paths whose cover request has finished (whether it yielded art or not).
-// Reactive so views can gate first paint until the first N covers resolve.
+// Пути, для которых обложка уже определена (загружена либо подтверждено
+// отсутствие). Реактивно — экраны гейтят первую отрисовку до резолва первых N.
 const resolvedCovers = reactive(new Set<string>());
 
 function markCoverResolved(filePath: string) {
@@ -41,32 +40,78 @@ interface CoverLoaderOptions {
     getTrackByPath: TrackResolver;
 }
 
-function processCoverQueue() {
-    while (activeCoverRequests < MAX_CONCURRENT_COVERS && coverQueue.length > 0) {
-        const { filePath, resolve } = coverQueue.shift()!;
+function pump(): void {
+    while (active < MAX_CONCURRENT_COVERS && order.length > 0) {
+        const filePath = order.pop()!;
+        const resolve = items.get(filePath)!;
+        items.delete(filePath);
+
         const track = resolve(filePath);
-        if (!track || track.cover_art) {
-            loadingCovers.delete(filePath);
+
+        if (track && track.cover_art) {
+            missRetries.delete(filePath);
             markCoverResolved(filePath);
             continue;
         }
-        activeCoverRequests++;
+
+        if (!track) {
+            // Метаданные ещё не подъехали в кэш — повторим чуть позже (трек
+            // материализуется фоновой дозагрузкой). Ограничиваем число попыток.
+            const tries = missRetries.get(filePath) ?? 0;
+            if (tries < COVER_MISS_RETRIES) {
+                missRetries.set(filePath, tries + 1);
+                setTimeout(() => schedule(filePath, resolve), COVER_MISS_RETRY_MS);
+            } else {
+                missRetries.delete(filePath);
+                markCoverResolved(filePath);
+            }
+            continue;
+        }
+
+        // Трек есть, обложки нет — читаем встроенную.
+        missRetries.delete(filePath);
+        running.add(filePath);
+        active++;
         invoke<string | null>("get_cover_art", { filePath })
             .then(art => {
+                const cached = resolve(filePath);
                 if (art) {
                     // Записываем обложку в живой объект из кэша того же экрана (реактивно).
-                    const cached = resolve(filePath);
                     if (cached) cached.cover_art = art;
+                } else if (cached) {
+                    // Встроенной обложки нет — пробуем внешний источник (если включено).
+                    useExternalSources().fetchTrackCover(cached);
                 }
             })
             .catch(() => {})
             .finally(() => {
-                loadingCovers.delete(filePath);
+                active--;
+                running.delete(filePath);
                 markCoverResolved(filePath);
-                activeCoverRequests--;
-                processCoverQueue();
+                pump();
             });
     }
+}
+
+/** Поставить путь в очередь (или поднять приоритет, если уже ждёт). */
+function schedule(filePath: string, resolve: TrackResolver): void {
+    if (running.has(filePath)) return;
+    if (items.has(filePath)) {
+        // Уже в очереди — поднимаем приоритет (текущий экран вперёд) и обновляем
+        // резолвер на актуальный экран.
+        const i = order.indexOf(filePath);
+        if (i !== -1) order.splice(i, 1);
+        order.push(filePath);
+        items.set(filePath, resolve);
+        return;
+    }
+    items.set(filePath, resolve);
+    order.push(filePath);
+    while (order.length > MAX_PENDING_COVERS) {
+        const dropped = order.shift()!;
+        items.delete(dropped);
+    }
+    pump();
 }
 
 export function useCoverLoader(options: CoverLoaderOptions) {
@@ -85,21 +130,16 @@ export function useCoverLoader(options: CoverLoaderOptions) {
             coverDebounceTimer = setTimeout(() => {
                 const visible = visibleTracks.value.map(t => t.file_path);
                 const visibleSet = new Set(visible);
-                const all = tracks.map(t => t.file_path);
-                const preloadOnly = all.filter(p => !visibleSet.has(p));
-                const ordered = [...visible, ...preloadOnly];
-
-                for (const item of coverQueue) {
-                    loadingCovers.delete(item.filePath);
+                const preloadOnly = tracks.map(t => t.file_path).filter(p => !visibleSet.has(p));
+                // Предзагрузка — ниже приоритетом, видимое окно — выше (ставим последним).
+                for (const filePath of preloadOnly) {
+                    const t = resolve(filePath);
+                    if (!t || !t.cover_art) schedule(filePath, resolve);
                 }
-                coverQueue = [];
-                for (const filePath of ordered) {
-                    const track = resolve(filePath);
-                    if (!track || track.cover_art || loadingCovers.has(filePath)) continue;
-                    loadingCovers.add(filePath);
-                    coverQueue.push({ filePath, resolve });
+                for (const filePath of visible) {
+                    const t = resolve(filePath);
+                    if (!t || !t.cover_art) schedule(filePath, resolve);
                 }
-                processCoverQueue();
             }, 50);
         }, { immediate: true });
     }
@@ -109,18 +149,14 @@ export function useCoverLoader(options: CoverLoaderOptions) {
         for (const track of tracks) {
             if (seen.has(track.file_path)) continue;
             seen.add(track.file_path);
-            if (track.cover_art || loadingCovers.has(track.file_path)) continue;
-            loadingCovers.add(track.file_path);
-            coverQueue.push({ filePath: track.file_path, resolve });
+            if (track.cover_art) continue;
+            schedule(track.file_path, resolve);
         }
-        processCoverQueue();
     }
 
     function clearQueue() {
-        for (const item of coverQueue) {
-            loadingCovers.delete(item.filePath);
-        }
-        coverQueue = [];
+        order.length = 0;
+        items.clear();
     }
 
     return { setupPreloadWatch, loadCoversForTracks, clearQueue };

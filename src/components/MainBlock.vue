@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import ViewFrame from './ViewFrame.vue';
 import SearchIcon from './Icons/SearchIcon.vue';
 import CatalogIcon from './Icons/CatalogIcon.vue';
+import DownloadIcon from './Icons/DownloadIcon.vue';
 import CollectionIcon from './Icons/CollectionIcon.vue';
 import SettingsIcon from './Icons/SettingsIcon.vue';
 import HomeIcon from './Icons/HomeIcon.vue';
@@ -17,6 +18,7 @@ import { usePins, type ResolvedPin } from '../composables/usePins';
 import { usePlayer } from '../composables/usePlayer';
 import { useSettings } from '../composables/useSettings';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useExternalSources } from '../composables/useExternalSources';
 import { tracksCountText } from '../utils/format';
 
 const route = useRoute();
@@ -28,6 +30,7 @@ const { resolvedPins, unpin, movePinToTop, loadPins } = usePins();
 const { loadCoversForTracks, getTrackByPath } = usePlayer();
 const { settings } = useSettings();
 const { getCustomCover } = useCustomCovers();
+const { avatarFor } = useExternalSources();
 
 // Высота блока плеера = 84px. Когда дополнительный блок плеера выключен,
 // растягиваем aside до самого низа окна, иначе оставляем место под плеер.
@@ -36,6 +39,10 @@ const asideBottom = computed(() => settings.value.show_player_extra_block ? '84p
 function pinCover(p: ResolvedPin): string {
     const custom = getCustomCover(p.kind, p.key);
     if (custom) return custom;
+    if (p.kind === 'artist') {
+        const external = avatarFor(p.name);
+        if (external) return external;
+    }
     if (p.kind === 'catalog') return catalogCover;
     if (p.cover) return p.cover;
     if (p.kind === 'playlist') return defaultPlaylistCover;
@@ -102,6 +109,7 @@ watch(resolvedPins, () => requestPinCovers());
     <div class="asideSpacer"></div>
     <aside class="navAside" :style="{ '--mainblock-aside-bottom': asideBottom }">
       <nav class="navList">
+        <RouterLink to="/downloads" class="navLink downloadsLink" :class="{ downloadsHidden: !settings.show_downloads_page }"><DownloadIcon width="24" height="24" stroke-width="2.25" /><span>Скачивание</span></RouterLink>
         <RouterLink to="/search" class="navLink"><SearchIcon width="24" height="24" stroke-width="2.25" /><span>Поиск</span></RouterLink>
         <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" /><span>Рекомендации</span></RouterLink>
         <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2.25" /><span>Коллекция</span></RouterLink>
@@ -243,6 +251,11 @@ watch(resolvedPins, () => requestPinCovers());
 }
 .navLink.router-link-active svg {
   color: #fff;
+}
+/* Скрытие пункта «Скачивание» настройкой (через display, чтобы не сдвигать
+   nth-child мобильного порядка). */
+.navLink.downloadsHidden {
+  display: none;
 }
 
 /* ── Pinned items ───────────────────────────────────────────────────────── */
@@ -434,20 +447,26 @@ watch(resolvedPins, () => requestPinCovers());
     display: none;
   }
 
-  /* Порядок на мобильной версии: Рекомендации, Коллекция, Поиск, Каталог, Настройки */
-  .navLink:nth-child(2) {
+  /* «Скачивание» — только десктоп. На телефоне скрыто (но остаётся 1-м child). */
+  .downloadsLink {
+    display: none;
+  }
+
+  /* Порядок на мобильной версии: Рекомендации, Коллекция, Поиск, Каталог, Настройки.
+     С учётом скрытого 1-го child (Скачивание) индексы nth-child смещены на +1. */
+  .navLink:nth-child(3) {
     order: 1; /* Рекомендации (to="/") */
   }
-  .navLink:nth-child(3) {
+  .navLink:nth-child(4) {
     order: 2; /* Коллекция (to="/collections") */
   }
-  .navLink:nth-child(1) {
+  .navLink:nth-child(2) {
     order: 3; /* Поиск (to="/search") */
   }
-  .navLink:nth-child(4) {
+  .navLink:nth-child(5) {
     order: 4; /* Каталог (to="/catalog") */
   }
-  .navLink:nth-child(5) {
+  .navLink:nth-child(6) {
     order: 5; /* Настройки (to="/settings") */
   }
 

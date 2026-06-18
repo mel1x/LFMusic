@@ -3,6 +3,7 @@ mod audio_player;
 mod catalog_search;
 mod covers;
 mod discord_rpc;
+mod external;
 mod library;
 mod mpris;
 mod pins;
@@ -742,6 +743,188 @@ fn album_set_track_order(
     library.set_album_track_order(&album_name, &track_paths)
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Команды внешних источников
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Получить макет альбома по данным внешних источников: канонический порядок
+/// треков + «фантомные» (отсутствующие в библиотеке) треки. Результат
+/// кэшируется в БД, поэтому повторные открытия не ходят в сеть.
+///
+/// Сетевой запрос выполняется на blocking-пуле (spawn_blocking), чтобы не
+/// занимать tokio-воркеры и не блокировать главный поток UI.
+#[tauri::command]
+async fn external_album_layout(
+    app: tauri::AppHandle,
+    album_name: String,
+    refresh: bool,
+) -> Result<external::AlbumLayout, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+
+        let none_layout = || external::AlbumLayout {
+            status: "none".into(),
+            source: None,
+            entries: Vec::new(),
+        };
+
+        let now = external::unix_secs();
+
+        // Фаза 1 (под блокировкой): читаем локальные треки и кэш, решаем, нужна
+        // ли сеть. Блокировку библиотеки НЕ держим во время сетевого запроса.
+        let (local, query_artist, album_key, decision) = {
+            let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let local = library.get_album_local_tracks(&album_name);
+            if local.is_empty() {
+                return Ok(none_layout());
+            }
+
+            // Самый частый исполнитель среди локальных треков — для запроса.
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for (_, _, artist) in &local {
+                if !artist.is_empty() {
+                    *counts.entry(artist.clone()).or_default() += 1;
+                }
+            }
+            let query_artist = counts
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(a, _)| a)
+                .unwrap_or_default();
+
+            // Ключ кэша зависит и от названия, и от артиста — два разных
+            // одноимённых альбома от разных исполнителей не путаются.
+            let album_key = external::album_cache_key(&album_name, &query_artist);
+
+            // 0 = кэш; 1 = сеть; 2 = none из негативного кэша.
+            let decision: (u8, Vec<external::ExternalTrack>, Option<String>) =
+                match library.get_external_album(&album_key) {
+                    Some((src, status, _, tracks)) if !refresh && status == "ok" => {
+                        (0, tracks, src)
+                    }
+                    Some((_, status, fetched, _))
+                        if !refresh
+                            && status == "none"
+                            && now.saturating_sub(fetched)
+                                < external::ALBUM_NEGATIVE_TTL_SECS =>
+                    {
+                        (2, Vec::new(), None)
+                    }
+                    _ => (1, Vec::new(), None),
+                };
+            (local, query_artist, album_key, decision)
+        };
+
+        let (mode, cached_tracks, cached_source) = decision;
+        if mode == 2 {
+            return Ok(none_layout());
+        }
+
+        let local_for_match: Vec<(String, String)> =
+            local.into_iter().map(|(p, t, _)| (p, t)).collect();
+
+        if mode == 0 {
+            if cached_tracks.is_empty() {
+                return Ok(none_layout());
+            }
+            let entries = external::build_layout(&cached_tracks, &local_for_match);
+            return Ok(external::AlbumLayout {
+                status: "ok".into(),
+                source: cached_source,
+                entries,
+            });
+        }
+
+        // Фаза 2 (без блокировки): сеть.
+        let fetched = external::fetch_album_tracklist(&query_artist, &album_name);
+
+        // Фаза 3 (под блокировкой): сохраняем результат в кэш.
+        let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        match fetched {
+            Some(album) if !album.tracks.is_empty() => {
+                let _ = library.set_external_album(
+                    &album_key,
+                    Some(&album.source),
+                    "ok",
+                    &album.tracks,
+                    now,
+                );
+                let entries = external::build_layout(&album.tracks, &local_for_match);
+                Ok(external::AlbumLayout {
+                    status: "ok".into(),
+                    source: Some(album.source),
+                    entries,
+                })
+            }
+            _ => {
+                let _ = library.set_external_album(&album_key, None, "none", &[], now);
+                Ok(none_layout())
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Получить аватарку исполнителя из внешнего источника (с дисковым кэшем).
+#[tauri::command]
+async fn external_artist_image(
+    app: tauri::AppHandle,
+    artist_name: String,
+    refresh: bool,
+) -> Result<external::ArtistImageResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = {
+            let state = app.state::<SettingsState>();
+            let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+            settings.1.clone()
+        };
+        Ok(external::get_or_fetch_artist_image(&dir, &artist_name, refresh))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Получить обложку для трека без встроенной обложки (по альбому/названию).
+#[tauri::command]
+async fn external_track_cover(
+    app: tauri::AppHandle,
+    artist: String,
+    album: String,
+    title: String,
+    refresh: bool,
+) -> Result<external::ArtistImageResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = {
+            let state = app.state::<SettingsState>();
+            let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+            settings.1.clone()
+        };
+        Ok(external::get_or_fetch_track_cover(&dir, &artist, &album, &title, refresh))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Загрузить все уже закэшированные аватарки исполнителей (для быстрой
+/// отрисовки на старте без обращения к сети).
+#[tauri::command]
+async fn external_load_cached_artist_images(
+    app: tauri::AppHandle,
+) -> Result<Vec<external::CachedArtistImage>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = {
+            let state = app.state::<SettingsState>();
+            let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+            settings.1.clone()
+        };
+        Ok(external::load_cached_artist_images(&dir))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
 #[tauri::command]
 fn statistics_add_track_delta(
     state: State<LibraryState>,
@@ -1364,6 +1547,11 @@ pub fn run() {
             playlist_get_ids_for_track,
             album_get_track_order,
             album_set_track_order,
+            // Внешние источники
+            external_album_layout,
+            external_artist_image,
+            external_track_cover,
+            external_load_cached_artist_images,
             statistics_add_track_delta,
             statistics_get_track,
             statistics_sum_listen_count,

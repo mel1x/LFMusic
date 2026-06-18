@@ -18,6 +18,7 @@ import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
+import { useExternalSources } from '../composables/useExternalSources';
 
 const router = useRouter();
 const {
@@ -54,6 +55,7 @@ const artists = computed<ArtistEntry[]>(() => {
 });
 
 const { getCustomCover } = useCustomCovers();
+const { avatarFor } = useExternalSources();
 
 function coverFor(path: string | null): string | null {
     if (!path) return null;
@@ -63,6 +65,8 @@ function coverFor(path: string | null): string | null {
 function artistCoverFor(artist: ArtistEntry): string {
     const custom = getCustomCover('artist', artist.name);
     if (custom) return custom;
+    const external = avatarFor(artist.name);
+    if (external) return external;
     return coverFor(artist.firstPath) || defaultTrackCover;
 }
 
@@ -196,6 +200,7 @@ let resizeObs: ResizeObserver | null = null;
 let scrollRoot: HTMLElement | null = null;
 let lastBottomMargin = 600;
 const elPath = new WeakMap<HTMLElement, string>();
+const elArtist = new WeakMap<HTMLElement, string>();
 const observedEls = new Set<HTMLElement>();
 
 function findScrollAncestor(el: HTMLElement): HTMLElement | null {
@@ -212,6 +217,9 @@ function onIntersect(entries: IntersectionObserverEntry[]) {
     const pending: TrackMetadata[] = [];
     for (const entry of entries) {
         if (!entry.isIntersecting) continue;
+        // Видимая карточка — поднимаем приоритет её внешней аватарки (если включено).
+        const name = elArtist.get(entry.target as HTMLElement);
+        if (name) avatarFor(name);
         const path = elPath.get(entry.target as HTMLElement);
         if (!path) continue;
         const t = getTrackByPath(path);
@@ -247,6 +255,7 @@ function bindCard(el: any, artist: ArtistEntry) {
         observedEls.delete(el);
     }
     elPath.set(el, artist.firstPath);
+    elArtist.set(el, artist.name);
     coverObs!.observe(el);
     observedEls.add(el);
 }

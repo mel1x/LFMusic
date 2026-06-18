@@ -32,6 +32,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 rayon = "1.10"
 # Оптимизированный БПФ (SIMD: SSE/AVX/NEON) для реал-тайм визуализатора спектра.
 rustfft = "6"
+# HTTP-клиент для внешних источников метаданных (iTunes/Deezer/MusicBrainz).
+# rustls вместо native-tls — без системного OpenSSL, собирается и на Android.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
 
 # Discord Rich Presence — только десктоп (IPC с локальным клиентом Discord).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
@@ -59,6 +62,10 @@ windows = { version = "0.61", features = [
 # в десятки раз — отсюда лаги анимаций превью и декода обложек при `tauri dev`.
 [profile.dev]
 opt-level = 1
+# Инкрементальная компиляция при opt-level>0 на Windows/MSVC периодически даёт
+# ошибки линковки (LNK2019 на anon.*.llvm.* — рассинхрон между codegen-units).
+# Отключаем: крейт пересобирается целиком, зато линковка стабильна.
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 2

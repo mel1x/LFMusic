@@ -1,5 +1,6 @@
 use crate::audio_features::{self, AudioFeatures, AUDIO_FEATURE_ANALYZER_VERSION};
 use crate::audio_player::{AudioPlayer, TrackMetadata};
+use crate::external::ExternalTrack;
 use crate::statistics::{self, CollectionKind, TrackStatistics, TrackStatisticsDelta};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
@@ -390,6 +391,13 @@ impl MusicLibrary {
              CREATE TABLE IF NOT EXISTS album_track_order (
                  album_name  TEXT PRIMARY KEY NOT NULL,
                  track_paths TEXT NOT NULL DEFAULT '[]'
+             );
+             CREATE TABLE IF NOT EXISTS external_album (
+                 album_key    TEXT PRIMARY KEY NOT NULL,
+                 source       TEXT,
+                 status       TEXT NOT NULL DEFAULT 'none',
+                 fetched_secs INTEGER NOT NULL DEFAULT 0,
+                 payload      TEXT NOT NULL DEFAULT '[]'
              );",
         )
         .map_err(|e| format!("Ошибка создания таблиц: {}", e))?;
@@ -2610,6 +2618,83 @@ impl MusicLibrary {
                 params![album_name, json],
             )
             .map_err(|e| format!("Ошибка сохранения порядка треков: {}", e))?;
+        Ok(())
+    }
+
+    // ── Внешние источники: треки альбома ────────────────────────────────────────
+
+    /// Локальные треки альбома для сопоставления с внешним списком:
+    /// (file_path, эффективное название, эффективный исполнитель). Эффективные
+    /// значения учитывают пользовательские переопределения (track_overrides).
+    pub fn get_album_local_tracks(&self, album_name: &str) -> Vec<(String, String, String)> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT t.file_path,
+                    COALESCE(NULLIF(o.title, ''), t.title, ''),
+                    COALESCE(NULLIF(o.artist, ''), t.artist, '')
+             FROM tracks t
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             WHERE t.album = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![album_name], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        });
+        match rows {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Прочитать кэш внешнего альбома: (source, status, fetched_secs, треки).
+    pub fn get_external_album(
+        &self,
+        album_key: &str,
+    ) -> Option<(Option<String>, String, u64, Vec<ExternalTrack>)> {
+        let result: Result<(Option<String>, String, i64, String), rusqlite::Error> =
+            self.conn.query_row(
+                "SELECT source, status, fetched_secs, payload FROM external_album WHERE album_key = ?1",
+                params![album_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            );
+        match result {
+            Ok((source, status, fetched, payload)) => {
+                let tracks: Vec<ExternalTrack> =
+                    serde_json::from_str(&payload).unwrap_or_default();
+                Some((source, status, fetched.max(0) as u64, tracks))
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Сохранить кэш внешнего альбома.
+    pub fn set_external_album(
+        &self,
+        album_key: &str,
+        source: Option<&str>,
+        status: &str,
+        tracks: &[ExternalTrack],
+        fetched_secs: u64,
+    ) -> Result<(), String> {
+        let payload = serde_json::to_string(tracks)
+            .map_err(|e| format!("Ошибка сериализации внешнего альбома: {}", e))?;
+        self.conn
+            .execute(
+                "INSERT INTO external_album (album_key, source, status, fetched_secs, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(album_key) DO UPDATE SET
+                     source = excluded.source,
+                     status = excluded.status,
+                     fetched_secs = excluded.fetched_secs,
+                     payload = excluded.payload",
+                params![album_key, source, status, fetched_secs as i64, payload],
+            )
+            .map_err(|e| format!("Ошибка сохранения внешнего альбома: {}", e))?;
         Ok(())
     }
 }

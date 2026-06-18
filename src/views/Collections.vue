@@ -17,6 +17,7 @@ import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
+import { useExternalSources } from '../composables/useExternalSources';
 import { useCoverGate } from '../composables/useCoverGate';
 
 const router = useRouter();
@@ -48,6 +49,7 @@ const {
 const playlistCovers = ref<Record<number, string>>({});
 
 const { getCustomCover } = useCustomCovers();
+const { avatarFor } = useExternalSources();
 
 function playlistCoverFor(pl: PlaylistInfo): string {
     const custom = getCustomCover('playlist', pl.id);
@@ -64,6 +66,8 @@ function albumCoverFor(album: AlbumEntry): string {
 function artistCoverFor(artist: ArtistEntry): string {
     const custom = getCustomCover('artist', artist.name);
     if (custom) return custom;
+    const external = avatarFor(artist.name);
+    if (external) return external;
     return artist.cover || defaultTrackCover;
 }
 

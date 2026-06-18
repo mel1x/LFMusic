@@ -21,6 +21,7 @@ import TrackArtists from '../components/TrackArtists.vue'
 import CoverEditor from '../components/CoverEditor.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
+import { useExternalSources } from '../composables/useExternalSources'
 
 const route = useRoute()
 const router = useRouter()
@@ -75,10 +76,13 @@ watch([artistPlaylist, artistName], loadArtistTracks, { immediate: true })
 const sourceId = computed(() => `artist:${artistName.value}`)
 
 const { getCustomCover } = useCustomCovers()
+const { avatarFor } = useExternalSources()
 
 const artistCover = computed(() => {
     const custom = getCustomCover('artist', artistName.value)
     if (custom) return custom
+    const external = avatarFor(artistName.value)
+    if (external) return external
     const path = artistPlaylist.value?.first_file_path
     if (!path) return defaultTrackCover
     const t = getTrackByPath(path)

@@ -12,6 +12,7 @@ import Artist from './views/Artist.vue'
 import ArtistTracks from './views/ArtistTracks.vue'
 
 const routes = [
+  { path: '/downloads', component: () => import('./views/Downloads.vue') },
   { path: '/search', component: Search },
   { path: '/', component: Main },
   { path: '/catalog', component: Catalog },
@@ -28,6 +29,7 @@ const routes = [
   { path: '/settings/playback', component: () => import('./views/settings/Playback.vue') },
   { path: '/settings/library', component: () => import('./views/settings/Library.vue') },
   { path: '/settings/general', component: () => import('./views/settings/General.vue') },
+  { path: '/settings/external', component: () => import('./views/settings/ExternalSources.vue') },
 ]
 
 export default createRouter({

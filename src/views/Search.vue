@@ -22,6 +22,7 @@ import TrackContextMenu from '../components/TrackContextMenu.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
+import { useExternalSources } from '../composables/useExternalSources'
 import { useCoverGate } from '../composables/useCoverGate'
 import { useVirtualScroll } from '../composables/useVirtualScroll'
 
@@ -147,6 +148,7 @@ const {
 } = usePlaylists()
 
 const { getCustomCover } = useCustomCovers()
+const { avatarFor } = useExternalSources()
 
 function albumCoverFor(name: string, fallback: string | null): string {
     return getCustomCover('album', name) || fallback || defaultTrackCover
@@ -155,7 +157,7 @@ function playlistCoverFor(id: number, fallback: string | null): string {
     return getCustomCover('playlist', id) || fallback || defaultPlaylistCover
 }
 function artistCoverFor(name: string, fallback: string | null): string {
-    return getCustomCover('artist', name) || fallback || defaultTrackCover
+    return getCustomCover('artist', name) || avatarFor(name) || fallback || defaultTrackCover
 }
 
 // ── Artists ────────────────────────────────────────────────────────────────
