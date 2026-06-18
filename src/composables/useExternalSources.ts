@@ -1,4 +1,4 @@
-import { reactive, ref } from "vue";
+import { reactive, ref, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "./useSettings";
 import type { TrackMetadata } from "./usePlayer";
@@ -106,6 +106,53 @@ const coverScheduler = createScheduler(4, 80);
 // (или null = «не нашлось»). Несколько треков одного альбома делят одну обложку.
 const trackCovers = reactive<Record<string, string | null>>({});
 const coverWaiters = new Map<string, Set<TrackMetadata>>();
+
+// Живые объекты треков, которым проставлена внешняя обложка (file_path -> track).
+// Нужно для отката при выключении настройки и восстановления при включении.
+// Сами data-URL остаются в trackCovers (и в бессрочном кэше бэкенда), поэтому
+// повторное включение не ходит в сеть.
+const externallyCovered = new Map<string, TrackMetadata>();
+
+/** Применить внешнюю обложку к треку и запомнить его для отката/восстановления. */
+function applyExternalCover(track: TrackMetadata, url: string): void {
+  track.cover_art = url;
+  track.cover_external = true;
+  externallyCovered.set(track.file_path, track);
+}
+
+// Откат/восстановление внешних обложек при переключении настройки. Watch в
+// отвязанном scope живёт всё время работы приложения (синглтон-композабл).
+effectScope(true).run(() => {
+  const { settings } = useSettings();
+  watch(
+    () => settings.value.external_track_covers,
+    (enabled) => {
+      if (enabled) {
+        // Восстанавливаем из сессионного кэша (сеть не дёргаем).
+        for (const track of externallyCovered.values()) {
+          if (track.cover_art) continue;
+          const key = coverCacheKey(track.artist || "", track.album || "", track.title || "");
+          const url = trackCovers[key];
+          if (url) applyExternalCover(track, url);
+        }
+      } else {
+        // Прячем внешние обложки → показываются локальные (плейсхолдер). Кэш и
+        // флаг cover_external сохраняем, чтобы восстановить при включении.
+        for (const track of externallyCovered.values()) {
+          if (track.cover_external) track.cover_art = null;
+        }
+      }
+    },
+  );
+});
+
+/** Сбросить пометку внешней обложки (когда у трека появилась локальная). */
+export function clearExternalCoverFlag(track: TrackMetadata): void {
+  if (track.cover_external) {
+    track.cover_external = false;
+    externallyCovered.delete(track.file_path);
+  }
+}
 
 /** Ключ кэша обложки — должен совпадать с `cover_cache_key` в external.rs. */
 function coverCacheKey(artist: string, album: string, title: string): string {
@@ -236,7 +283,7 @@ export function useExternalSources() {
     const key = coverCacheKey(artist, album, title);
     if (key in trackCovers) {
       const url = trackCovers[key];
-      if (url && !track.cover_art) track.cover_art = url;
+      if (url && !track.cover_art) applyExternalCover(track, url);
       return;
     }
 
@@ -257,7 +304,7 @@ export function useExternalSources() {
           const pending = coverWaiters.get(key);
           coverWaiters.delete(key);
           if (url && pending) {
-            for (const t of pending) if (!t.cover_art) t.cover_art = url;
+            for (const t of pending) if (!t.cover_art) applyExternalCover(t, url);
           }
         })
         .catch((e) => {

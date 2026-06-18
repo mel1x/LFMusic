@@ -101,6 +101,26 @@ fn client() -> &'static reqwest::blocking::Client {
     })
 }
 
+/// Глобальный троттл для MusicBrainz / Cover Art Archive: их условия требуют не
+/// более ~1 запроса в секунду на клиента, иначе сыпется 503 и временный бан.
+/// Запросы выполняются на blocking-пуле, поэтому короткий `sleep` под мьютексом
+/// просто сериализует обращения и держит интервал.
+fn mb_throttle() {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let lock = LAST.get_or_init(|| Mutex::new(None));
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let min_gap = Duration::from_millis(1100);
+    if let Some(prev) = *guard {
+        let elapsed = prev.elapsed();
+        if elapsed < min_gap {
+            std::thread::sleep(min_gap - elapsed);
+        }
+    }
+    *guard = Some(Instant::now());
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Нормализация и оценка схожести
 // ──────────────────────────────────────────────────────────────────────────────
@@ -402,8 +422,9 @@ impl Provider for ITunes {
         if sim < 0.5 {
             return Ok(None);
         }
-        // Апскейл превью iTunes (100x100) до 600x600.
-        let url = art.replace("100x100bb", "600x600bb");
+        // Апскейл превью iTunes (100x100) до 1000x1000 — Apple отдаёт исходник в
+        // полном разрешении, превью масштабируется простой заменой в URL.
+        let url = art.replace("100x100bb", "1000x1000bb");
         Ok(Some(ExternalImage {
             source: "iTunes".to_string(),
             url,
@@ -714,6 +735,7 @@ impl Provider for MusicBrainz {
         }
 
         let query = format!("release:\"{}\" AND artist:\"{}\"", album, artist);
+        mb_throttle();
         let search: SearchResp = client
             .get("https://musicbrainz.org/ws/2/release/")
             .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "6")])
@@ -766,6 +788,7 @@ impl Provider for MusicBrainz {
             length: Option<u64>,
         }
 
+        mb_throttle();
         let detail: ReleaseResp = client
             .get(format!("https://musicbrainz.org/ws/2/release/{}", release.id))
             .query(&[("inc", "recordings"), ("fmt", "json")])
@@ -803,6 +826,273 @@ impl Provider for MusicBrainz {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Провайдер: Cover Art Archive (обложки релизов из MusicBrainz)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Ищет release-group в MusicBrainz и возвращает `(mbid, title)` лучшего по
+/// совпадению названия (и, если задан, артиста). Release-group — это «альбом»
+/// поверх всех изданий, одна обложка на все переиздания.
+fn mb_release_group_id(
+    client: &reqwest::blocking::Client,
+    artist: &str,
+    album: &str,
+) -> Result<Option<(String, String)>, String> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(rename = "release-groups", default)]
+        groups: Vec<Group>,
+    }
+    #[derive(Deserialize)]
+    struct Group {
+        id: String,
+        title: String,
+        #[serde(rename = "artist-credit", default)]
+        artist_credit: Vec<Credit>,
+    }
+    #[derive(Deserialize)]
+    struct Credit {
+        name: String,
+    }
+
+    let query = format!("releasegroup:\"{}\" AND artist:\"{}\"", album, artist);
+    mb_throttle();
+    let resp: Resp = client
+        .get("https://musicbrainz.org/ws/2/release-group/")
+        .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "6")])
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let best = resp
+        .groups
+        .into_iter()
+        .filter_map(|g| {
+            let sim = similarity(album, &g.title);
+            // Если артист известен — отбрасываем одноимённый альбом другого автора.
+            let artist_ok = artist.is_empty()
+                || g
+                    .artist_credit
+                    .first()
+                    .map(|c| similarity(artist, &c.name) >= 0.4)
+                    .unwrap_or(false);
+            if sim >= 0.5 && artist_ok {
+                Some((sim, g.id, g.title))
+            } else {
+                None
+            }
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(best.map(|(_, id, title)| (id, title)))
+}
+
+struct CoverArtArchive;
+
+impl Provider for CoverArtArchive {
+    fn name(&self) -> &'static str {
+        "Cover Art Archive"
+    }
+
+    fn cover(
+        &self,
+        client: &reqwest::blocking::Client,
+        artist: &str,
+        album: &str,
+        _title: &str,
+    ) -> Result<Option<ExternalImage>, String> {
+        // CAA индексирует обложки по релизам/группам релизов MusicBrainz —
+        // работаем только когда известен альбом.
+        if album.trim().is_empty() {
+            return Ok(None);
+        }
+        let Some((rg_id, title)) = mb_release_group_id(client, artist, album)? else {
+            return Ok(None);
+        };
+
+        #[derive(Deserialize)]
+        struct CaaResp {
+            #[serde(default)]
+            images: Vec<CaaImage>,
+        }
+        #[derive(Deserialize)]
+        struct CaaImage {
+            #[serde(default)]
+            front: bool,
+            image: String,
+            #[serde(default)]
+            thumbnails: Thumbs,
+        }
+        #[derive(Deserialize, Default)]
+        struct Thumbs {
+            #[serde(rename = "1200")]
+            x1200: Option<String>,
+            #[serde(rename = "500")]
+            x500: Option<String>,
+            large: Option<String>,
+        }
+
+        mb_throttle();
+        let resp = client
+            .get(format!("https://coverartarchive.org/release-group/{}", rg_id))
+            .send()
+            .map_err(|e| e.to_string())?;
+        // Нет обложки для группы релизов — CAA отвечает 404.
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let caa: CaaResp = resp.json().map_err(|e| e.to_string())?;
+
+        // Предпочитаем помеченную как «front», иначе первую доступную.
+        let Some(img) = caa.images.iter().find(|i| i.front).or_else(|| caa.images.first())
+        else {
+            return Ok(None);
+        };
+        // Берём готовый превью 1200/500, иначе оригинал (бывает очень крупным).
+        let url = img
+            .thumbnails
+            .x1200
+            .clone()
+            .or_else(|| img.thumbnails.x500.clone())
+            .or_else(|| img.thumbnails.large.clone())
+            .unwrap_or_else(|| img.image.clone());
+
+        Ok(Some(ExternalImage {
+            source: "Cover Art Archive".to_string(),
+            url,
+            matched_name: title,
+        }))
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Провайдер: Wikipedia (аватарки исполнителей — фолбэк, когда нет в Deezer)
+// ──────────────────────────────────────────────────────────────────────────────
+
+struct Wikipedia;
+
+/// Содержит ли краткое описание из Wikidata признак музыкального исполнителя.
+/// Без этой проверки поиск легко подсунет статью-омоним (город, фильм, цвет).
+fn is_music_description(desc: Option<&str>) -> bool {
+    let Some(d) = desc else {
+        return false;
+    };
+    let d = d.to_lowercase();
+    const KW: &[&str] = &[
+        // en
+        "musician", "singer", "rapper", "band", "composer", "songwriter", "vocalist",
+        "guitarist", "drummer", " dj", "duo", "group", "producer", "music",
+        // ru
+        "певец", "певица", "музыкант", "группа", "рэпер", "композитор", "исполнит",
+        "музыкальн", "дуэт", "диджей", "вокалист", "гитарист", "ансамбль", "бэнд",
+        "рок-", "поп-", "музыка",
+    ];
+    KW.iter().any(|k| d.contains(k))
+}
+
+/// Ищет в конкретной языковой Wikipedia статью об исполнителе и возвращает её
+/// заглавное фото. Жёсткая фильтрация по «музыкальности» описания и совпадению
+/// имени: при сомнении возвращаем `None`, чтобы не подставить чужую картинку.
+fn wiki_lookup(
+    client: &reqwest::blocking::Client,
+    lang: &str,
+    artist: &str,
+) -> Result<Option<ExternalImage>, String> {
+    #[derive(Deserialize)]
+    struct Resp {
+        query: Option<Query>,
+    }
+    #[derive(Deserialize)]
+    struct Query {
+        #[serde(default)]
+        pages: HashMap<String, Page>,
+    }
+    #[derive(Deserialize)]
+    struct Page {
+        title: String,
+        description: Option<String>,
+        thumbnail: Option<Thumb>,
+        index: Option<i64>,
+    }
+    #[derive(Deserialize)]
+    struct Thumb {
+        source: String,
+    }
+
+    let endpoint = format!("https://{}.wikipedia.org/w/api.php", lang);
+    let resp: Resp = client
+        .get(&endpoint)
+        .query(&[
+            ("action", "query"),
+            ("format", "json"),
+            ("prop", "pageimages|description"),
+            ("piprop", "thumbnail"),
+            ("pithumbsize", "800"),
+            ("generator", "search"),
+            ("gsrsearch", artist),
+            ("gsrlimit", "5"),
+            ("gsrnamespace", "0"),
+        ])
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let Some(query) = resp.query else {
+        return Ok(None);
+    };
+
+    // Кандидаты: фото есть + описание музыкальное + имя совпадает. Лучший по
+    // совпадению имени, при равенстве — выше в поисковой выдаче (меньший index).
+    let mut candidates: Vec<(f32, i64, String, String)> = Vec::new();
+    for p in query.pages.values() {
+        let Some(thumb) = &p.thumbnail else {
+            continue;
+        };
+        if !is_music_description(p.description.as_deref()) {
+            continue;
+        }
+        let sim = similarity(artist, &p.title);
+        if sim < 0.7 {
+            continue;
+        }
+        candidates.push((sim, p.index.unwrap_or(999), p.title.clone(), thumb.source.clone()));
+    }
+    candidates.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+
+    Ok(candidates.into_iter().next().map(|(_, _, title, url)| ExternalImage {
+        source: "Wikipedia".to_string(),
+        url,
+        matched_name: title,
+    }))
+}
+
+impl Provider for Wikipedia {
+    fn name(&self) -> &'static str {
+        "Wikipedia"
+    }
+
+    fn artist_image(
+        &self,
+        client: &reqwest::blocking::Client,
+        artist: &str,
+    ) -> Result<Option<ExternalImage>, String> {
+        // Сначала англоязычная (шире покрытие и стабильные англ. описания),
+        // затем русская (локальные исполнители, которых нет в en).
+        for lang in ["en", "ru"] {
+            if let Some(img) = wiki_lookup(client, lang, artist)? {
+                return Ok(Some(img));
+            }
+        }
+        Ok(None)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Агрегатор
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -811,13 +1101,15 @@ fn album_providers() -> Vec<Box<dyn Provider>> {
 }
 
 fn image_providers() -> Vec<Box<dyn Provider>> {
-    // Только источники с открытыми изображениями исполнителей без ключа.
-    vec![Box::new(Deezer)]
+    // Deezer — основной (богатые фото артистов без ключа); Wikipedia — фолбэк
+    // для исполнителей, которых у Deezer нет (см. семантику в fetch_artist_image).
+    vec![Box::new(Deezer), Box::new(Wikipedia)]
 }
 
 fn cover_providers() -> Vec<Box<dyn Provider>> {
-    // iTunes — хорошее качество артов; Deezer — фолбэк.
-    vec![Box::new(ITunes), Box::new(Deezer)]
+    // iTunes — хорошее качество артов; Deezer — фолбэк; Cover Art Archive —
+    // последний рубеж (нишевые/региональные релизы, которых нет в стримингах).
+    vec![Box::new(ITunes), Box::new(Deezer), Box::new(CoverArtArchive)]
 }
 
 /// Опрашивает источники и возвращает обложку трека/альбома (первое совпадение).
@@ -869,7 +1161,10 @@ pub fn fetch_album_tracklist(artist: &str, album: &str) -> Option<ExternalAlbum>
     best.map(|(_, album)| album)
 }
 
-/// Опрашивает источники и возвращает лучшую аватарку исполнителя.
+/// Опрашивает источники и возвращает лучшую аватарку исполнителя. Провайдеры
+/// идут по приоритету: как только один уверенно совпал (≥0.85), последующие
+/// (например, Wikipedia) не опрашиваются — экономим сеть и снижаем риск
+/// подставить чужое фото из менее точного источника.
 pub fn fetch_artist_image(artist: &str) -> Option<ExternalImage> {
     let client = client();
     let mut best: Option<(f32, ExternalImage)> = None;
@@ -880,7 +1175,7 @@ pub fn fetch_artist_image(artist: &str) -> Option<ExternalImage> {
                 if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
                     best = Some((score, img));
                 }
-                if score >= 0.97 {
+                if score >= 0.85 {
                     break;
                 }
             }
@@ -1107,10 +1402,6 @@ fn download_artist_image(
     Ok(Some((filename, data_url)))
 }
 
-/// Сколько секунд держим негативный кэш (нет аватарки), прежде чем пробовать
-/// снова при обычном открытии (7 дней).
-const NEGATIVE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
-
 /// Получить аватарку исполнителя: сначала из кэша, иначе из сети (если включено
 /// настройкой — проверяется на стороне команды). `refresh` форсирует повторную
 /// загрузку из сети.
@@ -1139,7 +1430,9 @@ pub fn get_or_fetch_artist_image(
                         };
                     }
                 }
-            } else if rec.status == "none" && now_secs().saturating_sub(rec.fetched_secs) < NEGATIVE_TTL_SECS {
+            } else if rec.status == "none" {
+                // Кэш без срока истечения: «не найдено» больше не перепрашиваем
+                // (см. батч-проход подготовки внешних источников).
                 return ArtistImageResult { status: "none".into(), source: None, data_url: None };
             }
         }
@@ -1310,9 +1603,8 @@ pub fn get_or_fetch_track_cover(
                         };
                     }
                 }
-            } else if rec.status == "none"
-                && now_secs().saturating_sub(rec.fetched_secs) < NEGATIVE_TTL_SECS
-            {
+            } else if rec.status == "none" {
+                // Бессрочный негативный кэш (см. батч-проход подготовки).
                 return none_result();
             }
         }
@@ -1369,8 +1661,63 @@ pub fn album_cache_key(album: &str, artist: &str) -> String {
     format!("{}\u{1}{}", normalize(album), normalize(artist))
 }
 
-/// Сколько секунд держим негативный кэш для альбомов (нет внешних данных).
-pub const ALBUM_NEGATIVE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+// ──────────────────────────────────────────────────────────────────────────────
+// Поддержка батч-прохода подготовки внешних источников
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Ключ кэша обложки трека/альбома (тот же, что у `get_or_fetch_track_cover`).
+/// Нужен батч-проходу, чтобы определить, обработан ли уже трек/альбом.
+pub fn track_cover_key(artist: &str, album: &str, title: &str) -> String {
+    cover_cache_key(artist, album, title)
+}
+
+/// Нормализованный ключ исполнителя (тот же, что у кэша аватарок).
+pub fn artist_image_key(name: &str) -> String {
+    artist_key(name)
+}
+
+/// Ключи обложек с окончательным результатом (ok/none) — такие батч-проход
+/// пропускает (сеть не дёргает, теги не перечитывает).
+pub fn cover_settled_keys(app_data_dir: &PathBuf) -> std::collections::HashSet<String> {
+    load_covers_manifest(app_data_dir)
+        .into_iter()
+        .filter(|(_, r)| r.status == "ok" || r.status == "none")
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// Ключи исполнителей с окончательным результатом (ok/none) аватарки.
+pub fn artist_settled_keys(app_data_dir: &PathBuf) -> std::collections::HashSet<String> {
+    ensure_artist_cache_version(app_data_dir);
+    load_artists_manifest(app_data_dir)
+        .into_iter()
+        .filter(|(_, r)| r.status == "ok" || r.status == "none")
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// Пометить набор обложек как «нет внешней» одним сохранением манифеста (без
+/// сети). Используется батч-проходом для альбомов/треков, у которых уже есть
+/// локальная обложка, — чтобы при следующем старте не перечитывать их теги.
+pub fn mark_track_covers_none(app_data_dir: &PathBuf, keys: &[String]) {
+    if keys.is_empty() {
+        return;
+    }
+    let mut manifest = load_covers_manifest(app_data_dir);
+    let now = now_secs();
+    for key in keys {
+        if key.is_empty() {
+            continue;
+        }
+        manifest.entry(key.clone()).or_insert_with(|| ArtistImageRecord {
+            file: None,
+            source: None,
+            status: "none".into(),
+            fetched_secs: now,
+        });
+    }
+    let _ = save_covers_manifest(app_data_dir, &manifest);
+}
 
 /// Текущее время в секундах с эпохи (для команд).
 pub fn unix_secs() -> u64 {

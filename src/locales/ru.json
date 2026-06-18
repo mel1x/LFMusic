@@ -35,6 +35,11 @@
     "progressActivePrefix": "Обработано",
     "progressActiveMiddle": "из",
     "progressActiveSuffix": "треков. Это единоразовый фоновый анализ для будущих рекомендаций. Сильно нагружает CPU!",
+    "externalActiveTitle": "Получение данных из интернета",
+    "externalActive": "Получено {current} из {total} элементов из внешних источников (обложки, аватарки, порядок треков).",
+    "externalActivePrefix": "Получено",
+    "externalActiveMiddle": "из",
+    "externalActiveSuffix": "элементов из внешних источников (обложки, аватарки, порядок треков).",
     "tracksReadyTitle": "Треки уже можно слушать!",
     "tracksReadyText": "Сканирование треков завершено. В фоне первый раз идет подготовка к рекомендациям, это не мешает воспроизведению, но сильно нагружает CPU!",
     "tracksReadyButton": "Понятно"

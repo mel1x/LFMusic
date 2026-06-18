@@ -36,6 +36,15 @@ pub fn save(app_data_dir: &PathBuf, settings: &AppSettings) -> Result<(), String
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
+/// Прочитать булеву опцию из настроек (или `default`, если её нет/иной тип).
+pub fn option_bool(settings: &AppSettings, key: &str, default: bool) -> bool {
+    settings
+        .options
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
+}
+
 /// Прочитать список разделителей исполнителей из текущих настроек.
 /// Если в options нет artist_separators или значение некорректно — возвращает дефолт.
 pub fn get_artist_separators(state: &State<SettingsState>) -> Vec<String> {

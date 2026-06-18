@@ -19,6 +19,8 @@ interface AudioFeatureProgressPayload {
     total: number;
     percent: number;
     active: boolean;
+    // Активная фаза: анализ треков для рекомендаций или получение из интернета.
+    phase?: 'analysis' | 'external' | 'done';
 }
 
 const win = getCurrentWindow();
@@ -33,7 +35,12 @@ const featureProgress = ref<AudioFeatureProgressPayload>({
     total: 0,
     percent: 0,
     active: false,
+    phase: 'analysis',
 });
+
+// Идёт ли сейчас получение данных из интернета (внешние источники). По этой
+// фазе выбираем текст: анализ рекомендаций ↔ получение из интернета.
+const featureProgressIsExternal = computed(() => featureProgress.value.phase === 'external');
 
 let unlistenAudioFeatureProgress: UnlistenFn | null = null;
 let featureProgressHideTimer: ReturnType<typeof setTimeout> | null = null;
@@ -59,6 +66,7 @@ const featureProgressTooltipHeading = computed(() => {
     if (!p.active || p.current >= p.total) {
         return t('audioFeatures.progressDoneTitle');
     }
+    if (featureProgressIsExternal.value) return t('audioFeatures.externalActiveTitle');
     return t('audioFeatures.progressActiveTitle');
 });
 
@@ -67,6 +75,9 @@ const featureProgressTooltipText = computed(() => {
     if (p.total <= 0) return t('audioFeatures.progressStarting');
     if (!p.active || p.current >= p.total) {
         return t('audioFeatures.progressDone', { total: p.total });
+    }
+    if (featureProgressIsExternal.value) {
+        return t('audioFeatures.externalActive', { current: p.current, total: p.total });
     }
     return t('audioFeatures.progressActive', { current: p.current, total: p.total });
 });
@@ -115,6 +126,10 @@ onMounted(() => {
     }).then((unlisten) => {
         unlistenAudioFeatureProgress = unlisten;
         return invoke<number>('library_resume_audio_features');
+    }).then(() => {
+        // Догружаем данные включённых внешних источников одним фоновым проходом
+        // (его шаги дописываются к тому же прогресс-бару, что и анализ).
+        return invoke('external_prepare');
     }).catch(() => {
         // Продолжение фоновой подготовки не должно мешать запуску интерфейса.
     });
@@ -168,6 +183,13 @@ const closeWindow = async () => {
                             {{ t('audioFeatures.progressDonePrefix') }}
                             <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
                             {{ t('audioFeatures.progressDoneSuffix') }}
+                        </template>
+                        <template v-else-if="featureProgressIsExternal">
+                            {{ t('audioFeatures.externalActivePrefix') }}
+                            <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.current }}</span>
+                            {{ t('audioFeatures.externalActiveMiddle') }}
+                            <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
+                            {{ t('audioFeatures.externalActiveSuffix') }}
                         </template>
                         <template v-else>
                             {{ t('audioFeatures.progressActivePrefix') }}

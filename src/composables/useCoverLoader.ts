@@ -1,7 +1,7 @@
 import { reactive, watch, type ComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
-import { useExternalSources } from "./useExternalSources";
+import { useExternalSources, clearExternalCoverFlag } from "./useExternalSources";
 
 const MAX_CONCURRENT_COVERS = 3;
 // Ограничение пула ожидающих: текущий экран всегда в приоритете, самые старые
@@ -77,7 +77,12 @@ function pump(): void {
                 const cached = resolve(filePath);
                 if (art) {
                     // Записываем обложку в живой объект из кэша того же экрана (реактивно).
-                    if (cached) cached.cover_art = art;
+                    // Это локальная (встроенная/override) обложка — снимаем пометку
+                    // внешней, чтобы выключение внешних обложек её не откатило.
+                    if (cached) {
+                        cached.cover_art = art;
+                        clearExternalCoverFlag(cached);
+                    }
                 } else if (cached) {
                     // Встроенной обложки нет — пробуем внешний источник (если включено).
                     useExternalSources().fetchTrackCover(cached);

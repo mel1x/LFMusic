@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, computed } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useSettings, type SettingKey } from '../../composables/useSettings';
 import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
@@ -9,9 +10,17 @@ const { settings, settingItems, load, save } = useSettings();
 const externalKeys: SettingKey[] = ['external_album_order', 'external_supplement_missing', 'external_track_covers', 'external_artist_avatars', 'show_downloads_page'];
 const externalItems = computed(() => externalKeys.map(key => settingItems.find(i => i.key === key)!));
 
+// Сетевые источники: их переключение (вкл/выкл) перезапускает фоновый проход
+// подготовки. При включении он догружает данные с прогрессом; при выключении —
+// останавливает текущий проход (кэш не трогается).
+const networkSourceKeys: SettingKey[] = ['external_album_order', 'external_supplement_missing', 'external_track_covers', 'external_artist_avatars'];
+
 async function toggle(key: SettingKey) {
     settings.value[key] = !settings.value[key];
     await save();
+    if (networkSourceKeys.includes(key)) {
+        invoke('external_prepare').catch(() => { /* не мешаем UI */ });
+    }
 }
 
 onMounted(load);

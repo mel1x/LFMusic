@@ -2697,6 +2697,76 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка сохранения внешнего альбома: {}", e))?;
         Ok(())
     }
+
+    /// Пути треков с пользовательской (override) обложкой — для батч-прохода
+    /// внешних обложек: такие треки локально покрыты, внешняя не нужна.
+    pub fn override_cover_paths(&self) -> std::collections::HashSet<String> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT file_path FROM track_overrides WHERE cover_sig IS NOT NULL AND cover_sig != ''")
+        {
+            Ok(s) => s,
+            Err(_) => return std::collections::HashSet::new(),
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(r) => r,
+            Err(_) => return std::collections::HashSet::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    /// Альбомы, для которых ещё нет окончательного внешнего макета (ok/none).
+    /// Для каждого берётся самый частый исполнитель — так же, как при запросе
+    /// макета, — чтобы ключ кэша совпадал. Кэш бессрочный, поэтому уже
+    /// обработанные альбомы в сеть не ходят.
+    pub fn pending_external_album_names(&self) -> Vec<String> {
+        // Самый частый исполнитель на альбом (с учётом override).
+        let mut best_artist: std::collections::HashMap<String, (String, i64)> =
+            std::collections::HashMap::new();
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT t.album, COALESCE(NULLIF(o.artist,''), t.artist, ''), COUNT(*)
+             FROM tracks t
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             WHERE t.album IS NOT NULL AND t.album != ''
+             GROUP BY t.album, COALESCE(NULLIF(o.artist,''), t.artist, '')",
+        ) {
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            });
+            if let Ok(rows) = rows {
+                for (album, artist, cnt) in rows.filter_map(|r| r.ok()) {
+                    let entry = best_artist.entry(album).or_insert((artist.clone(), 0));
+                    if cnt > entry.1 {
+                        *entry = (artist, cnt);
+                    }
+                }
+            }
+        }
+
+        // Уже обработанные ключи (ok/none) — пропускаем.
+        let mut settled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT album_key FROM external_album WHERE status IN ('ok','none')")
+        {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                settled = rows.filter_map(|r| r.ok()).collect();
+            }
+        }
+
+        best_artist
+            .into_iter()
+            .filter(|(album, (artist, _))| {
+                let key = crate::external::album_cache_key(album, artist);
+                !settled.contains(&key)
+            })
+            .map(|(album, _)| album)
+            .collect()
+    }
 }
 
 /// Накопители для инкрементального расчёта центроида вкусов: взвешенные суммы

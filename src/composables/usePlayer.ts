@@ -38,6 +38,10 @@ export interface TrackMetadata {
   is_lossless: boolean;
   file_path: string;
   cover_art: string | null;
+  /** Frontend-only: обложка проставлена из внешнего источника (а не встроенная/
+   *  override). Нужно, чтобы при выключении внешних обложек откатить её, не
+   *  трогая локальные обложки. */
+  cover_external?: boolean;
   accent_color: string | null;
   bpm: number | null;
   loudness: number | null;

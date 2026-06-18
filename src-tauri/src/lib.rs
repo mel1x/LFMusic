@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Instant;
 use tauri::{Emitter, Manager, State};
 
@@ -41,6 +41,10 @@ struct AudioFeatureProgress {
     total: usize,
     percent: f64,
     active: bool,
+    /// Текущая активная фаза подготовки: "analysis" (анализ треков для
+    /// рекомендаций), "external" (получение данных из интернета) или "done".
+    /// Фронт по ней выбирает текст прогресса.
+    phase: &'static str,
 }
 
 const SCAN_PROGRESS_EMIT_MS: u64 = 120;
@@ -84,7 +88,12 @@ fn scan_progress_emitter(app: tauri::AppHandle) -> impl Fn(usize, usize) + Send 
     }
 }
 
-fn emit_audio_feature_progress(app: &tauri::AppHandle, current: usize, total: usize) {
+fn emit_audio_feature_progress(
+    app: &tauri::AppHandle,
+    current: usize,
+    total: usize,
+    phase: &'static str,
+) {
     let percent = if total > 0 {
         (current as f64 / total as f64) * 100.0
     } else {
@@ -98,30 +107,87 @@ fn emit_audio_feature_progress(app: &tauri::AppHandle, current: usize, total: us
             total,
             percent,
             active,
+            phase,
         },
     );
 }
 
-fn audio_feature_progress_emitter(app: tauri::AppHandle) -> AudioFeatureProgressEmitter {
-    let started = Instant::now();
-    let last_emit_ms = Arc::new(AtomicU64::new(0));
+/// Объединённый прогресс «подготовки»: фаза анализа аудио-фич (`f_*`) и фаза
+/// подготовки внешних источников (`e_*`) складываются в один прогресс-бар
+/// (TitleBar.vue). Внешние шаги дописываются к анализу, а не показываются
+/// отдельно.
+#[derive(Clone, Copy)]
+struct PrepCounts {
+    f_done: usize,
+    f_total: usize,
+    e_done: usize,
+    e_total: usize,
+}
 
-    Arc::new(move |current, total| {
+static PREP_COUNTS: Mutex<PrepCounts> =
+    Mutex::new(PrepCounts { f_done: 0, f_total: 0, e_done: 0, e_total: 0 });
+static PREP_LAST_EMIT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn prep_clock() -> &'static Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now)
+}
+
+/// Применить изменение к счётчикам и (с троттлингом) эмитнуть объединённый
+/// прогресс. По достижении 100% счётчики сбрасываются — следующий проход
+/// (новый анализ/подготовка) начинается с чистого листа.
+fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCounts)) {
+    let (current, total, force_done, phase) = {
+        let mut p = PREP_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        mutate(&mut p);
+        let current = p.f_done + p.e_done;
+        let total = p.f_total + p.e_total;
         let done = total == 0 || current >= total;
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        let last = last_emit_ms.load(Ordering::Relaxed);
-        if !done && elapsed_ms.saturating_sub(last) < AUDIO_FEATURE_PROGRESS_EMIT_MS {
-            return;
+        // Фаза для текста прогресса: пока идёт получение из интернета — "external"
+        // (приоритетнее), иначе анализ — "analysis". До старта внешней подготовки
+        // (e_total ещё 0) показывается текст анализа.
+        let phase = if p.e_total > 0 && p.e_done < p.e_total {
+            "external"
+        } else if p.f_total > 0 && p.f_done < p.f_total {
+            "analysis"
+        } else {
+            "done"
+        };
+        if done && total > 0 {
+            *p = PrepCounts { f_done: 0, f_total: 0, e_done: 0, e_total: 0 };
         }
+        (current, total, done, phase)
+    };
 
-        if done
-            || last_emit_ms
-                .compare_exchange(last, elapsed_ms, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            emit_audio_feature_progress(&app, current, total);
-        }
+    let elapsed_ms = prep_clock().elapsed().as_millis() as u64;
+    let last = PREP_LAST_EMIT_MS.load(Ordering::Relaxed);
+    if !force_done && elapsed_ms.saturating_sub(last) < AUDIO_FEATURE_PROGRESS_EMIT_MS {
+        return;
+    }
+    if force_done
+        || PREP_LAST_EMIT_MS
+            .compare_exchange(last, elapsed_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        emit_audio_feature_progress(app, current, total, phase);
+    }
+}
+
+fn audio_feature_progress_emitter(app: tauri::AppHandle) -> AudioFeatureProgressEmitter {
+    Arc::new(move |current, total| {
+        report_prep_progress(&app, |p| {
+            p.f_total = total;
+            p.f_done = current.min(total);
+        });
     })
+}
+
+/// Обновить «внешнюю» фазу объединённого прогресса.
+fn report_external_progress(app: &tauri::AppHandle, done: usize, total: usize) {
+    report_prep_progress(app, |p| {
+        p.e_total = total;
+        p.e_done = done.min(total);
+    });
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -582,6 +648,7 @@ fn library_audio_features_status(
         total,
         percent,
         active,
+        phase: if active { "analysis" } else { "done" },
     })
 }
 
@@ -759,112 +826,108 @@ async fn external_album_layout(
     album_name: String,
     refresh: bool,
 ) -> Result<external::AlbumLayout, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<LibraryState>();
+    tauri::async_runtime::spawn_blocking(move || run_album_layout(&app, &album_name, refresh))
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
+}
 
-        let none_layout = || external::AlbumLayout {
-            status: "none".into(),
-            source: None,
-            entries: Vec::new(),
-        };
+/// Синхронное ядро [`external_album_layout`] (используется и командой через
+/// spawn_blocking, и батч-проходом подготовки). Блокировку библиотеки НЕ держим
+/// во время сетевого запроса. Кэш в БД бессрочный — повторно в сеть не ходим.
+fn run_album_layout(
+    app: &tauri::AppHandle,
+    album_name: &str,
+    refresh: bool,
+) -> Result<external::AlbumLayout, String> {
+    let state = app.state::<LibraryState>();
 
-        let now = external::unix_secs();
+    let none_layout = || external::AlbumLayout {
+        status: "none".into(),
+        source: None,
+        entries: Vec::new(),
+    };
 
-        // Фаза 1 (под блокировкой): читаем локальные треки и кэш, решаем, нужна
-        // ли сеть. Блокировку библиотеки НЕ держим во время сетевого запроса.
-        let (local, query_artist, album_key, decision) = {
-            let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-            let local = library.get_album_local_tracks(&album_name);
-            if local.is_empty() {
-                return Ok(none_layout());
-            }
+    let now = external::unix_secs();
 
-            // Самый частый исполнитель среди локальных треков — для запроса.
-            let mut counts: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-            for (_, _, artist) in &local {
-                if !artist.is_empty() {
-                    *counts.entry(artist.clone()).or_default() += 1;
-                }
-            }
-            let query_artist = counts
-                .into_iter()
-                .max_by_key(|(_, c)| *c)
-                .map(|(a, _)| a)
-                .unwrap_or_default();
-
-            // Ключ кэша зависит и от названия, и от артиста — два разных
-            // одноимённых альбома от разных исполнителей не путаются.
-            let album_key = external::album_cache_key(&album_name, &query_artist);
-
-            // 0 = кэш; 1 = сеть; 2 = none из негативного кэша.
-            let decision: (u8, Vec<external::ExternalTrack>, Option<String>) =
-                match library.get_external_album(&album_key) {
-                    Some((src, status, _, tracks)) if !refresh && status == "ok" => {
-                        (0, tracks, src)
-                    }
-                    Some((_, status, fetched, _))
-                        if !refresh
-                            && status == "none"
-                            && now.saturating_sub(fetched)
-                                < external::ALBUM_NEGATIVE_TTL_SECS =>
-                    {
-                        (2, Vec::new(), None)
-                    }
-                    _ => (1, Vec::new(), None),
-                };
-            (local, query_artist, album_key, decision)
-        };
-
-        let (mode, cached_tracks, cached_source) = decision;
-        if mode == 2 {
+    // Фаза 1 (под блокировкой): читаем локальные треки и кэш, решаем, нужна сеть.
+    let (local, query_artist, album_key, decision) = {
+        let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let local = library.get_album_local_tracks(album_name);
+        if local.is_empty() {
             return Ok(none_layout());
         }
 
-        let local_for_match: Vec<(String, String)> =
-            local.into_iter().map(|(p, t, _)| (p, t)).collect();
-
-        if mode == 0 {
-            if cached_tracks.is_empty() {
-                return Ok(none_layout());
+        // Самый частый исполнитель среди локальных треков — для запроса.
+        let mut counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (_, _, artist) in &local {
+            if !artist.is_empty() {
+                *counts.entry(artist.clone()).or_default() += 1;
             }
-            let entries = external::build_layout(&cached_tracks, &local_for_match);
-            return Ok(external::AlbumLayout {
+        }
+        let query_artist = counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(a, _)| a)
+            .unwrap_or_default();
+
+        // Ключ кэша зависит и от названия, и от артиста — два разных
+        // одноимённых альбома от разных исполнителей не путаются.
+        let album_key = external::album_cache_key(album_name, &query_artist);
+
+        // 0 = кэш; 1 = сеть; 2 = none из (бессрочного) негативного кэша.
+        let decision: (u8, Vec<external::ExternalTrack>, Option<String>) =
+            match library.get_external_album(&album_key) {
+                Some((src, status, _, tracks)) if !refresh && status == "ok" => (0, tracks, src),
+                Some((_, status, _, _)) if !refresh && status == "none" => {
+                    (2, Vec::new(), None)
+                }
+                _ => (1, Vec::new(), None),
+            };
+        (local, query_artist, album_key, decision)
+    };
+
+    let (mode, cached_tracks, cached_source) = decision;
+    if mode == 2 {
+        return Ok(none_layout());
+    }
+
+    let local_for_match: Vec<(String, String)> =
+        local.into_iter().map(|(p, t, _)| (p, t)).collect();
+
+    if mode == 0 {
+        if cached_tracks.is_empty() {
+            return Ok(none_layout());
+        }
+        let entries = external::build_layout(&cached_tracks, &local_for_match);
+        return Ok(external::AlbumLayout {
+            status: "ok".into(),
+            source: cached_source,
+            entries,
+        });
+    }
+
+    // Фаза 2 (без блокировки): сеть.
+    let fetched = external::fetch_album_tracklist(&query_artist, album_name);
+
+    // Фаза 3 (под блокировкой): сохраняем результат в кэш.
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    match fetched {
+        Some(album) if !album.tracks.is_empty() => {
+            let _ =
+                library.set_external_album(&album_key, Some(&album.source), "ok", &album.tracks, now);
+            let entries = external::build_layout(&album.tracks, &local_for_match);
+            Ok(external::AlbumLayout {
                 status: "ok".into(),
-                source: cached_source,
+                source: Some(album.source),
                 entries,
-            });
+            })
         }
-
-        // Фаза 2 (без блокировки): сеть.
-        let fetched = external::fetch_album_tracklist(&query_artist, &album_name);
-
-        // Фаза 3 (под блокировкой): сохраняем результат в кэш.
-        let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        match fetched {
-            Some(album) if !album.tracks.is_empty() => {
-                let _ = library.set_external_album(
-                    &album_key,
-                    Some(&album.source),
-                    "ok",
-                    &album.tracks,
-                    now,
-                );
-                let entries = external::build_layout(&album.tracks, &local_for_match);
-                Ok(external::AlbumLayout {
-                    status: "ok".into(),
-                    source: Some(album.source),
-                    entries,
-                })
-            }
-            _ => {
-                let _ = library.set_external_album(&album_key, None, "none", &[], now);
-                Ok(none_layout())
-            }
+        _ => {
+            let _ = library.set_external_album(&album_key, None, "none", &[], now);
+            Ok(none_layout())
         }
-    })
-    .await
-    .map_err(|e| format!("Task error: {}", e))?
+    }
 }
 
 /// Получить аватарку исполнителя из внешнего источника (с дисковым кэшем).
@@ -923,6 +986,210 @@ async fn external_load_cached_artist_images(
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Батч-подготовка внешних источников (как анализ: один проход, бессрочный кэш)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Поколение воркера подготовки — повторный вызов команды отменяет предыдущий
+/// проход (например, при переключении настроек).
+static EXTERNAL_PREP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn external_prep_current(generation: u64) -> bool {
+    EXTERNAL_PREP_GENERATION.load(Ordering::SeqCst) == generation
+}
+
+/// Запустить (или перезапустить) фоновую подготовку внешних источников: один
+/// проход по библиотеке заранее тянет и кэширует обложки/аватарки/порядок
+/// альбомов для включённых источников. Прогресс дописывается к прогрессу
+/// анализа треков. Уже обработанное (ok/none) в сеть повторно не ходит.
+/// Безопасно вызывать на старте и при любом переключении внешних настроек.
+#[tauri::command]
+fn external_prepare(app: tauri::AppHandle) -> Result<(), String> {
+    let generation = EXTERNAL_PREP_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let (dir, covers_on, avatars_on, albums_on) = {
+        let state = app.state::<SettingsState>();
+        let s = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        (
+            s.1.clone(),
+            settings::option_bool(&s.0, "external_track_covers", false),
+            settings::option_bool(&s.0, "external_artist_avatars", false),
+            settings::option_bool(&s.0, "external_album_order", false)
+                || settings::option_bool(&s.0, "external_supplement_missing", false),
+        )
+    };
+
+    // Сбрасываем внешнюю фазу прогресса (актуально при выключении источников —
+    // прогресс-бар спрячется, если анализ тоже завершён).
+    report_external_progress(&app, 0, 0);
+
+    if !covers_on && !avatars_on && !albums_on {
+        return Ok(());
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("external-prepare".into())
+        .spawn(move || {
+            run_external_preparation(app, dir, covers_on, avatars_on, albums_on, generation)
+        });
+    Ok(())
+}
+
+/// Группа треков, делящих один ключ кэша обложки (как правило — один альбом).
+struct CoverGroup {
+    artist: String,
+    album: String,
+    title: String,
+    paths: Vec<String>,
+}
+
+fn run_external_preparation(
+    app: tauri::AppHandle,
+    dir: PathBuf,
+    covers_on: bool,
+    avatars_on: bool,
+    albums_on: bool,
+    generation: u64,
+) {
+    // ── Сбор заданий (короткие блокировки библиотеки) ──
+    let artists: Vec<String> = if avatars_on {
+        let state = app.state::<LibraryState>();
+        let names = match state.0.lock() {
+            Ok(lib) => lib.get_artists().into_iter().map(|p| p.name).collect(),
+            Err(_) => Vec::new(),
+        };
+        names
+    } else {
+        Vec::new()
+    };
+
+    let albums: Vec<String> = if albums_on {
+        let state = app.state::<LibraryState>();
+        let names = match state.0.lock() {
+            Ok(lib) => lib.pending_external_album_names(),
+            Err(_) => Vec::new(),
+        };
+        names
+    } else {
+        Vec::new()
+    };
+
+    let (cover_groups, override_paths): (Vec<CoverGroup>, HashSet<String>) = if covers_on {
+        let state = app.state::<LibraryState>();
+        let built = match state.0.lock() {
+            Ok(lib) => {
+                let overrides = lib.override_cover_paths();
+                let mut by_key: std::collections::HashMap<String, CoverGroup> =
+                    std::collections::HashMap::new();
+                for t in lib.get_all_tracks_light() {
+                    let artist = t.artist.unwrap_or_default();
+                    let album = t.album.unwrap_or_default();
+                    let title = t.title.unwrap_or_default();
+                    let key = external::track_cover_key(&artist, &album, &title);
+                    if key.is_empty() {
+                        continue;
+                    }
+                    by_key
+                        .entry(key)
+                        .or_insert_with(|| CoverGroup {
+                            artist,
+                            album,
+                            title,
+                            paths: Vec::new(),
+                        })
+                        .paths
+                        .push(t.file_path);
+                }
+                (by_key.into_values().collect(), overrides)
+            }
+            Err(_) => (Vec::new(), HashSet::new()),
+        };
+        built
+    } else {
+        (Vec::new(), HashSet::new())
+    };
+
+    // ── Отфильтровываем уже обработанное, считаем общий объём ──
+    let artist_settled = if avatars_on {
+        external::artist_settled_keys(&dir)
+    } else {
+        HashSet::new()
+    };
+    let pending_artists: Vec<String> = artists
+        .into_iter()
+        .filter(|a| {
+            !a.trim().is_empty() && !artist_settled.contains(&external::artist_image_key(a))
+        })
+        .collect();
+
+    let cover_settled = if covers_on {
+        external::cover_settled_keys(&dir)
+    } else {
+        HashSet::new()
+    };
+    let pending_covers: Vec<CoverGroup> = cover_groups
+        .into_iter()
+        .filter(|g| {
+            !cover_settled.contains(&external::track_cover_key(&g.artist, &g.album, &g.title))
+        })
+        .collect();
+
+    let total = pending_artists.len() + pending_covers.len() + albums.len();
+    if total == 0 {
+        report_external_progress(&app, 0, 0);
+        return;
+    }
+
+    let mut done = 0usize;
+    report_external_progress(&app, done, total);
+
+    // ── Аватарки исполнителей ──
+    for name in &pending_artists {
+        if !external_prep_current(generation) {
+            return;
+        }
+        let _ = external::get_or_fetch_artist_image(&dir, name, false);
+        done += 1;
+        report_external_progress(&app, done, total);
+    }
+
+    // ── Обложки треков без обложки ──
+    let mut none_keys: Vec<String> = Vec::new();
+    for g in &pending_covers {
+        if !external_prep_current(generation) {
+            return;
+        }
+        // Альбом считается нуждающимся во внешней обложке, если хотя бы у одного
+        // его трека нет ни override-, ни встроенной обложки.
+        let needs_external = g
+            .paths
+            .iter()
+            .any(|p| !override_paths.contains(p) && !AudioPlayer::has_embedded_cover(p));
+        if needs_external {
+            let _ = external::get_or_fetch_track_cover(&dir, &g.artist, &g.album, &g.title, false);
+        } else {
+            // Локально покрыт — помечаем «нет внешней» (одним сохранением в конце),
+            // чтобы при следующем старте не перечитывать теги этого альбома.
+            none_keys.push(external::track_cover_key(&g.artist, &g.album, &g.title));
+        }
+        done += 1;
+        report_external_progress(&app, done, total);
+    }
+    if external_prep_current(generation) {
+        external::mark_track_covers_none(&dir, &none_keys);
+    }
+
+    // ── Порядок треков альбомов (+ фантомы) ──
+    for name in &albums {
+        if !external_prep_current(generation) {
+            return;
+        }
+        let _ = run_album_layout(&app, name, false);
+        done += 1;
+        report_external_progress(&app, done, total);
+    }
 }
 
 #[tauri::command]
@@ -1552,6 +1819,7 @@ pub fn run() {
             external_artist_image,
             external_track_cover,
             external_load_cached_artist_images,
+            external_prepare,
             statistics_add_track_delta,
             statistics_get_track,
             statistics_sum_listen_count,
