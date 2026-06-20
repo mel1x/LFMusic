@@ -913,7 +913,7 @@ fn run_album_layout(
     // Фаза 3 (под блокировкой): сохраняем результат в кэш.
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     match fetched {
-        Some(album) if !album.tracks.is_empty() => {
+        external::FetchOutcome::Found(album) if !album.tracks.is_empty() => {
             let _ =
                 library.set_external_album(&album_key, Some(&album.source), "ok", &album.tracks, now);
             let entries = external::build_layout(&album.tracks, &local_for_match);
@@ -923,10 +923,15 @@ fn run_album_layout(
                 entries,
             })
         }
-        _ => {
+        // Все источники реально ответили «нет» (или вернули пустой список) —
+        // кэшируем негативный результат, чтобы не ходить в сеть повторно.
+        external::FetchOutcome::Found(_) | external::FetchOutcome::NotFound => {
             let _ = library.set_external_album(&album_key, None, "none", &[], now);
             Ok(none_layout())
         }
+        // Временная ошибка провайдера (сеть/парсинг/rate-limit) — НЕ кэшируем
+        // «нет», иначе альбом навсегда останется без внешнего порядка.
+        external::FetchOutcome::TemporaryError => Ok(none_layout()),
     }
 }
 
@@ -1707,6 +1712,15 @@ pub fn run() {
                 thumbnails::protocol_handler(ctx, request, responder);
             },
         )
+        // Кастомный протокол внешних картинок (аватарки/обложки): отдаёт
+        // кэшированные WebP по lfmusic-external://{artist|cover}/<hash>, без
+        // base64 в IPC — по образцу lfmusic-cover.
+        .register_asynchronous_uri_scheme_protocol(
+            "lfmusic-external",
+            |ctx, request, responder| {
+                external::protocol_handler(ctx, request, responder);
+            },
+        )
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -1747,6 +1761,7 @@ pub fn run() {
                 app_data_dir.clone(),
             ))));
 
+            let external_marker_dir = app_data_dir.clone();
             let mut library =
                 MusicLibrary::new(app_data_dir).expect("Не удалось инициализировать библиотеку");
 
@@ -1758,6 +1773,22 @@ pub fn run() {
             };
             if let Err(e) = library.rebuild_artist_playlists(&separators) {
                 eprintln!("Ошибка инициализации плейлистов исполнителей: {}", e);
+            }
+
+            // Одноразовая миграция: сбрасываем негативный кэш внешних альбомов —
+            // старые «нет» могли быть закэшированы из-за временных ошибок (теперь
+            // такие не кэшируются). Гейт — файл-маркер версии.
+            {
+                let marker = external_marker_dir.join("external_album.version");
+                let current = std::fs::read_to_string(&marker)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                const EXTERNAL_ALBUM_CACHE_VERSION: u32 = 1;
+                if current < EXTERNAL_ALBUM_CACHE_VERSION {
+                    let _ = library.clear_external_album_negative_cache();
+                    let _ = std::fs::write(&marker, EXTERNAL_ALBUM_CACHE_VERSION.to_string());
+                }
             }
 
             app.manage(LibraryState(Mutex::new(library)));

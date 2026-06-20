@@ -2672,6 +2672,16 @@ impl MusicLibrary {
         }
     }
 
+    /// Удалить негативные записи кэша внешних альбомов (status='none'). Нужно
+    /// одноразовой миграцией: старые «нет» могли быть закэшированы из-за
+    /// временных сетевых/парс-ошибок — теперь такие не кэшируются, и их стоит
+    /// перепроверить (см. `FetchOutcome` в external.rs).
+    pub fn clear_external_album_negative_cache(&self) -> Result<usize, String> {
+        self.conn
+            .execute("DELETE FROM external_album WHERE status = 'none'", [])
+            .map_err(|e| format!("Ошибка очистки негативного кэша альбомов: {}", e))
+    }
+
     /// Сохранить кэш внешнего альбома.
     pub fn set_external_album(
         &self,

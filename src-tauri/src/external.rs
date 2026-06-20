@@ -9,15 +9,22 @@
 //!  - получить «канонический» порядок треков в альбоме (+ список треков,
 //!    которых нет в локальной библиотеке — «фантомные»);
 //!  - получить аватарку исполнителя.
+//!
+//! Картинки (аватарки/обложки) НЕ передаются через IPC как base64: они
+//! скачиваются, валидируются и пережимаются в WebP на диск, а фронт получает
+//! короткий URL кастомного протокола `lfmusic-external://…` (см.
+//! [`protocol_handler`]) — по образцу `lfmusic-cover` для обложек треков.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use tauri::http::{header, Response, StatusCode};
+use tauri::{AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
 const USER_AGENT: &str =
     "LFMusic/0.1.0 ( https://github.com/melix/LFMusic )";
@@ -48,6 +55,18 @@ pub struct ExternalImage {
     pub url: String,
     /// Имя исполнителя, как его вернул источник (для оценки совпадения).
     pub matched_name: String,
+}
+
+/// Итог опроса источников. Ключевое отличие от «просто `Option`»: различаем
+/// «точно не нашли» (все провайдеры ответили «нет») и «временную ошибку»
+/// (сеть/парсинг/rate-limit) — последнюю НЕ кэшируем как «нет навсегда».
+pub enum FetchOutcome<T> {
+    /// Нашли подходящий результат.
+    Found(T),
+    /// Все провайдеры реально ответили «не найдено».
+    NotFound,
+    /// Хотя бы один провайдер упал с ошибкой, и никто не нашёл — повторим позже.
+    TemporaryError,
 }
 
 /// Общий интерфейс источника. Любой метод может вернуть `Ok(None)`, если
@@ -86,7 +105,7 @@ trait Provider: Send + Sync {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// HTTP-клиент (один на процесс)
+// HTTP-клиент (один на процесс) + пер-хост лимитер с backoff
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn client() -> &'static reqwest::blocking::Client {
@@ -101,24 +120,119 @@ fn client() -> &'static reqwest::blocking::Client {
     })
 }
 
-/// Глобальный троттл для MusicBrainz / Cover Art Archive: их условия требуют не
-/// более ~1 запроса в секунду на клиента, иначе сыпется 503 и временный бан.
-/// Запросы выполняются на blocking-пуле, поэтому короткий `sleep` под мьютексом
-/// просто сериализует обращения и держит интервал.
-fn mb_throttle() {
-    use std::sync::Mutex;
-    use std::time::Instant;
-    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    let lock = LAST.get_or_init(|| Mutex::new(None));
-    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let min_gap = Duration::from_millis(1100);
-    if let Some(prev) = *guard {
-        let elapsed = prev.elapsed();
-        if elapsed < min_gap {
-            std::thread::sleep(min_gap - elapsed);
-        }
+/// Состояние лимитера по одному хосту.
+#[derive(Default)]
+struct HostState {
+    /// Время, на которое зарезервирован следующий запрос (выдержка интервала).
+    next_slot: Option<Instant>,
+    /// До этого момента хост в backoff (после 429/503 с Retry-After).
+    blocked_until: Option<Instant>,
+}
+
+fn host_registry() -> &'static Mutex<HashMap<String, HostState>> {
+    static REG: OnceLock<Mutex<HashMap<String, HostState>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Минимальный интервал между запросами к хосту. MusicBrainz / Cover Art Archive
+/// требуют ≤1 запроса в секунду; iTunes/Deezer ограничиваем мягче (плюс backoff
+/// на 429/503). Это сериализует и ленивые запросы фронта, и батч-подготовку,
+/// идущие параллельно.
+fn host_min_gap(host: &str) -> Duration {
+    match host {
+        "musicbrainz.org" | "coverartarchive.org" => Duration::from_millis(1100),
+        "itunes.apple.com" => Duration::from_millis(300),
+        "api.deezer.com" => Duration::from_millis(220),
+        _ => Duration::from_millis(120),
     }
-    *guard = Some(Instant::now());
+}
+
+/// Грубо извлекает хост из URL (без полноценного парсинга URL).
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+/// Ждёт, пока хосту можно слать следующий запрос (интервал + backoff), и
+/// резервирует слот. Мьютекс под сон НЕ держим: считаем нужную задержку,
+/// сдвигаем слот и спим уже после освобождения мьютекса.
+fn host_throttle(host: &str) {
+    let sleep_dur = {
+        let reg = host_registry();
+        let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
+        let st = guard.entry(host.to_string()).or_default();
+        let now = Instant::now();
+        let mut earliest = st.next_slot.unwrap_or(now);
+        if let Some(b) = st.blocked_until {
+            if b > earliest {
+                earliest = b;
+            }
+        }
+        let target = if earliest > now { earliest } else { now };
+        // Следующий слот — не раньше target + интервал.
+        st.next_slot = Some(target + host_min_gap(host));
+        target.saturating_duration_since(now)
+    };
+    if !sleep_dur.is_zero() {
+        std::thread::sleep(sleep_dur);
+    }
+}
+
+/// Регистрирует backoff для хоста после 429/503 (берём максимум из текущего и
+/// нового, чтобы не сокращать уже назначенную паузу).
+fn register_backoff(host: &str, secs: u64) {
+    let reg = host_registry();
+    let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
+    let st = guard.entry(host.to_string()).or_default();
+    let until = Instant::now() + Duration::from_secs(secs);
+    st.blocked_until = Some(match st.blocked_until {
+        Some(b) if b > until => b,
+        _ => until,
+    });
+}
+
+/// Сколько секунд ждать по заголовку `Retry-After` (или дефолт 5с). Поддерживаем
+/// только формат «дельта-секунды»; ограничиваем сверху, чтобы не зависнуть.
+fn retry_after_secs(resp: &reqwest::blocking::Response) -> u64 {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(5)
+        .clamp(1, 120)
+}
+
+/// Отправляет запрос с учётом пер-хост лимита и backoff. На 429/503 регистрирует
+/// backoff и возвращает `Err` (провайдер расценит это как временную ошибку и не
+/// закэширует «нет»).
+fn send_throttled(
+    builder: reqwest::blocking::RequestBuilder,
+    host: &str,
+) -> Result<reqwest::blocking::Response, String> {
+    host_throttle(host);
+    let resp = builder.send().map_err(|e| e.to_string())?;
+    let code = resp.status().as_u16();
+    if code == 429 || code == 503 {
+        let secs = retry_after_secs(&resp);
+        register_backoff(host, secs);
+        return Err(format!("{} ответил {} (backoff {}с)", host, code, secs));
+    }
+    Ok(resp)
+}
+
+/// GET изображения с лимитом по хосту (хост берётся из самого URL).
+fn get_image(url: &str) -> Result<reqwest::blocking::Response, String> {
+    let host = host_of(url);
+    send_throttled(client().get(url), &host)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -227,6 +341,13 @@ fn is_placeholder_image(url: &str) -> bool {
 /// реальные фото — 90 КБ и больше; порог с большим запасом между ними.
 const MIN_REAL_IMAGE_BYTES: usize = 45_000;
 
+/// Жёсткий предел размера скачиваемого изображения (защита от «бомбы»/мусора).
+const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+/// Целевой максимум стороны при пережатии в WebP (downscale, как у миниатюр).
+const ARTIST_IMAGE_MAX_DIM: u32 = 800;
+const COVER_IMAGE_MAX_DIM: u32 = 1000;
+
 /// Насколько найденный альбом соответствует запросу (артист + название).
 fn album_score(query_artist: &str, query_album: &str, album: &ExternalAlbum) -> f32 {
     let title_sim = similarity(query_album, &album.title);
@@ -271,18 +392,17 @@ impl Provider for ITunes {
         }
 
         let term = format!("{} {}", artist, album);
-        let search: SearchResp = client
-            .get("https://itunes.apple.com/search")
-            .query(&[
+        let search: SearchResp = send_throttled(
+            client.get("https://itunes.apple.com/search").query(&[
                 ("term", term.as_str()),
                 ("entity", "album"),
                 ("limit", "6"),
                 ("media", "music"),
-            ])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+            ]),
+            "itunes.apple.com",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         // Лучший альбом-кандидат по названию.
         let best = search
@@ -323,17 +443,16 @@ impl Provider for ITunes {
             track_time_millis: Option<u64>,
         }
 
-        let lookup: LookupResp = client
-            .get("https://itunes.apple.com/lookup")
-            .query(&[
+        let lookup: LookupResp = send_throttled(
+            client.get("https://itunes.apple.com/lookup").query(&[
                 ("id", collection_id.to_string().as_str()),
                 ("entity", "song"),
                 ("limit", "300"),
-            ])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+            ]),
+            "itunes.apple.com",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         let mut tracks: Vec<ExternalTrack> = lookup
             .results
@@ -392,18 +511,17 @@ impl Provider for ITunes {
             ("song", format!("{} {}", artist, title), title)
         };
 
-        let resp: SearchResp = client
-            .get("https://itunes.apple.com/search")
-            .query(&[
+        let resp: SearchResp = send_throttled(
+            client.get("https://itunes.apple.com/search").query(&[
                 ("term", query.as_str()),
                 ("entity", entity),
                 ("limit", "5"),
                 ("media", "music"),
-            ])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+            ]),
+            "itunes.apple.com",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         let best = resp
             .results
@@ -465,13 +583,14 @@ impl Provider for Deezer {
         }
 
         let q = format!("artist:\"{}\" album:\"{}\"", artist, album);
-        let search: SearchResp = client
-            .get("https://api.deezer.com/search/album")
-            .query(&[("q", q.as_str()), ("limit", "6")])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+        let search: SearchResp = send_throttled(
+            client
+                .get("https://api.deezer.com/search/album")
+                .query(&[("q", q.as_str()), ("limit", "6")]),
+            "api.deezer.com",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         let best = search
             .data
@@ -508,12 +627,12 @@ impl Provider for Deezer {
             artist: Option<ArtistRef>,
         }
 
-        let album_resp: AlbumResp = client
-            .get(format!("https://api.deezer.com/album/{}", hit.id))
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+        let album_resp: AlbumResp = send_throttled(
+            client.get(format!("https://api.deezer.com/album/{}", hit.id)),
+            "api.deezer.com",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         let mut tracks: Vec<ExternalTrack> = album_resp
             .tracks
@@ -561,13 +680,14 @@ impl Provider for Deezer {
             picture_big: Option<String>,
         }
 
-        let search: SearchResp = client
-            .get("https://api.deezer.com/search/artist")
-            .query(&[("q", artist), ("limit", "8")])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+        let search: SearchResp = send_throttled(
+            client
+                .get("https://api.deezer.com/search/artist")
+                .query(&[("q", artist), ("limit", "8")]),
+            "api.deezer.com",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         // Берём лучшего по совпадению имени, при равенстве — более раннего
         // (Deezer отдаёт результаты по релевантности, поэтому первый
@@ -624,13 +744,14 @@ impl Provider for Deezer {
                 cover_big: Option<String>,
             }
             let q = format!("artist:\"{}\" album:\"{}\"", artist, album);
-            let resp: SearchResp = client
-                .get("https://api.deezer.com/search/album")
-                .query(&[("q", q.as_str()), ("limit", "5")])
-                .send()
-                .map_err(|e| e.to_string())?
-                .json()
-                .map_err(|e| e.to_string())?;
+            let resp: SearchResp = send_throttled(
+                client
+                    .get("https://api.deezer.com/search/album")
+                    .query(&[("q", q.as_str()), ("limit", "5")]),
+                "api.deezer.com",
+            )?
+            .json()
+            .map_err(|e| e.to_string())?;
             let best = resp
                 .data
                 .into_iter()
@@ -666,13 +787,14 @@ impl Provider for Deezer {
             album: Option<AlbumRef>,
         }
         let q = format!("artist:\"{}\" track:\"{}\"", artist, title);
-        let resp: TrackSearchResp = client
-            .get("https://api.deezer.com/search/track")
-            .query(&[("q", q.as_str()), ("limit", "5")])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+        let resp: TrackSearchResp = send_throttled(
+            client
+                .get("https://api.deezer.com/search/track")
+                .query(&[("q", q.as_str()), ("limit", "5")]),
+            "api.deezer.com",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
         let best = resp
             .data
             .into_iter()
@@ -735,14 +857,14 @@ impl Provider for MusicBrainz {
         }
 
         let query = format!("release:\"{}\" AND artist:\"{}\"", album, artist);
-        mb_throttle();
-        let search: SearchResp = client
-            .get("https://musicbrainz.org/ws/2/release/")
-            .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "6")])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+        let search: SearchResp = send_throttled(
+            client
+                .get("https://musicbrainz.org/ws/2/release/")
+                .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "6")]),
+            "musicbrainz.org",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         // Среди кандидатов выбираем с лучшим совпадением названия и наибольшим
         // числом треков (предпочитаем полные релизы, а не синглы).
@@ -788,14 +910,14 @@ impl Provider for MusicBrainz {
             length: Option<u64>,
         }
 
-        mb_throttle();
-        let detail: ReleaseResp = client
-            .get(format!("https://musicbrainz.org/ws/2/release/{}", release.id))
-            .query(&[("inc", "recordings"), ("fmt", "json")])
-            .send()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
+        let detail: ReleaseResp = send_throttled(
+            client
+                .get(format!("https://musicbrainz.org/ws/2/release/{}", release.id))
+                .query(&[("inc", "recordings"), ("fmt", "json")]),
+            "musicbrainz.org",
+        )?
+        .json()
+        .map_err(|e| e.to_string())?;
 
         let mut tracks: Vec<ExternalTrack> = Vec::new();
         for medium in &detail.media {
@@ -855,14 +977,14 @@ fn mb_release_group_id(
     }
 
     let query = format!("releasegroup:\"{}\" AND artist:\"{}\"", album, artist);
-    mb_throttle();
-    let resp: Resp = client
-        .get("https://musicbrainz.org/ws/2/release-group/")
-        .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "6")])
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let resp: Resp = send_throttled(
+        client
+            .get("https://musicbrainz.org/ws/2/release-group/")
+            .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "6")]),
+        "musicbrainz.org",
+    )?
+    .json()
+    .map_err(|e| e.to_string())?;
 
     let best = resp
         .groups
@@ -932,11 +1054,10 @@ impl Provider for CoverArtArchive {
             large: Option<String>,
         }
 
-        mb_throttle();
-        let resp = client
-            .get(format!("https://coverartarchive.org/release-group/{}", rg_id))
-            .send()
-            .map_err(|e| e.to_string())?;
+        let resp = send_throttled(
+            client.get(format!("https://coverartarchive.org/release-group/{}", rg_id)),
+            "coverartarchive.org",
+        )?;
         // Нет обложки для группы релизов — CAA отвечает 404.
         if !resp.status().is_success() {
             return Ok(None);
@@ -1020,9 +1141,9 @@ fn wiki_lookup(
     }
 
     let endpoint = format!("https://{}.wikipedia.org/w/api.php", lang);
-    let resp: Resp = client
-        .get(&endpoint)
-        .query(&[
+    let host = format!("{}.wikipedia.org", lang);
+    let resp: Resp = send_throttled(
+        client.get(&endpoint).query(&[
             ("action", "query"),
             ("format", "json"),
             ("prop", "pageimages|description"),
@@ -1032,11 +1153,11 @@ fn wiki_lookup(
             ("gsrsearch", artist),
             ("gsrlimit", "5"),
             ("gsrnamespace", "0"),
-        ])
-        .send()
-        .map_err(|e| e.to_string())?
-        .json()
-        .map_err(|e| e.to_string())?;
+        ]),
+        &host,
+    )?
+    .json()
+    .map_err(|e| e.to_string())?;
 
     let Some(query) = resp.query else {
         return Ok(None);
@@ -1113,24 +1234,32 @@ fn cover_providers() -> Vec<Box<dyn Provider>> {
 }
 
 /// Опрашивает источники и возвращает обложку трека/альбома (первое совпадение).
-pub fn fetch_track_cover(artist: &str, album: &str, title: &str) -> Option<ExternalImage> {
+/// `TemporaryError`, если никто не нашёл, но хотя бы один провайдер упал.
+pub fn fetch_track_cover(artist: &str, album: &str, title: &str) -> FetchOutcome<ExternalImage> {
     let client = client();
+    let mut had_error = false;
     for provider in cover_providers() {
         match provider.cover(client, artist, album, title) {
-            Ok(Some(img)) => return Some(img),
+            Ok(Some(img)) => return FetchOutcome::Found(img),
             Ok(None) => {}
             Err(e) => {
+                had_error = true;
                 eprintln!("[external] {} cover error: {}", provider.name(), e);
             }
         }
     }
-    None
+    if had_error {
+        FetchOutcome::TemporaryError
+    } else {
+        FetchOutcome::NotFound
+    }
 }
 
 /// Опрашивает источники и возвращает лучший по совпадению список треков альбома.
-pub fn fetch_album_tracklist(artist: &str, album: &str) -> Option<ExternalAlbum> {
+pub fn fetch_album_tracklist(artist: &str, album: &str) -> FetchOutcome<ExternalAlbum> {
     let client = client();
     let mut best: Option<(f32, ExternalAlbum)> = None;
+    let mut had_error = false;
     for provider in album_providers() {
         match provider.album_tracklist(client, artist, album) {
             Ok(Some(candidate)) => {
@@ -1154,20 +1283,26 @@ pub fn fetch_album_tracklist(artist: &str, album: &str) -> Option<ExternalAlbum>
             }
             Ok(None) => {}
             Err(e) => {
+                had_error = true;
                 eprintln!("[external] {} album error: {}", provider.name(), e);
             }
         }
     }
-    best.map(|(_, album)| album)
+    match best {
+        Some((_, album)) => FetchOutcome::Found(album),
+        None if had_error => FetchOutcome::TemporaryError,
+        None => FetchOutcome::NotFound,
+    }
 }
 
 /// Опрашивает источники и возвращает лучшую аватарку исполнителя. Провайдеры
 /// идут по приоритету: как только один уверенно совпал (≥0.85), последующие
 /// (например, Wikipedia) не опрашиваются — экономим сеть и снижаем риск
 /// подставить чужое фото из менее точного источника.
-pub fn fetch_artist_image(artist: &str) -> Option<ExternalImage> {
+pub fn fetch_artist_image(artist: &str) -> FetchOutcome<ExternalImage> {
     let client = client();
     let mut best: Option<(f32, ExternalImage)> = None;
+    let mut had_error = false;
     for provider in image_providers() {
         match provider.artist_image(client, artist) {
             Ok(Some(img)) => {
@@ -1181,11 +1316,16 @@ pub fn fetch_artist_image(artist: &str) -> Option<ExternalImage> {
             }
             Ok(None) => {}
             Err(e) => {
+                had_error = true;
                 eprintln!("[external] {} image error: {}", provider.name(), e);
             }
         }
     }
-    best.map(|(_, img)| img)
+    match best {
+        Some((_, img)) => FetchOutcome::Found(img),
+        None if had_error => FetchOutcome::TemporaryError,
+        None => FetchOutcome::NotFound,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1248,6 +1388,191 @@ pub fn build_layout(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Кастомный протокол lfmusic-external (отдаёт кэшированные WebP без base64 в IPC)
+// ──────────────────────────────────────────────────────────────────────────────
+
+const SCHEME: &str = "lfmusic-external";
+
+/// Платформенный origin кастомного протокола (как его видит вебвью).
+fn scheme_origin() -> String {
+    #[cfg(any(windows, target_os = "android"))]
+    {
+        format!("http://{}.localhost", SCHEME)
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
+    {
+        format!("{}://localhost", SCHEME)
+    }
+}
+
+/// Чистый билдер URL картинки для `<img :src>`. `kind` — "artist"|"cover",
+/// `hex` — hex-хеш ключа кэша, `version` — для cache-busting (момент скачивания):
+/// при refresh время меняется → меняется URL → вебвью перезагружает картинку.
+fn external_protocol_url(kind: &str, hex: &str, version: u64) -> String {
+    format!("{}/{}/{}?v={}", scheme_origin(), kind, hex, version)
+}
+
+fn artist_image_url(key: &str, version: u64) -> String {
+    external_protocol_url("artist", &format!("{:016x}", key_hash(key)), version)
+}
+
+fn cover_image_url(key: &str, version: u64) -> String {
+    external_protocol_url("cover", &format!("{:016x}", key_hash(key)), version)
+}
+
+/// Имя файла кэшированной аватарки (всегда WebP — после пережатия).
+fn artist_file_name(key: &str) -> String {
+    format!("{:016x}.webp", key_hash(key))
+}
+
+/// Имя файла кэшированной обложки (префикс `c`, чтобы не путать с аватарками).
+fn cover_file_name(key: &str) -> String {
+    format!("c{:016x}.webp", key_hash(key))
+}
+
+fn not_found() -> Response<Vec<u8>> {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Vec::new())
+        .unwrap()
+}
+
+fn build_external_response<R: Runtime>(
+    app: &AppHandle<R>,
+    uri: &tauri::http::Uri,
+) -> Response<Vec<u8>> {
+    // Путь: /<kind>/<hex>. kind = artist|cover, hex — hex от key_hash.
+    let mut segs = uri.path().trim_matches('/').splitn(2, '/');
+    let kind = segs.next().unwrap_or("");
+    let hex = segs.next().unwrap_or("");
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return not_found();
+    }
+    let Ok(app_data_dir) = app.path().app_data_dir() else {
+        return not_found();
+    };
+    let path = match kind {
+        "artist" => artists_dir(&app_data_dir).join(format!("{}.webp", hex)),
+        "cover" => covers_dir(&app_data_dir).join(format!("c{}.webp", hex)),
+        _ => return not_found(),
+    };
+    match fs::read(&path) {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/webp")
+            .header(header::CACHE_CONTROL, "max-age=31536000, immutable")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(bytes)
+            .unwrap(),
+        Err(_) => not_found(),
+    }
+}
+
+/// Асинхронный обработчик протокола `lfmusic-external`. Чтение файла — в
+/// отдельном потоке, чтобы не блокировать вебвью.
+pub fn protocol_handler<R: Runtime>(
+    ctx: UriSchemeContext<'_, R>,
+    request: tauri::http::Request<Vec<u8>>,
+    responder: UriSchemeResponder,
+) {
+    let app = ctx.app_handle().clone();
+    let uri = request.uri().clone();
+    std::thread::spawn(move || {
+        responder.respond(build_external_response(&app, &uri));
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Скачивание + валидация + пережатие изображений
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Итог скачивания изображения.
+enum ImageDownload {
+    /// Успешно скачано, провалидировано и пережато в WebP (файл записан).
+    Saved,
+    /// Валидный ответ, но это дефолтный плейсхолдер источника → кэшируем «нет».
+    Placeholder,
+    /// Сетевая/форматная ошибка → НЕ кэшируем «нет», повторим позже.
+    Error(String),
+}
+
+/// Скачивает изображение и валидирует его: HTTP-статус (`error_for_status`),
+/// `Content-Type: image/*`, лимит размера, декодирование (отсев HTML-ошибок и
+/// «битых» файлов) — затем пережимает в WebP с ограничением стороны `max_dim`.
+/// `min_real_bytes` — порог «плейсхолдера» по размеру оригинала (для аватарок;
+/// для обложек `None`, т.к. бывают легитимные мелкие арты).
+fn download_validate_encode(
+    url: &str,
+    target: &PathBuf,
+    max_dim: u32,
+    min_real_bytes: Option<usize>,
+) -> ImageDownload {
+    let resp = match get_image(url) {
+        Ok(r) => r,
+        Err(e) => return ImageDownload::Error(e),
+    };
+    // HTTP-ошибка (4xx/5xx) — не сохраняем её тело как «обложку».
+    let resp = match resp.error_for_status() {
+        Ok(r) => r,
+        Err(e) => return ImageDownload::Error(e.to_string()),
+    };
+    // Content-Type должен быть image/* (иначе это HTML-ошибка/редирект-страница).
+    if let Some(ct) = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        if !ct.trim().to_ascii_lowercase().starts_with("image/") {
+            return ImageDownload::Error(format!("не изображение: {}", ct));
+        }
+    }
+    let bytes = match resp.bytes() {
+        Ok(b) => b,
+        Err(e) => return ImageDownload::Error(e.to_string()),
+    };
+    if bytes.len() > MAX_DOWNLOAD_BYTES {
+        return ImageDownload::Error(format!("слишком большой файл: {} Б", bytes.len()));
+    }
+    // Подозрительно маленький оригинал — дефолтный силуэт источника.
+    if let Some(min) = min_real_bytes {
+        if bytes.len() < min {
+            return ImageDownload::Placeholder;
+        }
+    }
+    // Декодируем — заодно отсекаем не-картинки и узнаём размеры.
+    let img = match image::load_from_memory(&bytes) {
+        Ok(i) => i,
+        Err(_) => return ImageDownload::Error("не удалось декодировать изображение".into()),
+    };
+    if img.width() < 32 || img.height() < 32 {
+        return ImageDownload::Placeholder;
+    }
+    // Пережатие: downscale до max_dim + WebP (как миниатюры обложек треков).
+    let thumb = img.thumbnail(max_dim, max_dim);
+    let mut out = Vec::new();
+    if thumb
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::WebP)
+        .is_err()
+    {
+        return ImageDownload::Error("не удалось закодировать WebP".into());
+    }
+    // Атомарная запись (temp + rename), чтобы протокол не прочитал недописанный.
+    let Some(dir) = target.parent() else {
+        return ImageDownload::Error("нет родительской директории".into());
+    };
+    let tmp = dir.join(format!(".tmp_{}_{}.webp", std::process::id(), key_hash(url)));
+    if fs::write(&tmp, &out).is_err() {
+        return ImageDownload::Error("ошибка записи файла".into());
+    }
+    if fs::rename(&tmp, target).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return ImageDownload::Error("ошибка переименования файла".into());
+    }
+    ImageDownload::Saved
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Дисковый кэш аватарок исполнителей (по образцу covers.rs)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1261,13 +1586,22 @@ struct ArtistImageRecord {
     fetched_secs: u64,
 }
 
-/// Результат запроса аватарки исполнителя для фронтенда.
+/// Результат запроса аватарки/обложки для фронтенда. Вместо base64 — короткий
+/// URL кастомного протокола `lfmusic-external://…` (или `None`, если нет).
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtistImageResult {
     /// "ok" | "none"
     pub status: String,
     pub source: Option<String>,
-    pub data_url: Option<String>,
+    pub url: Option<String>,
+}
+
+fn none_result() -> ArtistImageResult {
+    ArtistImageResult {
+        status: "none".into(),
+        source: None,
+        url: None,
+    }
 }
 
 fn artists_dir(app_data_dir: &PathBuf) -> PathBuf {
@@ -1276,10 +1610,9 @@ fn artists_dir(app_data_dir: &PathBuf) -> PathBuf {
     dir
 }
 
-/// Версия кэша аватарок. Повышение сбрасывает дисковый кэш один раз —
-/// например, чтобы выкинуть дефолтные картинки-силуэты, закэшированные до
-/// добавления их фильтрации.
-const ARTIST_IMAGE_CACHE_VERSION: u32 = 4;
+/// Версия кэша аватарок. Повышение сбрасывает дисковый кэш один раз — например,
+/// при смене формата хранения (теперь WebP + отдача через кастомный протокол).
+const ARTIST_IMAGE_CACHE_VERSION: u32 = 5;
 
 /// Сбрасывает кэш аватарок, если его версия устарела (выполняется один раз).
 fn ensure_artist_cache_version(app_data_dir: &PathBuf) {
@@ -1331,80 +1664,27 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn mime_for_ext(ext: &str) -> &'static str {
-    match ext {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "image/jpeg",
-    }
-}
-
-fn ext_from_url_or_ct(url: &str, content_type: Option<&str>) -> &'static str {
-    let lower = url.to_lowercase();
-    if lower.contains(".png") {
-        return "png";
-    }
-    if lower.contains(".webp") {
-        return "webp";
-    }
-    if lower.contains(".gif") {
-        return "gif";
-    }
-    if lower.contains(".jpg") || lower.contains(".jpeg") {
-        return "jpg";
-    }
-    match content_type {
-        Some(ct) if ct.contains("png") => "png",
-        Some(ct) if ct.contains("webp") => "webp",
-        Some(ct) if ct.contains("gif") => "gif",
-        _ => "jpg",
-    }
-}
-
-fn read_as_data_url(file_path: &PathBuf) -> Option<String> {
-    let data = fs::read(file_path).ok()?;
-    let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or("jpg");
-    Some(format!(
-        "data:{};base64,{}",
-        mime_for_ext(ext),
-        STANDARD.encode(&data)
-    ))
-}
-
-/// Скачивает изображение по ссылке и сохраняет в кэш аватарок.
-/// `Ok(Some((имя файла, data-URL)))` — успех; `Ok(None)` — скачали, но это
-/// дефолтный плейсхолдер (пустой/слишком маленький) → ставить не нужно;
-/// `Err` — сетевая/IO-ошибка (можно повторить позже).
-fn download_artist_image(
+/// Пометить ключ как «нет внешней картинки» (негативный кэш) и сохранить.
+fn cache_none_artist(
     app_data_dir: &PathBuf,
-    artist_key: &str,
-    url: &str,
-) -> Result<Option<(String, String)>, String> {
-    let resp = client().get(url).send().map_err(|e| e.to_string())?;
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let bytes = resp.bytes().map_err(|e| e.to_string())?;
-    // Пустой или подозрительно маленький файл — дефолтный плейсхолдер источника.
-    if bytes.len() < MIN_REAL_IMAGE_BYTES {
-        return Ok(None);
-    }
-    let ext = ext_from_url_or_ct(url, content_type.as_deref());
-    let filename = format!("{:016x}.{}", key_hash(artist_key), ext);
-    let dir = artists_dir(app_data_dir);
-    let target = dir.join(&filename);
-    fs::write(&target, &bytes).map_err(|e| e.to_string())?;
-    let data_url = format!("data:{};base64,{}", mime_for_ext(ext), STANDARD.encode(&bytes));
-    Ok(Some((filename, data_url)))
+    manifest: &mut HashMap<String, ArtistImageRecord>,
+    key: String,
+) {
+    manifest.insert(
+        key,
+        ArtistImageRecord {
+            file: None,
+            source: None,
+            status: "none".into(),
+            fetched_secs: now_secs(),
+        },
+    );
+    let _ = save_artists_manifest(app_data_dir, manifest);
 }
 
 /// Получить аватарку исполнителя: сначала из кэша, иначе из сети (если включено
 /// настройкой — проверяется на стороне команды). `refresh` форсирует повторную
-/// загрузку из сети.
+/// загрузку из сети. Возвращает URL кастомного протокола (не base64).
 pub fn get_or_fetch_artist_image(
     app_data_dir: &PathBuf,
     artist_name: &str,
@@ -1412,7 +1692,7 @@ pub fn get_or_fetch_artist_image(
 ) -> ArtistImageResult {
     let key = artist_key(artist_name);
     if key.is_empty() {
-        return ArtistImageResult { status: "none".into(), source: None, data_url: None };
+        return none_result();
     }
 
     ensure_artist_cache_version(app_data_dir);
@@ -1421,77 +1701,80 @@ pub fn get_or_fetch_artist_image(
         if let Some(rec) = manifest.get(&key) {
             if rec.status == "ok" {
                 if let Some(file) = &rec.file {
-                    let path = artists_dir(app_data_dir).join(file);
-                    if let Some(data_url) = read_as_data_url(&path) {
+                    if artists_dir(app_data_dir).join(file).exists() {
                         return ArtistImageResult {
                             status: "ok".into(),
                             source: rec.source.clone(),
-                            data_url: Some(data_url),
+                            url: Some(artist_image_url(&key, rec.fetched_secs)),
                         };
                     }
                 }
             } else if rec.status == "none" {
-                // Кэш без срока истечения: «не найдено» больше не перепрашиваем
-                // (см. батч-проход подготовки внешних источников).
-                return ArtistImageResult { status: "none".into(), source: None, data_url: None };
+                // Негативный кэш: «не найдено» больше не перепрашиваем. Сюда
+                // попадают только реальные «нет» — временные ошибки не кэшируются.
+                return none_result();
             }
         }
     }
 
     // Идём в сеть.
-    let none_result = || ArtistImageResult { status: "none".into(), source: None, data_url: None };
-    let cache_none = |manifest: &mut HashMap<String, ArtistImageRecord>, key: String| {
-        manifest.insert(
-            key,
-            ArtistImageRecord {
-                file: None,
-                source: None,
-                status: "none".into(),
-                fetched_secs: now_secs(),
-            },
-        );
-    };
+    let now = now_secs();
+    let filename = artist_file_name(&key);
+    let target = artists_dir(app_data_dir).join(&filename);
 
     match fetch_artist_image(artist_name) {
-        Some(img) => match download_artist_image(app_data_dir, &key, &img.url) {
-            Ok(Some((file, data_url))) => {
-                manifest.insert(
-                    key,
-                    ArtistImageRecord {
-                        file: Some(file),
-                        source: Some(img.source.clone()),
+        FetchOutcome::Found(img) => {
+            match download_validate_encode(
+                &img.url,
+                &target,
+                ARTIST_IMAGE_MAX_DIM,
+                Some(MIN_REAL_IMAGE_BYTES),
+            ) {
+                ImageDownload::Saved => {
+                    manifest.insert(
+                        key.clone(),
+                        ArtistImageRecord {
+                            file: Some(filename),
+                            source: Some(img.source.clone()),
+                            status: "ok".into(),
+                            fetched_secs: now,
+                        },
+                    );
+                    let _ = save_artists_manifest(app_data_dir, &manifest);
+                    ArtistImageResult {
                         status: "ok".into(),
-                        fetched_secs: now_secs(),
-                    },
-                );
-                let _ = save_artists_manifest(app_data_dir, &manifest);
-                ArtistImageResult { status: "ok".into(), source: Some(img.source), data_url: Some(data_url) }
+                        source: Some(img.source),
+                        url: Some(artist_image_url(&key, now)),
+                    }
+                }
+                // Скачали дефолтный плейсхолдер — это легитимное «нет реального фото».
+                ImageDownload::Placeholder => {
+                    cache_none_artist(app_data_dir, &mut manifest, key);
+                    none_result()
+                }
+                // Сетевая/форматная ошибка — НЕ кэшируем, попробуем позже.
+                ImageDownload::Error(e) => {
+                    eprintln!("[external] download artist image failed: {}", e);
+                    none_result()
+                }
             }
-            // Скачали дефолтный плейсхолдер — не ставим, кэшируем «нет».
-            Ok(None) => {
-                cache_none(&mut manifest, key);
-                let _ = save_artists_manifest(app_data_dir, &manifest);
-                none_result()
-            }
-            // Сетевая ошибка — не кэшируем, попробуем позже.
-            Err(e) => {
-                eprintln!("[external] download artist image failed: {}", e);
-                none_result()
-            }
-        },
-        None => {
-            cache_none(&mut manifest, key);
-            let _ = save_artists_manifest(app_data_dir, &manifest);
+        }
+        // Все провайдеры ответили «нет» — кэшируем негативный результат.
+        FetchOutcome::NotFound => {
+            cache_none_artist(app_data_dir, &mut manifest, key);
             none_result()
         }
+        // Был сбой провайдера — НЕ кэшируем «нет», повторим при следующем заходе.
+        FetchOutcome::TemporaryError => none_result(),
     }
 }
 
 /// Загрузить все уже закэшированные аватарки (для быстрой отрисовки на старте).
+/// Возвращает протокол-URL (картинки тянутся вебвью лениво, без base64 в IPC).
 #[derive(Debug, Clone, Serialize)]
 pub struct CachedArtistImage {
     pub artist_key: String,
-    pub data_url: String,
+    pub url: String,
 }
 
 pub fn load_cached_artist_images(app_data_dir: &PathBuf) -> Vec<CachedArtistImage> {
@@ -1504,8 +1787,11 @@ pub fn load_cached_artist_images(app_data_dir: &PathBuf) -> Vec<CachedArtistImag
             continue;
         }
         if let Some(file) = &rec.file {
-            if let Some(data_url) = read_as_data_url(&dir.join(file)) {
-                out.push(CachedArtistImage { artist_key: key.clone(), data_url });
+            if dir.join(file).exists() {
+                out.push(CachedArtistImage {
+                    artist_key: key.clone(),
+                    url: artist_image_url(key, rec.fetched_secs),
+                });
             }
         }
     }
@@ -1524,6 +1810,24 @@ fn covers_dir(app_data_dir: &PathBuf) -> PathBuf {
 
 fn covers_manifest_path(app_data_dir: &PathBuf) -> PathBuf {
     app_data_dir.join("external_covers.json")
+}
+
+/// Версия кэша обложек. Повышение сбрасывает дисковый кэш один раз (смена формата
+/// хранения на WebP + отдача через кастомный протокол).
+const COVERS_CACHE_VERSION: u32 = 1;
+
+/// Сбрасывает кэш обложек, если его версия устарела (выполняется один раз).
+fn ensure_covers_cache_version(app_data_dir: &PathBuf) {
+    let path = app_data_dir.join("external_covers.version");
+    let current = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if current != COVERS_CACHE_VERSION {
+        let _ = fs::remove_dir_all(app_data_dir.join("external_covers"));
+        let _ = fs::remove_file(covers_manifest_path(app_data_dir));
+        let _ = fs::write(&path, COVERS_CACHE_VERSION.to_string());
+    }
 }
 
 fn load_covers_manifest(app_data_dir: &PathBuf) -> HashMap<String, ArtistImageRecord> {
@@ -1551,31 +1855,26 @@ fn cover_cache_key(artist: &str, album: &str, title: &str) -> String {
     }
 }
 
-/// Скачивает обложку и кладёт в кэш. `Ok(None)` — пустой ответ.
-fn download_cover_image(
+/// Пометить ключ обложки как «нет внешней» (негативный кэш) и сохранить.
+fn cache_none_cover(
     app_data_dir: &PathBuf,
-    key: &str,
-    url: &str,
-) -> Result<Option<(String, String)>, String> {
-    let resp = client().get(url).send().map_err(|e| e.to_string())?;
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let bytes = resp.bytes().map_err(|e| e.to_string())?;
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    let ext = ext_from_url_or_ct(url, content_type.as_deref());
-    let filename = format!("c{:016x}.{}", key_hash(key), ext);
-    let dir = covers_dir(app_data_dir);
-    fs::write(dir.join(&filename), &bytes).map_err(|e| e.to_string())?;
-    let data_url = format!("data:{};base64,{}", mime_for_ext(ext), STANDARD.encode(&bytes));
-    Ok(Some((filename, data_url)))
+    manifest: &mut HashMap<String, ArtistImageRecord>,
+    key: String,
+) {
+    manifest.insert(
+        key,
+        ArtistImageRecord {
+            file: None,
+            source: None,
+            status: "none".into(),
+            fetched_secs: now_secs(),
+        },
+    );
+    let _ = save_covers_manifest(app_data_dir, manifest);
 }
 
 /// Получить обложку трека/альбома: сначала из кэша, иначе из сети.
+/// Возвращает URL кастомного протокола (не base64).
 pub fn get_or_fetch_track_cover(
     app_data_dir: &PathBuf,
     artist: &str,
@@ -1583,75 +1882,71 @@ pub fn get_or_fetch_track_cover(
     title: &str,
     refresh: bool,
 ) -> ArtistImageResult {
-    let none_result = || ArtistImageResult { status: "none".into(), source: None, data_url: None };
     let key = cover_cache_key(artist, album, title);
     if key.is_empty() {
         return none_result();
     }
 
+    ensure_covers_cache_version(app_data_dir);
     let mut manifest = load_covers_manifest(app_data_dir);
     if !refresh {
         if let Some(rec) = manifest.get(&key) {
             if rec.status == "ok" {
                 if let Some(file) = &rec.file {
-                    let path = covers_dir(app_data_dir).join(file);
-                    if let Some(data_url) = read_as_data_url(&path) {
+                    if covers_dir(app_data_dir).join(file).exists() {
                         return ArtistImageResult {
                             status: "ok".into(),
                             source: rec.source.clone(),
-                            data_url: Some(data_url),
+                            url: Some(cover_image_url(&key, rec.fetched_secs)),
                         };
                     }
                 }
             } else if rec.status == "none" {
-                // Бессрочный негативный кэш (см. батч-проход подготовки).
+                // Негативный кэш (только реальные «нет», без временных ошибок).
                 return none_result();
             }
         }
     }
 
-    let cache_none = |manifest: &mut HashMap<String, ArtistImageRecord>, key: String| {
-        manifest.insert(
-            key,
-            ArtistImageRecord {
-                file: None,
-                source: None,
-                status: "none".into(),
-                fetched_secs: now_secs(),
-            },
-        );
-    };
+    let now = now_secs();
+    let filename = cover_file_name(&key);
+    let target = covers_dir(app_data_dir).join(&filename);
 
     match fetch_track_cover(artist, album, title) {
-        Some(img) => match download_cover_image(app_data_dir, &key, &img.url) {
-            Ok(Some((file, data_url))) => {
-                manifest.insert(
-                    key,
-                    ArtistImageRecord {
-                        file: Some(file),
-                        source: Some(img.source.clone()),
+        FetchOutcome::Found(img) => {
+            match download_validate_encode(&img.url, &target, COVER_IMAGE_MAX_DIM, None) {
+                ImageDownload::Saved => {
+                    manifest.insert(
+                        key.clone(),
+                        ArtistImageRecord {
+                            file: Some(filename),
+                            source: Some(img.source.clone()),
+                            status: "ok".into(),
+                            fetched_secs: now,
+                        },
+                    );
+                    let _ = save_covers_manifest(app_data_dir, &manifest);
+                    ArtistImageResult {
                         status: "ok".into(),
-                        fetched_secs: now_secs(),
-                    },
-                );
-                let _ = save_covers_manifest(app_data_dir, &manifest);
-                ArtistImageResult { status: "ok".into(), source: Some(img.source), data_url: Some(data_url) }
+                        source: Some(img.source),
+                        url: Some(cover_image_url(&key, now)),
+                    }
+                }
+                ImageDownload::Placeholder => {
+                    cache_none_cover(app_data_dir, &mut manifest, key);
+                    none_result()
+                }
+                ImageDownload::Error(e) => {
+                    eprintln!("[external] download cover failed: {}", e);
+                    none_result()
+                }
             }
-            Ok(None) => {
-                cache_none(&mut manifest, key);
-                let _ = save_covers_manifest(app_data_dir, &manifest);
-                none_result()
-            }
-            Err(e) => {
-                eprintln!("[external] download cover failed: {}", e);
-                none_result()
-            }
-        },
-        None => {
-            cache_none(&mut manifest, key);
-            let _ = save_covers_manifest(app_data_dir, &manifest);
+        }
+        FetchOutcome::NotFound => {
+            cache_none_cover(app_data_dir, &mut manifest, key);
             none_result()
         }
+        FetchOutcome::TemporaryError => none_result(),
     }
 }
 
@@ -1679,6 +1974,7 @@ pub fn artist_image_key(name: &str) -> String {
 /// Ключи обложек с окончательным результатом (ok/none) — такие батч-проход
 /// пропускает (сеть не дёргает, теги не перечитывает).
 pub fn cover_settled_keys(app_data_dir: &PathBuf) -> std::collections::HashSet<String> {
+    ensure_covers_cache_version(app_data_dir);
     load_covers_manifest(app_data_dir)
         .into_iter()
         .filter(|(_, r)| r.status == "ok" || r.status == "none")
@@ -1703,6 +1999,7 @@ pub fn mark_track_covers_none(app_data_dir: &PathBuf, keys: &[String]) {
     if keys.is_empty() {
         return;
     }
+    ensure_covers_cache_version(app_data_dir);
     let mut manifest = load_covers_manifest(app_data_dir);
     let now = now_secs();
     for key in keys {

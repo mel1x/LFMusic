@@ -26,12 +26,13 @@ export interface AlbumLayout {
 interface ArtistImageResult {
   status: "ok" | "none";
   source: string | null;
-  data_url: string | null;
+  /** URL кастомного протокола lfmusic-external:// (картинку тянет вебвью). */
+  url: string | null;
 }
 
 interface CachedArtistImage {
   artist_key: string;
-  data_url: string;
+  url: string;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -192,7 +193,7 @@ export function useExternalSources() {
     try {
       const list = await invoke<CachedArtistImage[]>("external_load_cached_artist_images");
       for (const e of list) {
-        if (avatars[e.artist_key] === undefined) avatars[e.artist_key] = e.data_url;
+        if (avatars[e.artist_key] === undefined) avatars[e.artist_key] = e.url;
       }
     } catch (e) {
       console.error("Ошибка загрузки кэша аватарок:", e);
@@ -217,7 +218,7 @@ export function useExternalSources() {
     avatarScheduler.schedule(key, () =>
       invoke<ArtistImageResult>("external_artist_image", { artistName, refresh: false })
         .then((res) => {
-          avatars[key] = res.status === "ok" ? res.data_url : null;
+          avatars[key] = res.status === "ok" ? res.url : null;
         })
         .catch((e) => {
           console.error("Ошибка получения аватарки исполнителя:", e);
@@ -235,7 +236,7 @@ export function useExternalSources() {
         artistName,
         refresh: true,
       });
-      avatars[key] = res.status === "ok" ? res.data_url : null;
+      avatars[key] = res.status === "ok" ? res.url : null;
       return avatars[key];
     } catch (e) {
       console.error("Ошибка обновления аватарки исполнителя:", e);
@@ -299,7 +300,7 @@ export function useExternalSources() {
     coverScheduler.schedule(key, () =>
       invoke<ArtistImageResult>("external_track_cover", { artist, album, title, refresh: false })
         .then((res) => {
-          const url = res.status === "ok" ? res.data_url : null;
+          const url = res.status === "ok" ? res.url : null;
           trackCovers[key] = url;
           const pending = coverWaiters.get(key);
           coverWaiters.delete(key);
