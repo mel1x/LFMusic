@@ -2,6 +2,7 @@
 import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import ContextMenu from './ContextMenu.vue'
+import ConfirmModal from './ConfirmModal.vue'
 import AnimatedCover from './AnimatedCover.vue'
 import ArrowUpIcon from './Icons/ArrowUpIcon.vue'
 import PlaylistIcon from './Icons/PlaylistIcon.vue'
@@ -10,6 +11,7 @@ import TuneIcon from './Icons/TuneIcon.vue'
 import AlbumIcon from './Icons/AlbumIcon.vue'
 import InfoIcon from './Icons/InfoIcon.vue'
 import DeleteIcon from './Icons/DeleteIcon.vue'
+import TrashIcon from './Icons/TrashIcon.vue'
 import defaultPlaylistCover from '../assets/playlistCover.webp'
 import type { TrackMetadata } from '../composables/usePlayer'
 import { usePlayer } from '../composables/usePlayer'
@@ -18,6 +20,8 @@ import { useCustomCovers } from '../composables/useCustomCovers'
 import { isPhoneViewport } from '../composables/usePlatform'
 import { useTrackInfoModal } from '../composables/useTrackInfoModal'
 import { useTrackEditModal } from '../composables/useTrackEditModal'
+import { useDownloads } from '../composables/useDownloads'
+import { useI18n } from '../composables/useI18n'
 
 const props = defineProps<{
     x: number
@@ -44,6 +48,41 @@ const { getTrackByPath, loadCoversForTracks } = usePlayer()
 const { getCustomCover } = useCustomCovers()
 const { openTrackInfo } = useTrackInfoModal()
 const { openTrackEdit } = useTrackEditModal()
+const { isDownloadedTrack, deleteDownloadedTrack } = useDownloads()
+const { t } = useI18n()
+
+// Трек скачан приложением — тогда показываем «Удалить трек» (файл + библиотека).
+const isDownloaded = computed(() => isDownloadedTrack(props.track.file_path))
+const showDeleteConfirm = ref(false)
+// Ошибка удаления (файл занят/нет прав) — показываем пользователю, а не глотаем:
+// иначе непонятно, удалился трек или нет.
+const deleteError = ref<string | null>(null)
+const deleteMessage = computed(() =>
+    t('trackMenu.deleteConfirmMessage', { title: props.track.title || t('trackMenu.noTitle') }),
+)
+
+function onDeleteTrackClick() {
+    showDeleteConfirm.value = true
+}
+async function confirmDeleteTrack() {
+    showDeleteConfirm.value = false
+    try {
+        await deleteDownloadedTrack(props.track.file_path)
+        emit('close')
+    } catch (e) {
+        console.error('Не удалось удалить трек:', e)
+        // Сообщение из бэкенда приходит строкой; показываем его в диалоге ошибки.
+        deleteError.value = e instanceof Error ? e.message : String(e)
+    }
+}
+function cancelDeleteTrack() {
+    showDeleteConfirm.value = false
+    emit('close')
+}
+function dismissDeleteError() {
+    deleteError.value = null
+    emit('close')
+}
 
 // "Перейти к альбому" имеет смысл только если у трека есть альбом и в нём
 // больше одного трека. Бэкенд создаёт album-плейлист только при count > 1,
@@ -322,7 +361,7 @@ function onAbout() {
 
 <template>
     <ContextMenu
-        v-if="!showPlaylistSheet"
+        v-if="!showPlaylistSheet && !showDeleteConfirm && deleteError === null"
         :x="x"
         :y="y"
         :alignRight="alignRight"
@@ -373,7 +412,32 @@ function onAbout() {
             <InfoIcon width="16" height="16" />
             <span>О треке</span>
         </button>
+        <template v-if="isDownloaded">
+            <div class="ctx-separator"></div>
+            <button class="ctx-item ctx-item-danger" @click="onDeleteTrackClick">
+                <TrashIcon width="16" height="16" />
+                <span>{{ t('trackMenu.delete') }}</span>
+            </button>
+        </template>
     </ContextMenu>
+    <ConfirmModal
+        :open="showDeleteConfirm"
+        :title="t('trackMenu.deleteConfirmTitle')"
+        :message="deleteMessage"
+        :confirmText="t('trackMenu.deleteConfirm')"
+        :cancelText="t('trackMenu.deleteCancel')"
+        @confirm="confirmDeleteTrack"
+        @cancel="cancelDeleteTrack"
+    />
+    <ConfirmModal
+        :open="deleteError !== null"
+        :title="t('trackMenu.deleteErrorTitle')"
+        :message="deleteError || ''"
+        :confirmText="t('trackMenu.deleteErrorDismiss')"
+        :hideCancel="true"
+        @confirm="dismissDeleteError"
+        @cancel="dismissDeleteError"
+    />
     <Teleport to="body">
         <Transition name="sub">
             <div
@@ -501,6 +565,20 @@ function onAbout() {
 }
 .ctx-item:hover svg {
     color: hsla(0, 0%, 100%, 0.8);
+}
+/* Деструктивное действие (удаление файла) — красноватый акцент. */
+.ctx-item-danger {
+    color: hsla(2, 60%, 72%, 0.9);
+}
+.ctx-item-danger svg {
+    color: hsla(2, 60%, 66%, 0.85);
+}
+.ctx-item-danger:hover {
+    background-color: hsla(2, 60%, 50%, 0.14);
+    color: hsla(2, 72%, 80%, 1);
+}
+.ctx-item-danger:hover svg {
+    color: hsla(2, 72%, 78%, 1);
 }
 .ctx-separator {
     height: 1px;

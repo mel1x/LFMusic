@@ -3,6 +3,7 @@ mod audio_player;
 mod catalog_search;
 mod covers;
 mod discord_rpc;
+mod downloads;
 mod external;
 mod library;
 mod mpris;
@@ -12,6 +13,7 @@ mod settings;
 mod spectrum;
 pub mod statistics;
 mod taskbar;
+mod tools;
 mod thumbnails;
 mod track_covers;
 mod window_state;
@@ -42,8 +44,8 @@ struct AudioFeatureProgress {
     percent: f64,
     active: bool,
     /// Текущая активная фаза подготовки: "analysis" (анализ треков для
-    /// рекомендаций), "external" (получение данных из интернета) или "done".
-    /// Фронт по ней выбирает текст прогресса.
+    /// рекомендаций), "external" (получение данных из интернета), "download"
+    /// (скачивание треков) или "done". Фронт по ней выбирает текст прогресса.
     phase: &'static str,
 }
 
@@ -92,13 +94,9 @@ fn emit_audio_feature_progress(
     app: &tauri::AppHandle,
     current: usize,
     total: usize,
+    percent: f64,
     phase: &'static str,
 ) {
-    let percent = if total > 0 {
-        (current as f64 / total as f64) * 100.0
-    } else {
-        100.0
-    };
     let active = total > 0 && current < total;
     let _ = app.emit(
         "audio_feature_progress",
@@ -112,20 +110,33 @@ fn emit_audio_feature_progress(
     );
 }
 
-/// Объединённый прогресс «подготовки»: фаза анализа аудио-фич (`f_*`) и фаза
-/// подготовки внешних источников (`e_*`) складываются в один прогресс-бар
-/// (TitleBar.vue). Внешние шаги дописываются к анализу, а не показываются
-/// отдельно.
+/// Объединённый прогресс «подготовки»: фаза анализа аудио-фич (`f_*`), фаза
+/// подготовки внешних источников (`e_*`) и фаза скачивания треков (`d_*`)
+/// складываются в один прогресс-бар (TitleBar.vue). Внешние шаги дописываются к
+/// анализу, скачивание — последней фазой (см. выбор `phase` ниже).
 #[derive(Clone, Copy)]
 struct PrepCounts {
     f_done: usize,
     f_total: usize,
     e_done: usize,
     e_total: usize,
+    d_done: usize,
+    d_total: usize,
+    /// Доля прогресса текущего скачиваемого трека (0..1). Прибавляется к числу
+    /// готовых только при расчёте процента — чтобы бар в шапке шёл плавно, а не
+    /// прыгал «потреково». На счётчик «готово/всего» (current/total) не влияет.
+    d_frac: f64,
 }
 
-static PREP_COUNTS: Mutex<PrepCounts> =
-    Mutex::new(PrepCounts { f_done: 0, f_total: 0, e_done: 0, e_total: 0 });
+static PREP_COUNTS: Mutex<PrepCounts> = Mutex::new(PrepCounts {
+    f_done: 0,
+    f_total: 0,
+    e_done: 0,
+    e_total: 0,
+    d_done: 0,
+    d_total: 0,
+    d_frac: 0.0,
+});
 static PREP_LAST_EMIT_MS: AtomicU64 = AtomicU64::new(0);
 
 fn prep_clock() -> &'static Instant {
@@ -137,26 +148,43 @@ fn prep_clock() -> &'static Instant {
 /// прогресс. По достижении 100% счётчики сбрасываются — следующий проход
 /// (новый анализ/подготовка) начинается с чистого листа.
 fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCounts)) {
-    let (current, total, force_done, phase) = {
+    let (current, total, percent, force_done, phase) = {
         let mut p = PREP_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
         mutate(&mut p);
-        let current = p.f_done + p.e_done;
-        let total = p.f_total + p.e_total;
+        let current = p.f_done + p.e_done + p.d_done;
+        let total = p.f_total + p.e_total + p.d_total;
         let done = total == 0 || current >= total;
-        // Фаза для текста прогресса: пока идёт получение из интернета — "external"
-        // (приоритетнее), иначе анализ — "analysis". До старта внешней подготовки
-        // (e_total ещё 0) показывается текст анализа.
+        // Фаза для текста прогресса: получение из интернета ("external")
+        // приоритетнее анализа ("analysis"); скачивание ("download") показывается
+        // последним — только когда анализ и внешние источники уже завершены.
         let phase = if p.e_total > 0 && p.e_done < p.e_total {
             "external"
         } else if p.f_total > 0 && p.f_done < p.f_total {
             "analysis"
+        } else if p.d_total > 0 && p.d_done < p.d_total {
+            "download"
         } else {
             "done"
         };
+        // Плавный процент: к числу готовых добавляем долю текущего скачиваемого
+        // трека (d_frac ∈ [0,1)). Так бар не прыгает с 0 сразу на «трек готов».
+        let percent = if total > 0 {
+            ((current as f64 + p.d_frac.clamp(0.0, 1.0)) / total as f64 * 100.0).clamp(0.0, 100.0)
+        } else {
+            100.0
+        };
         if done && total > 0 {
-            *p = PrepCounts { f_done: 0, f_total: 0, e_done: 0, e_total: 0 };
+            *p = PrepCounts {
+                f_done: 0,
+                f_total: 0,
+                e_done: 0,
+                e_total: 0,
+                d_done: 0,
+                d_total: 0,
+                d_frac: 0.0,
+            };
         }
-        (current, total, done, phase)
+        (current, total, percent, done, phase)
     };
 
     let elapsed_ms = prep_clock().elapsed().as_millis() as u64;
@@ -169,7 +197,7 @@ fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCou
             .compare_exchange(last, elapsed_ms, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     {
-        emit_audio_feature_progress(app, current, total, phase);
+        emit_audio_feature_progress(app, current, total, percent, phase);
     }
 }
 
@@ -187,6 +215,35 @@ fn report_external_progress(app: &tauri::AppHandle, done: usize, total: usize) {
     report_prep_progress(app, |p| {
         p.e_total = total;
         p.e_done = done.min(total);
+    });
+}
+
+/// Обновить фазу «скачивание треков» объединённого прогресса (вызывается из
+/// менеджера загрузок). Эта фаза показывается последней — после анализа и
+/// внешних источников.
+pub(crate) fn report_download_progress(app: &tauri::AppHandle, done: usize, total: usize) {
+    report_prep_progress(app, |p| {
+        p.d_total = total;
+        p.d_done = done.min(total);
+        // Целочисленное обновление (трек поставлен/завершён/убран) — сбрасываем
+        // дробь текущего трека, чтобы она не «висела» от предыдущего скачивания.
+        p.d_frac = 0.0;
+    });
+}
+
+/// То же, но с долей прогресса текущего скачиваемого трека (`frac` ∈ [0,1]) — для
+/// плавного процента в шапке во время загрузки. `done`/`total` остаются числом
+/// готовых/всего треков (счётчик в тексте прогресса не дробится).
+pub(crate) fn report_download_progress_frac(
+    app: &tauri::AppHandle,
+    done: usize,
+    total: usize,
+    frac: f64,
+) {
+    report_prep_progress(app, |p| {
+        p.d_total = total;
+        p.d_done = done.min(total);
+        p.d_frac = frac.clamp(0.0, 1.0);
     });
 }
 
@@ -1696,6 +1753,433 @@ fn discord_clear_presence() {
     discord_rpc::clear_presence();
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Скачивание треков (страница «Скачивание»)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Поиск треков во внешних источниках (кандидаты на скачивание), постранично.
+/// Помечает `in_library` для треков, уже присутствующих в локальной библиотеке.
+#[tauri::command]
+async fn downloads_search(
+    app: tauri::AppHandle,
+    query: String,
+    // Точные исполнитель/название (клик по «фантому» в альбоме) — включают точный
+    // поиск по полям Deezer; для обычного поиска из строки отсутствуют.
+    artist: Option<String>,
+    title: Option<String>,
+    index: Option<u32>,
+    limit: Option<u32>,
+) -> Result<external::ExternalSearchPage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut page = external::search_tracks(
+            &query,
+            artist.as_deref(),
+            title.as_deref(),
+            index.unwrap_or(0),
+            limit.unwrap_or(30),
+        );
+
+        // Индекс локального каталога — краткие блокировки настроек/библиотеки.
+        let separators = settings::get_artist_separators(&app.state::<SettingsState>());
+        let lib_index = app
+            .state::<LibraryState>()
+            .0
+            .lock()
+            .map(|lib| lib.catalog_artist_title_index(&separators))
+            .unwrap_or_default();
+
+        // Набор разделителей для нечёткого сопоставления готовим ОДИН раз до цикла:
+        // иначе на каждый из ~30 треков заново аллоцировался и сортировался их
+        // список (см. external::prepare_artist_separators).
+        let prepared_seps = external::prepare_artist_separators(&separators);
+
+        // Трек «уже в библиотеке», если совпало название (без шума), есть хотя бы
+        // один общий артист (поддержка мультиартистных треков) И альбом совместим.
+        // Альбом совместим, когда: у внешнего трека альбома нет, ИЛИ у локальной
+        // версии тег альбома пуст (не с чем сверять — не блокируем), ИЛИ ключи
+        // альбомов совпадают. Так одноимённый трек того же исполнителя из ДРУГОГО
+        // альбома НЕ помечается «скачанным» — только реально скачанная версия.
+        for t in &mut page.tracks {
+            let tkey = external::title_match_key(&t.title);
+            let Some(local_versions) = lib_index.get(&tkey) else {
+                continue;
+            };
+            let track_artists =
+                external::split_artists_for_match_prepared(&t.artist, &prepared_seps);
+            let ext_album_key = t
+                .album
+                .as_deref()
+                .map(external::album_match_key)
+                .unwrap_or_default();
+            let matched = local_versions.iter().any(|v| {
+                let artist_match = track_artists.iter().any(|a| v.artists.contains(a));
+                let album_match =
+                    ext_album_key.is_empty() || v.album_key.is_empty() || v.album_key == ext_album_key;
+                artist_match && album_match
+            });
+            if matched {
+                t.in_library = true;
+            }
+        }
+        page
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))
+}
+
+/// Поставить трек в очередь скачивания. Возвращает id элемента очереди.
+#[tauri::command]
+fn downloads_enqueue(
+    app: tauri::AppHandle,
+    request: downloads::DownloadRequest,
+) -> Result<u64, String> {
+    Ok(downloads::enqueue(&app, request))
+}
+
+/// Текущий снимок очереди + статус утилит (для первичной загрузки страницы).
+#[tauri::command]
+fn downloads_snapshot(app: tauri::AppHandle) -> downloads::DownloadSnapshot {
+    downloads::snapshot(&app)
+}
+
+/// Убрать (или отменить активный) элемент очереди.
+#[tauri::command(async)]
+fn downloads_remove(app: tauri::AppHandle, id: u64) {
+    downloads::remove(&app, id);
+}
+
+/// Повторить скачивание ошибочного элемента очереди.
+#[tauri::command(async)]
+fn downloads_retry(app: tauri::AppHandle, id: u64) {
+    downloads::retry(&app, id);
+}
+
+/// Очистить завершённые/ошибочные элементы.
+#[tauri::command]
+fn downloads_clear_finished(app: tauri::AppHandle) {
+    downloads::clear_finished(&app);
+}
+
+/// Путь папки скачиваний (фронт по нему определяет, скачан ли трек приложением).
+#[tauri::command]
+fn downloads_dir_path(app: tauri::AppHandle) -> String {
+    downloads::downloads_dir_path(&app)
+}
+
+/// Открыть папку в системном файловом менеджере (клик по иконке папки в списке
+/// «Локальные папки» настроек).
+///
+/// На Windows открываем через shell-ассоциацию (`ShellExecuteW` с verb `"open"`),
+/// а НЕ прямым вызовом `explorer.exe`: иначе игнорировался бы зарегистрированный
+/// пользователем обработчик открытия папок (сторонний файловый менеджер). macOS
+/// `open` и Linux `xdg-open` и так уважают дефолтное приложение.
+#[tauri::command]
+fn open_folder_in_explorer(path: String) -> Result<(), String> {
+    if !std::path::Path::new(&path).is_dir() {
+        return Err("Папка недоступна".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        // Широкая строка с нуль-терминатором; держим её живой на время вызова.
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let hinst = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecute возвращает HINSTANCE > 32 при успехе (легаси-семантика).
+        if hinst.0 as isize <= 32 {
+            return Err("Не удалось открыть папку".to_string());
+        }
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        let mut cmd = std::process::Command::new("open");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(&path);
+        cmd.spawn()
+            .map_err(|e| format!("Не удалось открыть папку: {}", e))?;
+        return Ok(());
+    }
+}
+
+/// Удалить скачанный приложением трек (из библиотеки и файл с диска).
+#[tauri::command(async)]
+fn downloads_delete_track(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
+    downloads::delete_downloaded_track(&app, &file_path)
+}
+
+/// Проверить доступность yt-dlp/ffmpeg/deno (без скачивания).
+#[tauri::command]
+async fn downloads_check_tools(
+    app: tauri::AppHandle,
+) -> Result<downloads::ToolsStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || downloads::refresh_tools_status(&app))
+        .await
+        .map_err(|e| format!("Task error: {}", e))
+}
+
+/// Открыть окно входа в YouTube. После авторизации cookies сохраняются и
+/// автоматически проверяются (статус приходит снапшотом `download_queue`).
+#[tauri::command]
+fn downloads_youtube_login(app: tauri::AppHandle) {
+    downloads::open_login(&app);
+}
+
+/// Запустить проверку валидности сохранённых cookies YouTube (фоновый сетевой
+/// тест). Результат приходит снапшотом `download_queue`.
+#[tauri::command]
+fn downloads_validate_cookies(app: tauri::AppHandle) {
+    downloads::validate_youtube_cookies(&app);
+}
+
+/// Выйти из аккаунта YouTube (удалить сохранённые cookies).
+#[tauri::command]
+fn downloads_youtube_logout(app: tauri::AppHandle) {
+    downloads::logout(&app);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Управление утилитами (yt-dlp/ffmpeg) — страница настроек «Внешние источники»
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn tools_app_data_dir(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Прогресс установки/обновления утилиты (событие `tools_progress`).
+#[derive(Clone, serde::Serialize)]
+struct ToolsProgress {
+    /// "ytdlp" | "ffmpeg".
+    tool: String,
+    message: Option<String>,
+    active: bool,
+}
+
+/// Локальная информация об утилитах (версии/managed) — без обращения к сети.
+#[tauri::command]
+async fn tools_info(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || tools::info(&tools_app_data_dir(&app)))
+        .await
+        .map_err(|e| format!("Task error: {}", e))
+}
+
+/// Проверка обновлений утилит (обращается к GitHub). Возвращает ту же структуру
+/// с заполненным `update_available`.
+#[tauri::command]
+async fn tools_check_updates(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || tools::check_updates(&tools_app_data_dir(&app)))
+        .await
+        .map_err(|e| format!("Task error: {}", e))
+}
+
+/// (Пере)установить/обновить утилиту (`tool` = "ytdlp" | "ffmpeg"). Прогресс
+/// стримится событием `tools_progress`; по завершении эмитится `tools_changed`.
+#[tauri::command]
+async fn tools_install(
+    app: tauri::AppHandle,
+    tool: String,
+) -> Result<tools::ToolsInfo, String> {
+    let app_for_task = app.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        let dir = tools_app_data_dir(&app_for_task);
+        let app_for_report = app_for_task.clone();
+        let tool_for_report = tool.clone();
+        let report = move |msg: String| {
+            let _ = app_for_report.emit(
+                "tools_progress",
+                ToolsProgress {
+                    tool: tool_for_report.clone(),
+                    message: Some(msg),
+                    active: true,
+                },
+            );
+        };
+        let result = match tool.as_str() {
+            // Deno (JS-движок для yt-dlp) ставится вместе с yt-dlp. Best-effort:
+            // при ошибке Deno не откатываем yt-dlp (он работает и без Deno, но в
+            // деградированном режиме) — только сообщаем в прогрессе.
+            "ytdlp" => {
+                let r = tools::install_ytdlp(&dir, &report);
+                if r.is_ok() {
+                    if let Err(e) = tools::install_deno(&dir, &report) {
+                        report(format!("yt-dlp установлен; Deno не установлен: {}", e));
+                    }
+                }
+                r
+            }
+            "ffmpeg" => tools::install_ffmpeg(&dir, &report),
+            _ => Err("Неизвестная утилита".to_string()),
+        };
+        // Снимаем индикатор прогресса независимо от исхода.
+        let _ = app_for_task.emit(
+            "tools_progress",
+            ToolsProgress {
+                tool: tool.clone(),
+                message: None,
+                active: false,
+            },
+        );
+        result?;
+        Ok::<_, String>(tools::info(&dir))
+    })
+    .await;
+    // Статус обновляем ВСЕГДА — даже если установка вернула ошибку ИЛИ задача
+    // упала (паника): иначе UI остался бы устаревшим. Эмитим ДО разбора исхода,
+    // чтобы ранний выход по ошибке join не пропустил событие (refreshToolsInfo).
+    let _ = app.emit("tools_changed", ());
+    info.map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Доустановить Deno (JS-движок для yt-dlp), если он отсутствует. Нужно для
+/// пользователей, поставивших yt-dlp до появления связки с Deno. Прогресс — под
+/// ключом "ytdlp" (Deno показывается в карточке yt-dlp).
+#[tauri::command]
+async fn tools_install_deno(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
+    let app_for_task = app.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        let dir = tools_app_data_dir(&app_for_task);
+        let app_for_report = app_for_task.clone();
+        let report = move |msg: String| {
+            let _ = app_for_report.emit(
+                "tools_progress",
+                ToolsProgress {
+                    tool: "ytdlp".to_string(),
+                    message: Some(msg),
+                    active: true,
+                },
+            );
+        };
+        let result = tools::install_deno(&dir, &report);
+        let _ = app_for_task.emit(
+            "tools_progress",
+            ToolsProgress {
+                tool: "ytdlp".to_string(),
+                message: None,
+                active: false,
+            },
+        );
+        result?;
+        Ok::<_, String>(tools::info(&dir))
+    })
+    .await;
+    // Статус обновляем ВСЕГДА (даже при ошибке/панике задачи), чтобы UI не остался
+    // устаревшим. Эмитим ДО разбора исхода join.
+    let _ = app.emit("tools_changed", ());
+    info.map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Установить сразу все утилиты одним действием: yt-dlp (+ Deno) и ffmpeg.
+/// Прогресс по каждой стримится событием `tools_progress` под её ключом. yt-dlp
+/// обязателен — его сбой возвращается ошибкой; ffmpeg опционален (его сбой не
+/// фатален: качество/ремукс ограничены, но скачивание работает).
+#[tauri::command]
+async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
+    let app_for_task = app.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        let dir = tools_app_data_dir(&app_for_task);
+
+        let make_report = |tool: &'static str| {
+            let app_for_report = app_for_task.clone();
+            move |msg: String| {
+                let _ = app_for_report.emit(
+                    "tools_progress",
+                    ToolsProgress { tool: tool.to_string(), message: Some(msg), active: true },
+                );
+            }
+        };
+        let clear_progress = |tool: &'static str| {
+            let _ = app_for_task.emit(
+                "tools_progress",
+                ToolsProgress { tool: tool.to_string(), message: None, active: false },
+            );
+        };
+
+        // Ставим только ОТСУТСТВУЮЩЕЕ: «Установить необходимое» не должно
+        // перекачивать уже установленные бинари (обновление — отдельная кнопка).
+        // yt-dlp обязателен; Deno докидываем рядом (install_deno сам идемпотентен —
+        // вернёт Ok, если Deno уже есть).
+        let report_ytdlp = make_report("ytdlp");
+        let ytdlp_result: Result<(), String> = if tools::resolve_ytdlp(&dir).is_some() {
+            Ok(())
+        } else {
+            tools::install_ytdlp(&dir, &report_ytdlp).map(|_| ())
+        };
+        if ytdlp_result.is_ok() {
+            if let Err(e) = tools::install_deno(&dir, &report_ytdlp) {
+                report_ytdlp(format!("Deno не установлен: {}", e));
+            }
+        }
+        clear_progress("ytdlp");
+
+        // ffmpeg опционален — ставим, только если его ещё нет; сбой не валит всё.
+        let report_ffmpeg = make_report("ffmpeg");
+        if tools::resolve_ffmpeg(&dir).is_none() {
+            if let Err(e) = tools::install_ffmpeg(&dir, &report_ffmpeg) {
+                report_ffmpeg(format!("ffmpeg не установлен: {}", e));
+            }
+        }
+        clear_progress("ffmpeg");
+
+        ytdlp_result?;
+        Ok::<_, String>(tools::info(&dir))
+    })
+    .await;
+    // Статус обновляем ВСЕГДА: при частичном успехе (ffmpeg встал, а yt-dlp нет)
+    // ИЛИ панике задачи событие триггерит refreshToolsInfo, и UI отразит
+    // фактическое состояние. Эмитим ДО разбора исхода join.
+    let _ = app.emit("tools_changed", ());
+    info.map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Удалить скачанную приложением утилиту (`tool` = "ytdlp" | "ffmpeg").
+#[tauri::command]
+async fn tools_delete(
+    app: tauri::AppHandle,
+    tool: String,
+) -> Result<tools::ToolsInfo, String> {
+    // Утилитой может пользоваться активный воркер скачивания (yt-dlp/ffmpeg уже
+    // резолвнуты и качают очередь). Удаление выдернуло бы бинарь из-под него —
+    // не даём, пока в очереди есть незавершённые элементы.
+    if downloads::has_active_jobs(&app) {
+        return Err(
+            "Нельзя удалить, пока есть треки в очереди скачивания. Дождитесь завершения или очистите очередь."
+                .to_string(),
+        );
+    }
+    let app_for_task = app.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        let dir = tools_app_data_dir(&app_for_task);
+        match tool.as_str() {
+            // Deno удаляется вместе с yt-dlp (ставились вместе).
+            "ytdlp" => {
+                tools::delete_ytdlp(&dir)?;
+                tools::delete_deno(&dir)?;
+            }
+            "ffmpeg" => tools::delete_ffmpeg(&dir)?,
+            _ => return Err("Неизвестная утилита".to_string()),
+        }
+        Ok::<_, String>(tools::info(&dir))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))??;
+    let _ = app.emit("tools_changed", ());
+    Ok(info)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -1796,6 +2280,7 @@ pub fn run() {
             Ok(())
         })
         .manage(PlayerState(RwLock::new(player)))
+        .manage(downloads::DownloadsState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -1851,6 +2336,25 @@ pub fn run() {
             external_track_cover,
             external_load_cached_artist_images,
             external_prepare,
+            // Скачивание треков
+            downloads_search,
+            downloads_enqueue,
+            downloads_snapshot,
+            downloads_remove,
+            downloads_retry,
+            downloads_clear_finished,
+            downloads_dir_path,
+            downloads_delete_track,
+            downloads_check_tools,
+            downloads_youtube_login,
+            downloads_validate_cookies,
+            downloads_youtube_logout,
+            tools_info,
+            tools_check_updates,
+            tools_install,
+            tools_install_deno,
+            tools_install_all,
+            tools_delete,
             statistics_add_track_delta,
             statistics_get_track,
             statistics_sum_listen_count,
@@ -1893,6 +2397,7 @@ pub fn run() {
             // Окно
             window_state::toggle_window_fullscreen,
             window_state::toggle_window_maximize,
+            open_folder_in_explorer,
             // Панель задач (Windows)
             taskbar_set_playing,
             taskbar_set_modes,
@@ -1908,6 +2413,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                // Сначала добиваем активный yt-dlp — иначе при закрытии во время
+                // скачивания он остался бы процессом-зомби в фоне ОС.
+                downloads::cleanup_on_exit(app_handle);
                 if let Some(state) = app_handle.try_state::<LibraryState>() {
                     if let Ok(library) = state.0.lock() {
                         if let Err(e) = library.shutdown() {

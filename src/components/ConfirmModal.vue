@@ -7,9 +7,13 @@ const props = withDefaults(defineProps<{
     message?: string
     confirmText?: string
     cancelText?: string
+    /** Скрыть кнопку отмены — для модалок-уведомлений с единственным действием
+     *  (например, показ ошибки), где «Отмена» дублировала бы «ОК». */
+    hideCancel?: boolean
 }>(), {
     confirmText: 'Подтвердить',
     cancelText: 'Отмена',
+    hideCancel: false,
 })
 
 const emit = defineEmits<{
@@ -61,7 +65,7 @@ onUnmounted(() => {
                     <div class="modalTitle">{{ title }}</div>
                     <div v-if="message" class="modalMessage">{{ message }}</div>
                     <div class="modalActions">
-                        <button class="modalBtn" @click="onCancel">{{ cancelText }}</button>
+                        <button v-if="!hideCancel" class="modalBtn" @click="onCancel">{{ cancelText }}</button>
                         <button class="modalBtn confirmBtn" @click="onConfirm">{{ confirmText }}</button>
                     </div>
                 </div>

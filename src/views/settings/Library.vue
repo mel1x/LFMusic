@@ -87,6 +87,15 @@ function onSeparatorKey(e: KeyboardEvent) {
         addSeparator();
     }
 }
+
+// ── Открыть папку в проводнике (клик по иконке папки в списке) ──────────────
+async function openFolder(path: string) {
+    try {
+        await invoke('open_folder_in_explorer', { path });
+    } catch (e) {
+        console.error('Не удалось открыть папку:', e);
+    }
+}
 </script>
 
 <template>
@@ -170,7 +179,13 @@ function onSeparatorKey(e: KeyboardEvent) {
                     class="folderElem"
                     :class="{ 'folderMissing': !folder.exists }"
                 >
-                    <div class="icon"><FolderIcon /></div>
+                    <button
+                        class="icon"
+                        @click="openFolder(folder.path)"
+                        :disabled="!folder.exists"
+                    >
+                        <FolderIcon />
+                    </button>
                     <div class="folderInfo">
                         <div class="folderPath">{{ folderDisplayName(folder.path) }}</div>
                         <div class="folderTracks" v-if="folder.exists">{{ folder.track_count }} Треков</div>
@@ -339,12 +354,17 @@ function onSeparatorKey(e: KeyboardEvent) {
 }
 .folderElem .icon {
     padding: 0px 6px 0px 8px;
+    background: transparent;
+    cursor: pointer;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
     transition: .24s ease-in-out;
 
     &:hover {
         color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.62);
     }
+}
+.folderElem .icon:disabled {
+    cursor: default;
 }
 .folderInfo {
     display: flex;

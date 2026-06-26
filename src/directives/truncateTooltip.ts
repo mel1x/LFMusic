@@ -58,8 +58,11 @@ function getTooltip(): HTMLElement {
     return tooltipEl
 }
 
+// Текст обрезан либо по ширине (single-line ellipsis), либо по высоте
+// (-webkit-line-clamp / многострочное обрезание). Проверяем оба измерения, чтобы
+// директива работала и для однострочных, и для многострочных усечений.
 function isOverflowing(el: HTMLElement): boolean {
-    return el.scrollWidth - el.clientWidth > 1
+    return el.scrollWidth - el.clientWidth > 1 || el.scrollHeight - el.clientHeight > 1
 }
 
 type Placement = 'auto' | 'top' | 'bottom'

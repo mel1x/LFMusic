@@ -86,7 +86,9 @@ onMounted(() => {
 
 // ── Search input ───────────────────────────────────────────────────────────
 
+import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
+useTypeToSearch(searchInput)
 const rawSearch = ref('')
 const debouncedSearch = ref('')
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null

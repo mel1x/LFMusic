@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -8,6 +8,7 @@ import MaximizeIcon from './Icons/MaximizeIcon.vue';
 import MinimizeIcon from './Icons/MinimizeIcon.vue';
 import CloseIcon from './Icons/CloseIcon.vue';
 import GithubIcon from './Icons/GithubIcon.vue';
+import DownloadQueueIndicator from './DownloadQueueIndicator.vue';
 
 import { useSettings } from '../composables/useSettings';
 import { usePlayer } from '../composables/usePlayer';
@@ -19,8 +20,9 @@ interface AudioFeatureProgressPayload {
     total: number;
     percent: number;
     active: boolean;
-    // Активная фаза: анализ треков для рекомендаций или получение из интернета.
-    phase?: 'analysis' | 'external' | 'done';
+    // Активная фаза: анализ треков для рекомендаций, получение из интернета или
+    // скачивание треков (последняя по очереди).
+    phase?: 'analysis' | 'external' | 'download' | 'done';
 }
 
 const win = getCurrentWindow();
@@ -41,6 +43,8 @@ const featureProgress = ref<AudioFeatureProgressPayload>({
 // Идёт ли сейчас получение данных из интернета (внешние источники). По этой
 // фазе выбираем текст: анализ рекомендаций ↔ получение из интернета.
 const featureProgressIsExternal = computed(() => featureProgress.value.phase === 'external');
+// Идёт ли сейчас скачивание треков (фаза «download», последняя по очереди).
+const featureProgressIsDownload = computed(() => featureProgress.value.phase === 'download');
 
 let unlistenAudioFeatureProgress: UnlistenFn | null = null;
 let featureProgressHideTimer: ReturnType<typeof setTimeout> | null = null;
@@ -66,6 +70,7 @@ const featureProgressTooltipHeading = computed(() => {
     if (!p.active || p.current >= p.total) {
         return t('audioFeatures.progressDoneTitle');
     }
+    if (featureProgressIsDownload.value) return t('audioFeatures.downloadActiveTitle');
     if (featureProgressIsExternal.value) return t('audioFeatures.externalActiveTitle');
     return t('audioFeatures.progressActiveTitle');
 });
@@ -76,6 +81,9 @@ const featureProgressTooltipText = computed(() => {
     if (!p.active || p.current >= p.total) {
         return t('audioFeatures.progressDone', { total: p.total });
     }
+    if (featureProgressIsDownload.value) {
+        return t('audioFeatures.downloadActive', { current: p.current, total: p.total });
+    }
     if (featureProgressIsExternal.value) {
         return t('audioFeatures.externalActive', { current: p.current, total: p.total });
     }
@@ -84,6 +92,101 @@ const featureProgressTooltipText = computed(() => {
 
 const featureProgressAriaLabel = computed(() => {
     return `${featureProgressTooltipHeading.value}. ${featureProgressTooltipText.value}`;
+});
+
+// ── Плавный бар прогресса ───────────────────────────────────────────────────
+// Реальный процент приходит дискретно и с «провалами»: yt-dlp долго извлекает
+// формат, не сообщая прогресса, а сам файл качается рывком — отсюда скачки
+// 0→100. Сглаживаем на клиенте: экспоненциальное приближение displayPercent к
+// цели + лёгкий «ручеёк» во время фазы скачивания, чтобы бар не висел на месте,
+// но и не вылезал за долю текущего трека (потолок = конец слота (current+1)/total).
+const displayPercent = ref(0);
+let progressRaf: number | null = null;
+let lastFrameTs = 0;
+let trickle = 0;
+let lastTarget = 0;
+let stalledMs = 0;
+
+function progressFrame(ts: number) {
+    progressRaf = requestAnimationFrame(progressFrame);
+    const dt = lastFrameTs ? Math.min(120, ts - lastFrameTs) : 16;
+    lastFrameTs = ts;
+
+    const p = featureProgress.value;
+    const target = featureProgressPercent.value;
+
+    // Новый прогон: реальная цель резко упала (бэкенд сбросил счётчики) —
+    // перезапускаем сглаживание снизу. ВАЖНО сравнивать с предыдущей РЕАЛЬНОЙ
+    // целью (lastTarget), а не с displayPercent: «ручеёк», убежавший выше цели,
+    // иначе сам бы вызывал ложный сброс — и бар циклически откатывался бы к нулю.
+    if (p.active && target < lastTarget - 25) {
+        displayPercent.value = target;
+        trickle = target;
+        stalledMs = 0;
+    }
+
+    // Отслеживаем «застой» реального процента: пока приходят новые данные — ведём
+    // бар по ним; если данные встали (yt-dlp извлекает формат) — добавляем
+    // «ручеёк», чтобы бар не выглядел замёрзшим.
+    if (Math.abs(target - lastTarget) > 0.1) {
+        stalledMs = 0;
+    } else {
+        stalledMs += dt;
+    }
+    lastTarget = target;
+    trickle = Math.max(trickle, target);
+
+    let goal: number;
+    if (!p.active) {
+        // Фаза завершена — добиваем до 100%.
+        goal = 100;
+    } else if (featureProgressIsDownload.value) {
+        // Подползаем только при застое (>350мс без новых данных) и не дальше конца
+        // слота текущего трека ((current+1)/total) — чтобы не обгонять реальность.
+        if (stalledMs > 350) {
+            const slotEnd = p.total > 0
+                ? ((Math.min(p.current, p.total) + 1) / p.total) * 100
+                : 95;
+            const ceiling = Math.min(95, slotEnd);
+            if (trickle < ceiling) {
+                trickle += (ceiling - trickle) * (1 - Math.pow(0.75, dt / 1000));
+            }
+        }
+        goal = Math.max(target, trickle);
+    } else {
+        // Анализ / внешние источники — данных много, сглаживаем без «ручейка».
+        goal = target;
+    }
+
+    // Экспоненциальное приближение с постоянной времени ≈0.25 с.
+    const k = 1 - Math.pow(0.018, dt / 1000);
+    displayPercent.value += (goal - displayPercent.value) * k;
+    if (Math.abs(goal - displayPercent.value) < 0.05) displayPercent.value = goal;
+}
+
+function startProgressAnim(initial: number) {
+    displayPercent.value = initial;
+    trickle = initial;
+    lastTarget = initial;
+    stalledMs = 0;
+    if (progressRaf === null) {
+        lastFrameTs = 0;
+        progressRaf = requestAnimationFrame(progressFrame);
+    }
+}
+
+function stopProgressAnim() {
+    if (progressRaf !== null) {
+        cancelAnimationFrame(progressRaf);
+        progressRaf = null;
+    }
+    lastFrameTs = 0;
+}
+
+// Анимируем, только пока бар виден (фоновая подготовка/скачивание идёт).
+watch(featureProgressVisible, (vis) => {
+    if (vis) startProgressAnim(featureProgressPercent.value);
+    else stopProgressAnim();
 });
 
 function publishAndroidFeatureProgress(payload: AudioFeatureProgressPayload) {
@@ -144,6 +247,7 @@ onUnmounted(() => {
         unlistenAudioFeatureProgress();
         unlistenAudioFeatureProgress = null;
     }
+    stopProgressAnim();
 });
 
 // ── Window controls ─────────────────────────────────────────────────────────
@@ -164,15 +268,16 @@ const closeWindow = async () => {
             <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.artist || 'Неизвестный исполнитель') : 'by mel1x' }}</div>
         </div>
         <div class="winControls">
+            <DownloadQueueIndicator />
             <div
                 v-if="featureProgressVisible"
                 class="featureWorkerProgress"
                 :aria-label="featureProgressAriaLabel"
             >
                 <div class="featureWorkerTrack">
-                    <div class="featureWorkerFill" :style="{ width: featureProgressPercent + '%' }"></div>
+                    <div class="featureWorkerFill" :style="{ width: displayPercent + '%' }"></div>
                 </div>
-                <span class="featureWorkerPercent">{{ Math.round(featureProgressPercent) }}%</span>
+                <span class="featureWorkerPercent">{{ Math.round(displayPercent) }}%</span>
                 <div class="featureWorkerTooltip" role="tooltip">
                     <div class="featureWorkerTooltipTitle">{{ featureProgressTooltipHeading }}</div>
                     <div class="featureWorkerTooltipText">
@@ -183,6 +288,13 @@ const closeWindow = async () => {
                             {{ t('audioFeatures.progressDonePrefix') }}
                             <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
                             {{ t('audioFeatures.progressDoneSuffix') }}
+                        </template>
+                        <template v-else-if="featureProgressIsDownload">
+                            {{ t('audioFeatures.downloadActivePrefix') }}
+                            <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.current }}</span>
+                            {{ t('audioFeatures.downloadActiveMiddle') }}
+                            <span class="featureWorkerTooltipNumber" :style="{ width: featureProgressNumberWidth }">{{ featureProgress.total }}</span>
+                            {{ t('audioFeatures.downloadActiveSuffix') }}
                         </template>
                         <template v-else-if="featureProgressIsExternal">
                             {{ t('audioFeatures.externalActivePrefix') }}
@@ -288,7 +400,9 @@ const closeWindow = async () => {
     min-width: 4px;
     border-radius: inherit;
     background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%, 0.95);
-    transition: width .28s ease;
+    /* Ширину покадрово двигает rAF-сглаживание в скрипте — CSS-переход по width
+       тут только мешал бы (двойное сглаживание). */
+    transition: background .24s ease;
 }
 .featureWorkerPercent {
     min-width: 30px;
@@ -315,18 +429,6 @@ const closeWindow = async () => {
     transform: translateY(-3px);
     transition: opacity .16s ease, transform .16s ease;
     z-index: 20;
-}
-.featureWorkerTooltip::before {
-    content: '';
-    position: absolute;
-    top: -5px;
-    right: 24px;
-    width: 10px;
-    height: 10px;
-    transform: rotate(45deg);
-    background: inherit;
-    border-left: 1px solid hsla(0, 0%, 100%, 0.1);
-    border-top: 1px solid hsla(0, 0%, 100%, 0.1);
 }
 .featureWorkerProgress:hover .featureWorkerTooltip {
     opacity: 1;

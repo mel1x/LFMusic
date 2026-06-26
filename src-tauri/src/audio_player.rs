@@ -1346,11 +1346,24 @@ impl AudioPlayer {
 
     // ── Статические методы (метаданные) ─────────────────────────────────────
 
+    /// Открыть файл для чтения тегов/свойств с определением типа по содержимому.
+    ///
+    /// ВАЖНО: используем `guess_file_type` (читает магические байты), а не голый
+    /// `Probe::open(...).read()` (определяет формат по расширению). Иначе файлы с
+    /// несоответствием «расширение ↔ кодек» не читаются: yt-dlp ремуксит Opus в
+    /// контейнер с расширением `.ogg`, lofty по расширению ждёт Vorbis, не находит
+    /// его сигнатуру и падает (`FileDecoding(Vorbis: "File missing magic signature")`)
+    /// — теги/обложка таких треков терялись. Определение по содержимому это чинит,
+    /// а для совпадающих расширений работает как раньше (расширение — фолбэк).
+    pub(crate) fn read_tagged_file(path: &std::path::Path) -> Option<lofty::file::TaggedFile> {
+        Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()
+    }
+
     /// Извлечь обложку трека как data URL (полного размера).
     /// Используется только для превью «сбросить обложку» в модалке редактирования
     /// (нужен оригинал из тегов в обход пользовательского переопределения).
     pub fn extract_cover_art(file_path: &str) -> Option<String> {
-        let tagged_file = Probe::open(PathBuf::from(file_path)).ok()?.read().ok()?;
+        let tagged_file = Self::read_tagged_file(&PathBuf::from(file_path))?;
         let tag = tagged_file
             .primary_tag()
             .or_else(|| tagged_file.first_tag())?;
@@ -1359,7 +1372,7 @@ impl AudioPlayer {
 
     /// Проверить наличие встроенной обложки (дёшево — без извлечения байтов).
     pub fn has_embedded_cover(file_path: &str) -> bool {
-        let Ok(tagged_file) = Probe::open(PathBuf::from(file_path)).and_then(|p| p.read()) else {
+        let Some(tagged_file) = Self::read_tagged_file(&PathBuf::from(file_path)) else {
             return false;
         };
         match tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
@@ -1370,7 +1383,7 @@ impl AudioPlayer {
 
     /// Сырые байты встроенной обложки (для генерации WebP-миниатюры).
     pub fn extract_cover_bytes(file_path: &str) -> Option<Vec<u8>> {
-        let tagged_file = Probe::open(PathBuf::from(file_path)).ok()?.read().ok()?;
+        let tagged_file = Self::read_tagged_file(&PathBuf::from(file_path))?;
         let tag = tagged_file
             .primary_tag()
             .or_else(|| tagged_file.first_tag())?;
@@ -1449,8 +1462,8 @@ impl AudioPlayer {
         let mut cover_art: Option<String> = None;
         let mut accent_color: Option<String> = None;
 
-        if let Ok(probe) = Probe::open(&path) {
-            if let Ok(tagged_file) = probe.read() {
+        if let Some(tagged_file) = Self::read_tagged_file(&path) {
+            {
                 if let Some(tag) = tagged_file
                     .primary_tag()
                     .or_else(|| tagged_file.first_tag())
@@ -1683,6 +1696,13 @@ impl AudioPlayer {
             }
         }
         pos
+    }
+
+    /// Путь файла текущего трека (если что-то загружено). Нужен, например, чтобы
+    /// перед удалением скачанного файла остановить плеер, если играет именно он
+    /// (декодер держит хэндл файла — иначе удаление упрётся в «файл занят»).
+    pub fn current_file_path(&self) -> Option<String> {
+        self.current_track.as_ref().map(|t| t.file_path.clone())
     }
 
     /// Лёгкий статус для частого поллинга

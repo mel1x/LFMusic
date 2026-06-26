@@ -117,6 +117,27 @@ pub struct MusicLibrary {
     /// In-memory индекс поиска по каталогу (приведённые к нижнему регистру поля).
     /// Строится лениво из БД, сбрасывается по флагу [`SEARCH_INDEX_DIRTY`].
     search_index: RefCell<Option<Vec<crate::catalog_search::SearchEntry>>>,
+    /// Кэш индекса «нормализованное название → локальные версии» для страницы
+    /// «Скачивание» (см. [`MusicLibrary::catalog_artist_title_index`]). Хранит
+    /// разделители, под которые построен, и сам индекс за `Arc` (debounce-поиск
+    /// дёргает его на каждый ввод). Сбрасывается по флагу [`DOWNLOADS_INDEX_DIRTY`]
+    /// и при смене разделителей.
+    catalog_index_cache:
+        RefCell<Option<(Vec<String>, Arc<HashMap<String, Vec<LibraryTrackMatch>>>)>>,
+}
+
+/// Локальная версия трека для album-aware сопоставления «есть ли такой трек в
+/// библиотеке» (страница «Скачивание»). Один локальный файл = набор его
+/// нормализованных артистов + нормализованный ключ альбома (пустой, если тега
+/// нет). Несколько файлов с одинаковым названием дают несколько таких записей под
+/// одним ключом названия — это и позволяет отличить одноимённые треки из РАЗНЫХ
+/// альбомов. См. [`MusicLibrary::catalog_artist_title_index`].
+#[derive(Debug, Clone)]
+pub struct LibraryTrackMatch {
+    /// Нормализованные артисты этого локального файла (мультиартист → несколько).
+    pub artists: HashSet<String>,
+    /// Нормализованный альбом (пустая строка, если тега альбома нет).
+    pub album_key: String,
 }
 
 pub type AudioFeatureProgressEmitter = Arc<dyn Fn(usize, usize) + Send + Sync + 'static>;
@@ -130,6 +151,29 @@ static CENTROID_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
 /// альбом/жанр/путь). In-memory индекс поиска по каталогу пересобирается при
 /// следующем чтении. Стартовое значение `true` — индекс строится лениво.
 static SEARCH_INDEX_DIRTY: AtomicBool = AtomicBool::new(true);
+/// Помечается вместе с [`SEARCH_INDEX_DIRTY`] (см. [`mark_track_indexes_dirty`]):
+/// кэш индекса «уже скачано» для страницы «Скачивание» зависит от тех же
+/// title/artist треков. Отдельный флаг — чтобы у каждого кэша был свой потребитель
+/// `swap(false)` и они не «съедали» инвалидацию друг друга.
+static DOWNLOADS_INDEX_DIRTY: AtomicBool = AtomicBool::new(true);
+
+/// Помечает зависящие от состава/полей треков in-memory индексы устаревшими:
+/// поиск по каталогу ([`SEARCH_INDEX_DIRTY`]) и индекс «уже скачано» для страницы
+/// «Скачивание» ([`DOWNLOADS_INDEX_DIRTY`]). Оба пересобираются лениво при чтении.
+fn mark_track_indexes_dirty() {
+    for flag in [&SEARCH_INDEX_DIRTY, &DOWNLOADS_INDEX_DIRTY] {
+        flag.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Помечает устаревшим ТОЛЬКО индекс поиска по каталогу (он упорядочен по
+/// `sort_order` — см. `CATALOG_ORDER_BY`). Индекс «уже скачано» зависит лишь от
+/// полей title/artist/album (не от порядка), поэтому изменения порядка его НЕ
+/// инвалидируют (иначе на странице «Скачивание» он зря пересобирался бы при
+/// каждом move-to-top/перестановке).
+fn mark_search_index_dirty() {
+    SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+}
 
 fn current_audio_feature_generation() -> u64 {
     AUDIO_FEATURE_WORKER_GENERATION.load(Ordering::SeqCst)
@@ -273,9 +317,10 @@ fn spawn_audio_feature_analysis(
 
                 let _ = tx.commit();
 
-                // Появились новые аудио-фичи — центроид мог измениться.
+                // Появились новые аудио-фичи — центроид мог измениться. Индексы
+                // поиска/«скачано» НЕ трогаем: они зависят от title/artist/album/
+                // genre/порядка, а аудио-фичи ничего из этого не меняют.
                 CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
 
                 if !is_audio_feature_generation_current(generation) {
                     return;
@@ -410,6 +455,7 @@ impl MusicLibrary {
             db_path,
             centroid_cache: RefCell::new(None),
             search_index: RefCell::new(None),
+            catalog_index_cache: RefCell::new(None),
         })
     }
 
@@ -675,8 +721,175 @@ impl MusicLibrary {
         self.rebuild_artist_playlists(artist_separators)?;
         // Состав треков изменился — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
         Ok(self.get_all_tracks_light())
+    }
+
+    /// Зарегистрированная папка библиотеки, которая совпадает с `dir` или
+    /// содержит его (т.е. `dir` — её поддиректория). Сравнение по канонизированным
+    /// путям (устойчиво к регистру/разделителям на Windows). Возвращает исходный
+    /// (хранимый в БД) путь накрывающей папки.
+    ///
+    /// Нужно, чтобы папку скачиваний не регистрировать повторно, когда она вложена
+    /// в уже добавленную пользователем папку (иначе одни и те же файлы попали бы
+    /// в `folders` дважды и сканировались бы под двумя путями).
+    pub fn covering_folder(&self, dir: &str) -> Option<String> {
+        let target = std::fs::canonicalize(dir).ok()?;
+        let folders: Vec<String> = {
+            let mut stmt = self.conn.prepare("SELECT path FROM folders").ok()?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .ok()?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for f in folders {
+            if let Ok(fp) = std::fs::canonicalize(&f) {
+                // `starts_with` сравнивает по компонентам пути, поэтому совпадение
+                // и «вложенность» обрабатываются корректно (без ложных
+                // «C:\Music2» ⊂ «C:\Music»).
+                if target.starts_with(&fp) {
+                    return Some(f);
+                }
+            }
+        }
+        None
+    }
+
+    /// Точечно добавить ОДИН скачанный файл в библиотеку — без обхода всей папки
+    /// (как при полном сканировании). Путь известен заранее, поэтому читаем
+    /// метаданные только этого файла и делаем UPSERT, затем перестраиваем
+    /// плейлисты и запускаем фоновый анализ аудио-фич. Так трек появляется в
+    /// каталоге сразу по мере скачивания, а стоимость не растёт с размером
+    /// библиотеки (нет рекурсивного обхода и диффа mtime всех файлов).
+    ///
+    /// `downloads_dir` — папка скачиваний: определяет `folder_path` трека.
+    /// Если она накрыта уже добавленной папкой — берём её (без дубля в `folders`);
+    /// иначе регистрируем саму папку скачиваний (один раз).
+    pub fn insert_downloaded_track(
+        &mut self,
+        file_path: &str,
+        downloads_dir: &str,
+        artist_separators: &[String],
+    ) -> Result<(), String> {
+        let folder_path = match self.covering_folder(downloads_dir) {
+            Some(parent) => parent,
+            None => {
+                self.conn
+                    .execute(
+                        "INSERT OR IGNORE INTO folders (path) VALUES (?1)",
+                        params![downloads_dir],
+                    )
+                    .map_err(|e| format!("Ошибка добавления папки: {}", e))?;
+                downloads_dir.to_string()
+            }
+        };
+
+        let m = AudioPlayer::get_metadata_light(file_path)?;
+        let mtime = Self::get_mtime(&PathBuf::from(file_path));
+        self.conn
+            .execute(
+                "INSERT INTO tracks
+                 (file_path, folder_path, title, artist, album, genre, duration_secs,
+                  format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    folder_path = excluded.folder_path,
+                    title = excluded.title,
+                    artist = excluded.artist,
+                    album = excluded.album,
+                    genre = excluded.genre,
+                    duration_secs = excluded.duration_secs,
+                    format = excluded.format,
+                    sample_rate = excluded.sample_rate,
+                    bit_depth = excluded.bit_depth,
+                    channels = excluded.channels,
+                    bitrate = excluded.bitrate,
+                    is_lossless = excluded.is_lossless,
+                    modified_secs = excluded.modified_secs,
+                    accent_color = NULL",
+                params![
+                    file_path,
+                    folder_path,
+                    m.title,
+                    m.artist,
+                    m.album,
+                    m.genre,
+                    m.duration_secs,
+                    m.format,
+                    m.sample_rate,
+                    m.bit_depth.map(|v| v as i32),
+                    m.channels.map(|v| v as i32),
+                    m.bitrate,
+                    m.is_lossless as i32,
+                    mtime as i64,
+                ],
+            )
+            .map_err(|e| format!("Ошибка вставки трека: {}", e))?;
+
+        // Группировки альбома/артиста — чтобы трек попал в свои плейлисты.
+        self.rebuild_album_playlists()?;
+        self.rebuild_artist_playlists(artist_separators)?;
+        // Анализ «настроения» (bpm/energy/…) здесь НЕ перезапускаем: при пакетном
+        // скачивании это отменяло+перезапускало бы фоновый воркер на каждый трек.
+        // Вызывающий (download-воркер) запускает анализ ОДИН раз по завершении
+        // пачки через `resume_pending_audio_feature_analysis`.
+        CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
+        Ok(())
+    }
+
+    /// Удалить один трек из библиотеки (запись в БД и зависимые данные) и
+    /// перестроить плейлисты. Сам файл на диске НЕ трогает — это делает
+    /// вызывающий (см. `downloads::delete_downloaded_track`). Каскадные FK
+    /// (`PRAGMA foreign_keys=ON`) убирают строки в playlist_tracks и
+    /// track_audio_features; track_overrides/track_statistics чистим явно.
+    pub fn remove_track(
+        &mut self,
+        file_path: &str,
+        artist_separators: &[String],
+    ) -> Result<(), String> {
+        // Сигнатуру кастомной обложки берём ДО удаления переопределения — после
+        // коммита подчистим осиротевший файл в track_covers/, если на него больше
+        // никто не ссылается (иначе файл обложки остался бы висеть на диске).
+        let cover_sig = self.get_override_cover_sig(file_path);
+        {
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(|e| format!("Ошибка транзакции: {}", e))?;
+            tx.execute(
+                "DELETE FROM track_overrides WHERE file_path = ?1",
+                params![file_path],
+            )
+            .map_err(|e| format!("Ошибка удаления переопределений: {}", e))?;
+            // Статистика прослушиваний — best-effort (таблица из модуля statistics).
+            let _ = tx.execute(
+                "DELETE FROM track_statistics WHERE file_path = ?1",
+                params![file_path],
+            );
+            tx.execute("DELETE FROM tracks WHERE file_path = ?1", params![file_path])
+                .map_err(|e| format!("Ошибка удаления трека: {}", e))?;
+            tx.commit().map_err(|e| format!("Ошибка коммита: {}", e))?;
+        }
+
+        if let Some(sig) = cover_sig {
+            self.remove_orphan_cover_file(&sig, file_path);
+        }
+
+        // Перестройка плейлистов/индексов — производное от уже ЗАКОММИЧЕННОГО
+        // удаления (источник истины — таблица tracks). Делаем best-effort и НЕ
+        // пробрасываем ошибку: иначе вызывающий счёл бы удаление неудачным и вернул
+        // файл из карантина — а записи в БД уже нет (рассинхрон: файл есть, трека
+        // нет). Стейл плейлистов восстановится при следующей перестройке.
+        if let Err(e) = self.rebuild_album_playlists() {
+            eprintln!("[library] remove_track: не удалось перестроить альбомы: {}", e);
+        }
+        if let Err(e) = self.rebuild_artist_playlists(artist_separators) {
+            eprintln!("[library] remove_track: не удалось перестроить исполнителей: {}", e);
+        }
+        CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
+        Ok(())
     }
 
     pub fn remove_folder(
@@ -718,7 +931,7 @@ impl MusicLibrary {
         let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
         // Состав треков изменился — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
         Ok(())
     }
 
@@ -774,7 +987,7 @@ impl MusicLibrary {
 
             // Удалены треки (вместе с их статистикой) — центроид мог измениться.
             CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
         }
 
         Ok(count)
@@ -787,6 +1000,85 @@ impl MusicLibrary {
     /// Получить все треки без обложек (для экономии памяти при больших библиотеках)
     pub fn get_all_tracks_light(&self) -> Vec<TrackMetadata> {
         self.get_all_tracks_inner(true)
+    }
+
+    /// Индекс каталога «нормализованное название → локальные версии трека»
+    /// ([`LibraryTrackMatch`]: артисты + альбом, с учётом переопределений). Для
+    /// страницы «Скачивание»: трек из интернета считается уже скачанным, если
+    /// совпало название (со снятым шумом вроде `(prod. by …)`), пересеклись наборы
+    /// артистов (хотя бы один общий — поддержка мультиартистных треков) И альбом
+    /// совместим (см. логику в `downloads_search`) — чтобы одноимённый трек из
+    /// другого альбома не помечался «скачанным». Лёгкий запрос по title/artist/album.
+    pub fn catalog_artist_title_index(
+        &self,
+        separators: &[String],
+    ) -> Arc<HashMap<String, Vec<LibraryTrackMatch>>> {
+        // Кэшируем: debounce-поиск на странице «Скачивание» дёргает индекс на
+        // каждый ввод, а пересборка — это SQL-скан всех треков + нормализация.
+        // Инвалидация по составу/полям треков (флаг) и при смене разделителей.
+        if DOWNLOADS_INDEX_DIRTY.swap(false, Ordering::SeqCst) {
+            self.catalog_index_cache.borrow_mut().take();
+        }
+        if let Some((sep, idx)) = self.catalog_index_cache.borrow().as_ref() {
+            if sep.as_slice() == separators {
+                return Arc::clone(idx);
+            }
+        }
+        let built = Arc::new(self.build_catalog_artist_title_index(separators));
+        *self.catalog_index_cache.borrow_mut() =
+            Some((separators.to_vec(), Arc::clone(&built)));
+        built
+    }
+
+    /// Строит индекс «нормализованное название → локальные версии (артисты +
+    /// альбом)» из БД (без кэша). Альбом нужен, чтобы отличать одноимённые треки
+    /// одного исполнителя из РАЗНЫХ альбомов: только реально скачанная версия
+    /// помечается «в библиотеке».
+    fn build_catalog_artist_title_index(
+        &self,
+        separators: &[String],
+    ) -> HashMap<String, Vec<LibraryTrackMatch>> {
+        let mut index: HashMap<String, Vec<LibraryTrackMatch>> = HashMap::new();
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT COALESCE(o.title, t.title), COALESCE(o.artist, t.artist), t.album
+             FROM tracks t
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path",
+        ) else {
+            return index;
+        };
+        // Готовим разделители ОДИН раз — иначе на каждый трек заново аллоцировался
+        // и сортировался бы их список (тысячи лишних аллокаций на большой медиатеке).
+        let prepared_seps = crate::external::prepare_artist_separators(separators);
+        let rows = stmt.query_map([], |row| {
+            let title: Option<String> = row.get(0)?;
+            let artist: Option<String> = row.get(1)?;
+            let album: Option<String> = row.get(2)?;
+            Ok((
+                title.unwrap_or_default(),
+                artist.unwrap_or_default(),
+                album.unwrap_or_default(),
+            ))
+        });
+        if let Ok(rows) = rows {
+            for (title, artist, album) in rows.flatten() {
+                let tkey = crate::external::title_match_key(&title);
+                if tkey.is_empty() {
+                    continue;
+                }
+                let artists: HashSet<String> =
+                    crate::external::split_artists_for_match_prepared(&artist, &prepared_seps)
+                        .into_iter()
+                        .collect();
+                if artists.is_empty() {
+                    continue;
+                }
+                index.entry(tkey).or_default().push(LibraryTrackMatch {
+                    artists,
+                    album_key: crate::external::album_match_key(&album),
+                });
+            }
+        }
+        index
     }
 
     fn get_all_tracks_inner(&self, light: bool) -> Vec<TrackMetadata> {
@@ -1103,8 +1395,10 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка обновления sort_order: {}", e))?;
 
         if changed > 0 {
-            // Изменился sort_order → канонический порядок каталога устарел.
-            SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+            // Изменился sort_order → канонический порядок каталога устарел (этот
+            // порядок зашит в индекс поиска). Индекс «скачано» зависит только от
+            // title/artist — его не трогаем.
+            mark_search_index_dirty();
             self.add_track_statistics_delta(TrackStatisticsDelta {
                 file_path: file_path.to_string(),
                 move_to_top_count_delta: 1,
@@ -1176,7 +1470,7 @@ impl MusicLibrary {
 
         // Состав треков мог измениться — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
         Ok(self.get_all_tracks())
     }
 
@@ -1950,7 +2244,7 @@ impl MusicLibrary {
         keep_existing_cover: bool,
     ) -> Result<(), String> {
         // Меняются title/artist → индекс поиска устарел.
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
         // Нормализуем пустые строки в None — пустое поле = «использовать оригинал».
         let title = title.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
         let artist = artist.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
@@ -2038,7 +2332,7 @@ impl MusicLibrary {
 
     /// Полностью удалить переопределение для трека (вернуть оригинальные значения)
     pub fn clear_track_override(&self, file_path: &str) -> Result<(), String> {
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
         // Сначала подчищаем осиротевший файл обложки (если он больше ничей).
         if let Some(sig) = self.get_override_cover_sig(file_path) {
             self.remove_orphan_cover_file(&sig, file_path);
@@ -2056,7 +2350,7 @@ impl MusicLibrary {
     /// Также сбрасывает кэшированный accent_color, чтобы следующее воспроизведение
     /// пересчитало его из оригинальной обложки файла.
     pub fn clear_all_track_overrides(&self) -> Result<usize, String> {
-        SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
         let count = self
             .conn
             .execute("DELETE FROM track_overrides", [])

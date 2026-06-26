@@ -240,11 +240,17 @@ function requestCoversForCards() {
     if (pending.length) loadCoversForTracks(pending);
 }
 
+// Источник данных готов (плейлисты/альбомы/исполнители загружены). До этого гейт
+// обложек не должен открываться — иначе он откроется на пустом списке, контент
+// мелькнёт, а лоадер появится уже поверх подгрузки (обратный порядок).
+const dataReady = ref(false);
+
 onMounted(async () => {
     playlistsLine.observe();
     albumsLine.observe();
     artistsLine.observe();
     await loadPlaylists();
+    dataReady.value = true;
     refreshAllCovers();
     requestCoversForCards();
 });
@@ -459,6 +465,22 @@ const visibleArtists = computed(() => sortedArtists.value.slice(0, visibleArtist
 
 watch([visibleSortedAlbums, visibleArtists], () => requestCoversForCards());
 
+// Гейт «вооружён» только когда данные загружены И трек-кэш начал отдавать
+// объекты. На первом запуске плейлисты успевают загрузиться раньше каталога
+// (usePlayer ещё наполняет trackCache), поэтому getTrackByPath возвращает
+// undefined → цели гейта пустые → он бы открылся вхолостую (контент мелькает,
+// и лоадер появляется уже после подгрузки). Ждём, пока первый трек резолвится.
+const gateArmed = computed(() => {
+    if (!dataReady.value) return false;
+    const firstPath =
+        sortedAlbums.value[0]?.firstPath ||
+        sortedArtists.value[0]?.firstPath ||
+        userPlaylists.value[0]?.first_file_path ||
+        null;
+    if (!firstPath) return true; // коллекция пуста — ждать нечего
+    return !!getTrackByPath(firstPath);
+});
+
 // Hold back first paint until the first covers of each line have resolved, so
 // the cards don't visibly resize/flash while their covers stream in. The lines
 // stay mounted (just hidden) so they measure & request covers during the hold.
@@ -475,7 +497,7 @@ const { ready: coversReady } = useCoverGate(() => {
     for (const a of sortedArtists.value.slice(0, 16)) pushFirst(a.firstPath);
     for (const pl of userPlaylists.value.slice(0, 16)) pushFirst(pl.first_file_path);
     return out;
-}, { timeout: 10000 });
+}, { timeout: 10000, armed: () => gateArmed.value });
 
 const albumMenu = ref<{ x: number; y: number; album: AlbumEntry; centerX: boolean } | null>(null);
 

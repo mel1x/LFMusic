@@ -66,7 +66,11 @@ async function loadArtistTracks() {
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
-        artistTracks.value = tracks
+        // Берём живые объекты из кэша: cacheTracks мог слить метаданные в уже
+        // существующий объект (Object.assign в cacheTrack), и обложка пишется
+        // именно в него. Если оставить сырые объекты, у ранее закэшированных
+        // треков обложка не отобразится (грузится в кэш-объект, рендерится сырой).
+        artistTracks.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     } catch {
         artistTracks.value = []
     }
@@ -91,7 +95,9 @@ const artistCover = computed(() => {
 
 // ── Search ──────────────────────────────────────────────────────────────────
 
+import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
+useTypeToSearch(searchInput)
 const rawSearch = ref('')
 const debouncedSearch = ref('')
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null

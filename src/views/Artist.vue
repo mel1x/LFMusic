@@ -70,7 +70,9 @@ async function loadArtistTracks() {
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
-        artistTracks.value = tracks
+        // Живые объекты из кэша — иначе у ранее закэшированных треков обложка не
+        // отобразится (грузится в кэш-объект, а рендерится сырой). См. cacheTrack.
+        artistTracks.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     } catch {
         artistTracks.value = []
     }

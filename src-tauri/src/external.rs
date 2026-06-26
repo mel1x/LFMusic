@@ -1329,6 +1329,412 @@ pub fn fetch_artist_image(artist: &str) -> FetchOutcome<ExternalImage> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Поиск треков по внешним источникам (для страницы «Скачивание»)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Найденный во внешнем источнике трек (кандидат на скачивание). В отличие от
+/// [`ExternalTrack`] несёт удалённый URL обложки (грузится вебвью напрямую) и
+/// имя источника — это «фантомный» результат, которого нет в библиотеке.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalSearchTrack {
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration_secs: Option<u32>,
+    /// Прямой URL обложки (Deezer/iTunes CDN) для `<img :src>` на странице поиска.
+    pub cover_url: Option<String>,
+    pub source: String,
+    /// Трек с таким же исполнителем+названием уже есть в локальной библиотеке.
+    /// Проставляется в команде `downloads_search` (внешний поиск об этом не знает).
+    #[serde(default)]
+    pub in_library: bool,
+}
+
+/// Ключ идентичности трека-кандидата на скачивание — «исполнитель + название +
+/// альбом» (нормализованный). Включает альбом, чтобы различать одноимённые треки
+/// одного исполнителя из РАЗНЫХ альбомов: они и в выдаче должны показываться по
+/// отдельности, и в очередь добавляться независимо, а не схлопываться в один.
+/// Пустой альбом → ключ сводится к «исполнитель + название» (album-blind).
+/// Держать в синхроне с `trackKey` во фронтенде (useDownloads.ts).
+pub fn track_identity_key(artist: &str, title: &str, album: Option<&str>) -> String {
+    normalize(&format!("{} {} {}", artist, title, album.unwrap_or("")))
+}
+
+/// Токены внутри скобок, означающие «шум» (кредиты/лейблы), а не отдельную
+/// версию трека. Скобочная группа с таким токеном выбрасывается из названия при
+/// сопоставлении, чтобы «Песня (prod. by X)» совпала с «Песня». Версии
+/// (remix/live/acoustic/…) НЕ перечислены — такие группы сохраняются.
+const TITLE_NOISE_TOKENS: &[&str] = &[
+    "feat", "ft", "featuring", "prod", "produced", "official", "lyric", "lyrics",
+    "visualizer", "remaster", "remastered", "explicit", "mv",
+];
+
+/// Содержит ли скобочная группа (уже в нижнем регистре) «шумовой» токен.
+fn group_is_noise(buf: &str) -> bool {
+    buf.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .any(|w| TITLE_NOISE_TOKENS.contains(&w))
+}
+
+/// Убирает из названия «шум» для сопоставления: скобочные кредиты
+/// `(prod. by …)`/`(feat. …)`/`(Official Video)` и хвостовые `feat.`/`prod.`.
+/// Версийные пометки в скобках (remix/live/…) сохраняются.
+fn strip_title_noise(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut buf = String::new();
+    let mut depth: i32 = 0;
+    for ch in lower.chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                depth += 1;
+                buf.push(ch);
+            }
+            ')' | ']' | '}' if depth > 0 => {
+                buf.push(ch);
+                depth -= 1;
+                if depth == 0 {
+                    if !group_is_noise(&buf) {
+                        out.push_str(&buf);
+                    }
+                    buf.clear();
+                }
+            }
+            _ => {
+                if depth > 0 {
+                    buf.push(ch);
+                } else {
+                    out.push(ch);
+                }
+            }
+        }
+    }
+    // Незакрытая скобка — добавляем остаток, если он не «шум».
+    if !buf.is_empty() && !group_is_noise(&buf) {
+        out.push_str(&buf);
+    }
+    // Хвостовые кредиты вне скобок.
+    let mut base = out.as_str();
+    for marker in [
+        " feat.", " feat ", " ft.", " ft ", " featuring ", " prod.", " prod ",
+    ] {
+        if let Some(idx) = base.find(marker) {
+            base = &base[..idx];
+        }
+    }
+    base.to_string()
+}
+
+/// Нормализованный ключ названия для сопоставления с библиотекой (со снятым шумом).
+pub fn title_match_key(title: &str) -> String {
+    normalize(&strip_title_noise(title))
+}
+
+/// Нормализованный ключ альбома для album-aware сопоставления с библиотекой:
+/// нижний регистр, только буквы/цифры, прочее — одиночный пробел. Пустой/None
+/// альбом → пустая строка. Обе стороны сравнения (локальный тег и альбом из
+/// внешнего источника) должны проходить через него, иначе ключи не совпадут.
+pub fn album_match_key(album: &str) -> String {
+    normalize(album)
+}
+
+/// Подготовить набор разделителей для нечёткого сопоставления ОДИН раз: объединить
+/// пользовательские (в нижнем регистре) со встроенными «шумовыми» (feat/ft/and…),
+/// отсортировать по убыванию длины (длинные — первыми, чтобы короткий-префикс
+/// " feat " не съел часть длинного " featuring ") и выкинуть пустые. Вынесено из
+/// горячего пути: на медиатеке в десятки тысяч треков аллокация+сортировка этого
+/// списка на КАЖДЫЙ трек давала тысячи лишних аллокаций и фриз UI при пересборке
+/// индекса. См. [`split_artists_for_match_prepared`].
+pub fn prepare_artist_separators(separators: &[String]) -> Vec<String> {
+    let mut seps: Vec<String> = separators.iter().map(|x| x.to_lowercase()).collect();
+    for extra in [
+        "&", ",", ";", "/", " feat ", " feat. ", " ft ", " ft. ", " featuring ",
+        " x ", " vs ", " vs. ", " and ", " и ",
+    ] {
+        seps.push(extra.to_string());
+    }
+    seps.sort_by(|a, b| b.len().cmp(&a.len()));
+    seps.retain(|s| !s.is_empty());
+    seps
+}
+
+/// Разбивает строку исполнителей на отдельных артистов (нормализованных) для
+/// нечёткого СОПОСТАВЛЕНИЯ уже подготовленным (см. [`prepare_artist_separators`])
+/// набором разделителей — без повторной аллокации/сортировки на каждый вызов.
+/// В отличие от [`crate::library::split_artists`] (обычное разбиение по
+/// пользовательским разделителям) делит агрессивнее — дополнительно по типичным
+/// союзам (&, feat, ft., x, vs, «и» и т.п.), чтобы матчить мультиартистные треки
+/// «хотя бы по одному совпавшему артисту».
+pub fn split_artists_for_match_prepared(artist: &str, prepared_seps: &[String]) -> Vec<String> {
+    // Паддинг пробелами — чтобы разделители вида " feat " ловились на границах.
+    let mut s = format!(" {} ", artist.to_lowercase());
+    for sep in prepared_seps {
+        s = s.replace(sep.as_str(), "\u{1}");
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for part in s.split('\u{1}') {
+        let n = normalize(part);
+        if !n.is_empty() && seen.insert(n.clone()) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Поиск треков в Deezer (`/search/track`). Богатый источник без ключа: отдаёт
+/// исполнителя, альбом, длительность и обложку.
+/// Возвращает отфильтрованные треки И «сырое» число записей, отданных Deezer на
+/// этой странице (до фильтрации). Сырое число нужно для пагинации: если считать
+/// курсор по отфильтрованному списку, отброшенные записи (без артиста и т.п.)
+/// преждевременно занулили бы `has_more` и сбили `next_index`.
+/// Строит расширенный запрос Deezer с операторами полей `artist:"…" track:"…"`.
+/// Точное совпадение по полям спасает нишевые треки с «общим» названием
+/// («Интро»/«Outro»), которые в свободном `q=` тонут под одноимёнными хитами.
+/// Кавычки в значениях сломали бы синтаксис — заменяем их пробелом.
+fn deezer_advanced_query(artist: &str, title: &str) -> String {
+    let a = artist.replace('"', " ");
+    let t = title.replace('"', " ");
+    format!("artist:\"{}\" track:\"{}\"", a.trim(), t.trim())
+}
+
+fn deezer_search_tracks(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    index: u32,
+    limit: u32,
+) -> Result<(Vec<ExternalSearchTrack>, u32), String> {
+    #[derive(Deserialize)]
+    struct SearchResp {
+        data: Vec<Hit>,
+    }
+    #[derive(Deserialize)]
+    struct Hit {
+        title: String,
+        duration: Option<u32>,
+        artist: Option<ArtistRef>,
+        album: Option<AlbumRef>,
+    }
+    #[derive(Deserialize)]
+    struct ArtistRef {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct AlbumRef {
+        title: Option<String>,
+        cover_xl: Option<String>,
+        cover_big: Option<String>,
+        cover_medium: Option<String>,
+    }
+
+    let resp: SearchResp = send_throttled(
+        client.get("https://api.deezer.com/search/track").query(&[
+            ("q", query),
+            ("index", index.to_string().as_str()),
+            ("limit", limit.to_string().as_str()),
+        ]),
+        "api.deezer.com",
+    )?
+    .json()
+    .map_err(|e| e.to_string())?;
+
+    let raw_count = resp.data.len() as u32;
+    let tracks = resp
+        .data
+        .into_iter()
+        .filter_map(|h| {
+            let artist = h.artist.map(|a| a.name).unwrap_or_default();
+            if artist.is_empty() {
+                return None;
+            }
+            let (album, cover_url) = match h.album {
+                Some(a) => (
+                    a.title.filter(|t| !t.is_empty()),
+                    a.cover_xl
+                        .filter(|u| !u.is_empty())
+                        .or(a.cover_big)
+                        .or(a.cover_medium)
+                        .filter(|u| !u.is_empty()),
+                ),
+                None => (None, None),
+            };
+            Some(ExternalSearchTrack {
+                title: h.title,
+                artist,
+                album,
+                duration_secs: h.duration,
+                cover_url,
+                source: "Deezer".to_string(),
+                in_library: false,
+            })
+        })
+        .collect();
+    Ok((tracks, raw_count))
+}
+
+/// Поиск треков в iTunes Search API (фолбэк, если Deezer недоступен).
+fn itunes_search_tracks(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<ExternalSearchTrack>, String> {
+    #[derive(Deserialize)]
+    struct SearchResp {
+        results: Vec<Hit>,
+    }
+    #[derive(Deserialize)]
+    struct Hit {
+        #[serde(rename = "trackName")]
+        track_name: Option<String>,
+        #[serde(rename = "artistName")]
+        artist_name: Option<String>,
+        #[serde(rename = "collectionName")]
+        collection_name: Option<String>,
+        #[serde(rename = "artworkUrl100")]
+        artwork_url100: Option<String>,
+        #[serde(rename = "trackTimeMillis")]
+        track_time_millis: Option<u64>,
+    }
+
+    let resp: SearchResp = send_throttled(
+        client.get("https://itunes.apple.com/search").query(&[
+            ("term", query),
+            ("entity", "song"),
+            ("limit", limit.to_string().as_str()),
+            ("media", "music"),
+        ]),
+        "itunes.apple.com",
+    )?
+    .json()
+    .map_err(|e| e.to_string())?;
+
+    Ok(resp
+        .results
+        .into_iter()
+        .filter_map(|h| {
+            let title = h.track_name?;
+            let artist = h.artist_name.unwrap_or_default();
+            if artist.is_empty() {
+                return None;
+            }
+            // Превью 100×100 → 600×600 простой заменой в URL (как в обложках).
+            let cover_url = h
+                .artwork_url100
+                .map(|u| u.replace("100x100bb", "600x600bb"));
+            Some(ExternalSearchTrack {
+                title,
+                artist,
+                album: h.collection_name.filter(|t| !t.is_empty()),
+                duration_secs: h.track_time_millis.map(|ms| (ms / 1000) as u32),
+                cover_url,
+                source: "iTunes".to_string(),
+                in_library: false,
+            })
+        })
+        .collect())
+}
+
+/// Страница результатов поиска с явным курсором пагинации. Курсор считается ТОЛЬКО
+/// по Deezer (источник со смещением); подмешанные iTunes-треки на него не влияют —
+/// иначе фронт принял бы суммарную длину за Deezer-offset и пропустил часть выдачи.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalSearchPage {
+    pub tracks: Vec<ExternalSearchTrack>,
+    /// Смещение для следующего запроса Deezer (`index` следующей страницы).
+    pub next_index: u32,
+    /// Есть ли ещё страницы Deezer (вернул полную страницу `>= limit`).
+    pub has_more: bool,
+}
+
+/// Поиск треков для страницы «Скачивание», постранично (`index` — смещение,
+/// `limit` — размер страницы). Deezer — основной источник с пагинацией. iTunes
+/// подмешивается только на первой странице (его API не поддерживает смещение) и
+/// только когда Deezer вернул неполную выдачу (`< limit` — слабый/нишевой запрос
+/// или последняя страница): для популярных запросов лишнего сетевого вызова не
+/// делаем. Порядок Deezer сохраняется, iTunes-треки дописываются в конец с
+/// дедупом по `track_identity_key`. Курсор (`next_index`/`has_more`) считается по Deezer,
+/// поэтому подмешивание iTunes не ломает пагинацию.
+pub fn search_tracks(
+    query: &str,
+    artist: Option<&str>,
+    title: Option<&str>,
+    index: u32,
+    limit: u32,
+) -> ExternalSearchPage {
+    let q = query.trim();
+    if q.is_empty() {
+        return ExternalSearchPage { tracks: Vec::new(), next_index: index, has_more: false };
+    }
+    let client = client();
+
+    let (mut results, deezer_raw) = match deezer_search_tracks(client, q, index, limit) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("[external] deezer track search error: {}", e);
+            (Vec::new(), 0)
+        }
+    };
+
+    // Курсор считаем по СЫРОМУ числу записей Deezer (до фильтрации) — иначе
+    // отброшенные записи преждевременно занулили бы has_more и сбили next_index.
+    // iTunes подмешивается отдельно и на курсор не влияет.
+    let next_index = index + deezer_raw;
+    let has_more = deezer_raw >= limit;
+
+    // Точный поиск по полям (только первая страница, когда известны исполнитель и
+    // название — например, клик по «фантому» в альбоме). Свободный `q=` ранжирует
+    // по популярности: нишевый трек с «общим» названием («Интро»/«Outro») тонет
+    // под тысячами одноимённых и в выдачу не попадает. Операторы Deezer
+    // `artist:"…" track:"…"` дают точное совпадение по полям — ставим эти хиты в
+    // начало списка (дедуп с обычной выдачей по track_identity_key, album-aware).
+    if index == 0 {
+        if let (Some(a), Some(t)) = (artist, title) {
+            let (a, t) = (a.trim(), t.trim());
+            if !a.is_empty() && !t.is_empty() {
+                let adv = deezer_advanced_query(a, t);
+                match deezer_search_tracks(client, &adv, 0, limit) {
+                    Ok((exact, _)) if !exact.is_empty() => {
+                        // Дедуп album-aware: одноимённые треки из разных альбомов
+                        // остаются обоими, схлопывается только реально тот же релиз.
+                        let mut seen: std::collections::HashSet<String> = exact
+                            .iter()
+                            .map(|t| track_identity_key(&t.artist, &t.title, t.album.as_deref()))
+                            .collect();
+                        let tail = std::mem::replace(&mut results, exact);
+                        for t in tail {
+                            if seen.insert(track_identity_key(&t.artist, &t.title, t.album.as_deref())) {
+                                results.push(t);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[external] deezer advanced search error: {}", e),
+                }
+            }
+        }
+    }
+
+    if index == 0 && deezer_raw < limit {
+        match itunes_search_tracks(client, q, limit) {
+            Ok(itunes) => {
+                let mut seen: std::collections::HashSet<String> = results
+                    .iter()
+                    .map(|t| track_identity_key(&t.artist, &t.title, t.album.as_deref()))
+                    .collect();
+                for t in itunes {
+                    if seen.insert(track_identity_key(&t.artist, &t.title, t.album.as_deref())) {
+                        results.push(t);
+                    }
+                }
+            }
+            Err(e) => eprintln!("[external] itunes track search error: {}", e),
+        }
+    }
+
+    ExternalSearchPage { tracks: results, next_index, has_more }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Сопоставление внешних треков с локальными файлами
 // ──────────────────────────────────────────────────────────────────────────────
 

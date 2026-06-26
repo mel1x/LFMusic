@@ -35,15 +35,27 @@ rustfft = "6"
 # HTTP-клиент для внешних источников метаданных (iTunes/Deezer/MusicBrainz).
 # rustls вместо native-tls — без системного OpenSSL, собирается и на Android.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+# Проверка целостности скачанных бинарей (yt-dlp) по SHA256 из релиза.
+sha2 = "0.10"
 
-# Discord Rich Presence — только десктоп (IPC с локальным клиентом Discord).
+# Десктоп-зависимости (не Android/iOS).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# Discord Rich Presence — IPC с локальным клиентом Discord.
 discord-rich-presence = "0.2.5"
+# Распаковка zip-архивов (страница «Скачивание»): ffmpeg на Windows
+# (FFmpeg-Builds) и macOS (evermeet.cx); Deno (JS-движок для yt-dlp) на всех
+# десктоп-платформах распространяется в zip (на Linux ffmpeg идёт в tar.xz,
+# см. tar/lzma-rs ниже, а Deno — в zip, поэтому zip нужен и здесь).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Системное медиа-управление на Linux (MPRIS). use_zbus — чистый Rust,
 # без системной зависимости libdbus.
 [target.'cfg(target_os = "linux")'.dependencies]
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+# Распаковка tar.xz-сборок ffmpeg (FFmpeg-Builds) для страницы «Скачивание».
+# lzma-rs — чистый Rust xz-декодер (без системного liblzma), tar — чтение архива.
+tar = "0.4"
+lzma-rs = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

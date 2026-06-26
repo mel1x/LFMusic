@@ -15,9 +15,10 @@ import { isCoverResolved } from "./useCoverLoader";
  */
 export function useCoverGate(
     targetTracks: () => TrackMetadata[],
-    options: { timeout?: number } = {},
+    options: { timeout?: number; armed?: () => boolean } = {},
 ) {
     const timeout = options.timeout ?? 3000;
+    const armedFn = options.armed ?? (() => true);
     const { loadCoversForTracks } = usePlayer();
 
     const ready = ref(false);
@@ -25,29 +26,41 @@ export function useCoverGate(
 
     const targets = computed(() => targetTracks());
     const targetKey = computed(() => targets.value.map(t => t.file_path).join("|"));
-    const allResolved = computed(() =>
-        targets.value.every(t => isCoverResolved(t)),
+    // `armed` гейтит открытие: пока источник данных не готов (например, плейлисты
+    // ещё грузятся), пустой список целей НЕ должен считаться «всё загружено» —
+    // иначе гейт откроется до данных, мелькнёт пустой контент, и лоадер появится
+    // уже после подгрузки обложек (обратный порядок).
+    const armed = computed(() => armedFn());
+    const resolved = computed(() =>
+        armed.value && targets.value.every(t => isCoverResolved(t)),
     );
 
     function clearTimer() {
         if (timer) { clearTimeout(timer); timer = null; }
     }
 
-    // Re-gate whenever the target set changes (new list / new search query).
-    watch(targetKey, () => {
+    // Re-gate whenever the target set changes (new list / new search query) or
+    // the source becomes armed (data finished loading).
+    watch([targetKey, armed], () => {
         ready.value = false;
         clearTimer();
         const list = targets.value;
         if (list.length) loadCoversForTracks(list);
-        if (allResolved.value) {
+        if (resolved.value) {
             ready.value = true;
-        } else {
+        } else if (armed.value) {
+            // Таймер-страховку запускаем ТОЛЬКО когда источник готов (armed).
+            // Иначе при медленной загрузке данных гейт открылся бы по таймауту до
+            // появления данных, мелькнул бы пустой контент, а затем закрылся снова
+            // при armed=true (тот самый «обратный порядок»). Когда armed станет
+            // true, этот watch перезапустится (armed — его зависимость) и заведёт
+            // таймер уже корректно.
             timer = setTimeout(() => { ready.value = true; timer = null; }, timeout);
         }
     }, { immediate: true });
 
-    // Reveal as soon as the first covers finish loading.
-    watch(allResolved, (v) => {
+    // Reveal as soon as the first covers finish loading (once armed).
+    watch(resolved, (v) => {
         if (v && !ready.value) {
             ready.value = true;
             clearTimer();

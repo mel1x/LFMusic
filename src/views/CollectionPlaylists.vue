@@ -47,13 +47,21 @@ function playlistCoverFor(pl: PlaylistInfo): string {
     return coverFor(pl.first_file_path) || defaultCover;
 }
 
+// Источник данных готов (плейлисты загружены). До этого гейт обложек не должен
+// открываться — иначе он откроется на пустом списке, контент мелькнёт, а лоадер
+// появится уже поверх подгрузки обложек (обратный порядок).
+const dataReady = ref(false);
+
 onMounted(async () => {
     await loadPlaylists();
+    dataReady.value = true;
 });
 
 // ── Search ──────────────────────────────────────────────────────────────────
 
+import { useTypeToSearch } from '../composables/useTypeToSearch';
 const searchInput = ref<HTMLInputElement | null>(null);
+useTypeToSearch(searchInput);
 const rawSearch = ref('');
 const debouncedSearch = ref('');
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,6 +98,7 @@ const { ready: coversReady } = useCoverGate(() =>
         .slice(0, 30)
         .map(p => (p.first_file_path ? getTrackByPath(p.first_file_path) : undefined))
         .filter((t): t is TrackMetadata => !!t),
+    { armed: () => dataReady.value },
 );
 
 // ── Lazy cover loading ─────────────────────────────────────────────────────

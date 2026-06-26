@@ -94,7 +94,9 @@ const playlistCover = computed(() => {
 
 // ── Search ──────────────────────────────────────────────────────────────────
 
+import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
+useTypeToSearch(searchInput)
 const rawSearch = ref('')
 const debouncedSearch = ref('')
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -139,6 +141,11 @@ const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
 let headerResizeObserver: ResizeObserver | null = null
 
+// Треки плейлиста загружены. До этого гейт обложек не должен открываться —
+// иначе он откроется на пустом списке, контент мелькнёт, а лоадер появится уже
+// поверх подгрузки обложек (обратный порядок).
+const dataReady = ref(false)
+
 onMounted(async () => {
     if (scrollHeaderRef.value) {
         scrollHeaderHeight.value = scrollHeaderRef.value.offsetHeight
@@ -151,6 +158,7 @@ onMounted(async () => {
     }
     if (!playlists.value.length) await loadPlaylists()
     await reloadPlaylistTracks()
+    dataReady.value = true
 })
 
 function onPlaylistTrackMovedToTop(e: Event) {
@@ -168,7 +176,13 @@ onUnmounted(() => {
 })
 
 watch(playlistId, async () => {
+    // Закрываем гейт обложек на время смены плейлиста: иначе, пока грузятся треки
+    // нового плейлиста, gate (armed=dataReady) оставался бы открытым и мелькнул бы
+    // контент предыдущего плейлиста. Сброс в false разоружает гейт (ready→false),
+    // а по завершении загрузки снова взводим — гейт перепроверит новые обложки.
+    dataReady.value = false
     await reloadPlaylistTracks()
+    dataReady.value = true
 })
 
 watch(firstCoverTrack, (track) => {
@@ -193,7 +207,9 @@ watch(debouncedSearch, () => resetScroll())
 const isScrollingToTop = ref(false)
 
 // Hold back first paint until the first 20 covers have resolved.
-const { ready: coversReady } = useCoverGate(() => filteredTracks.value.slice(0, 20))
+const { ready: coversReady } = useCoverGate(() => filteredTracks.value.slice(0, 20), {
+    armed: () => dataReady.value,
+})
 
 watch(visibleTracks, (tracks) => {
     if (!isScrollingToTop.value) {
