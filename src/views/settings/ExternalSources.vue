@@ -85,6 +85,17 @@ const depStateLabel = computed(() => {
     }
 });
 
+// Тултип на статус-метке «Доступно обновление»: какие именно компоненты
+// обновятся. Пусто (тултипа нет) во всех остальных состояниях.
+const updateTooltip = computed(() => {
+    if (depStatusKind.value !== 'update') return '';
+    const names: string[] = [];
+    if (toolsInfo.value.ytdlp.update_available) names.push('yt-dlp');
+    if (toolsInfo.value.ffmpeg.update_available) names.push('ffmpeg');
+    if (!names.length) return '';
+    return t('downloads.deps.updateTooltip', { list: names.join(', ') });
+});
+
 // Три компонента как статус-чипы — пользователю видно, чего именно не хватает.
 const depComponents = computed(() => [
     { name: 'yt-dlp', on: toolsInfo.value.ytdlp.installed, version: toolsInfo.value.ytdlp.version },
@@ -286,7 +297,7 @@ onMounted(async () => {
                     <h3 class="depTitle">{{ t('downloads.deps.title') }}</h3>
                     <p class="depDesc" v-truncate>{{ depDetail }}</p>
                 </div>
-                <div class="depState" :class="depStatusKind">
+                <div class="depState" :class="depStatusKind" v-tooltip:bottom="updateTooltip">
                     <span v-if="depStatusKind === 'busy'" class="miniSpinner"></span>
                     <span v-else class="stateDot"></span>
                     <span>{{ depStateLabel }}</span>
@@ -345,7 +356,6 @@ onMounted(async () => {
         </div>
 
         <!-- Авторизация YouTube (необязательна) -->
-        <h2 class="sectionTitle">{{ t('downloads.cookies.sectionTitle') }}</h2>
         <div class="ytAuth" :class="cookieStatusKind">
             <div class="ytAuthMain">
                 <div class="ytAuthStatusRow">
@@ -376,7 +386,6 @@ onMounted(async () => {
                 >{{ t('downloads.cookies.signOut') }}</button>
             </div>
         </div>
-        <p class="hint">{{ t('downloads.cookies.hint') }}</p>
 
         <ConfirmModal
             :open="confirmOpen"
@@ -399,7 +408,7 @@ onMounted(async () => {
     width: 100%;
 }
 .hint {
-    margin-top: 22px;
+    margin-top: 6px;
     max-width: 800px;
     font-weight: 500;
     font-size: 13px;
@@ -443,9 +452,8 @@ onMounted(async () => {
     max-width: 800px;
     width: 100%;
     padding: 18px 20px 16px;
-    border-radius: 16px;
+    border-radius: 24px 24px 0px 0px;
     background: hsla(0, 0%, 100%, 0.028);
-    border: 1px solid hsla(0, 0%, 100%, 0.08);
     transition: border-color .24s ease;
 }
 /* Чего-то не хватает / есть обновление — мягкий акцентный верх зовёт к
@@ -455,7 +463,6 @@ onMounted(async () => {
     background:
         linear-gradient(180deg, hsla(var(--accent-h), var(--accent-s), 50%, 0.07), hsla(0, 0%, 100%, 0.028) 70px),
         hsla(0, 0%, 100%, 0.028);
-    border-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.18);
 }
 .depTop {
     display: flex;
@@ -503,7 +510,7 @@ onMounted(async () => {
 }
 .depState.ok { color: hsla(145, 55%, 70%, 0.95); background: hsla(145, 45%, 45%, 0.12); }
 .depState.ok .stateDot { background-color: hsla(145, 60%, 55%, 0.95); }
-.depState.update { color: hsla(38, 90%, 70%, 1); background: hsla(38, 85%, 50%, 0.14); }
+.depState.update { color: hsla(38, 90%, 70%, 1); background: hsla(38, 85%, 50%, 0.14); cursor: help; }
 .depState.update .stateDot { background-color: hsla(38, 90%, 58%, 0.95); }
 .depState.missing { color: hsla(0, 0%, 100%, 0.5); }
 .depState.missing .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
@@ -521,7 +528,6 @@ onMounted(async () => {
     padding: 6px 11px;
     border-radius: 9px;
     background: hsla(0, 0%, 100%, 0.035);
-    border: 1px solid hsla(0, 0%, 100%, 0.06);
 }
 .chipDot {
     width: 6px;
@@ -642,9 +648,8 @@ onMounted(async () => {
     max-width: 800px;
     width: 100%;
     padding: 15px 18px;
-    border-radius: 14px;
+    border-radius: 0px 0px 24px 24px;
     background: hsla(0, 0%, 100%, 0.022);
-    border: 1px solid hsla(0, 0%, 100%, 0.06);
 }
 .ytAuthMain { flex: 1; min-width: 0; }
 .ytAuthStatusRow {

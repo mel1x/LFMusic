@@ -59,9 +59,14 @@ mod imp {
     const WM_DWMSENDICONICLIVEPREVIEW: u32 = 0x0326;
     const THBN_CLICKED: u32 = 0x1800;
     const SUBCLASS_ID: usize = 0x4C46_4D31; // "LFM1"
-    const TRANS_MS: f32 = 300.0; // длительность кроссфейда/слайда обложек
-    const SCALE_MS: f32 = 320.0; // длительность анимации размера при play/pause
-    const PLAY_SCALE: f32 = 1.10; // во сколько раз центральная обложка крупнее при игре
+    const TRANS_MS: f32 = 170.0; // длительность кроссфейда/слайда обложек
+    const SCALE_MS: f32 = 180.0; // длительность анимации размера при play/pause
+    // Нижний отступ боковых обложек (доля высоты превью). Верх у всех трёх обложек
+    // на одной линии (y=0); этот отступ оставляет небольшой зазор снизу.
+    const BOTTOM_PAD_FRAC: f32 = 0.07;
+    // Центральная обложка при игре растёт ровно на нижний отступ и занимает всю
+    // высоту превью (s × PLAY_SCALE = ch). На паузе она равна боковым.
+    const PLAY_SCALE: f32 = 1.0 / (1.0 - BOTTOM_PAD_FRAC);
 
     // ── Глифы Segoe MDL2 Assets ──────────────────────────────────────────────
     const GLYPH_SHUFFLE: u16 = 0xE8B1;
@@ -385,20 +390,19 @@ mod imp {
         t * t * (3.0 - 2.0 * t)
     }
 
-    /// Геометрия раскладки: (вертикальный отступ, сторона базовой обложки `s`,
-    /// шаг между центрами). Горизонтальный зазор между обложками шире
-    /// вертикального — так превью выглядит просторнее.
-    fn layout(ch: u32) -> (f32, f32, f32) {
-        // Отступ подобран так, чтобы центральная обложка при play-увеличении
-        // (×PLAY_SCALE) ровно вписывалась в высоту, а не обрезалась.
-        let margin = ((ch as f32) * 0.045).max(2.0);
-        let s = ((ch as f32) - 2.0 * margin).max(1.0);
-        let hgap = ((ch as f32) * 0.16).max(4.0);
-        (margin, s, s + hgap)
+    /// Геометрия раскладки: (сторона базовой обложки `s`, шаг между центрами).
+    /// Обложки выровнены по верху (y=0); базовая высота `s` оставляет снизу зазор
+    /// `BOTTOM_PAD_FRAC`. Между обложками — небольшой горизонтальный зазор.
+    fn layout(ch: u32) -> (f32, f32) {
+        let s = ((ch as f32) * (1.0 - BOTTOM_PAD_FRAC)).max(1.0);
+        let hgap = ((ch as f32) * 0.1).max(2.0);
+        (s, s + hgap)
     }
 
     /// Рисует одну обложку в позиции слота `slot` (0 — центр, ±1 — соседи).
     /// Чем ближе к центру, тем крупнее (до `play_scale`) — индикатор воспроизведения.
+    /// Обложки выровнены по верху (y=0); центральная при игре растёт вниз на весь
+    /// нижний отступ. Размер ограничен высотой превью, чтобы ничего не вылезало.
     fn draw_slot(
         canvas: &mut RgbaImage,
         cover: &Option<Img>,
@@ -412,18 +416,17 @@ mod imp {
         let Some(src) = cover else { return };
         let closeness = (1.0 - slot.abs()).clamp(0.0, 1.0);
         let scale = 1.0 + (play_scale - 1.0) * closeness;
-        let size = (s * scale).round().max(1.0) as u32;
+        let size = (s * scale).round().clamp(1.0, ch as f32) as u32;
         let img = prep_cover(src, size);
         let xc = cw as f32 / 2.0 + slot * step;
         let x = (xc - size as f32 / 2.0).round() as i64;
-        let y = ((ch as f32 - size as f32) / 2.0).round() as i64;
-        image::imageops::overlay(canvas, &img, x, y);
+        image::imageops::overlay(canvas, &img, x, 0);
     }
 
     /// Статичная раскладка «предыдущий | текущий | следующий».
     fn compose(c: &Covers, cw: u32, ch: u32, play_scale: f32) -> RgbaImage {
         let mut canvas = RgbaImage::from_pixel(cw, ch, image::Rgba([0, 0, 0, 0]));
-        let (_, s, step) = layout(ch);
+        let (s, step) = layout(ch);
         // Соседи под центром (центр может быть крупнее) — рисуем его последним.
         draw_slot(&mut canvas, &c.prev, -1.0, step, s, cw, ch, play_scale);
         draw_slot(&mut canvas, &c.next, 1.0, step, s, cw, ch, play_scale);
@@ -443,7 +446,7 @@ mod imp {
         play_scale: f32,
     ) -> RgbaImage {
         let mut canvas = RgbaImage::from_pixel(cw, ch, image::Rgba([0, 0, 0, 0]));
-        let (_, s, step) = layout(ch);
+        let (s, step) = layout(ch);
         let shift = if forward { -t } else { t };
 
         // (обложка, слот при t=0). Четвёртая обложка въезжает с края.
@@ -919,7 +922,7 @@ mod imp {
                 WORK_SIZE,
                 image::imageops::FilterType::Lanczos3,
             );
-            round_corners(&mut img, WORK_SIZE as f32 * 0.10);
+            round_corners(&mut img, WORK_SIZE as f32 * 0.09);
             Some(img)
         };
         // Есть ли играющий трек — независимо от наличия обложки (для force-iconic).

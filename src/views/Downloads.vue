@@ -560,15 +560,13 @@ onUnmounted(() => {
     gap: 14px;
     padding: 14px 16px;
     margin-bottom: 24px;
-    border-radius: 14px;
+    border-radius: 999px;
     background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 22%, 0.6), hsla(var(--accent-h), var(--accent-s), 14%, 0.6));
-    border: 1px solid hsla(0, 0%, 100%, 0.08);
     flex-shrink: 0;
 }
 /* Не хватает только ffmpeg — некритичная подсказка, оформляем нейтрально. */
 .toolsBanner.soft {
     background: hsla(0, 0%, 100%, 0.04);
-    border-color: hsla(0, 0%, 100%, 0.07);
 }
 .toolsIcon {
     display: flex;
@@ -576,7 +574,7 @@ onUnmounted(() => {
     justify-content: center;
     width: 38px;
     height: 38px;
-    border-radius: 10px;
+    border-radius: 24px;
     background-color: hsla(0, 0%, 100%, 0.07);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.95);
     flex-shrink: 0;

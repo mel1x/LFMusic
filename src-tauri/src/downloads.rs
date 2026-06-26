@@ -367,6 +367,8 @@ pub fn delete_downloaded_track(app: &AppHandle, file_path: &str) -> Result<(), S
     if let Some(q) = quarantine {
         let _ = remove_file_with_retries(&q);
     }
+    // Сопутствующий `.lrc`-сайдкар удаляем вместе с треком (best-effort).
+    let _ = std::fs::remove_file(path.with_extension("lrc"));
     let _ = app.emit("downloads_library_updated", ());
     Ok(())
 }
@@ -1687,6 +1689,17 @@ fn remove_stem_files(dir: &Path, stem: &str, keep: Option<&Path>) {
             None => continue,
         };
         if name == stem || name.starts_with(&format!("{}.", stem)) {
+            // `.lrc`-сайдкар — намеренный результат скачивания, а не временный хвост
+            // yt-dlp: его НЕ удаляем (иначе текст исчезал бы сразу после записи на
+            // финальной уборке `stem.*`).
+            let is_lrc = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|e| e.eq_ignore_ascii_case("lrc"))
+                .unwrap_or(false);
+            if is_lrc {
+                continue;
+            }
             let _ = std::fs::remove_file(&p);
         }
     }
@@ -1865,13 +1878,138 @@ fn detect_image_mime(bytes: &[u8]) -> lofty::picture::MimeType {
     }
 }
 
-/// Проставляет теги (название/исполнитель/альбом + обложку) в скачанный файл.
+// ──────────────────────────────────────────────────────────────────────────────
+// Текст песни (.lrc) — LRCLIB (lrclib.net): бесплатный источник без API-ключа
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Ответ LRCLIB (ключи camelCase). `instrumental` — у инструментала текста нет.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LrclibLyrics {
+    #[serde(default)]
+    plain_lyrics: Option<String>,
+    #[serde(default)]
+    synced_lyrics: Option<String>,
+    #[serde(default)]
+    instrumental: bool,
+}
+
+/// Найденный текст песни: синхронизированный (LRC с таймкодами) и/или простой.
+struct FetchedLyrics {
+    /// Синхронизированный текст в формате LRC (`[mm:ss.xx] строка`).
+    synced: Option<String>,
+    /// Простой текст без таймкодов.
+    plain: Option<String>,
+}
+
+impl FetchedLyrics {
+    /// Содержимое для `.lrc`-файла: предпочитаем синхро-версию.
+    fn lrc_body(&self) -> Option<&str> {
+        self.synced.as_deref().or(self.plain.as_deref())
+    }
+    /// Текст для встраивания в тег (USLT/`LYRICS`): предпочитаем простой.
+    fn tag_body(&self) -> Option<&str> {
+        self.plain.as_deref().or(self.synced.as_deref())
+    }
+}
+
+/// Преобразует ответ LRCLIB в [`FetchedLyrics`], отсеивая инструментал и пустые
+/// поля. `None` — пригодного текста нет.
+fn usable_lyrics(l: LrclibLyrics) -> Option<FetchedLyrics> {
+    if l.instrumental {
+        return None;
+    }
+    let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
+    let synced = nonempty(l.synced_lyrics);
+    let plain = nonempty(l.plain_lyrics);
+    if synced.is_none() && plain.is_none() {
+        return None;
+    }
+    Some(FetchedLyrics { synced, plain })
+}
+
+/// Запросить текст песни в LRCLIB. Сначала точный `/api/get` (требует длительность,
+/// совпадение в пределах ±2 c), при промахе — `/api/search` (берём первый результат
+/// с синхро-текстом, иначе с простым). Любой провал — `None` (трек скачается без
+/// текста). Источник открытый и без API-ключа — в духе [`crate::external`].
+fn fetch_lyrics(
+    artist: &str,
+    title: &str,
+    album: Option<&str>,
+    duration_secs: Option<u64>,
+) -> Option<FetchedLyrics> {
+    if artist.trim().is_empty() || title.trim().is_empty() {
+        return None;
+    }
+    let client = cover_client();
+
+    // Точный запрос: исполнитель + название (+ альбом) + длительность.
+    if let Some(dur) = duration_secs {
+        let url = format!(
+            "https://lrclib.net/api/get?artist_name={}&track_name={}&album_name={}&duration={}",
+            percent_encode_query(artist),
+            percent_encode_query(title),
+            percent_encode_query(album.unwrap_or("")),
+            dur
+        );
+        if let Some(found) = client
+            .get(&url)
+            .send()
+            .ok()
+            .and_then(|r| r.error_for_status().ok())
+            .and_then(|r| r.json::<LrclibLyrics>().ok())
+            .and_then(usable_lyrics)
+        {
+            return Some(found);
+        }
+    }
+
+    // Фолбэк: поиск без жёсткой привязки к длительности.
+    let url = format!(
+        "https://lrclib.net/api/search?artist_name={}&track_name={}",
+        percent_encode_query(artist),
+        percent_encode_query(title)
+    );
+    let results: Vec<LrclibLyrics> = client
+        .get(&url)
+        .send()
+        .ok()
+        .and_then(|r| r.error_for_status().ok())
+        .and_then(|r| r.json().ok())
+        .unwrap_or_default();
+
+    let mut first_plain: Option<FetchedLyrics> = None;
+    for l in results {
+        if let Some(f) = usable_lyrics(l) {
+            if f.synced.is_some() {
+                return Some(f); // синхро-версия — лучший вариант
+            }
+            first_plain.get_or_insert(f);
+        }
+    }
+    first_plain
+}
+
+/// Пишет `.lrc`-файл рядом с треком (то же имя, расширение `.lrc`). Предпочитает
+/// синхро-текст. Best-effort: нет текста — ничего не делает.
+fn write_lyrics_sidecar(audio_path: &Path, lyrics: Option<FetchedLyrics>) {
+    let Some(body) = lyrics.as_ref().and_then(|l| l.lrc_body()) else {
+        return;
+    };
+    let lrc_path = audio_path.with_extension("lrc");
+    if let Err(e) = std::fs::write(&lrc_path, body) {
+        eprintln!("[downloads] не удалось записать .lrc: {}", e);
+    }
+}
+
+/// Проставляет теги (название/исполнитель/альбом + обложку + текст песни) в
+/// скачанный файл и пишет рядом `.lrc`-сайдкар ([`write_lyrics_sidecar`]).
 /// Best-effort: ошибки лишь логируются (контейнер вроде webm может не писаться).
 fn write_tags(path: &Path, title: &str, artist: &str, album: Option<&str>, cover_url: Option<&str>) {
     use lofty::config::WriteOptions;
     use lofty::picture::{Picture, PictureType};
     use lofty::prelude::*;
-    use lofty::tag::Tag;
+    use lofty::tag::{ItemKey, Tag};
 
     // ВАЖНО: тип файла определяем по содержимому (см. `read_tagged_file`), а не по
     // расширению. yt-dlp ремуксит Opus-аудио в контейнер, у которого lofty по
@@ -1881,15 +2019,27 @@ fn write_tags(path: &Path, title: &str, artist: &str, album: Option<&str>, cover
         Some(t) => t,
         None => {
             eprintln!("[downloads] не удалось открыть для тегирования: {}", path.display());
+            // Контейнер не тегируется, но текст рядом сохранить можно (длительность
+            // для точного запроса неизвестна — полагаемся на поиск по названию).
+            write_lyrics_sidecar(path, fetch_lyrics(artist, title, album, None));
             return;
         }
     };
+
+    // Длительность нужна LRCLIB для точного совпадения (±2 c) — читаем из файла.
+    let duration_secs = {
+        let secs = tagged.properties().duration().as_secs();
+        (secs > 0).then_some(secs)
+    };
+    let lyrics = fetch_lyrics(artist, title, album, duration_secs);
 
     let tag_type = tagged.primary_tag_type();
     if tagged.primary_tag().is_none() {
         tagged.insert_tag(Tag::new(tag_type));
     }
     let Some(tag) = tagged.primary_tag_mut() else {
+        // В тег встроить не вышло — текст всё равно сохраняем рядом.
+        write_lyrics_sidecar(path, lyrics);
         return;
     };
 
@@ -1908,10 +2058,18 @@ fn write_tags(path: &Path, title: &str, artist: &str, album: Option<&str>, cover
         let pic = Picture::new_unchecked(PictureType::CoverFront, Some(mime), None, bytes);
         tag.push_picture(pic);
     }
+    // Текст песни встраиваем в тег (USLT/`LYRICS`) — предпочтительно простой.
+    if let Some(body) = lyrics.as_ref().and_then(|l| l.tag_body()) {
+        tag.insert_text(ItemKey::Lyrics, body.to_string());
+    }
 
     if let Err(e) = tag.save_to_path(path, WriteOptions::default()) {
         eprintln!("[downloads] не удалось записать теги: {}", e);
     }
+
+    // `.lrc`-сайдкар пишем после сохранения тегов; финальная уборка `stem.*` его не
+    // тронет (см. [`remove_stem_files`]).
+    write_lyrics_sidecar(path, lyrics);
 }
 
 /// Достаёт байты обложки: пробует прямой `cover_url`, при неудаче — внешние

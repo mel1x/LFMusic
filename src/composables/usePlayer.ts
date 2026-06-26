@@ -867,6 +867,21 @@ function createPlayer() {
     }
   }
 
+  /**
+   * Однократное фоновое пересканирование активных папок при запуске: подхватывает
+   * файлы, добавленные/удалённые вне приложения, а новые треки (через sort_order на
+   * бэкенде) встают в начало каталога. Тихое — без модалок прогресса/флага
+   * isScanning; по завершении обновляет каталог через refreshLibrary().
+   */
+  async function rescanOnStartup() {
+    try {
+      await invoke("library_rescan");
+      await refreshLibrary();
+    } catch {
+      // Запуск не должен падать из-за фонового пересканирования.
+    }
+  }
+
   // ── Управление папками (делегирование в useFolders) ───────────────────────
 
   async function addFolder() {
@@ -1362,6 +1377,10 @@ function createPlayer() {
       startStatusPolling();
       startSmoothProgress();
     }
+
+    // Тихое пересканирование активных папок один раз за запуск (fire-and-forget,
+    // чтобы не задерживать готовность интерфейса).
+    void rescanOnStartup();
 
     // Сохраняем открытую страницу при каждой навигации (debounced).
     // Ставится после restoreState, чтобы восстановительный replace не сработал.

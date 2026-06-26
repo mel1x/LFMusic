@@ -786,12 +786,20 @@ impl MusicLibrary {
 
         let m = AudioPlayer::get_metadata_light(file_path)?;
         let mtime = Self::get_mtime(&PathBuf::from(file_path));
+        // Скачанный трек встаёт в начало каталога (сортировка по sort_order DESC):
+        // даём значение выше текущего максимума. При повторном скачивании (ветка
+        // DO UPDATE) тоже поднимаем — это явное действие пользователя «добавить трек».
+        let new_sort_order: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
+            .unwrap_or(0)
+            + 1;
         self.conn
             .execute(
                 "INSERT INTO tracks
                  (file_path, folder_path, title, artist, album, genre, duration_secs,
-                  format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                  format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                  ON CONFLICT(file_path) DO UPDATE SET
                     folder_path = excluded.folder_path,
                     title = excluded.title,
@@ -806,6 +814,7 @@ impl MusicLibrary {
                     bitrate = excluded.bitrate,
                     is_lossless = excluded.is_lossless,
                     modified_secs = excluded.modified_secs,
+                    sort_order = excluded.sort_order,
                     accent_color = NULL",
                 params![
                     file_path,
@@ -822,6 +831,7 @@ impl MusicLibrary {
                     m.bitrate,
                     m.is_lossless as i32,
                     mtime as i64,
+                    new_sort_order,
                 ],
             )
             .map_err(|e| format!("Ошибка вставки трека: {}", e))?;
@@ -1569,12 +1579,23 @@ impl MusicLibrary {
                 .transaction()
                 .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
+            // Новые (впервые встреченные) файлы встают в начало каталога: каталог
+            // сортируется по sort_order DESC, поэтому свежим трекам выдаём значение
+            // выше текущего максимума. Все новинки этого скана делят одно значение
+            // (group at top; внутри группы — по артисту/альбому/названию). У уже
+            // существующих треков (ветка DO UPDATE) sort_order не трогаем, поэтому
+            // изменение mtime само по себе наверх их не поднимает.
+            let new_sort_order: i64 = tx
+                .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
+                .unwrap_or(0)
+                + 1;
+
             {
                 let mut stmt = tx.prepare(
                     "INSERT INTO tracks
                      (file_path, folder_path, title, artist, album, genre, duration_secs,
-                      format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                      format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                      ON CONFLICT(file_path) DO UPDATE SET
                         folder_path = excluded.folder_path,
                         title = excluded.title,
@@ -1608,6 +1629,7 @@ impl MusicLibrary {
                         m.bitrate,
                         m.is_lossless as i32,
                         *mtime as i64,
+                        new_sort_order,
                     ])
                     .map_err(|e| format!("Ошибка вставки: {}", e))?;
                 }

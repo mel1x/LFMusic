@@ -153,6 +153,20 @@ const cookiesMessage = computed(() => tools.value.cookies_message)
 
 async function refreshToolsInfo(): Promise<ToolsInfo> {
   const info = await invoke<ToolsInfo>('tools_info')
+  // `tools_info` — локальная проверка (без сети): она не знает про обновления и
+  // всегда отдаёт update_available=false. Переносим флаг из последнего результата
+  // сетевой проверки (checkToolUpdates), пока версия утилиты та же. Иначе
+  // refreshToolsInfo (вызывается при входе на «Скачивание»/настройки и по событию
+  // tools_changed) затирал бы «доступно обновление» в false — баннер мигал и
+  // пропадал, а TTL-кэш checkToolUpdates потом отдавал то же false. Если версия
+  // изменилась (утилиту поставили/обновили) — прежний флаг неактуален, оставляем
+  // false (после обновления checkToolUpdates всё равно сходит в сеть заново).
+  const prev = toolsInfo.value
+  for (const key of ['ytdlp', 'ffmpeg', 'deno'] as const) {
+    if (info[key].version === prev[key].version && prev[key].update_available) {
+      info[key].update_available = true
+    }
+  }
   toolsInfo.value = info
   toolsLoaded.value = true
   return info
@@ -164,6 +178,22 @@ async function refreshToolsInfo(): Promise<ToolsInfo> {
 // ставим только при успехе (без сети повторим при следующем заходе).
 const TOOL_UPDATE_TTL_MS = 15 * 60 * 1000
 let lastToolUpdateCheck = 0
+
+/**
+ * Проверить наличие обновлений утилит (обращается к сети). Результат кэшируется
+ * на TTL — повторные вызовы в его пределах возвращают текущий `toolsInfo` без
+ * запроса. `force` обходит кэш (после установки/обновления).
+ */
+async function checkToolUpdates(force = false): Promise<ToolsInfo> {
+  if (!force && lastToolUpdateCheck && Date.now() - lastToolUpdateCheck < TOOL_UPDATE_TTL_MS) {
+    return toolsInfo.value
+  }
+  const info = await invoke<ToolsInfo>('tools_check_updates')
+  toolsInfo.value = info
+  toolsLoaded.value = true
+  lastToolUpdateCheck = Date.now()
+  return info
+}
 
 let initialized = false
 
@@ -221,6 +251,11 @@ async function init(): Promise<void> {
   } catch (e) {
     console.error('Ошибка загрузки статуса утилит:', e)
   }
+  // Проверка обновлений (сеть) один раз при запуске — чтобы баннер «доступно
+  // обновление» появлялся сразу, без захода на «Скачивание»/в настройки.
+  // Fire-and-forget (не задерживаем запуск); TTL-кэш не даст дублировать запрос
+  // при последующих заходах на эти страницы.
+  void checkToolUpdates().catch(() => { /* без сети — просто без обновлений */ })
   // Путь папки скачиваний — для определения «скачанных приложением» треков.
   try {
     downloadsDir.value = await invoke<string>('downloads_dir_path')
@@ -340,22 +375,6 @@ export function useDownloads() {
     const s = await invoke<ToolsStatus>('downloads_check_tools')
     tools.value = s
     return s
-  }
-
-  /**
-   * Проверить наличие обновлений утилит (обращается к сети). Результат кэшируется
-   * на TTL — повторные вызовы в его пределах возвращают текущий `toolsInfo` без
-   * запроса. `force` обходит кэш (после установки/обновления).
-   */
-  async function checkToolUpdates(force = false): Promise<ToolsInfo> {
-    if (!force && lastToolUpdateCheck && Date.now() - lastToolUpdateCheck < TOOL_UPDATE_TTL_MS) {
-      return toolsInfo.value
-    }
-    const info = await invoke<ToolsInfo>('tools_check_updates')
-    toolsInfo.value = info
-    toolsLoaded.value = true
-    lastToolUpdateCheck = Date.now()
-    return info
   }
 
   /** Установить/обновить утилиту (скачивает в папку приложения). */
