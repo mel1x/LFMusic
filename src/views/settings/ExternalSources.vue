@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { onMounted, computed, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { useSettings, type SettingKey } from '../../composables/useSettings';
 import { useDownloads } from '../../composables/useDownloads';
 import { useI18n } from '../../composables/useI18n';
+import { isAndroidRuntime } from '../../composables/usePlatform';
 import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
 import ConfirmModal from '../../components/ConfirmModal.vue';
 import LoadingSpinner from '../../components/LoadingSpinner.vue';
+import FolderIcon from '../../components/Icons/FolderIcon.vue';
 
 const { t } = useI18n();
 const { settings, settingItems, load, save } = useSettings();
@@ -29,7 +32,11 @@ const {
     cookiesValid,
     cookiesLoginOpen,
     cookiesMessage,
+    downloadsDir,
+    setDownloadsDir,
 } = useDownloads();
+
+const isAndroid = isAndroidRuntime();
 
 const externalKeys: SettingKey[] = ['external_album_order', 'external_supplement_missing', 'external_track_covers', 'external_artist_avatars', 'show_downloads_page'];
 const externalItems = computed(() => externalKeys.map(key => settingItems.find(i => i.key === key)!));
@@ -258,6 +265,69 @@ function signOut() {
     void logoutYoutube();
 }
 
+// ── Папка для скачиваемых треков ──────────────────────────────────────────────
+// Путь хранится в downloadsDir (грузится в useDownloads.init). Смена через
+// downloads_set_dir: бэкенд перерегистрирует папку в библиотеке (старую убирает
+// из сканируемых, новую добавляет) и при любой ошибке делает fallback на
+// стандартную папку — тогда применённый путь не совпадёт с выбранным.
+const folderBusy = ref(false);
+const folderFellBack = ref(false);
+const folderError = ref<string | null>(null);
+
+const folderDisplay = computed(() => (downloadsDir.value || '').replace(/\\/g, '/'));
+
+async function chooseDownloadFolder() {
+    if (folderBusy.value) return;
+    folderError.value = null;
+    folderFellBack.value = false;
+    let picked: string | null = null;
+    try {
+        const res = await open({ directory: true, multiple: false });
+        picked = typeof res === 'string' ? res : null;
+    } catch (e) {
+        folderError.value = String(e);
+        return;
+    }
+    if (!picked) return;
+    folderBusy.value = true;
+    try {
+        const resolved = await setDownloadsDir(picked);
+        // Бэкенд не смог подготовить выбранную папку и вернул стандартную.
+        folderFellBack.value = norm(resolved) !== norm(picked);
+    } catch (e) {
+        folderError.value = String(e);
+    } finally {
+        folderBusy.value = false;
+    }
+}
+
+async function resetDownloadFolder() {
+    if (folderBusy.value) return;
+    folderError.value = null;
+    folderFellBack.value = false;
+    folderBusy.value = true;
+    try {
+        await setDownloadsDir(null);
+    } catch (e) {
+        folderError.value = String(e);
+    } finally {
+        folderBusy.value = false;
+    }
+}
+
+function norm(p: string): string {
+    return p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+}
+
+async function openDownloadFolder() {
+    if (!downloadsDir.value) return;
+    try {
+        await invoke('open_folder_in_explorer', { path: downloadsDir.value });
+    } catch (e) {
+        console.error('Не удалось открыть папку:', e);
+    }
+}
+
 onMounted(async () => {
     await load();
     try {
@@ -285,6 +355,44 @@ onMounted(async () => {
         <p class="hint">
             Данные берутся из открытых источников. Повторные открытия не обращаются к сети.
         </p>
+
+        <!-- Папка для скачиваемых треков -->
+        <template v-if="!isAndroid">
+            <h2 class="sectionTitle">{{ t('downloads.folder.sectionTitle') }}</h2>
+            <div class="dlFolder">
+                <div class="dlFolderRow">
+                    <button
+                        class="dlFolderIcon"
+                        @click="openDownloadFolder"
+                    >
+                        <FolderIcon />
+                    </button>
+                    <div class="dlFolderInfo">
+                        <div class="dlFolderPath" v-truncate>{{ folderDisplay }}</div>
+                        <div class="dlFolderHint">{{ t('downloads.folder.desc') }}</div>
+                    </div>
+                    <div class="dlFolderActions">
+                        <button
+                            class="actBtn primary"
+                            :class="{ loading: folderBusy }"
+                            :disabled="folderBusy"
+                            @click="chooseDownloadFolder"
+                        >
+                            <span class="btnLabel">{{ t('downloads.folder.choose') }}</span>
+                            <span class="miniSpinner btnSpinner" aria-hidden="true"></span>
+                        </button>
+                        <button
+                            class="actBtn ghost"
+                            :disabled="folderBusy"
+                            @click="resetDownloadFolder"
+                            v-tooltip="t('downloads.folder.resetTooltip')"
+                        >{{ t('downloads.folder.reset') }}</button>
+                    </div>
+                </div>
+                <p v-if="folderFellBack" class="dlFolderWarn">{{ t('downloads.folder.fallback') }}</p>
+                <p v-else-if="folderError" class="dlFolderWarn">{{ folderError }}</p>
+            </div>
+        </template>
 
         <!-- Компоненты для скачивания: один блок (yt-dlp + ffmpeg + Deno) -->
         <h2 class="sectionTitle">{{ t('downloads.comp.sectionTitle') }}</h2>
@@ -387,6 +495,9 @@ onMounted(async () => {
             </div>
         </div>
 
+        <!-- Региональные блокировки: скачивание может быть недоступно -->
+        <p class="regionNote">{{ t('downloads.vpnNote') }}</p>
+
         <ConfirmModal
             :open="confirmOpen"
             :title="confirmTitle"
@@ -414,6 +525,117 @@ onMounted(async () => {
     font-size: 13px;
     line-height: 1.5;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.42);
+}
+
+/* Нижняя сноска о региональных блокировках/VPN — тихая, не зовёт к действию. */
+.regionNote {
+    margin-top: 28px;
+    max-width: 800px;
+    width: 100%;
+    font-weight: 500;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.38);
+}
+
+/* ── Папка для скачиваемых треков ─────────────────────────────────── */
+.dlFolder {
+    max-width: 800px;
+    width: 100%;
+}
+.dlFolderRow {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+    border-radius: 16px;
+    background: hsla(0, 0%, 100%, 0.028);
+}
+.dlFolderIcon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.55);
+    background: transparent;
+    transition: .2s ease;
+}
+.dlFolderIcon:hover {
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.85);
+}
+.dlFolderInfo {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.dlFolderPath {
+    font-family: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: hsla(0, 0%, 100%, 0.9);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dlFolderHint {
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.45);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dlFolderActions {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.dlFolderActions .actBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+}
+/* Спиннер кладём ПОВЕРХ текста (absolute), а текст лишь гасим прозрачностью —
+   ширина кнопки не меняется (без «прыжка»). Оба всегда в DOM, переключаемся
+   плавным кроссфейдом по opacity (без резкого мигания через v-if). */
+.dlFolderActions .actBtn.primary {
+    position: relative;
+}
+.dlFolderActions .btnLabel {
+    opacity: 1;
+    transition: opacity .18s ease;
+}
+.dlFolderActions .actBtn.loading .btnLabel {
+    opacity: 0;
+}
+.dlFolderActions .btnSpinner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+}
+.dlFolderActions .actBtn.loading .btnSpinner {
+    opacity: 1;
+}
+.dlFolderWarn {
+    margin: 10px 0 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: hsla(38, 85%, 72%, 0.95);
 }
 
 /* ── Необходимые компоненты ──────────────────────────────────────── */
@@ -690,10 +912,15 @@ onMounted(async () => {
     .settingsBlock,
     .hint,
     .sectionTitle,
+    .dlFolder,
     .depPanel,
-    .ytAuth {
+    .ytAuth,
+    .regionNote {
         max-width: none;
     }
+    .dlFolderRow { flex-wrap: wrap; }
+    .dlFolderActions { flex: 1 0 100%; }
+    .dlFolderActions .actBtn { flex: 1; }
     .ytAuth { flex-wrap: wrap; }
     .depActions,
     .ytAuthActions { flex-wrap: wrap; }

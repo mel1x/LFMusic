@@ -67,6 +67,12 @@ async function addFolder() {
     }
 }
 
+/** Перечитать список папок библиотеки (после изменений вне useFolders, напр.
+ *  смены папки скачиваний на странице «Внешние источники»). */
+async function refreshFolders() {
+    folders.value = await invoke<FolderInfo[]>('library_get_folders')
+}
+
 async function removeFolder(folderPath: string) {
     removingFolder.value = folderPath
     try {
@@ -117,6 +123,7 @@ export function useFolders() {
         init,
         addFolder,
         removeFolder,
+        refreshFolders,
         rescanLibrary,
         folderDisplayName,
         dismissTracksReadyModal,

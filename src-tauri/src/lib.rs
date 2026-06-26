@@ -1866,6 +1866,69 @@ fn downloads_dir_path(app: tauri::AppHandle) -> String {
     downloads::downloads_dir_path(&app)
 }
 
+/// Сменить папку для скачиваемых треков. `folder_path` = None/пусто — сброс на
+/// стандартную папку «LFMusic Downloads» в системной музыкальной директории.
+/// При смене старая папка скачиваний убирается из сканируемых, а новая
+/// добавляется. Если новая папка вложена в уже сканируемую — её не добавляем
+/// отдельно (иначе двойное сканирование; треки и так попадут в накрывающую
+/// папку). При любой ошибке подготовки папки — fallback на стандартную.
+/// Возвращает фактически применённый путь.
+#[tauri::command]
+async fn downloads_set_dir(
+    app: tauri::AppHandle,
+    folder_path: Option<String>,
+) -> Result<String, String> {
+    // Сканирование новой папки может быть долгим (если выбрали существующую папку
+    // с музыкой) — уводим всю работу в blocking-пул, как library_add_folder.
+    tauri::async_runtime::spawn_blocking(move || {
+        let (old_dir, new_dir) = downloads::apply_downloads_dir(&app, folder_path);
+
+        // Папка не изменилась (тот же путь или fallback вернул прежнюю) — библиотеку
+        // не трогаем.
+        if !downloads::same_path(&old_dir, &new_dir) {
+            let separators = settings::get_artist_separators(&app.state::<SettingsState>());
+            let old = old_dir.to_string_lossy().to_string();
+            let new = new_dir.to_string_lossy().to_string();
+
+            // Перерегистрацию делаем под одним локом библиотеки (проверка
+            // вложенности + мутации атомарны).
+            let state = app.state::<LibraryState>();
+            let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+
+            // 1) Убрать старую папку из сканируемых — ТОЛЬКО если она была отдельной
+            //    записью в БД. Если старая папка была вложена в пользовательскую
+            //    (covering_folder вернул другой путь) — своей записи у неё нет,
+            //    удалять нечего, иначе снесли бы папку пользователя вместе с треками.
+            if library.covering_folder(&old).as_deref() == Some(old.as_str()) {
+                library.remove_folder(
+                    old,
+                    &separators,
+                    Some(audio_feature_progress_emitter(app.clone())),
+                )?;
+            }
+
+            // 2) Добавить новую папку — если она НЕ вложена в уже сканируемую (иначе
+            //    двойное сканирование; вложенные треки попадут в накрывающую папку).
+            if library.covering_folder(&new).is_none() {
+                library.add_folder(
+                    new,
+                    &separators,
+                    Some(audio_feature_progress_emitter(app.clone())),
+                    scan_progress_emitter(app.clone()),
+                )?;
+            }
+            drop(library);
+
+            // Набор папок/каталог изменился — фронт перезагрузит библиотеку и список папок.
+            let _ = app.emit("downloads_library_updated", ());
+        }
+
+        Ok(new_dir.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
 /// Открыть папку в системном файловом менеджере (клик по иконке папки в списке
 /// «Локальные папки» настроек).
 ///
@@ -2344,6 +2407,7 @@ pub fn run() {
             downloads_retry,
             downloads_clear_finished,
             downloads_dir_path,
+            downloads_set_dir,
             downloads_delete_track,
             downloads_check_tools,
             downloads_youtube_login,

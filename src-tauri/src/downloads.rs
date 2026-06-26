@@ -442,6 +442,15 @@ pub fn enqueue(app: &AppHandle, req: DownloadRequest) -> u64 {
                 return (existing.id, false);
             }
         }
+        // Добавляем новый элемент → прежнюю ОШИБОЧНУЮ версию того же трека убираем
+        // из очереди: её заменяет новый queued-элемент (а не висит рядом дублем).
+        // Счётчики run_total/run_done трогать не нужно: ошибочный элемент уже зачёл
+        // свой +1 в run_done при провале, так что остаток (total−done) не меняется.
+        m.items.retain(|i| {
+            !(i.status == "error"
+                && crate::external::track_identity_key(&i.artist, &i.title, i.album.as_deref())
+                    == key)
+        });
         let id = m.next_id;
         m.next_id += 1;
         m.items.push(DownloadItem {
@@ -1572,17 +1581,93 @@ fn app_data_dir(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Папка для скачанных треков: «LFMusic Downloads» в системной музыкальной
-/// директории (фолбэк — папка данных приложения).
+/// Папка для скачанных треков. По умолчанию — «LFMusic Downloads» в системной
+/// музыкальной директории, но пользователь может задать свою в настройках
+/// «Внешние источники». При ЛЮБОЙ ошибке подготовки заданной папки (нет прав,
+/// невалидный путь, недоступный диск) — fallback на стандартную папку Music.
 fn downloads_dir(app: &AppHandle) -> PathBuf {
+    let dir = configured_downloads_dir(app).unwrap_or_else(|| default_downloads_dir(app));
+    // Папку нужно гарантированно создать; при сбое — fallback на стандартную.
+    if std::fs::create_dir_all(&dir).is_ok() {
+        return dir;
+    }
+    let fallback = default_downloads_dir(app);
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
+}
+
+/// Стандартная папка скачиваний: «LFMusic Downloads» в системной музыкальной
+/// директории (фолбэк — папка данных приложения, если её не определить).
+fn default_downloads_dir(app: &AppHandle) -> PathBuf {
     let base = app
         .path()
         .audio_dir()
         .ok()
         .unwrap_or_else(|| app_data_dir(app));
-    let dir = base.join("LFMusic Downloads");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    base.join("LFMusic Downloads")
+}
+
+/// Заданная пользователем папка скачиваний из настроек (если непустая). Сама
+/// папка НЕ создаётся здесь — это делает `downloads_dir` (с fallback при сбое).
+fn configured_downloads_dir(app: &AppHandle) -> Option<PathBuf> {
+    let state = app.state::<crate::SettingsState>();
+    let guard = state.0.lock().ok()?;
+    guard
+        .0
+        .download_dir
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Сменить папку скачиваний: подготовить новую (создать; при любой ошибке —
+/// fallback на стандартную папку Music), сохранить путь в настройки и вернуть
+/// фактические `(старая, новая)` папки. Перерегистрацию папок в библиотеке
+/// (убрать старую / добавить новую) выполняет вызывающий в lib.rs, где доступны
+/// эмиттеры прогресса. `requested` = None/пусто → сброс на стандартную папку.
+pub fn apply_downloads_dir(app: &AppHandle, requested: Option<String>) -> (PathBuf, PathBuf) {
+    let old_dir = downloads_dir(app);
+
+    // Готовим заданную папку заранее: создаём её. Не удалось (нет прав/невалидна) —
+    // сохраняем None, что означает стандартную папку (реализует fallback).
+    let prepared: Option<String> = requested
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|p| {
+            let pb = PathBuf::from(&p);
+            if std::fs::create_dir_all(&pb).is_ok() && pb.is_dir() {
+                Some(pb.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
+
+    persist_download_dir(app, prepared);
+    let new_dir = downloads_dir(app);
+    (old_dir, new_dir)
+}
+
+/// Записать путь папки скачиваний в настройки (отдельным полем, не в `options`).
+fn persist_download_dir(app: &AppHandle, value: Option<String>) {
+    let state = app.state::<crate::SettingsState>();
+    let mut guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    guard.0.download_dir = value;
+    // Запись на диск под локом (как в eq_persist) — короткая операция, гонок нет.
+    let path = guard.1.clone();
+    let _ = crate::settings::save(&path, &guard.0);
+}
+
+/// Совпадают ли два пути. Канонизируем оба (устойчиво к регистру/разделителям/
+/// `..` на Windows); если файла ещё нет на диске — лексическое сравнение.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => lexical_normalize(a) == lexical_normalize(b),
+    }
 }
 
 /// Убирает недопустимые в имени файла символы (Windows-набор) и схлопывает пробелы.

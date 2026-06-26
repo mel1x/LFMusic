@@ -2,6 +2,7 @@ import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { usePlayer } from './usePlayer'
+import { useFolders } from './useFolders'
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Типы (зеркало serde-структур из src-tauri/src/{external,downloads}.rs)
@@ -282,6 +283,23 @@ async function deleteDownloadedTrack(filePath: string): Promise<void> {
 }
 
 /**
+ * Сменить папку скачиваний. `folderPath` — абсолютный путь выбранной папки, либо
+ * `null`/`undefined` для сброса на стандартную папку «LFMusic Downloads» в
+ * системной музыкальной директории. Бэкенд при любой ошибке делает fallback на
+ * стандартную папку и возвращает фактически применённый путь — обновляем им
+ * локальное состояние. Старая папка убирается из сканируемых, новая добавляется,
+ * поэтому перечитываем список папок и каталог.
+ */
+async function setDownloadsDir(folderPath?: string | null): Promise<string> {
+  const resolved = await invoke<string>('downloads_set_dir', { folderPath: folderPath ?? null })
+  downloadsDir.value = resolved
+  // Набор сканируемых папок и каталог изменились — обновляем оба представления.
+  try { await useFolders().refreshFolders() } catch { /* список папок ещё не инициализирован */ }
+  try { await usePlayer().refreshLibrary() } catch { /* каталог обновится по событию */ }
+  return resolved
+}
+
+/**
  * Нормализация строки — порт Rust-функции `external::normalize`: приводит к
  * нижнему регистру, оставляет только буквы/цифры (любых алфавитов), а любые
  * прочие символы схлопывает в одиночные пробелы (без ведущих/хвостовых).
@@ -438,6 +456,8 @@ export function useDownloads() {
     deleteTool,
     isDownloadedTrack,
     deleteDownloadedTrack,
+    downloadsDir,
+    setDownloadsDir,
     trackKey,
   }
 }

@@ -64,6 +64,7 @@
     "depsBotwallTitle": "Sign in to YouTube",
     "depsBotwallText": "YouTube asked to confirm you're not a bot. Sign in on the settings page and try again — sign-in is optional and only needed when this happens.",
     "depsOpenSettings": "Open settings",
+    "vpnNote": "In some countries tracks may fail to download due to regional blocks. Using a VPN is recommended - though it may reduce download stability.",
     "deps": {
       "title": "Download components",
       "desc": "yt-dlp, ffmpeg and the Deno JS engine — needed to search and download tracks. They are installed, updated and removed together.",
@@ -72,6 +73,15 @@
       "stateMissing": "Not installed",
       "stateUpdate": "Update available",
       "updateTooltip": "Will be updated to newer versions: {list}"
+    },
+    "folder": {
+      "sectionTitle": "Download folder",
+      "desc": "Downloaded tracks are saved here.",
+      "choose": "Choose folder",
+      "reset": "Default",
+      "resetTooltip": "Restore the default «LFMusic Downloads» folder in the system Music directory",
+      "open": "Open folder",
+      "fallback": "Couldn't use the selected folder — reverted to the default folder in the system Music directory."
     },
     "cookies": {
       "sectionTitle": "YouTube authorization",
