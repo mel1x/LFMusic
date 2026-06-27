@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onMounted, computed, ref } from 'vue';
+import { onMounted, computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useSettings, type SettingKey } from '../../composables/useSettings';
-import { useDownloads } from '../../composables/useDownloads';
+import { useDownloads, type ProxyMode } from '../../composables/useDownloads';
 import { useI18n } from '../../composables/useI18n';
 import { isAndroidRuntime } from '../../composables/usePlatform';
 import SettingsShell from '../../components/SettingsShell.vue';
@@ -34,6 +34,8 @@ const {
     cookiesMessage,
     downloadsDir,
     setDownloadsDir,
+    proxyConfig,
+    setProxy,
 } = useDownloads();
 
 const isAndroid = isAndroidRuntime();
@@ -275,6 +277,8 @@ const folderFellBack = ref(false);
 const folderError = ref<string | null>(null);
 
 const folderDisplay = computed(() => (downloadsDir.value || '').replace(/\\/g, '/'));
+// Путь ещё не загружен (init асинхронный) — вместо пустоты показываем shimmer.
+const folderLoading = computed(() => !downloadsDir.value);
 
 async function chooseDownloadFolder() {
     if (folderBusy.value) return;
@@ -328,6 +332,60 @@ async function openDownloadFolder() {
     }
 }
 
+// ── Прокси для yt-dlp ─────────────────────────────────────────────────────────
+// Системный (по умолчанию) / Нет (прямое) / Указать (свой socks5/http). Полезно
+// при блокировках провайдера: маршрут через ByeDPI (обычно socks5://127.0.0.1:1080).
+const proxyModeOptions = computed<{ key: ProxyMode; label: string }[]>(() => [
+    { key: 'system', label: t('downloads.proxy.modeSystem') },
+    { key: 'none', label: t('downloads.proxy.modeNone') },
+    { key: 'custom', label: t('downloads.proxy.modeCustom') },
+]);
+// Локальная копия URL для ввода; синхронизируется, когда proxyConfig подгрузится.
+const proxyUrlInput = ref(proxyConfig.value.url);
+const proxyError = ref<string | null>(null);
+watch(() => proxyConfig.value.url, (v) => { proxyUrlInput.value = v; });
+
+const proxyHint = computed(() => {
+    switch (proxyConfig.value.mode) {
+        case 'none': return t('downloads.proxy.noneHint');
+        case 'custom': return t('downloads.proxy.customHint');
+        default: return t('downloads.proxy.systemHint');
+    }
+});
+
+// Схема прокси, которую понимает yt-dlp: socks5/socks5h/socks4/socks4a/http/https.
+function isValidProxyUrl(u: string): boolean {
+    return /^(socks(5h?|4a?)|https?):\/\/\S+/i.test(u.trim());
+}
+
+async function applyProxy(mode: ProxyMode, url: string) {
+    proxyError.value = null;
+    if (mode === 'custom') {
+        const u = url.trim();
+        // Пустой URL допускаем (бэкенд сведёт к системному), непустой — валидируем.
+        if (u && !isValidProxyUrl(u)) {
+            proxyError.value = t('downloads.proxy.invalidUrl');
+            return;
+        }
+    }
+    try {
+        await setProxy(mode, url);
+    } catch (e) {
+        proxyError.value = String(e);
+    }
+}
+
+function selectProxyMode(mode: ProxyMode) {
+    if (mode === proxyConfig.value.mode) return;
+    void applyProxy(mode, mode === 'custom' ? proxyUrlInput.value : '');
+}
+
+function saveCustomUrl() {
+    if (proxyConfig.value.mode !== 'custom') return;
+    if (proxyUrlInput.value.trim() === proxyConfig.value.url) return;
+    void applyProxy('custom', proxyUrlInput.value);
+}
+
 onMounted(async () => {
     await load();
     try {
@@ -356,6 +414,10 @@ onMounted(async () => {
             Данные берутся из открытых источников. Повторные открытия не обращаются к сети.
         </p>
 
+        <!-- Всё ниже (папка → компоненты → вход → прокси → сноска) показываем
+             только при включённой странице «Скачивание»: без неё эти настройки
+             бессмысленны. -->
+        <template v-if="settings.show_downloads_page">
         <!-- Папка для скачиваемых треков -->
         <template v-if="!isAndroid">
             <h2 class="sectionTitle">{{ t('downloads.folder.sectionTitle') }}</h2>
@@ -368,7 +430,8 @@ onMounted(async () => {
                         <FolderIcon />
                     </button>
                     <div class="dlFolderInfo">
-                        <div class="dlFolderPath" v-truncate>{{ folderDisplay }}</div>
+                        <div v-if="!folderLoading" class="dlFolderPath" v-truncate>{{ folderDisplay }}</div>
+                        <div v-else class="dlFolderPathShimmer" aria-hidden="true"></div>
                         <div class="dlFolderHint">{{ t('downloads.folder.desc') }}</div>
                     </div>
                     <div class="dlFolderActions">
@@ -495,8 +558,45 @@ onMounted(async () => {
             </div>
         </div>
 
+        <!-- Прокси для yt-dlp (в самом низу) -->
+        <template v-if="!isAndroid">
+            <h2 class="sectionTitle">{{ t('downloads.proxy.sectionTitle') }}</h2>
+            <div class="dlProxy">
+                <p class="dlProxyDesc">{{ t('downloads.proxy.desc') }}</p>
+                <div class="proxySeg" role="radiogroup">
+                    <button
+                        v-for="m in proxyModeOptions"
+                        :key="m.key"
+                        type="button"
+                        class="proxySegBtn"
+                        :class="{ active: proxyConfig.mode === m.key }"
+                        :aria-pressed="proxyConfig.mode === m.key"
+                        @click="selectProxyMode(m.key)"
+                    >
+                        <span>{{ m.label }}</span>
+                    </button>
+                </div>
+                <div v-if="proxyConfig.mode === 'custom'" class="proxyCustom">
+                    <input
+                        class="proxyInput"
+                        type="text"
+                        :placeholder="t('downloads.proxy.customPlaceholder')"
+                        v-model="proxyUrlInput"
+                        spellcheck="false"
+                        autocapitalize="off"
+                        autocomplete="off"
+                        @blur="saveCustomUrl"
+                        @keydown.enter="saveCustomUrl"
+                    />
+                </div>
+                <p class="proxyHint">{{ proxyHint }}</p>
+                <p v-if="proxyError" class="dlFolderWarn">{{ proxyError }}</p>
+            </div>
+        </template>
+
         <!-- Региональные блокировки: скачивание может быть недоступно -->
         <p class="regionNote">{{ t('downloads.vpnNote') }}</p>
+        </template>
 
         <ConfirmModal
             :open="confirmOpen"
@@ -584,6 +684,27 @@ onMounted(async () => {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* Shimmer-плейсхолдер пути, пока он не загрузился (init асинхронный) — вместо
+   пустой строки. Высота примерно по строке пути, чтобы ряд не «прыгал». */
+.dlFolderPathShimmer {
+    height: 14px;
+    width: 55%;
+    max-width: 280px;
+    margin: 2px 0;
+    border-radius: 999px;
+    background: linear-gradient(
+        90deg,
+        hsla(var(--accent-h), calc(var(--accent-s) * 0.3), 82%, 0.06) 25%,
+        hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.16) 50%,
+        hsla(var(--accent-h), calc(var(--accent-s) * 0.3), 82%, 0.06) 75%
+    );
+    background-size: 200% 100%;
+    animation: lfmShimmer 1.4s linear infinite;
+}
+@keyframes lfmShimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
 .dlFolderHint {
     font-size: 12px;
     font-weight: 500;
@@ -638,6 +759,80 @@ onMounted(async () => {
     color: hsla(38, 85%, 72%, 0.95);
 }
 
+/* ── Прокси для yt-dlp ────────────────────────────────────────────── */
+.dlProxy {
+    max-width: 800px;
+    width: 100%;
+}
+.dlProxyDesc {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1.5;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+}
+/* Переключатель режима — как «режим блока» в настройках оформления:
+   тёмный контейнер с inset-границей, прозрачные кнопки, мягкий active-фон. */
+.proxySeg {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 16px;
+    background-color: var(--dark-bg);
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
+}
+.proxySegBtn {
+    user-select: none;
+    min-width: 92px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 14px;
+    border-radius: 13px;
+    background-color: transparent;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.35), 84%, 0.58);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color .18s ease, color .18s ease;
+}
+.proxySegBtn:hover {
+    color: hsla(0, 0%, 100%, 0.82);
+}
+.proxySegBtn.active {
+    background-color: hsla(0, 0%, 100%, 0.09);
+    color: #ffffff;
+}
+.proxyCustom {
+    margin-top: 12px;
+}
+.proxyInput {
+    width: 100%;
+    max-width: 420px;
+    padding: 10px 16px;
+    border-radius: 999px;
+    border: none;
+    background: hsla(0, 0%, 100%, 0.04);
+    color: hsla(0, 0%, 100%, 0.92);
+    font-family: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+    outline: none;
+    transition: background-color .18s ease;
+}
+.proxyInput:focus {
+    background: hsla(0, 0%, 100%, 0.07);
+}
+.proxyHint {
+    margin: 10px 0 0;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.45;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.42);
+}
+
 /* ── Необходимые компоненты ──────────────────────────────────────── */
 .sectionTitle {
     margin-top: 40px;
@@ -648,13 +843,19 @@ onMounted(async () => {
     font-size: 19px;
     color: hsla(0, 0%, 100%, 0.92);
 }
+/* Загрузчик блока зависимостей: тот же бокс, что и .depPanel (размер, паддинги,
+   фон, скруглённый верх — стыкуется с .ytAuth снизу), только со спиннером внутри.
+   Иначе вместо панели мигал бы маленький оторванный спиннер. */
 .toolLoading {
     display: flex;
     align-items: center;
     justify-content: center;
     max-width: 800px;
     width: 100%;
-    min-height: 150px;
+    min-height: 168px;
+    padding: 18px 20px 16px;
+    border-radius: 24px 24px 0px 0px;
+    background: hsla(0, 0%, 100%, 0.028);
 }
 .miniSpinner {
     flex-shrink: 0;
@@ -913,6 +1114,8 @@ onMounted(async () => {
     .hint,
     .sectionTitle,
     .dlFolder,
+    .dlProxy,
+    .toolLoading,
     .depPanel,
     .ytAuth,
     .regionNote {

@@ -70,10 +70,6 @@ mod imp {
 
     // ── Глифы Segoe MDL2 Assets ──────────────────────────────────────────────
     const GLYPH_SHUFFLE: u16 = 0xE8B1;
-    const GLYPH_PREV: u16 = 0xE892;
-    const GLYPH_PLAY: u16 = 0xE768;
-    const GLYPH_PAUSE: u16 = 0xE769;
-    const GLYPH_NEXT: u16 = 0xE893;
     const GLYPH_REPEAT_ALL: u16 = 0xE8EE;
     const GLYPH_REPEAT_ONE: u16 = 0xE8ED;
 
@@ -167,6 +163,153 @@ mod imp {
 
     fn hwnd() -> HWND {
         HWND(HWND_RAW.load(Ordering::Relaxed) as *mut c_void)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SolidIcon {
+        Prev,
+        Play,
+        Pause,
+        Next,
+    }
+
+    #[derive(Clone, Copy)]
+    struct Point {
+        x: f32,
+        y: f32,
+    }
+
+    fn rect_contains(p: Point, left: f32, top: f32, right: f32, bottom: f32) -> bool {
+        p.x >= left && p.x <= right && p.y >= top && p.y <= bottom
+    }
+
+    fn triangle_contains(p: Point, a: Point, b: Point, c: Point) -> bool {
+        let edge = |p1: Point, p2: Point, p3: Point| {
+            (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
+        };
+        let d1 = edge(p, a, b);
+        let d2 = edge(p, b, c);
+        let d3 = edge(p, c, a);
+        let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        !(has_neg && has_pos)
+    }
+
+    fn solid_transport_contains(kind: SolidIcon, p: Point) -> bool {
+        const D: f32 = 32.0;
+        let pt = |x: f32, y: f32| Point { x: x / D, y: y / D };
+
+        match kind {
+            SolidIcon::Play => {
+                triangle_contains(p, pt(10.0, 7.0), pt(10.0, 25.0), pt(24.0, 16.0))
+            }
+            SolidIcon::Pause => {
+                rect_contains(p, 10.0 / D, 7.0 / D, 14.0 / D, 25.0 / D)
+                    || rect_contains(p, 18.0 / D, 7.0 / D, 22.0 / D, 25.0 / D)
+            }
+            SolidIcon::Next => {
+                triangle_contains(p, pt(8.0, 7.0), pt(8.0, 25.0), pt(20.0, 16.0))
+                    || rect_contains(p, 22.0 / D, 7.0 / D, 25.0 / D, 25.0 / D)
+            }
+            SolidIcon::Prev => {
+                triangle_contains(p, pt(24.0, 7.0), pt(24.0, 25.0), pt(12.0, 16.0))
+                    || rect_contains(p, 7.0 / D, 7.0 / D, 10.0 / D, 25.0 / D)
+            }
+        }
+    }
+
+    fn rasterize_solid_transport_icon(kind: SolidIcon, level: u8, size: i32) -> Vec<u8> {
+        if size <= 0 {
+            return Vec::new();
+        }
+
+        const AA: i32 = 4;
+        let mut pixels = vec![0u8; (size * size * 4) as usize];
+        let size_f = size as f32;
+
+        for y in 0..size {
+            for x in 0..size {
+                let mut covered = 0;
+                for sy in 0..AA {
+                    for sx in 0..AA {
+                        let p = Point {
+                            x: (x as f32 + (sx as f32 + 0.5) / AA as f32) / size_f,
+                            y: (y as f32 + (sy as f32 + 0.5) / AA as f32) / size_f,
+                        };
+                        if solid_transport_contains(kind, p) {
+                            covered += 1;
+                        }
+                    }
+                }
+
+                let alpha = (covered * 255 / (AA * AA)) as u8;
+                let color = (alpha as u16 * level as u16 / 255) as u8;
+                let offset = ((y * size + x) * 4) as usize;
+                pixels[offset] = color;
+                pixels[offset + 1] = color;
+                pixels[offset + 2] = color;
+                pixels[offset + 3] = alpha;
+            }
+        }
+
+        pixels
+    }
+
+    unsafe fn create_icon_from_bgra(size: i32, pixels: &[u8]) -> Option<HICON> {
+        if size <= 0 || pixels.len() != (size * size * 4) as usize {
+            return None;
+        }
+
+        let memdc = CreateCompatibleDC(None);
+        if memdc.is_invalid() {
+            return None;
+        }
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0, // BI_RGB
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let hbm = CreateDIBSection(Some(memdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok();
+        let result = (|| {
+            let hbm = hbm?;
+            if bits.is_null() {
+                return None;
+            }
+
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u8, pixels.len());
+            let mask = CreateBitmap(size, size, 1, 1, None);
+            let ii = ICONINFO {
+                fIcon: true.into(),
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: mask,
+                hbmColor: hbm,
+            };
+            let icon = CreateIconIndirect(&ii).ok();
+            let _ = DeleteObject(HGDIOBJ(mask.0));
+            icon
+        })();
+
+        if let Some(hbm) = hbm {
+            let _ = DeleteObject(HGDIOBJ(hbm.0));
+        }
+        let _ = DeleteDC(memdc);
+        result
+    }
+
+    unsafe fn render_solid_transport_icon(kind: SolidIcon, level: u8) -> Option<HICON> {
+        let pixels = rasterize_solid_transport_icon(kind, level, ICON_SIZE);
+        create_icon_from_bgra(ICON_SIZE, &pixels)
     }
 
     // ── Рендер глифа шрифта в HICON (32bpp с альфой) ─────────────────────────
@@ -268,10 +411,10 @@ mod imp {
                     Some(Icons {
                         shuffle_dim: render_glyph_icon(GLYPH_SHUFFLE, LEVEL_DIM)?,
                         shuffle_on: render_glyph_icon(GLYPH_SHUFFLE, LEVEL_BRIGHT)?,
-                        prev: render_glyph_icon(GLYPH_PREV, LEVEL_BRIGHT)?,
-                        play: render_glyph_icon(GLYPH_PLAY, LEVEL_BRIGHT)?,
-                        pause: render_glyph_icon(GLYPH_PAUSE, LEVEL_BRIGHT)?,
-                        next: render_glyph_icon(GLYPH_NEXT, LEVEL_BRIGHT)?,
+                        prev: render_solid_transport_icon(SolidIcon::Prev, LEVEL_BRIGHT)?,
+                        play: render_solid_transport_icon(SolidIcon::Play, LEVEL_BRIGHT)?,
+                        pause: render_solid_transport_icon(SolidIcon::Pause, LEVEL_BRIGHT)?,
+                        next: render_solid_transport_icon(SolidIcon::Next, LEVEL_BRIGHT)?,
                         repeat_all: render_glyph_icon(GLYPH_REPEAT_ALL, LEVEL_DIM)?,
                         repeat_one: render_glyph_icon(GLYPH_REPEAT_ONE, LEVEL_BRIGHT)?,
                     })
@@ -969,6 +1112,48 @@ mod imp {
         }
         if animate {
             wake_animator();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn transport_icon_masks_are_solid_white_shapes() {
+            for kind in [
+                SolidIcon::Prev,
+                SolidIcon::Play,
+                SolidIcon::Pause,
+                SolidIcon::Next,
+            ] {
+                let pixels = rasterize_solid_transport_icon(kind, LEVEL_BRIGHT, ICON_SIZE);
+                let mut opaque = 0usize;
+                let mut bright_opaque = 0usize;
+                let mut translucent = 0usize;
+
+                for px in pixels.chunks_exact(4) {
+                    let alpha = px[3];
+                    if alpha == 255 {
+                        opaque += 1;
+                        if px[0] == 255 && px[1] == 255 && px[2] == 255 {
+                            bright_opaque += 1;
+                        }
+                    } else if alpha > 0 {
+                        translucent += 1;
+                    }
+                }
+
+                assert!(opaque > 80, "{kind:?} should have a filled body");
+                assert_eq!(
+                    bright_opaque, opaque,
+                    "{kind:?} opaque pixels should be solid white"
+                );
+                assert!(
+                    translucent < opaque / 2,
+                    "{kind:?} should not render as a mostly outlined glyph"
+                );
+            }
         }
     }
 }

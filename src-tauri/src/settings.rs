@@ -27,6 +27,18 @@ pub struct AppSettings {
     /// целиком заменяет `options`, не затирал её (как и `eq_settings`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<String>,
+
+    /// Режим прокси для yt-dlp: `"system"` (по умолчанию/None — системный прокси
+    /// или из окружения), `"none"` (прямое соединение, `--proxy ""`), `"custom"`
+    /// (заданный `proxy_url`). Отдельное поле — по той же причине, что и
+    /// `download_dir` (не часть flatten-`options`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_mode: Option<String>,
+
+    /// URL прокси для режима `"custom"` (напр. `socks5://127.0.0.1:1080` для
+    /// ByeDPI/ByeByeDPI). Пусто/None — режим `custom` сводится к системному.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 pub fn load(app_data_dir: &PathBuf) -> AppSettings {
@@ -57,7 +69,12 @@ pub fn option_bool(settings: &AppSettings, key: &str, default: bool) -> bool {
 pub fn get_artist_separators(state: &State<SettingsState>) -> Vec<String> {
     let guard = match state.0.lock() {
         Ok(g) => g,
-        Err(_) => return DEFAULT_ARTIST_SEPARATORS.iter().map(|s| s.to_string()).collect(),
+        Err(_) => {
+            return DEFAULT_ARTIST_SEPARATORS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
     };
     if let Some(serde_json::Value::Array(arr)) = guard.0.options.get("artist_separators") {
         let parsed: Vec<String> = arr
@@ -69,7 +86,10 @@ pub fn get_artist_separators(state: &State<SettingsState>) -> Vec<String> {
             return parsed;
         }
     }
-    DEFAULT_ARTIST_SEPARATORS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_ARTIST_SEPARATORS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[cfg(test)]
@@ -89,7 +109,10 @@ mod tests {
         }"##;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.download_dir.as_deref(), Some("D:/Music/My Downloads"));
-        assert!(!s.options.contains_key("download_dir"), "download_dir утёк в options");
+        assert!(
+            !s.options.contains_key("download_dir"),
+            "download_dir утёк в options"
+        );
         assert!(s.options.contains_key("crossfade_on_seek"));
         assert!(s.options.contains_key("static_accent_color"));
     }
@@ -101,6 +124,9 @@ mod tests {
         let s: AppSettings = serde_json::from_str(r#"{"show_github_badge": false}"#).unwrap();
         assert_eq!(s.download_dir, None);
         let out = serde_json::to_string(&s).unwrap();
-        assert!(!out.contains("download_dir"), "пустой download_dir не должен сериализоваться");
+        assert!(
+            !out.contains("download_dir"),
+            "пустой download_dir не должен сериализоваться"
+        );
     }
 }

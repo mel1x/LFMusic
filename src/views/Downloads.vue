@@ -47,10 +47,11 @@ const {
 const downloadsLocked = computed(() => ytdlpMissing.value)
 const searchDisabledText = computed(() => t('downloads.searchDisabledPlaceholder'))
 
-// Был ли среди ошибок очереди признак «бот-стены» YouTube (маркер из downloads.rs
-// `BOT_WALL_HINT`). Если да и пользователь ещё не входил — предложим авторизацию.
+// Была ли среди ошибок очереди «бот-стена» YouTube — по ТИПУ ошибки
+// (error_kind === 'bot_wall_network'), а не по тексту. Это IP/сетевая стена (не
+// протухание входа); если пользователь ещё не входил — вход одна из мер обхода.
 const botWallHit = computed(() =>
-    queue.value.some(i => i.status === 'error' && !!i.error && i.error.includes('YouTube требует вход')),
+    queue.value.some(i => i.status === 'error' && i.error_kind === 'bot_wall_network'),
 )
 
 // ── Search input (debounced, network) ───────────────────────────────────────

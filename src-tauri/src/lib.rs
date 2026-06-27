@@ -13,8 +13,8 @@ mod settings;
 mod spectrum;
 pub mod statistics;
 mod taskbar;
-mod tools;
 mod thumbnails;
+mod tools;
 mod track_covers;
 mod window_state;
 
@@ -508,10 +508,7 @@ fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, St
 
 /// Добавить папку, просканировать
 #[tauri::command]
-async fn library_add_folder(
-    app: tauri::AppHandle,
-    folder_path: String,
-) -> Result<(), String> {
+async fn library_add_folder(app: tauri::AppHandle, folder_path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
@@ -564,9 +561,7 @@ fn android_music_folder_candidates() -> Vec<String> {
 }
 
 #[tauri::command]
-async fn library_add_android_music_folders(
-    app: tauri::AppHandle,
-) -> Result<(), String> {
+async fn library_add_android_music_folders(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let candidates = android_music_folder_candidates();
         if candidates.is_empty() {
@@ -915,8 +910,7 @@ fn run_album_layout(
         }
 
         // Самый частый исполнитель среди локальных треков — для запроса.
-        let mut counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (_, _, artist) in &local {
             if !artist.is_empty() {
                 *counts.entry(artist.clone()).or_default() += 1;
@@ -936,9 +930,7 @@ fn run_album_layout(
         let decision: (u8, Vec<external::ExternalTrack>, Option<String>) =
             match library.get_external_album(&album_key) {
                 Some((src, status, _, tracks)) if !refresh && status == "ok" => (0, tracks, src),
-                Some((_, status, _, _)) if !refresh && status == "none" => {
-                    (2, Vec::new(), None)
-                }
+                Some((_, status, _, _)) if !refresh && status == "none" => (2, Vec::new(), None),
                 _ => (1, Vec::new(), None),
             };
         (local, query_artist, album_key, decision)
@@ -971,8 +963,13 @@ fn run_album_layout(
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     match fetched {
         external::FetchOutcome::Found(album) if !album.tracks.is_empty() => {
-            let _ =
-                library.set_external_album(&album_key, Some(&album.source), "ok", &album.tracks, now);
+            let _ = library.set_external_album(
+                &album_key,
+                Some(&album.source),
+                "ok",
+                &album.tracks,
+                now,
+            );
             let entries = external::build_layout(&album.tracks, &local_for_match);
             Ok(external::AlbumLayout {
                 status: "ok".into(),
@@ -1005,7 +1002,11 @@ async fn external_artist_image(
             let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
             settings.1.clone()
         };
-        Ok(external::get_or_fetch_artist_image(&dir, &artist_name, refresh))
+        Ok(external::get_or_fetch_artist_image(
+            &dir,
+            &artist_name,
+            refresh,
+        ))
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -1026,7 +1027,9 @@ async fn external_track_cover(
             let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
             settings.1.clone()
         };
-        Ok(external::get_or_fetch_track_cover(&dir, &artist, &album, &title, refresh))
+        Ok(external::get_or_fetch_track_cover(
+            &dir, &artist, &album, &title, refresh,
+        ))
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -1815,8 +1818,7 @@ fn mark_tracks_in_library(app: &tauri::AppHandle, tracks: &mut [external::Extern
         let Some(local_versions) = lib_index.get(&tkey) else {
             continue;
         };
-        let track_artists =
-            external::split_artists_for_match_prepared(&t.artist, &prepared_seps);
+        let track_artists = external::split_artists_for_match_prepared(&t.artist, &prepared_seps);
         let ext_album_key = t
             .album
             .as_deref()
@@ -2038,9 +2040,7 @@ fn downloads_delete_track(app: tauri::AppHandle, file_path: String) -> Result<()
 
 /// Проверить доступность yt-dlp/ffmpeg/deno (без скачивания).
 #[tauri::command]
-async fn downloads_check_tools(
-    app: tauri::AppHandle,
-) -> Result<downloads::ToolsStatus, String> {
+async fn downloads_check_tools(app: tauri::AppHandle) -> Result<downloads::ToolsStatus, String> {
     tauri::async_runtime::spawn_blocking(move || downloads::refresh_tools_status(&app))
         .await
         .map_err(|e| format!("Task error: {}", e))
@@ -2064,6 +2064,19 @@ fn downloads_validate_cookies(app: tauri::AppHandle) {
 #[tauri::command]
 fn downloads_youtube_logout(app: tauri::AppHandle) {
     downloads::logout(&app);
+}
+
+/// Текущая конфигурация прокси для yt-dlp (режим + URL).
+#[tauri::command]
+fn downloads_get_proxy(app: tauri::AppHandle) -> downloads::ProxyConfig {
+    downloads::get_proxy(&app)
+}
+
+/// Сохранить конфигурацию прокси для yt-dlp. `mode`: "system" | "none" | "custom";
+/// `url` нужен только для "custom" (напр. socks5://127.0.0.1:1080 для ByeDPI).
+#[tauri::command]
+fn downloads_set_proxy(app: tauri::AppHandle, mode: String, url: String) {
+    downloads::set_proxy(&app, mode, url);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2105,10 +2118,7 @@ async fn tools_check_updates(app: tauri::AppHandle) -> Result<tools::ToolsInfo, 
 /// (Пере)установить/обновить утилиту (`tool` = "ytdlp" | "ffmpeg"). Прогресс
 /// стримится событием `tools_progress`; по завершении эмитится `tools_changed`.
 #[tauri::command]
-async fn tools_install(
-    app: tauri::AppHandle,
-    tool: String,
-) -> Result<tools::ToolsInfo, String> {
+async fn tools_install(app: tauri::AppHandle, tool: String) -> Result<tools::ToolsInfo, String> {
     let app_for_task = app.clone();
     let info = tauri::async_runtime::spawn_blocking(move || {
         let dir = tools_app_data_dir(&app_for_task);
@@ -2213,14 +2223,22 @@ async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, St
             move |msg: String| {
                 let _ = app_for_report.emit(
                     "tools_progress",
-                    ToolsProgress { tool: tool.to_string(), message: Some(msg), active: true },
+                    ToolsProgress {
+                        tool: tool.to_string(),
+                        message: Some(msg),
+                        active: true,
+                    },
                 );
             }
         };
         let clear_progress = |tool: &'static str| {
             let _ = app_for_task.emit(
                 "tools_progress",
-                ToolsProgress { tool: tool.to_string(), message: None, active: false },
+                ToolsProgress {
+                    tool: tool.to_string(),
+                    message: None,
+                    active: false,
+                },
             );
         };
 
@@ -2263,10 +2281,7 @@ async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, St
 
 /// Удалить скачанную приложением утилиту (`tool` = "ytdlp" | "ffmpeg").
 #[tauri::command]
-async fn tools_delete(
-    app: tauri::AppHandle,
-    tool: String,
-) -> Result<tools::ToolsInfo, String> {
+async fn tools_delete(app: tauri::AppHandle, tool: String) -> Result<tools::ToolsInfo, String> {
     // Утилитой может пользоваться активный воркер скачивания (yt-dlp/ffmpeg уже
     // резолвнуты и качают очередь). Удаление выдернуло бы бинарь из-под него —
     // не даём, пока в очереди есть незавершённые элементы.
@@ -2306,21 +2321,15 @@ pub fn run() {
     tauri::Builder::default()
         // Кастомный протокол обложек: отдаёт уменьшенные WebP-миниатюры по
         // file_path (генерируются лениво и кэшируются на диск), без base64 в IPC.
-        .register_asynchronous_uri_scheme_protocol(
-            "lfmusic-cover",
-            |ctx, request, responder| {
-                thumbnails::protocol_handler(ctx, request, responder);
-            },
-        )
+        .register_asynchronous_uri_scheme_protocol("lfmusic-cover", |ctx, request, responder| {
+            thumbnails::protocol_handler(ctx, request, responder);
+        })
         // Кастомный протокол внешних картинок (аватарки/обложки): отдаёт
         // кэшированные WebP по lfmusic-external://{artist|cover}/<hash>, без
         // base64 в IPC — по образцу lfmusic-cover.
-        .register_asynchronous_uri_scheme_protocol(
-            "lfmusic-external",
-            |ctx, request, responder| {
-                external::protocol_handler(ctx, request, responder);
-            },
-        )
+        .register_asynchronous_uri_scheme_protocol("lfmusic-external", |ctx, request, responder| {
+            external::protocol_handler(ctx, request, responder);
+        })
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -2469,6 +2478,8 @@ pub fn run() {
             downloads_youtube_login,
             downloads_validate_cookies,
             downloads_youtube_logout,
+            downloads_get_proxy,
+            downloads_set_proxy,
             tools_info,
             tools_check_updates,
             tools_install,

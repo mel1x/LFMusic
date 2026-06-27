@@ -55,8 +55,52 @@ pub struct DownloadItem {
     pub status: String,
     /// Прогресс текущего элемента, 0..100.
     pub progress: f64,
+    /// Человекочитаемое сообщение об ошибке (для показа в очереди).
     pub error: Option<String>,
+    /// Тип ошибки — чтобы UI различал причины НЕ по тексту (см. [`DownloadErrorKind`]).
+    pub error_kind: Option<DownloadErrorKind>,
     pub file_path: Option<String>,
+}
+
+/// Тип ошибки скачивания — для UI (разные подсказки/иконки и честная диагностика),
+/// а не парсинг текста сообщения. Прежде один текстовый маркер «YouTube требует
+/// вход» обслуживал и IP/VPN-бот-стену, и реальное протухание cookies — UI
+/// психологически врал. Теперь причина передаётся типом.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadErrorKind {
+    /// Бот-стена YouTube — почти всегда про репутацию IP/сети (VPN/дата-центр), а
+    /// НЕ про cookies. Лечится сменой сети/прокси/повтором (или входом — как одна
+    /// из мер обхода).
+    BotWallNetwork,
+    /// yt-dlp явно отверг сами cookies (просрочены/ротированы) — нужен перелогин.
+    CookiesExpired,
+    /// Сетевой таймаут/обрыв/сбой резолва — транзиентная сетевая ошибка.
+    NetworkTimeout,
+    /// Не нашлось подходящего аудиоформата (нет ffmpeg / трека/формата нет).
+    NoFormat,
+    /// Отсутствует/не запускается обязательная утилита (yt-dlp).
+    ToolMissing,
+    /// Отмена пользователем.
+    Cancelled,
+    /// Прочее (нераспознанная ошибка yt-dlp, ошибка импорта в библиотеку).
+    Unknown,
+}
+
+/// Ошибка скачивания: тип (для UI) + человекочитаемое сообщение (для показа).
+#[derive(Debug, Clone)]
+pub struct DownloadError {
+    pub kind: DownloadErrorKind,
+    pub message: String,
+}
+
+impl DownloadError {
+    fn new(kind: DownloadErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
 }
 
 /// Доступность внешних утилит (для статуса и блокировки кнопок на странице).
@@ -336,8 +380,7 @@ pub fn delete_downloaded_track(app: &AppHandle, file_path: &str) -> Result<(), S
     let path = PathBuf::from(file_path);
     let quarantine: Option<PathBuf> = if path.exists() {
         let q = quarantine_path(&path);
-        rename_with_retries(&path, &q)
-            .map_err(|e| format!("Не удалось удалить файл: {}", e))?;
+        rename_with_retries(&path, &q).map_err(|e| format!("Не удалось удалить файл: {}", e))?;
         Some(q)
     } else {
         None
@@ -499,6 +542,7 @@ fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) 
         status: "queued".into(),
         progress: 0.0,
         error: None,
+        error_kind: None,
         file_path: None,
     });
     m.run_total += 1;
@@ -521,7 +565,10 @@ pub fn remove(app: &AppHandle, id: u64) {
             "downloading" => {
                 // Удаляем из списка; воркер увидит пропажу и зачтёт run_done.
                 m.items.remove(pos);
-                m.current_child.lock().unwrap_or_else(|e| e.into_inner()).take()
+                m.current_child
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
             }
             _ => {
                 // done / error — просто убрать из истории.
@@ -544,12 +591,17 @@ pub fn remove(app: &AppHandle, id: u64) {
 /// Метаданные и поисковый запрос сохраняются — повторно ничего вводить не нужно.
 pub fn retry(app: &AppHandle, id: u64) {
     let restarted = with_manager(app, |m| {
-        let Some(item) = m.items.iter_mut().find(|i| i.id == id && i.status == "error") else {
+        let Some(item) = m
+            .items
+            .iter_mut()
+            .find(|i| i.id == id && i.status == "error")
+        else {
             return false;
         };
         item.status = "queued".into();
         item.progress = 0.0;
         item.error = None;
+        item.error_kind = None;
         item.file_path = None;
         // Добавляем в текущий прогон, чтобы прогресс-бар в шапке учёл повтор.
         m.run_total += 1;
@@ -610,7 +662,7 @@ const LOGIN_URL: &str =
 /// embedded) — отдаёт пустую/заблокированную страницу. Под видом обычного Chrome
 /// страница входа открывается нормально.
 const LOGIN_UA: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 /// Стабильное видео для проверки cookies (популярный, не удаляемый ролик).
 const COOKIE_CHECK_URL: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
@@ -646,6 +698,25 @@ fn mark_cookies_invalid(app: &AppHandle) {
 /// Снять пометку «протухли» (после успешного входа/проверки).
 fn clear_cookies_invalid(app: &AppHandle) {
     let _ = std::fs::remove_file(cookies_invalid_marker(app));
+}
+
+/// Успешная загрузка с cookies доказала, что вход рабочий → снять маркер «протухли»,
+/// если он был. Нужно, потому что прежде маркер выставлялся по транзиентной бот-стене
+/// (по IP) и ЗАЛИПАЛ: успешные загрузки его не снимали, и пользователь оставался в
+/// «войдите заново» до ручного перелогина даже после смены сети. Снапшот эмитим
+/// только при реальном изменении — не дёргаем UI на каждой удачной загрузке.
+fn mark_cookies_valid_after_success(app: &AppHandle) {
+    if !cookies_invalid_marker(app).exists() {
+        return;
+    }
+    clear_cookies_invalid(app);
+    with_manager(app, |m| {
+        if m.cookies_authorized {
+            m.cookies_valid = true;
+        }
+        m.cookies_message = None;
+    });
+    emit_snapshot(app);
 }
 
 /// Подтянуть сохранённое состояние входа с диска один раз за запуск. Валиден =
@@ -763,7 +834,9 @@ fn read_youtube_cookies(app: &AppHandle) -> Vec<tauri::webview::cookie::Cookie<'
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for u in urls {
-        let Ok(url) = tauri::Url::parse(u) else { continue };
+        let Ok(url) = tauri::Url::parse(u) else {
+            continue;
+        };
         if let Ok(cookies) = win.cookies_for_url(url) {
             for c in cookies {
                 let key = format!("{}|{}", c.name(), c.domain().unwrap_or(""));
@@ -804,7 +877,10 @@ fn clear_webview_youtube_cookies(app: &AppHandle) {
 }
 
 /// Записать cookies в Netscape-файл для yt-dlp. Возвращает число записанных строк.
-fn write_cookies_file(app: &AppHandle, cookies: &[tauri::webview::cookie::Cookie<'static>]) -> Result<usize, String> {
+fn write_cookies_file(
+    app: &AppHandle,
+    cookies: &[tauri::webview::cookie::Cookie<'static>],
+) -> Result<usize, String> {
     let mut out = String::from("# Netscape HTTP Cookie File\n# Сгенерировано LFMusic\n\n");
     let mut count = 0usize;
     for c in cookies {
@@ -813,7 +889,10 @@ fn write_cookies_file(app: &AppHandle, cookies: &[tauri::webview::cookie::Cookie
             _ => continue,
         };
         let dl = domain.to_ascii_lowercase();
-        if !(dl.contains("youtube.com") || dl.contains("google.com") || dl.contains("googlevideo.com")) {
+        if !(dl.contains("youtube.com")
+            || dl.contains("google.com")
+            || dl.contains("googlevideo.com"))
+        {
             continue;
         }
         // HttpOnly помечается префиксом домена `#HttpOnly_` (его понимает yt-dlp).
@@ -823,9 +902,17 @@ fn write_cookies_file(app: &AppHandle, cookies: &[tauri::webview::cookie::Cookie
         } else {
             domain.to_string()
         };
-        let include_sub = if domain.starts_with('.') { "TRUE" } else { "FALSE" };
+        let include_sub = if domain.starts_with('.') {
+            "TRUE"
+        } else {
+            "FALSE"
+        };
         let path = c.path().unwrap_or("/");
-        let secure = if c.secure().unwrap_or(false) { "TRUE" } else { "FALSE" };
+        let secure = if c.secure().unwrap_or(false) {
+            "TRUE"
+        } else {
+            "FALSE"
+        };
         // Session-cookies (без даты) → 0.
         let expiry = c
             .expires_datetime()
@@ -834,7 +921,13 @@ fn write_cookies_file(app: &AppHandle, cookies: &[tauri::webview::cookie::Cookie
             .unwrap_or(0);
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            domain_field, include_sub, path, secure, expiry, c.name(), c.value()
+            domain_field,
+            include_sub,
+            path,
+            secure,
+            expiry,
+            c.name(),
+            c.value()
         ));
         count += 1;
     }
@@ -1025,7 +1118,10 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
     };
     let cookies = cookies_file(app);
     if !cookies.exists() {
-        return (false, Some("Нет cookies — авторизуйтесь в YouTube.".to_string()));
+        return (
+            false,
+            Some("Нет cookies — авторизуйтесь в YouTube.".to_string()),
+        );
     }
 
     // Без JS-движка YouTube не отдаёт аудиоформаты (signature/n-challenge не
@@ -1052,7 +1148,17 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
         .arg("-f")
         .arg("bestaudio/best")
         .arg("--js-runtimes")
-        .arg(deno_rt);
+        .arg(deno_rt)
+        // Тот же клиент и UA, что и при реальной загрузке (см. download_one_with_stem),
+        // иначе проверка и скачивание расходятся: одно проходит, другое падает.
+        .arg("--extractor-args")
+        .arg(format!("youtube:player_client={}", YT_PLAYER_CLIENTS[0]))
+        .arg("--user-agent")
+        .arg(LOGIN_UA);
+    // Тот же прокси, что и при загрузке (иначе проверка ходит другим маршрутом).
+    if let Some(proxy) = proxy_arg(app) {
+        cmd.arg("--proxy").arg(proxy);
+    }
     cmd.arg(COOKIE_CHECK_URL)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1068,6 +1174,84 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     (false, Some(extract_ytdlp_error(&stderr)))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Прокси (для yt-dlp) — режим из настроек
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Конфигурация прокси для фронта: режим + URL (для режима «указать»).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    /// "system" (системный/окружения) | "none" (прямое) | "custom" (заданный URL).
+    pub mode: String,
+    pub url: String,
+}
+
+/// Значение для `--proxy` yt-dlp по текущим настройкам (см. [`ResolvedTools::proxy`]):
+/// `None` — флаг не передаём (системный прокси/окружение); `Some("")` — прямое
+/// соединение (режим «нет»); `Some(url)` — заданный прокси (режим «указать»;
+/// пустой URL сводится к системному).
+fn proxy_arg(app: &AppHandle) -> Option<String> {
+    let state = app.state::<crate::SettingsState>();
+    let guard = state.0.lock().ok()?;
+    match guard.0.proxy_mode.as_deref().unwrap_or("system") {
+        "none" => Some(String::new()),
+        "custom" => guard
+            .0
+            .proxy_url
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        _ => None, // "system" и любое неизвестное значение
+    }
+}
+
+/// Текущая конфигурация прокси (для страницы настроек).
+pub fn get_proxy(app: &AppHandle) -> ProxyConfig {
+    let state = app.state::<crate::SettingsState>();
+    // Привязываем guard к локалу (а не матчим временный `lock()` в хвосте блока):
+    // иначе его деструктор отработал бы ПОСЛЕ дропа `state` (E0597).
+    let guard = state.0.lock();
+    match guard {
+        Ok(g) => ProxyConfig {
+            mode: g
+                .0
+                .proxy_mode
+                .clone()
+                .unwrap_or_else(|| "system".to_string()),
+            url: g.0.proxy_url.clone().unwrap_or_default(),
+        },
+        Err(_) => ProxyConfig {
+            mode: "system".to_string(),
+            url: String::new(),
+        },
+    }
+}
+
+/// Сохранить конфигурацию прокси в настройки. Неизвестный режим → "system".
+/// Пустой URL не сохраняем (None), чтобы режим «custom» с пустым полем вёл себя
+/// как системный, а не как битый прокси.
+pub fn set_proxy(app: &AppHandle, mode: String, url: String) {
+    let mode = match mode.as_str() {
+        "none" | "system" | "custom" => mode,
+        _ => "system".to_string(),
+    };
+    let trimmed = url.trim().to_string();
+    let state = app.state::<crate::SettingsState>();
+    let mut guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    guard.0.proxy_mode = Some(mode);
+    guard.0.proxy_url = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
+    // Запись на диск под локом (как persist_download_dir) — короткая операция.
+    let path = guard.1.clone();
+    let _ = crate::settings::save(&path, &guard.0);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1130,6 +1314,7 @@ fn worker_loop(app: AppHandle) {
                             "yt-dlp не установлен. Установите его в настройках → Внешние источники."
                                 .into(),
                         );
+                        item.error_kind = Some(DownloadErrorKind::ToolMissing);
                     }
                 }
                 m.run_done = m.run_total;
@@ -1156,6 +1341,7 @@ fn worker_loop(app: AppHandle) {
         ffmpeg,
         deno,
         cookies_file: cookies_file_opt,
+        proxy: proxy_arg(&app),
     };
 
     let child_slot = with_manager(&app, |m| m.current_child.clone());
@@ -1193,19 +1379,20 @@ fn worker_loop(app: AppHandle) {
                         if let Some(err) = &import_err {
                             item.status = "error".into();
                             item.progress = 100.0;
-                            item.error = Some(format!(
-                                "Трек скачан, но не добавлен в библиотеку: {}",
-                                err
-                            ));
+                            item.error =
+                                Some(format!("Трек скачан, но не добавлен в библиотеку: {}", err));
+                            item.error_kind = Some(DownloadErrorKind::Unknown);
                         } else {
                             item.status = "done".into();
                             item.progress = 100.0;
                             item.error = None;
+                            item.error_kind = None;
                         }
                     }
                     Err(e) => {
                         item.status = "error".into();
-                        item.error = Some(e.clone());
+                        item.error = Some(e.message.clone());
+                        item.error_kind = Some(e.kind);
                     }
                 }
             }
@@ -1249,10 +1436,12 @@ fn finish_run(app: &AppHandle) {
     ensure_worker(app);
 }
 
-/// Текст-маркер «бот-стены» YouTube в сообщении об ошибке (по нему фронт
-/// показывает мягкую подсказку войти в аккаунт). Держать в синхроне с фронтом
-/// (`useDownloads.ts` → `isBotWallError`).
-pub const BOT_WALL_HINT: &str = "YouTube требует вход";
+/// Клиенты YouTube-плеера для ротации между попытками при бот-стене. Дефолтный
+/// `web` — самый «бот-стенный» и сейчас требует PO-токен, поэтому используем менее
+/// задушенные клиенты и МЕНЯЕМ их по попыткам: часть отказов клиент-специфична, и
+/// другой клиент нередко проходит там, где предыдущий упёрся в стену. Порядок — от
+/// самого устойчивого (`tv` работает и с cookies) к запасным.
+const YT_PLAYER_CLIENTS: &[&str] = &["tv", "web_safari", "mweb"];
 
 /// Признаки «бот-стены» в stderr yt-dlp (требуется авторизация для обхода).
 fn is_bot_wall(stderr: &str) -> bool {
@@ -1264,10 +1453,61 @@ fn is_bot_wall(stderr: &str) -> bool {
         || (s.contains("cookies") && s.contains("authentication") && s.contains("required"))
 }
 
-/// Пользователь отменил скачивание (kill процесса) — повтор с другим источником
-/// не нужен.
-fn is_cancel_error(e: &str) -> bool {
-    e.contains("отменено")
+/// Явный признак, что yt-dlp отверг сами cookies (а не показал generic бот-стену):
+/// аккаунт-cookies просрочены/ротированы. ТОЛЬКО в этом случае имеет смысл просить
+/// перелогиниться — обычная бот-стена «sign in to confirm you're not a bot» это про
+/// IP/сеть, и инвалидировать рабочий вход по ней нельзя (иначе «вход устарел» при
+/// актуальном входе — типичная картина под VPN/дата-центровым IP).
+fn is_cookies_expired(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("cookies are no longer valid")
+        || s.contains("account cookies are no longer valid")
+        || s.contains("cookies have been rotated")
+        || (s.contains("cookies") && s.contains("no longer valid"))
+}
+
+/// Признаки сетевого таймаута/обрыва/сбоя резолва в stderr yt-dlp — транзиентная
+/// сетевая ошибка (особенно вероятна под VPN/DPI-обходом с медленным коннектом).
+fn is_network_timeout(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("timed out")
+        || s.contains("timeout")
+        || s.contains("connection reset")
+        || s.contains("connection refused")
+        || s.contains("connection aborted")
+        || s.contains("unable to connect")
+        || s.contains("failed to resolve")
+        || s.contains("getaddrinfo")
+        || s.contains("temporary failure in name resolution")
+        || s.contains("network is unreachable")
+        || s.contains("urlopen error")
+}
+
+/// Признаки «нет подходящего формата» в stderr yt-dlp (нужен ffmpeg / у трека нет
+/// аудиоформата / видео недоступно как аудио).
+fn is_no_format(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("requested format is not available")
+        || s.contains("no video formats")
+        || s.contains("no formats found")
+        || s.contains("only images are available")
+}
+
+/// Классифицирует ошибку yt-dlp по stderr в [`DownloadErrorKind`]. Порядок важен:
+/// сначала точные причины (отвергнутые cookies, бот-стена), затем сеть/формат,
+/// иначе общий сетевой текст перехватил бы более специфичную причину.
+fn classify_ytdlp_error(stderr: &str) -> DownloadErrorKind {
+    if is_cookies_expired(stderr) {
+        DownloadErrorKind::CookiesExpired
+    } else if is_bot_wall(stderr) {
+        DownloadErrorKind::BotWallNetwork
+    } else if is_network_timeout(stderr) {
+        DownloadErrorKind::NetworkTimeout
+    } else if is_no_format(stderr) {
+        DownloadErrorKind::NoFormat
+    } else {
+        DownloadErrorKind::Unknown
+    }
 }
 
 /// Поисковые цели для yt-dlp по порядку надёжности. Сначала — YouTube Music
@@ -1292,69 +1532,93 @@ fn download_one(
     dir: &Path,
     job: &DownloadItem,
     child_slot: &Arc<Mutex<Option<Child>>>,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, DownloadError> {
     let stem = unique_stem(dir, &job.artist, &job.title);
     let targets = search_targets(&job.query);
 
-    // Бот-стена YouTube часто транзиентна — те же cookies проходят со 2–3 попытки
-    // (ровно то, что пользователь делал руками, переоткрывая скачивание). Поэтому
-    // при бот-стене не сдаёмся сразу: повторяем несколько раз с короткой паузой, и
-    // помечаем вход устаревшим ТОЛЬКО если ВСЕ попытки упёрлись в бот-стену (тогда
-    // cookies, скорее всего, реально протухли). Обычные ошибки ретраем не лечатся.
-    const BOT_WALL_ATTEMPTS: usize = 3;
-    let mut last_err = "yt-dlp завершился с ошибкой".to_string();
+    // Бот-стена YouTube почти всегда транзиентна и привязана к IP (а не к cookies):
+    // те же cookies проходят со 2–3 попытки. Поэтому при бот-стене не сдаёмся сразу,
+    // а ПОВТОРЯЕМ, МЕНЯЯ player_client (см. [`YT_PLAYER_CLIENTS`]) — часть отказов
+    // клиент-специфична, и другой клиент нередко проходит. Вход помечаем устаревшим
+    // ТОЛЬКО если yt-dlp явно отверг сами cookies (kind == CookiesExpired): generic
+    // бот-стена этого не делает — иначе «вход устарел» при актуальном входе.
+    // Обычные (не бот-стена) ошибки ретраем не лечатся — выходим сразу.
+    let mut last_err =
+        DownloadError::new(DownloadErrorKind::Unknown, "yt-dlp завершился с ошибкой");
     let mut bot_wall_seen = false;
+    let mut cookies_expired_seen = false;
 
-    for attempt in 0..BOT_WALL_ATTEMPTS {
-        let mut hit_bot_wall = false;
+    for (attempt, &client) in YT_PLAYER_CLIENTS.iter().enumerate() {
+        let mut should_retry = false;
         for target in &targets {
             let result =
-                download_one_with_stem(app, resolved, dir, job, child_slot, &stem, target);
+                download_one_with_stem(app, resolved, dir, job, child_slot, &stem, target, client);
             // Уборка хвостов yt-dlp (фрагменты, `.part`, `.ytdl`) при любом исходе.
             // `stem` уникален для задания: при ошибке безопасно удалить все `stem.*`,
             // при успехе — всё, кроме итогового файла.
             match result {
                 Ok(final_path) => {
                     remove_stem_files(dir, &stem, Some(&final_path));
+                    // Успех с cookies → снимаем возможный залипший маркер «протухли»
+                    // (мог быть выставлен прошлой транзиентной бот-стеной по IP).
+                    if resolved.cookies_file.is_some() {
+                        mark_cookies_valid_after_success(app);
+                    }
                     return Ok(final_path);
                 }
                 Err(e) => {
                     remove_stem_files(dir, &stem, None);
-                    // Отмена пользователем — прекращаем немедленно.
-                    if is_cancel_error(&e) {
-                        return Err(e);
-                    }
-                    if e.contains(BOT_WALL_HINT) {
-                        hit_bot_wall = true;
-                        bot_wall_seen = true;
+                    match e.kind {
+                        // Отмена пользователем — прекращаем немедленно.
+                        DownloadErrorKind::Cancelled => return Err(e),
+                        // Сами cookies отвергнуты. Продолжаем ротацию (клиент без
+                        // cookies мог бы пройти), но запоминаем — пометим вход
+                        // устаревшим, если так и не скачали.
+                        DownloadErrorKind::CookiesExpired => {
+                            cookies_expired_seen = true;
+                            should_retry = true;
+                        }
+                        DownloadErrorKind::BotWallNetwork => {
+                            bot_wall_seen = true;
+                            should_retry = true;
+                        }
+                        // Прочее (нет формата, сеть, неизвестное) ротацией не лечится.
+                        _ => {}
                     }
                     last_err = e;
                 }
             }
         }
-        // Повторяем только транзиентную бот-стену; обычная ошибка — выходим сразу.
-        if !hit_bot_wall {
+        // Повторяем только транзиентную бот-стену/отказ cookies; иначе выходим сразу.
+        if !should_retry {
             break;
         }
-        if attempt + 1 < BOT_WALL_ATTEMPTS {
+        if attempt + 1 < YT_PLAYER_CLIENTS.len() {
             std::thread::sleep(Duration::from_secs(2));
         }
     }
 
-    // Бот-стена пережила все повторы → cookies, вероятно, реально протухли. Только
-    // теперь помечаем вход устаревшим (статус сбросится и переживёт перезапуск).
+    // Cookies реально отвергнуты yt-dlp → помечаем вход устаревшим (статус переживёт
+    // перезапуск) и просим перелогиниться.
+    if cookies_expired_seen && resolved.cookies_file.is_some() {
+        mark_cookies_invalid(app);
+        emit_snapshot(app);
+        return Err(DownloadError::new(
+            DownloadErrorKind::CookiesExpired,
+            "Вход в YouTube устарел — войдите заново в «Внешние источники»",
+        ));
+    }
+    // Generic бот-стена пережила все клиенты. Это про IP/сеть, а НЕ про cookies —
+    // вход НЕ инвалидируем. Подсказка зависит от того, входил ли пользователь.
     if bot_wall_seen {
-        if resolved.cookies_file.is_some() {
-            mark_cookies_invalid(app);
-            emit_snapshot(app);
-            return Err(format!(
-                "{} - войдите заново в «Внешние источники»",
-                BOT_WALL_HINT
-            ));
-        }
-        return Err(format!(
-            "{} - войдите в YouTube в настройках «Внешние источники»",
-            BOT_WALL_HINT
+        let message = if resolved.cookies_file.is_some() {
+            "YouTube запросил подтверждение (IP/сеть) — попробуйте позже, смените сеть/VPN или прокси"
+        } else {
+            "YouTube запросил подтверждение (IP/сеть) — войдите в YouTube или смените сеть/прокси в «Внешних источниках»"
+        };
+        return Err(DownloadError::new(
+            DownloadErrorKind::BotWallNetwork,
+            message,
         ));
     }
     Err(last_err)
@@ -1368,7 +1632,8 @@ fn download_one_with_stem(
     child_slot: &Arc<Mutex<Option<Child>>>,
     stem: &str,
     search_target: &str,
-) -> Result<PathBuf, String> {
+    player_client: &str,
+) -> Result<PathBuf, DownloadError> {
     let out_template = dir.join(format!("{}.%(ext)s", stem));
 
     // Библиотека сканирует только определённые контейнеры (m4a/opus/ogg/mp3/…),
@@ -1435,6 +1700,20 @@ fn download_one_with_stem(
         cmd.arg("--js-runtimes")
             .arg(tools::deno_runtime_value(deno));
     }
+    // Клиент YouTube-плеера (ротация по попыткам, см. [`download_one`]): уводит от
+    // самого «бот-стенного» дефолтного `web`, который сейчас требует PO-токен.
+    cmd.arg("--extractor-args")
+        .arg(format!("youtube:player_client={}", player_client));
+    // UA как у окна входа в YouTube ([`LOGIN_UA`]): cookies снимались в вебвью под
+    // этим UA, и совпадение фингерпринта браузера делает запрос с теми же cookies
+    // консистентнее (меньше повод для бот-челленджа).
+    cmd.arg("--user-agent").arg(LOGIN_UA);
+    // Прокси по настройкам: Some("") — прямое соединение (режим «нет»), Some(url) —
+    // заданный прокси (напр. ByeDPI socks5://127.0.0.1:1080), None — флаг не
+    // передаём (системный прокси/окружение).
+    if let Some(proxy) = &resolved.proxy {
+        cmd.arg("--proxy").arg(proxy);
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1446,9 +1725,12 @@ fn download_one_with_stem(
         cmd.process_group(0);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Не удалось запустить yt-dlp: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        DownloadError::new(
+            DownloadErrorKind::ToolMissing,
+            format!("Не удалось запустить yt-dlp: {}", e),
+        )
+    })?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -1508,14 +1790,18 @@ fn download_one_with_stem(
 
     // Забираем процесс назад и ждём завершения.
     let status = {
-        let taken = child_slot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let taken = child_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         match taken {
-            Some(mut c) => c.wait().map_err(|e| e.to_string())?,
+            Some(mut c) => c
+                .wait()
+                .map_err(|e| DownloadError::new(DownloadErrorKind::Unknown, e.to_string()))?,
             // Процесс уже забрали (отмена) — считаем отменённым.
-            None => return Err("Скачивание отменено".to_string()),
+            None => {
+                return Err(DownloadError::new(
+                    DownloadErrorKind::Cancelled,
+                    "Скачивание отменено",
+                ))
+            }
         }
     };
 
@@ -1532,17 +1818,19 @@ fn download_one_with_stem(
             job.query,
             stderr_text.trim()
         );
-        // Бот-стена YouTube — возвращаем только маркер. Вход НЕ инвалидируем здесь:
-        // бот-стена часто транзиентна (те же cookies проходят со 2–3 попытки).
-        // Решение о повторах и об устаревании cookies принимает download_one.
-        if is_bot_wall(&stderr_text) {
-            return Err(BOT_WALL_HINT.to_string());
-        }
-        return Err(extract_ytdlp_error(&stderr_text));
+        // Классифицируем по stderr (cookies-отказ / бот-стена / сеть / формат).
+        // Решение о повторах и об устаревании cookies принимает download_one — по
+        // типу ошибки (kind), а НЕ по тексту: бот-стена ≠ протухшие cookies.
+        let kind = classify_ytdlp_error(&stderr_text);
+        return Err(DownloadError::new(kind, extract_ytdlp_error(&stderr_text)));
     }
 
-    let file = find_output(dir, stem)
-        .ok_or_else(|| "Файл не найден после скачивания".to_string())?;
+    let file = find_output(dir, stem).ok_or_else(|| {
+        DownloadError::new(
+            DownloadErrorKind::Unknown,
+            "Файл не найден после скачивания",
+        )
+    })?;
 
     // Страховка: если итоговый контейнер библиотека не сканирует (например, без
     // ffmpeg прорвался .webm), не выдаём ложное «готово» — удаляем и сообщаем.
@@ -1553,14 +1841,23 @@ fn download_one_with_stem(
         .to_lowercase();
     if !is_supported_audio_ext(&ext) {
         let _ = std::fs::remove_file(&file);
-        return Err(format!(
-            "формат {} не поддерживается (нужен ffmpeg для конвертации)",
-            if ext.is_empty() { "файла" } else { &ext }
+        return Err(DownloadError::new(
+            DownloadErrorKind::NoFormat,
+            format!(
+                "формат {} не поддерживается (нужен ffmpeg для конвертации)",
+                if ext.is_empty() { "файла" } else { &ext }
+            ),
         ));
     }
 
     // Теги — best-effort: даже если не записались, файл уже скачан и играбелен.
-    write_tags(&file, &job.title, &job.artist, job.album.as_deref(), job.cover_url.as_deref());
+    write_tags(
+        &file,
+        &job.title,
+        &job.artist,
+        job.album.as_deref(),
+        job.cover_url.as_deref(),
+    );
 
     Ok(file)
 }
@@ -1606,7 +1903,9 @@ fn is_reserved_windows_name(name: &str) -> bool {
 }
 
 fn app_data_dir(app: &AppHandle) -> PathBuf {
-    app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Папка для скачанных треков. По умолчанию — «LFMusic Downloads» в системной
@@ -1765,7 +2064,12 @@ fn unique_stem(dir: &Path, artist: &str, title: &str) -> String {
     let existing: HashSet<String> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .flatten()
-            .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(String::from))
+            .filter_map(|e| {
+                e.path()
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(String::from)
+            })
             .collect(),
         Err(_) => HashSet::new(),
     };
@@ -1955,7 +2259,12 @@ fn cover_client() -> &'static reqwest::blocking::Client {
 
 fn fetch_cover_bytes(url: &str) -> Option<Vec<u8>> {
     const MAX: usize = 8 * 1024 * 1024;
-    let resp = cover_client().get(url).send().ok()?.error_for_status().ok()?;
+    let resp = cover_client()
+        .get(url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?;
     // Отсекаем заведомо большие картинки по Content-Length, не загружая их целиком.
     if let Some(len) = resp.content_length() {
         if len > MAX as u64 {
@@ -2118,7 +2427,13 @@ fn write_lyrics_sidecar(audio_path: &Path, lyrics: Option<FetchedLyrics>) {
 /// Проставляет теги (название/исполнитель/альбом + обложку + текст песни) в
 /// скачанный файл и пишет рядом `.lrc`-сайдкар ([`write_lyrics_sidecar`]).
 /// Best-effort: ошибки лишь логируются (контейнер вроде webm может не писаться).
-fn write_tags(path: &Path, title: &str, artist: &str, album: Option<&str>, cover_url: Option<&str>) {
+fn write_tags(
+    path: &Path,
+    title: &str,
+    artist: &str,
+    album: Option<&str>,
+    cover_url: Option<&str>,
+) {
     use lofty::config::WriteOptions;
     use lofty::picture::{Picture, PictureType};
     use lofty::prelude::*;
@@ -2131,7 +2446,10 @@ fn write_tags(path: &Path, title: &str, artist: &str, album: Option<&str>, cover
     let mut tagged = match crate::audio_player::AudioPlayer::read_tagged_file(path) {
         Some(t) => t,
         None => {
-            eprintln!("[downloads] не удалось открыть для тегирования: {}", path.display());
+            eprintln!(
+                "[downloads] не удалось открыть для тегирования: {}",
+                path.display()
+            );
             // Контейнер не тегируется, но текст рядом сохранить можно (длительность
             // для точного запроса неизвестна — полагаемся на поиск по названию).
             write_lyrics_sidecar(path, fetch_lyrics(artist, title, album, None));
@@ -2258,7 +2576,11 @@ mod tests {
         // Даже с уникализацией и худшим временным суффиксом yt-dlp путь обязан
         // уложиться в Windows MAX_PATH (260) — иначе sanitize_open даёт [Errno 22].
         let worst = format!("{}\\{} (12).f251.webm.part", dir.display(), stem);
-        assert!(worst.chars().count() < 260, "len = {}", worst.chars().count());
+        assert!(
+            worst.chars().count() < 260,
+            "len = {}",
+            worst.chars().count()
+        );
     }
 
     #[test]

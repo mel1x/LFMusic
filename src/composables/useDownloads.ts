@@ -79,6 +79,20 @@ export interface ExternalSearchPage {
 
 export type DownloadStatus = 'queued' | 'downloading' | 'done' | 'error'
 
+/**
+ * Тип ошибки скачивания (зеркало `downloads.rs::DownloadErrorKind`). UI различает
+ * причины по типу, а НЕ по тексту: `bot_wall_network` (IP/VPN-стена, НЕ протухание
+ * входа) ≠ `cookies_expired` (реально нужен перелогин).
+ */
+export type DownloadErrorKind =
+  | 'bot_wall_network'
+  | 'cookies_expired'
+  | 'network_timeout'
+  | 'no_format'
+  | 'tool_missing'
+  | 'cancelled'
+  | 'unknown'
+
 /** Элемент очереди скачивания. */
 export interface DownloadItem {
   id: number
@@ -90,7 +104,16 @@ export interface DownloadItem {
   status: DownloadStatus
   progress: number
   error: string | null
+  /** Тип ошибки (для honest-диагностики в UI). null, если не ошибка. */
+  error_kind: DownloadErrorKind | null
   file_path: string | null
+}
+
+/** Конфигурация прокси для yt-dlp (зеркало `downloads.rs::ProxyConfig`). */
+export type ProxyMode = 'system' | 'none' | 'custom'
+export interface ProxyConfig {
+  mode: ProxyMode
+  url: string
 }
 
 /** Доступность внешних утилит + статус авторизации YouTube (зеркало downloads.rs::ToolsStatus). */
@@ -162,6 +185,9 @@ const toolsInfo = ref<ToolsInfo>({ ytdlp: emptyTool(), ffmpeg: emptyTool(), deno
 // Папка скачиваний — чтобы фронт определял «скачанные приложением» треки (для
 // пункта «Удалить трек» в контекстном меню). Грузится один раз в init().
 const downloadsDir = ref<string>('')
+// Конфигурация прокси для yt-dlp (страница настроек «Внешние источники»). По
+// умолчанию системный; грузится один раз в init().
+const proxyConfig = ref<ProxyConfig>({ mode: 'system', url: '' })
 /** Текст прогресса установки/обновления по утилите (null — не идёт). */
 const toolsProgress = ref<Record<ToolKey, string | null>>({ ytdlp: null, ffmpeg: null })
 // Статус утилит ещё не загружен — отображаем оптимистично (как будто всё на
@@ -310,6 +336,12 @@ async function init(): Promise<void> {
   } catch (e) {
     console.error('Ошибка получения папки скачиваний:', e)
   }
+  // Конфигурация прокси (для настроек «Внешние источники»).
+  try {
+    proxyConfig.value = await invoke<ProxyConfig>('downloads_get_proxy')
+  } catch (e) {
+    console.error('Ошибка получения настроек прокси:', e)
+  }
 }
 
 /** Трек скачан этим приложением (его файл лежит в папке скачиваний). */
@@ -344,6 +376,16 @@ async function setDownloadsDir(folderPath?: string | null): Promise<string> {
   try { await useFolders().refreshFolders() } catch { /* список папок ещё не инициализирован */ }
   try { await usePlayer().refreshLibrary() } catch { /* каталог обновится по событию */ }
   return resolved
+}
+
+/**
+ * Сохранить конфигурацию прокси для yt-dlp. `mode`: системный/нет/указать; `url`
+ * нужен только для 'custom' (напр. socks5://127.0.0.1:1080 для ByeDPI). Применяется
+ * к следующим скачиваниям и проверке cookies.
+ */
+async function setProxy(mode: ProxyMode, url = ''): Promise<void> {
+  await invoke('downloads_set_proxy', { mode, url })
+  proxyConfig.value = { mode, url: mode === 'custom' ? url.trim() : '' }
 }
 
 /**
@@ -532,6 +574,8 @@ export function useDownloads() {
     deleteDownloadedTrack,
     downloadsDir,
     setDownloadsDir,
+    proxyConfig,
+    setProxy,
     trackKey,
   }
 }

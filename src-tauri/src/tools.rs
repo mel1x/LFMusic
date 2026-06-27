@@ -36,6 +36,10 @@ pub struct ResolvedTools {
     /// Файл cookies (Netscape) для yt-dlp (`--cookies`), если пользователь
     /// авторизовался в YouTube.
     pub cookies_file: Option<PathBuf>,
+    /// Значение для `--proxy` yt-dlp по настройкам. `None` — флаг не передаём
+    /// (системный прокси/окружение). `Some("")` — прямое соединение (режим «нет»).
+    /// `Some(url)` — заданный прокси (режим «указать»).
+    pub proxy: Option<String>,
 }
 
 /// Информация об одной внешней утилите (для страницы настроек/уведомлений).
@@ -91,11 +95,19 @@ fn bin_dir(app_data_dir: &Path) -> PathBuf {
 }
 
 fn ytdlp_local(app_data_dir: &Path) -> PathBuf {
-    bin_dir(app_data_dir).join(if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" })
+    bin_dir(app_data_dir).join(if cfg!(windows) {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    })
 }
 
 fn ffmpeg_local(app_data_dir: &Path) -> PathBuf {
-    bin_dir(app_data_dir).join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" })
+    bin_dir(app_data_dir).join(if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    })
 }
 
 fn deno_local(app_data_dir: &Path) -> PathBuf {
@@ -260,15 +272,27 @@ fn deno_asset_name() -> &'static str {
     let arm = std::env::consts::ARCH == "aarch64";
     #[cfg(windows)]
     {
-        if arm { "deno-aarch64-pc-windows-msvc.zip" } else { "deno-x86_64-pc-windows-msvc.zip" }
+        if arm {
+            "deno-aarch64-pc-windows-msvc.zip"
+        } else {
+            "deno-x86_64-pc-windows-msvc.zip"
+        }
     }
     #[cfg(target_os = "macos")]
     {
-        if arm { "deno-aarch64-apple-darwin.zip" } else { "deno-x86_64-apple-darwin.zip" }
+        if arm {
+            "deno-aarch64-apple-darwin.zip"
+        } else {
+            "deno-x86_64-apple-darwin.zip"
+        }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if arm { "deno-aarch64-unknown-linux-gnu.zip" } else { "deno-x86_64-unknown-linux-gnu.zip" }
+        if arm {
+            "deno-aarch64-unknown-linux-gnu.zip"
+        } else {
+            "deno-x86_64-unknown-linux-gnu.zip"
+        }
     }
 }
 
@@ -338,11 +362,7 @@ fn make_executable(p: &Path) -> Result<(), String> {
 /// bin-папку. На Unix проставляет +x. Возвращает путь к первому из `wanted`.
 /// Доступно на всех десктоп-платформах: ffmpeg-zip (Windows/macOS) и Deno-zip
 /// (Windows/macOS/Linux) распаковываются одинаково.
-fn extract_zip_binaries(
-    zip_path: &Path,
-    bin: &Path,
-    wanted: &[&str],
-) -> Result<PathBuf, String> {
+fn extract_zip_binaries(zip_path: &Path, bin: &Path, wanted: &[&str]) -> Result<PathBuf, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {
@@ -526,7 +546,11 @@ fn ffmpeg_version(path: &Path) -> Option<String> {
 fn deno_version(path: &Path) -> Option<String> {
     let out = run_capture(path, &["--version"])?;
     let first = out.lines().next()?;
-    let token = first.strip_prefix("deno ").unwrap_or(first).split_whitespace().next()?;
+    let token = first
+        .strip_prefix("deno ")
+        .unwrap_or(first)
+        .split_whitespace()
+        .next()?;
     if token.is_empty() {
         None
     } else {
@@ -732,7 +756,10 @@ impl Drop for StagingDir {
 
 /// Путь резервной копии для атомарной подмены (`<target>.bak`).
 fn backup_path(target: &Path) -> PathBuf {
-    let name = target.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+    let name = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
     target.with_file_name(format!("{}.bak", name))
 }
 
@@ -757,7 +784,10 @@ fn swap_in_files(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
     for (staged, target) in pairs {
         if !staged.exists() {
             rollback(&done);
-            return Err(format!("подготовленный файл отсутствует: {}", staged.display()));
+            return Err(format!(
+                "подготовленный файл отсутствует: {}",
+                staged.display()
+            ));
         }
         let bak = if target.exists() {
             let b = backup_path(target);
@@ -803,8 +833,8 @@ pub fn install_ytdlp(
 
     // Резолвим конкретную версию: бинарь и его контрольная сумма берутся из
     // одного неизменяемого релиза (а не из подвижного latest-редиректа).
-    let tag = fetch_ytdlp_latest()
-        .ok_or_else(|| "Не удалось определить версию yt-dlp".to_string())?;
+    let tag =
+        fetch_ytdlp_latest().ok_or_else(|| "Не удалось определить версию yt-dlp".to_string())?;
     let asset = ytdlp_asset_name();
 
     // Сперва получаем ожидаемую контрольную сумму — ДО скачивания бинаря. Если
@@ -881,8 +911,16 @@ pub fn install_ffmpeg(
         }
 
         // Подменяем ffmpeg и (если есть) ffprobe одной транзакцией.
-        let ff_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-        let fp_name = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
+        let ff_name = if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        };
+        let fp_name = if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        };
         let mut pairs = vec![(staging.path().join(ff_name), bin.join(ff_name))];
         if staging.path().join(fp_name).exists() {
             pairs.push((staging.path().join(fp_name), bin.join(fp_name)));
@@ -958,10 +996,7 @@ pub fn delete_ffmpeg(app_data_dir: &Path) -> Result<(), String> {
 /// Deno уже доступен (в bin-папке или системном PATH) — пропускаем скачивание.
 /// Скачивается одним zip с GitHub-релиза denoland/deno под текущую платформу.
 /// Привязан к жизненному циклу yt-dlp (ставится/удаляется вместе с ним).
-pub fn install_deno(
-    app_data_dir: &Path,
-    report: &(dyn Fn(String) + Sync),
-) -> Result<(), String> {
+pub fn install_deno(app_data_dir: &Path, report: &(dyn Fn(String) + Sync)) -> Result<(), String> {
     let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // Уже есть рабочий Deno (наш или системный) — не качаем повторно.
@@ -1039,7 +1074,10 @@ fn write_meta_field(app_data_dir: &Path, key: &str, value: &str) {
         m = serde_json::json!({});
     }
     if let Some(obj) = m.as_object_mut() {
-        obj.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        obj.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
     }
     let _ = std::fs::write(meta_path(app_data_dir), m.to_string());
 }

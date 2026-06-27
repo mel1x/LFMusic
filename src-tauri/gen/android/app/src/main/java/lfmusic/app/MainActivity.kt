@@ -1,4 +1,4 @@
-package com.lfmusic.app
+package lfmusic.app
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -39,7 +39,7 @@ private const val MEDIA_NOTIFICATION_ID = 1001
 private const val AUDIO_FEATURE_NOTIFICATION_ID = 1002
 private const val MEDIA_CHANNEL_ID = "lfmusic_playback"
 private const val AUDIO_FEATURE_CHANNEL_ID = "lfmusic_audio_analysis"
-private const val ACTION_MEDIA_COMMAND = "com.lfmusic.app.MEDIA_COMMAND"
+private const val ACTION_MEDIA_COMMAND = "lfmusic.app.MEDIA_COMMAND"
 private const val EXTRA_MEDIA_COMMAND = "media_command"
 private const val DEFAULT_SYSTEM_BAR_COLOR = 0xFF101010.toInt()
 

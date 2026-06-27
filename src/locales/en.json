@@ -83,6 +83,18 @@
       "open": "Open folder",
       "fallback": "Couldn't use the selected folder — reverted to the default folder in the system Music directory."
     },
+    "proxy": {
+      "sectionTitle": "Proxy",
+      "desc": "Which proxy yt-dlp uses to reach YouTube.",
+      "modeSystem": "System",
+      "modeNone": "None",
+      "modeCustom": "Custom",
+      "systemHint": "Uses the system proxy or environment settings.",
+      "noneHint": "Direct connection; proxy and system settings are ignored.",
+      "customPlaceholder": "socks5://127.0.0.1:1080",
+      "customHint": "Proxy address: socks5://, http:// or https://.",
+      "invalidUrl": "Invalid address — include a scheme: socks5://, http:// or https://"
+    },
     "cookies": {
       "sectionTitle": "YouTube authorization",
       "desc": "Authorization is necessary to improve the stability of downloading external tracks via yt-dlp (optional)",
