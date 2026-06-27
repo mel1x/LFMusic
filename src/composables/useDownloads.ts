@@ -19,11 +19,58 @@ export interface ExternalSearchTrack {
   source: string
   /** Трек уже есть в локальной библиотеке (по исполнителю+названию). */
   in_library: boolean
+  /** Deezer-id исполнителя — артист трека кликабелен (→ страница скачивания). null у iTunes. */
+  artist_id: number | null
+  /** Deezer-id альбома — альбом трека кликабелен (→ страница скачивания). null у iTunes. */
+  album_id: number | null
+}
+
+/** Альбом из внешнего источника (Deezer) — результат поиска. */
+export interface ExternalSearchAlbum {
+  id: number
+  title: string
+  artist: string
+  artist_id: number | null
+  cover_url: string | null
+  nb_tracks: number | null
+  source: string
+}
+
+/** Исполнитель из внешнего источника (Deezer) — результат поиска. */
+export interface ExternalSearchArtist {
+  id: number
+  name: string
+  picture_url: string | null
+  nb_album: number | null
+  source: string
+}
+
+/** Детальная карточка альбома (метаданные + треки) для страницы скачивания. */
+export interface ExternalAlbumDetail {
+  id: number
+  title: string
+  artist: string
+  artist_id: number | null
+  cover_url: string | null
+  tracks: ExternalSearchTrack[]
+}
+
+/** Детальная карточка исполнителя (альбомы + популярные треки). */
+export interface ExternalArtistDetail {
+  id: number
+  name: string
+  picture_url: string | null
+  albums: ExternalSearchAlbum[]
+  top_tracks: ExternalSearchTrack[]
 }
 
 /** Страница результатов поиска с явным курсором пагинации (считается по Deezer). */
 export interface ExternalSearchPage {
   tracks: ExternalSearchTrack[]
+  /** Альбомы (только на первой странице, index === 0). */
+  albums: ExternalSearchAlbum[]
+  /** Исполнители (только на первой странице, index === 0). */
+  artists: ExternalSearchArtist[]
   /** Смещение для следующего запроса (передаётся как index). */
   next_index: number
   /** Есть ли ещё страницы. */
@@ -350,7 +397,7 @@ export function useDownloads() {
     exact?: { artist: string; title: string },
   ): Promise<ExternalSearchPage> {
     const q = query.trim()
-    if (!q) return { tracks: [], next_index: index, has_more: false }
+    if (!q) return { tracks: [], albums: [], artists: [], next_index: index, has_more: false }
     return await invoke<ExternalSearchPage>('downloads_search', {
       query: q,
       index,
@@ -371,6 +418,30 @@ export function useDownloads() {
         force,
       },
     })
+  }
+
+  /** Поставить пачку треков в очередь одним вызовом (кнопка «Скачать все треки»). */
+  async function enqueueMany(tracks: ExternalSearchTrack[], force = false): Promise<number[]> {
+    if (tracks.length === 0) return []
+    return await invoke<number[]>('downloads_enqueue_many', {
+      requests: tracks.map(t => ({
+        title: t.title,
+        artist: t.artist,
+        album: t.album,
+        cover_url: t.cover_url,
+        force,
+      })),
+    })
+  }
+
+  /** Детальная карточка альбома по Deezer-id (метаданные + треки). null — не найден. */
+  async function albumDetail(id: number): Promise<ExternalAlbumDetail | null> {
+    return await invoke<ExternalAlbumDetail | null>('downloads_album', { albumId: id })
+  }
+
+  /** Детальная карточка исполнителя по Deezer-id (альбомы + популярные треки). */
+  async function artistDetail(id: number): Promise<ExternalArtistDetail | null> {
+    return await invoke<ExternalArtistDetail | null>('downloads_artist', { artistId: id })
   }
 
   /** Убрать/отменить элемент очереди. */
@@ -444,6 +515,9 @@ export function useDownloads() {
     cookiesMessage,
     search,
     enqueue,
+    enqueueMany,
+    albumDetail,
+    artistDetail,
     remove,
     retry,
     clearFinished,

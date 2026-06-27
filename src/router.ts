@@ -13,6 +13,8 @@ import ArtistTracks from './views/ArtistTracks.vue'
 
 const routes = [
   { path: '/downloads', component: () => import('./views/Downloads.vue') },
+  { path: '/downloads/album/:id', component: () => import('./views/DownloadAlbum.vue') },
+  { path: '/downloads/artist/:id', component: () => import('./views/DownloadArtist.vue') },
   { path: '/search', component: Search },
   { path: '/', component: Main },
   { path: '/catalog', component: Catalog },

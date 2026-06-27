@@ -1348,6 +1348,61 @@ pub struct ExternalSearchTrack {
     /// Проставляется в команде `downloads_search` (внешний поиск об этом не знает).
     #[serde(default)]
     pub in_library: bool,
+    /// Deezer-id исполнителя — чтобы артист трека был кликабелен (→ страница
+    /// скачивания исполнителя). `None` у iTunes-результатов (нет id) → некликабелен.
+    #[serde(default)]
+    pub artist_id: Option<u64>,
+    /// Deezer-id альбома — для кликабельного альбома (→ страница скачивания альбома).
+    #[serde(default)]
+    pub album_id: Option<u64>,
+}
+
+/// Альбом из внешнего источника (Deezer) — результат поиска на странице
+/// «Скачивание». Идентифицируется Deezer-id, по которому открывается страница
+/// скачивания альбома (см. [`album_detail`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalSearchAlbum {
+    pub id: u64,
+    pub title: String,
+    pub artist: String,
+    pub artist_id: Option<u64>,
+    pub cover_url: Option<String>,
+    pub nb_tracks: Option<u32>,
+    pub source: String,
+}
+
+/// Исполнитель из внешнего источника (Deezer) — результат поиска. По Deezer-id
+/// открывается страница скачивания исполнителя (см. [`artist_detail`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalSearchArtist {
+    pub id: u64,
+    pub name: String,
+    pub picture_url: Option<String>,
+    pub nb_album: Option<u32>,
+    pub source: String,
+}
+
+/// Детальная карточка альбома для страницы скачивания: метаданные + полный список
+/// треков (кандидатов на скачивание).
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalAlbumDetail {
+    pub id: u64,
+    pub title: String,
+    pub artist: String,
+    pub artist_id: Option<u64>,
+    pub cover_url: Option<String>,
+    pub tracks: Vec<ExternalSearchTrack>,
+}
+
+/// Детальная карточка исполнителя для страницы скачивания: метаданные + его
+/// альбомы и популярные треки.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalArtistDetail {
+    pub id: u64,
+    pub name: String,
+    pub picture_url: Option<String>,
+    pub albums: Vec<ExternalSearchAlbum>,
+    pub top_tracks: Vec<ExternalSearchTrack>,
 }
 
 /// Ключ идентичности трека-кандидата на скачивание — «исполнитель + название +
@@ -1517,10 +1572,12 @@ fn deezer_search_tracks(
     }
     #[derive(Deserialize)]
     struct ArtistRef {
+        id: Option<u64>,
         name: String,
     }
     #[derive(Deserialize)]
     struct AlbumRef {
+        id: Option<u64>,
         title: Option<String>,
         cover_xl: Option<String>,
         cover_big: Option<String>,
@@ -1543,20 +1600,24 @@ fn deezer_search_tracks(
         .data
         .into_iter()
         .filter_map(|h| {
-            let artist = h.artist.map(|a| a.name).unwrap_or_default();
+            let (artist, artist_id) = match h.artist {
+                Some(a) => (a.name, a.id),
+                None => (String::new(), None),
+            };
             if artist.is_empty() {
                 return None;
             }
-            let (album, cover_url) = match h.album {
+            let (album, album_id, cover_url) = match h.album {
                 Some(a) => (
                     a.title.filter(|t| !t.is_empty()),
+                    a.id,
                     a.cover_xl
                         .filter(|u| !u.is_empty())
                         .or(a.cover_big)
                         .or(a.cover_medium)
                         .filter(|u| !u.is_empty()),
                 ),
-                None => (None, None),
+                None => (None, None, None),
             };
             Some(ExternalSearchTrack {
                 title: h.title,
@@ -1566,10 +1627,345 @@ fn deezer_search_tracks(
                 cover_url,
                 source: "Deezer".to_string(),
                 in_library: false,
+                artist_id,
+                album_id,
             })
         })
         .collect();
     Ok((tracks, raw_count))
+}
+
+/// Выбирает лучший доступный URL картинки из набора (xl → big → medium),
+/// отбрасывая пустые и дефолтные плейсхолдеры Deezer.
+fn pick_image(candidates: &[Option<String>]) -> Option<String> {
+    candidates
+        .iter()
+        .flatten()
+        .find(|u| !u.is_empty() && !is_placeholder_image(u))
+        .cloned()
+}
+
+/// Поиск альбомов в Deezer (`/search/album`) — для страницы «Скачивание».
+fn deezer_search_albums(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<ExternalSearchAlbum>, String> {
+    #[derive(Deserialize)]
+    struct SearchResp {
+        data: Vec<Hit>,
+    }
+    #[derive(Deserialize)]
+    struct Hit {
+        id: u64,
+        title: String,
+        cover_xl: Option<String>,
+        cover_big: Option<String>,
+        cover_medium: Option<String>,
+        nb_tracks: Option<u32>,
+        artist: Option<ArtistRef>,
+    }
+    #[derive(Deserialize)]
+    struct ArtistRef {
+        id: Option<u64>,
+        name: Option<String>,
+    }
+
+    let resp: SearchResp = send_throttled(
+        client.get("https://api.deezer.com/search/album").query(&[
+            ("q", query),
+            ("limit", limit.to_string().as_str()),
+        ]),
+        "api.deezer.com",
+    )?
+    .json()
+    .map_err(|e| e.to_string())?;
+
+    Ok(resp
+        .data
+        .into_iter()
+        .map(|h| {
+            let (artist, artist_id) = match h.artist {
+                Some(a) => (a.name.unwrap_or_default(), a.id),
+                None => (String::new(), None),
+            };
+            ExternalSearchAlbum {
+                id: h.id,
+                title: h.title,
+                artist,
+                artist_id,
+                cover_url: pick_image(&[h.cover_xl, h.cover_big, h.cover_medium]),
+                nb_tracks: h.nb_tracks,
+                source: "Deezer".to_string(),
+            }
+        })
+        .collect())
+}
+
+/// Поиск исполнителей в Deezer (`/search/artist`) — для страницы «Скачивание».
+fn deezer_search_artists(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<ExternalSearchArtist>, String> {
+    #[derive(Deserialize)]
+    struct SearchResp {
+        data: Vec<Hit>,
+    }
+    #[derive(Deserialize)]
+    struct Hit {
+        id: u64,
+        name: String,
+        picture_xl: Option<String>,
+        picture_big: Option<String>,
+        picture_medium: Option<String>,
+        nb_album: Option<u32>,
+    }
+
+    let resp: SearchResp = send_throttled(
+        client.get("https://api.deezer.com/search/artist").query(&[
+            ("q", query),
+            ("limit", limit.to_string().as_str()),
+        ]),
+        "api.deezer.com",
+    )?
+    .json()
+    .map_err(|e| e.to_string())?;
+
+    Ok(resp
+        .data
+        .into_iter()
+        .map(|h| ExternalSearchArtist {
+            id: h.id,
+            name: h.name,
+            picture_url: pick_image(&[h.picture_xl, h.picture_big, h.picture_medium]),
+            nb_album: h.nb_album,
+            source: "Deezer".to_string(),
+        })
+        .collect())
+}
+
+/// Детальная карточка альбома по Deezer-id (`/album/{id}`): метаданные + треки.
+/// `Ok(None)` — альбом не найден; `Err` — сетевая/парс-ошибка.
+pub fn album_detail(id: u64) -> Result<Option<ExternalAlbumDetail>, String> {
+    let client = client();
+    #[derive(Deserialize)]
+    struct AlbumResp {
+        id: u64,
+        title: String,
+        cover_xl: Option<String>,
+        cover_big: Option<String>,
+        cover_medium: Option<String>,
+        artist: Option<ArtistRef>,
+        tracks: Option<TracksWrap>,
+    }
+    #[derive(Deserialize)]
+    struct ArtistRef {
+        id: Option<u64>,
+        name: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct TracksWrap {
+        #[serde(default)]
+        data: Vec<TrackHit>,
+    }
+    #[derive(Deserialize)]
+    struct TrackHit {
+        title: String,
+        duration: Option<u32>,
+        track_position: Option<u32>,
+        disk_number: Option<u32>,
+        artist: Option<ArtistRef>,
+    }
+
+    let resp = send_throttled(
+        client.get(format!("https://api.deezer.com/album/{}", id)),
+        "api.deezer.com",
+    )?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let album: AlbumResp = resp.json().map_err(|e| e.to_string())?;
+    let (album_artist, album_artist_id) = match album.artist {
+        Some(a) => (a.name.unwrap_or_default(), a.id),
+        None => (String::new(), None),
+    };
+    let cover_url = pick_image(&[album.cover_xl, album.cover_big, album.cover_medium]);
+
+    let mut indexed: Vec<(u32, u32, ExternalSearchTrack)> = album
+        .tracks
+        .map(|w| w.data)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let (artist, artist_id) = match t.artist {
+                Some(a) => (
+                    a.name.filter(|n| !n.is_empty()).unwrap_or_else(|| album_artist.clone()),
+                    a.id.or(album_artist_id),
+                ),
+                None => (album_artist.clone(), album_artist_id),
+            };
+            let disc = t.disk_number.unwrap_or(1);
+            let pos = t.track_position.unwrap_or((i + 1) as u32);
+            (
+                disc,
+                pos,
+                ExternalSearchTrack {
+                    title: t.title,
+                    artist,
+                    album: Some(album.title.clone()),
+                    duration_secs: t.duration,
+                    cover_url: cover_url.clone(),
+                    source: "Deezer".to_string(),
+                    in_library: false,
+                    artist_id,
+                    album_id: Some(album.id),
+                },
+            )
+        })
+        .collect();
+    indexed.sort_by_key(|(disc, pos, _)| (*disc, *pos));
+    let tracks = indexed.into_iter().map(|(_, _, t)| t).collect();
+
+    Ok(Some(ExternalAlbumDetail {
+        id: album.id,
+        title: album.title,
+        artist: album_artist,
+        artist_id: album_artist_id,
+        cover_url,
+        tracks,
+    }))
+}
+
+/// Детальная карточка исполнителя по Deezer-id: метаданные (`/artist/{id}`),
+/// его альбомы (`/artist/{id}/albums`) и популярные треки (`/artist/{id}/top`).
+/// `Ok(None)` — исполнитель не найден; `Err` — сетевая/парс-ошибка.
+pub fn artist_detail(id: u64) -> Result<Option<ExternalArtistDetail>, String> {
+    let client = client();
+
+    #[derive(Deserialize)]
+    struct ArtistResp {
+        id: u64,
+        name: String,
+        picture_xl: Option<String>,
+        picture_big: Option<String>,
+        picture_medium: Option<String>,
+    }
+    let resp = send_throttled(
+        client.get(format!("https://api.deezer.com/artist/{}", id)),
+        "api.deezer.com",
+    )?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let artist: ArtistResp = resp.json().map_err(|e| e.to_string())?;
+    let picture_url = pick_image(&[artist.picture_xl, artist.picture_big, artist.picture_medium]);
+
+    // Альбомы исполнителя (оригиналы вперёд: альбомы → EP → синглы — по nb_tracks).
+    #[derive(Deserialize)]
+    struct AlbumsResp {
+        #[serde(default)]
+        data: Vec<AlbumHit>,
+    }
+    #[derive(Deserialize)]
+    struct AlbumHit {
+        id: u64,
+        title: String,
+        cover_xl: Option<String>,
+        cover_big: Option<String>,
+        cover_medium: Option<String>,
+        nb_tracks: Option<u32>,
+    }
+    let albums = match send_throttled(
+        client
+            .get(format!("https://api.deezer.com/artist/{}/albums", id))
+            .query(&[("limit", "50")]),
+        "api.deezer.com",
+    ) {
+        Ok(r) if r.status().is_success() => {
+            let parsed: AlbumsResp = r.json().map_err(|e| e.to_string())?;
+            parsed
+                .data
+                .into_iter()
+                .map(|a| ExternalSearchAlbum {
+                    id: a.id,
+                    title: a.title,
+                    artist: artist.name.clone(),
+                    artist_id: Some(artist.id),
+                    cover_url: pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
+                    nb_tracks: a.nb_tracks,
+                    source: "Deezer".to_string(),
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
+    // Популярные треки исполнителя.
+    #[derive(Deserialize)]
+    struct TopResp {
+        #[serde(default)]
+        data: Vec<TopHit>,
+    }
+    #[derive(Deserialize)]
+    struct TopHit {
+        title: String,
+        duration: Option<u32>,
+        album: Option<AlbumRef>,
+    }
+    #[derive(Deserialize)]
+    struct AlbumRef {
+        id: Option<u64>,
+        title: Option<String>,
+        cover_xl: Option<String>,
+        cover_big: Option<String>,
+        cover_medium: Option<String>,
+    }
+    let top_tracks = match send_throttled(
+        client
+            .get(format!("https://api.deezer.com/artist/{}/top", id))
+            .query(&[("limit", "20")]),
+        "api.deezer.com",
+    ) {
+        Ok(r) if r.status().is_success() => {
+            let parsed: TopResp = r.json().map_err(|e| e.to_string())?;
+            parsed
+                .data
+                .into_iter()
+                .map(|t| {
+                    let (album, album_id, cover_url) = match t.album {
+                        Some(a) => (
+                            a.title.filter(|t| !t.is_empty()),
+                            a.id,
+                            pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
+                        ),
+                        None => (None, None, None),
+                    };
+                    ExternalSearchTrack {
+                        title: t.title,
+                        artist: artist.name.clone(),
+                        album,
+                        duration_secs: t.duration,
+                        cover_url,
+                        source: "Deezer".to_string(),
+                        in_library: false,
+                        artist_id: Some(artist.id),
+                        album_id,
+                    }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
+    Ok(Some(ExternalArtistDetail {
+        id: artist.id,
+        name: artist.name,
+        picture_url,
+        albums,
+        top_tracks,
+    }))
 }
 
 /// Поиск треков в iTunes Search API (фолбэк, если Deezer недоступен).
@@ -1629,6 +2025,9 @@ fn itunes_search_tracks(
                 cover_url,
                 source: "iTunes".to_string(),
                 in_library: false,
+                // iTunes не отдаёт Deezer-id — артист/альбом таких треков некликабельны.
+                artist_id: None,
+                album_id: None,
             })
         })
         .collect())
@@ -1640,6 +2039,12 @@ fn itunes_search_tracks(
 #[derive(Debug, Clone, Serialize)]
 pub struct ExternalSearchPage {
     pub tracks: Vec<ExternalSearchTrack>,
+    /// Альбомы (Deezer) — заполняются только на первой странице (`index == 0`).
+    #[serde(default)]
+    pub albums: Vec<ExternalSearchAlbum>,
+    /// Исполнители (Deezer) — заполняются только на первой странице (`index == 0`).
+    #[serde(default)]
+    pub artists: Vec<ExternalSearchArtist>,
     /// Смещение для следующего запроса Deezer (`index` следующей страницы).
     pub next_index: u32,
     /// Есть ли ещё страницы Deezer (вернул полную страницу `>= limit`).
@@ -1663,7 +2068,13 @@ pub fn search_tracks(
 ) -> ExternalSearchPage {
     let q = query.trim();
     if q.is_empty() {
-        return ExternalSearchPage { tracks: Vec::new(), next_index: index, has_more: false };
+        return ExternalSearchPage {
+            tracks: Vec::new(),
+            albums: Vec::new(),
+            artists: Vec::new(),
+            next_index: index,
+            has_more: false,
+        };
     }
     let client = client();
 
@@ -1731,7 +2142,24 @@ pub fn search_tracks(
         }
     }
 
-    ExternalSearchPage { tracks: results, next_index, has_more }
+    // Альбомы и исполнители — только на первой странице (отдельные секции выдачи;
+    // подгрузка дальше касается лишь треков). Ошибки источника не критичны —
+    // показываем то, что нашли.
+    let (albums, artists) = if index == 0 {
+        let albums = deezer_search_albums(client, q, 12).unwrap_or_else(|e| {
+            eprintln!("[external] deezer album search error: {}", e);
+            Vec::new()
+        });
+        let artists = deezer_search_artists(client, q, 12).unwrap_or_else(|e| {
+            eprintln!("[external] deezer artist search error: {}", e);
+            Vec::new()
+        });
+        (albums, artists)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    ExternalSearchPage { tracks: results, albums, artists, next_index, has_more }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

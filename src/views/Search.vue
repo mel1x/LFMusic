@@ -25,6 +25,7 @@ import { useCustomCovers } from '../composables/useCustomCovers'
 import { useExternalSources } from '../composables/useExternalSources'
 import { useCoverGate } from '../composables/useCoverGate'
 import { useVirtualScroll } from '../composables/useVirtualScroll'
+import { useScrollLine } from '../composables/useScrollLine'
 
 const router = useRouter()
 
@@ -484,55 +485,6 @@ async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
 
 // ── Horizontal scroll helper ───────────────────────────────────────────────
 
-function useScrollLine(baseItemWidth = 210, gap = 16) {
-    const el = ref<HTMLElement | null>(null)
-    const scrollLeft = ref(0)
-    const scrollMax = ref(0)
-    const itemWidth = ref(baseItemWidth)
-    const measured = ref(false)
-    let ro: ResizeObserver | null = null
-
-    async function update() {
-        const node = el.value
-        if (!node) return
-        const cw = node.clientWidth
-        if (cw > 0) {
-            const n = Math.max(1, Math.floor((cw + gap) / (baseItemWidth + gap)))
-            itemWidth.value = (cw - (n - 1) * gap) / n
-            measured.value = true
-        }
-        await nextTick()
-        scrollLeft.value = node.scrollLeft
-        scrollMax.value = Math.max(0, node.scrollWidth - node.clientWidth)
-    }
-    function onScroll() {
-        const node = el.value
-        if (!node) return
-        scrollLeft.value = node.scrollLeft
-        scrollMax.value = Math.max(0, node.scrollWidth - node.clientWidth)
-    }
-    function scrollByPage(dir: 1 | -1) {
-        const node = el.value
-        if (!node) return
-        node.scrollBy({ left: dir * node.clientWidth * 0.9, behavior: 'smooth' })
-    }
-    function observe() {
-        const node = el.value
-        if (!node) return
-        update()
-        if (!ro) {
-            ro = new ResizeObserver(() => update())
-            ro.observe(node)
-        }
-    }
-    function unobserve() { ro?.disconnect(); ro = null }
-
-    const canPrev = computed(() => scrollLeft.value > 1)
-    const canNext = computed(() => scrollLeft.value < scrollMax.value - 1)
-
-    return { el, canPrev, canNext, itemWidth, measured, onScroll, scrollByPage, observe, unobserve, update }
-}
-
 const albumsLine = useScrollLine(190, 16)
 const playlistsLine = useScrollLine(190, 16)
 
@@ -700,7 +652,6 @@ function scrollToTop() {
                             :key="album.id"
                             class="playlistItem albumItem"
                             @click="openAlbum(album)"
-                            v-tooltip="'Открыть альбом'"
                         >
                         <div class="coverWrap">
                             <AnimatedCover class="cover" :src="albumCoverFor(album.name, album.cover)" />
@@ -1248,6 +1199,11 @@ function scrollToTop() {
     padding: 12px;
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     background-color: hsla(0, 0%, 100%, 0.95);
+}
+/* У альбомов главная кнопка — в правом нижнем углу. */
+.albumItem .playBtn {
+    left: auto;
+    right: 12px;
 }
 .playlistItem .playBtn:hover {
     color: hsla(var(--accent-h), var(--accent-s), 18%, 1);

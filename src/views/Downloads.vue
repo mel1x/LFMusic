@@ -7,18 +7,25 @@ import DownloadIcon from '../components/Icons/DownloadIcon.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import CoverImage from '../components/CoverImage.vue'
+import DownloadTrackRow from '../components/DownloadTrackRow.vue'
+import DownloadAlbumCard from '../components/DownloadAlbumCard.vue'
 
-import defaultTrackCover from '../assets/trackCover.webp'
+import defaultCover from '../assets/cover.webp'
 
-import { usePlayer } from '../composables/usePlayer'
-import { useDownloads, type ExternalSearchTrack } from '../composables/useDownloads'
+import {
+    useDownloads,
+    type ExternalSearchTrack,
+    type ExternalSearchAlbum,
+    type ExternalSearchArtist,
+} from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 import { useVirtualScroll } from '../composables/useVirtualScroll'
+import { useScrollLine } from '../composables/useScrollLine'
+import { switchLayout } from '../composables/useSearch'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
-const { formatTime } = usePlayer()
 const {
     queue,
     search,
@@ -82,22 +89,76 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-// Enter — мгновенный поиск, не дожидаясь дебаунса.
+// Enter — мгновенный поиск, не дожидаясь дебаунса (и сохраняем запрос в подсказки).
 function onSearchEnter() {
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
     debouncedSearch.value = rawSearch.value.trim()
+    rememberCurrentSearch()
+}
+
+// ── Подсказки прошлых запросов (как в обычном поиске) ─────────────────────────
+const PAST_SEARCHES_KEY = 'lfmusic_past_downloads'
+const MAX_PAST_SEARCHES = 15
+const pastSearches = ref<string[]>([])
+
+function loadPastSearches() {
+    try {
+        const raw = localStorage.getItem(PAST_SEARCHES_KEY)
+        if (raw) pastSearches.value = JSON.parse(raw)
+    } catch { /* ignore */ }
+}
+function savePastSearches() {
+    localStorage.setItem(PAST_SEARCHES_KEY, JSON.stringify(pastSearches.value))
+}
+function addPastSearch(queryStr: string) {
+    const trimmed = queryStr.trim()
+    if (!trimmed) return
+    pastSearches.value = pastSearches.value.filter(q => q !== trimmed)
+    pastSearches.value.unshift(trimmed)
+    if (pastSearches.value.length > MAX_PAST_SEARCHES) {
+        pastSearches.value = pastSearches.value.slice(0, MAX_PAST_SEARCHES)
+    }
+    savePastSearches()
+}
+// Любое целевое действие над результатами (скачивание, открытие альбома/
+// исполнителя) означает, что запрос оказался полезным — сохраняем его.
+function rememberCurrentSearch() {
+    addPastSearch(rawSearch.value.trim())
+}
+const filteredPastSearches = computed(() => {
+    const q = rawSearch.value.trim().toLowerCase()
+    if (!q) return pastSearches.value.slice(0, 15)
+    return pastSearches.value.filter(p => p.toLowerCase().includes(q)).slice(0, 15)
+})
+function onPastSearchClick(q: string) {
+    rawSearch.value = q
+    debouncedSearch.value = q
+    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null }
+    searchInput.value?.focus()
 }
 
 const query = computed(() => debouncedSearch.value.trim())
 const hasQuery = computed(() => !!query.value)
+// Есть ли в выдаче хоть что-то (треки/альбомы/исполнители) — для «спиннера
+// загрузки» и состояния «ничего не найдено».
+const hasAnyResults = computed(
+    () => results.value.length > 0 || resultAlbums.value.length > 0 || resultArtists.value.length > 0,
+)
 
 // ── Results (постранично, с подгрузкой при прокрутке) ────────────────────────
 const PAGE_SIZE = 30
 const results = ref<ExternalSearchTrack[]>([])
+// Альбомы и исполнители приходят только с первой страницей выдачи (index 0) и
+// показываются отдельными секциями над списком треков.
+const resultAlbums = ref<ExternalSearchAlbum[]>([])
+const resultArtists = ref<ExternalSearchArtist[]>([])
 const searching = ref(false)     // первичная загрузка для нового запроса
 const loadingMore = ref(false)   // подгрузка следующей страницы
 const hasMore = ref(false)
 let nextIndex = 0                 // смещение (Deezer index) для следующей страницы
+// Запрос, фактически ушедший в Deezer: может отличаться от введённого, если
+// сработала «починка раскладки» (см. runSearch). По нему идёт подгрузка страниц.
+let effectiveQuery = ''
 let searchReqId = 0
 
 // ── Виртуализация списка результатов ─────────────────────────────────────────
@@ -142,12 +203,20 @@ function dedupeInto(base: ExternalSearchTrack[], extra: ExternalSearchTrack[]): 
 
 watch(query, (q) => { void runSearch(q) })
 
+/** Пуста ли выдача целиком (нет ни треков, ни альбомов, ни исполнителей). */
+function isEmptyPage(p: { tracks: unknown[]; albums?: unknown[]; artists?: unknown[] }): boolean {
+    return p.tracks.length === 0 && (p.albums?.length ?? 0) === 0 && (p.artists?.length ?? 0) === 0
+}
+
 async function runSearch(q: string) {
     const reqId = ++searchReqId
     results.value = []
+    resultAlbums.value = []
+    resultArtists.value = []
     nextIndex = 0
     hasMore.value = false
     loadingMore.value = false
+    effectiveQuery = q
     // Новый запрос — возвращаем виртуальный список в начало, иначе при прокрутке
     // вниз старой выдачи новая открылась бы с середины или с пустым окном.
     vsResetScroll()
@@ -157,9 +226,23 @@ async function runSearch(q: string) {
     }
     searching.value = true
     try {
-        const page = await search(q, 0, PAGE_SIZE, exactMatch.value ?? undefined)
+        let page = await search(q, 0, PAGE_SIZE, exactMatch.value ?? undefined)
+        let usedQuery = q
+        // Починка раскладки (как в обычном поиске): если по введённому запросу
+        // пусто — частый случай «набрал не в той раскладке». Пробуем ту же строку
+        // в перевёрнутой раскладке и, если там что-то нашлось, показываем её.
+        if (isEmptyPage(page)) {
+            const switched = switchLayout(q)
+            if (switched && switched !== q) {
+                const alt = await search(switched, 0, PAGE_SIZE, exactMatch.value ?? undefined)
+                if (!isEmptyPage(alt)) { page = alt; usedQuery = switched }
+            }
+        }
         if (reqId !== searchReqId) return
+        effectiveQuery = usedQuery
         results.value = dedupeInto([], page.tracks)
+        resultAlbums.value = page.albums ?? []
+        resultArtists.value = page.artists ?? []
         nextIndex = page.next_index
         hasMore.value = page.has_more
     } catch (e) {
@@ -175,7 +258,7 @@ async function loadMore() {
     const reqId = searchReqId
     loadingMore.value = true
     try {
-        const page = await search(query.value, nextIndex, PAGE_SIZE, exactMatch.value ?? undefined)
+        const page = await search(effectiveQuery, nextIndex, PAGE_SIZE, exactMatch.value ?? undefined)
         if (reqId !== searchReqId) return
         results.value = dedupeInto(results.value, page.tracks)
         nextIndex = page.next_index
@@ -193,40 +276,58 @@ function onScroll(e: Event) {
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 360) void loadMore()
 }
 
-// Ключи треков, уже стоящих в очереди (исключая ошибочные — их можно перекачать).
-const queuedKeys = computed(() => {
-    const set = new Set<string>()
-    for (const item of queue.value) {
-        if (item.status !== 'error') set.add(trackKey(item.artist, item.title, item.album))
+// ── Исполнители: «бейджи» с переносом и сворачиванием (как в обычном поиске) ──
+const artistsExpanded = ref(false)
+const artistsContainer = ref<HTMLElement | null>(null)
+const artistsOverflow = ref(false)
+const artistsCollapsedMaxHeight = ref(0)
+let artistsRO: ResizeObserver | null = null
+
+function recomputeArtistsOverflow() {
+    const el = artistsContainer.value
+    if (!el || resultArtists.value.length === 0) { artistsOverflow.value = false; return }
+    const item = el.querySelector('.artistBadge') as HTMLElement | null
+    if (!item) { artistsOverflow.value = false; return }
+    const cs = getComputedStyle(el)
+    const rowGap = parseFloat(cs.rowGap || '0') || 0
+    const rowH = item.offsetHeight
+    const collapsedH = rowH * 2 + rowGap
+    artistsCollapsedMaxHeight.value = collapsedH
+    const wasCollapsed = el.style.maxHeight !== ''
+    if (wasCollapsed) el.style.maxHeight = ''
+    const fullH = el.scrollHeight
+    if (wasCollapsed && !artistsExpanded.value) el.style.maxHeight = collapsedH + 'px'
+    artistsOverflow.value = fullH > collapsedH + 1
+}
+
+watch(resultArtists, async () => {
+    artistsExpanded.value = false
+    await nextTick()
+    recomputeArtistsOverflow()
+})
+watch(artistsContainer, (el) => {
+    if (el) {
+        if (!artistsRO) artistsRO = new ResizeObserver(() => recomputeArtistsOverflow())
+        artistsRO.observe(el)
+        nextTick(() => recomputeArtistsOverflow())
     }
-    return set
 })
 
-function isQueued(t: ExternalSearchTrack): boolean {
-    return queuedKeys.value.has(trackKey(t.artist, t.title, t.album))
+function openArtist(a: ExternalSearchArtist) {
+    rememberCurrentSearch()
+    router.push(`/downloads/artist/${a.id}`)
 }
 
-async function onDownload(track: ExternalSearchTrack) {
-    if (track.in_library || isQueued(track)) return
-    if (downloadsLocked.value) return  // защита: гейт yt-dlp/cookies
-    try {
-        await enqueue(track)
-    } catch (e) {
-        console.error('Ошибка добавления в очередь:', e)
-    }
-}
+// ── Альбомы: горизонтальный ряд со стрелочной навигацией (как в обычном поиске) ──
+const albumsLine = useScrollLine(190, 16)
+watch(resultAlbums, async () => {
+    await nextTick()
+    albumsLine.observe()
+})
 
-// Нажатие на кнопку результата: уже в очереди → ничего (защита от дублей, даже
-// если трек уже в библиотеке); в библиотеке → подтверждение повторного
-// скачивания; иначе → обычное добавление.
-function onResultButton(track: ExternalSearchTrack) {
-    if (isQueued(track)) return
-    if (track.in_library) {
-        confirmTrack.value = track
-        return
-    }
-    void onDownload(track)
-}
+// Состояние строки трека (в очереди/в библиотеке) и кнопка скачивания живут в
+// DownloadTrackRow; повторное скачивание (трек уже в библиотеке) строка делегирует
+// сюда через событие redownload — общая модалка подтверждения ниже.
 
 // ── Повторное скачивание (модалка «уже в библиотеке») ────────────────────────
 const confirmTrack = ref<ExternalSearchTrack | null>(null)
@@ -240,6 +341,7 @@ async function confirmRedownload() {
     const track = confirmTrack.value
     confirmTrack.value = null
     if (!track) return
+    rememberCurrentSearch()
     try {
         await enqueue(track, true)
     } catch (e) {
@@ -295,6 +397,7 @@ watch(resultsListEl, (el) => { if (el) void nextTick(measureResultsOffset) })
 let headerRO: ResizeObserver | null = null
 
 onMounted(async () => {
+    loadPastSearches()
     // Предзаполнение поиска из query-параметра (переход с фантомного трека альбома).
     const pickParam = (v: typeof route.query[string]) => (Array.isArray(v) ? v[0] : v) || ''
     const q = pickParam(route.query.q)
@@ -331,6 +434,9 @@ onUnmounted(() => {
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
     headerRO?.disconnect()
     headerRO = null
+    artistsRO?.disconnect()
+    artistsRO = null
+    albumsLine.unobserve()
 })
 </script>
 
@@ -362,6 +468,18 @@ onUnmounted(() => {
             </div>
         </div>
 
+        <!-- Подсказки прошлых запросов (когда поле пустое) -->
+        <div class="pastSearchesBar" v-if="!downloadsLocked && pastSearches.length > 0 && !rawSearch.trim()">
+            <button
+                v-for="(pq, idx) in filteredPastSearches"
+                :key="idx"
+                class="pastSearchChip"
+                @click="onPastSearchClick(pq)"
+            >
+                {{ pq }}
+            </button>
+        </div>
+
         <!-- Dependencies banner -->
         <div v-if="showDepsBanner" class="toolsBanner" :class="{ soft: depsBannerMode === 'update' || depsBannerMode === 'recommend' }">
             <div class="toolsIcon">
@@ -386,62 +504,100 @@ onUnmounted(() => {
             <button class="toolsBtn" @click="goToToolsSettings">{{ t('downloads.depsOpenSettings') }}</button>
         </div>
 
+        <!-- Artists (только первая страница выдачи) -->
+        <section v-if="hasQuery && resultArtists.length" class="pageLine">
+            <div class="lineHat">
+                <div class="lineTitle nonClickable">{{ t('downloads.artistsTitle') }}</div>
+            </div>
+            <div class="artistsBlockWrap">
+                <div
+                    class="artistsList"
+                    ref="artistsContainer"
+                    :class="{ collapsed: !artistsExpanded && artistsOverflow }"
+                    :style="!artistsExpanded && artistsOverflow ? { maxHeight: artistsCollapsedMaxHeight + 'px' } : {}"
+                >
+                    <div
+                        v-for="a in resultArtists"
+                        :key="a.id"
+                        class="artistBadge"
+                        @click="openArtist(a)"
+                        v-tooltip="t('downloads.openArtist')"
+                    >
+                        <div class="artistAvatar"><CoverImage :src="a.picture_url" :fallback="defaultCover" /></div>
+                        <span v-truncate class="artistBadgeName">{{ a.name }}</span>
+                    </div>
+                </div>
+                <div v-if="artistsOverflow" class="moreArtistsRow" :class="{ collapsed: !artistsExpanded }">
+                    <button class="moreArtistsBtn" @click="artistsExpanded = !artistsExpanded">
+                        <span class="moreArtistsLabel">{{ artistsExpanded ? t('downloads.collapse') : t('downloads.showAllArtists') }}</span>
+                        <span v-if="!artistsExpanded" class="moreArtistsCount">{{ resultArtists.length }}</span>
+                        <svg class="chev" :class="{ expanded: artistsExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Albums (только первая страница выдачи) -->
+        <section v-if="hasQuery && resultAlbums.length" class="pageLine">
+            <div class="lineHat">
+                <div class="lineTitle nonClickable">{{ t('downloads.albumsTitle') }}</div>
+                <div class="lineControls">
+                    <button class="prevBtn" :disabled="!albumsLine.canPrev.value" @click="albumsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
+                    <button class="nextBtn" :disabled="!albumsLine.canNext.value" @click="albumsLine.scrollByPage(1)"><svg style="margin-left:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></button>
+                </div>
+            </div>
+            <div
+                class="lineList"
+                :ref="(el: any) => { albumsLine.el.value = el as HTMLElement | null }"
+                :style="{ '--card-w': albumsLine.itemWidth.value + 'px', visibility: albumsLine.measured.value ? 'visible' : 'hidden' }"
+                @scroll="albumsLine.onScroll"
+            >
+                <DownloadAlbumCard
+                    v-for="al in resultAlbums"
+                    :key="al.id"
+                    :album="al"
+                    @open="rememberCurrentSearch"
+                    @download="rememberCurrentSearch"
+                />
+            </div>
+        </section>
+
         </div>
         <!-- /шапка -->
 
-        <!-- Results -->
-        <section v-if="hasQuery" class="pageLine resultsLine">
+        <!-- Initial loading for a fresh query (no results of any kind yet) -->
+        <LoadingSpinner v-if="hasQuery && searching && !hasAnyResults" />
+
+        <!-- Tracks -->
+        <section v-if="hasQuery && results.length" class="pageLine resultsLine">
             <div class="lineHat">
-                <div class="lineTitle nonClickable">{{ t('downloads.resultsTitle') }}</div>
+                <div class="lineTitle nonClickable">{{ t('downloads.tracksTitle') }}</div>
             </div>
 
-            <LoadingSpinner v-if="searching && results.length === 0" />
-
-            <div v-else-if="results.length === 0" class="emptyState small">
-                <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
-                <div class="emptyText">{{ t('downloads.emptyNothingTitle') }}</div>
-                <div class="emptyDesc">{{ t('downloads.emptyNothingDesc') }}</div>
-            </div>
-
-            <div v-else class="tracksList" ref="resultsListEl">
+            <div class="tracksList" ref="resultsListEl">
                 <div class="vsPad" :style="{ height: vsPadTop + 'px' }"></div>
-                <div v-for="track in visibleResults" :key="trackKey(track.artist, track.title, track.album)" class="trackElem">
-                    <div class="trackCover">
-                        <CoverImage :src="track.cover_url" :fallback="defaultTrackCover" />
-                    </div>
-                    <div class="trackInfo">
-                        <div v-truncate class="trackName">{{ track.title }}</div>
-                        <div v-truncate class="trackArtist">{{ track.artist }}<template v-if="track.album"> · {{ track.album }}</template></div>
-                    </div>
-                    <div class="trackTime">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                    <button
-                        class="dlBtn"
-                        :class="{ done: track.in_library && !isQueued(track), added: isQueued(track) }"
-                        :disabled="isQueued(track)"
-                        @click="onResultButton(track)"
-                    >
-                        <template v-if="isQueued(track)">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                            <span>{{ t('downloads.btnAdded') }}</span>
-                        </template>
-                        <template v-else-if="track.in_library">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                            <span>{{ t('downloads.btnDownloaded') }}</span>
-                        </template>
-                        <template v-else>
-                            <DownloadIcon width="16" height="16" />
-                            <span>{{ t('downloads.btnDownload') }}</span>
-                        </template>
-                    </button>
-                </div>
+                <DownloadTrackRow
+                    v-for="track in visibleResults"
+                    :key="trackKey(track.artist, track.title, track.album)"
+                    :track="track"
+                    @download="rememberCurrentSearch"
+                    @redownload="confirmTrack = $event"
+                />
                 <div class="vsPad" :style="{ height: vsPadBottom + 'px' }"></div>
             </div>
 
             <div v-if="loadingMore" class="loadMoreRow"><div class="miniSpinner"></div></div>
         </section>
 
+        <!-- Nothing found (no tracks, albums or artists) -->
+        <div v-if="hasQuery && !searching && !hasAnyResults" class="emptyState small">
+            <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
+            <div class="emptyText">{{ t('downloads.emptyNothingTitle') }}</div>
+            <div class="emptyDesc">{{ t('downloads.emptyNothingDesc') }}</div>
+        </div>
+
         <!-- Idle empty state -->
-        <div v-else class="emptyState">
+        <div v-if="!hasQuery" class="emptyState">
             <div class="emptyIcon"><DownloadIcon width="22" height="22" /></div>
             <div class="emptyText">{{ t('downloads.idleTitle') }}</div>
             <div class="emptyDesc">{{ t('downloads.idleDesc') }}</div>
@@ -552,6 +708,42 @@ onUnmounted(() => {
     cursor: not-allowed;
 }
 
+/* ── Подсказки прошлых запросов (как в обычном поиске) ────────────── */
+.pastSearchesBar {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+    margin-bottom: 24px;
+}
+.pastSearchesBar::-webkit-scrollbar { display: none; }
+.pastSearchChip {
+    display: block;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    line-height: 1;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.6);
+    font-size: 12px;
+    font-weight: 500;
+    transition: .24s ease;
+    flex-shrink: 0;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pastSearchChip:hover {
+    background-color: hsla(0, 0%, 100%, 0.1);
+    color: hsla(0, 0%, 100%, 0.8);
+}
+
 /* ── Tools banner ────────────────────────────────────────────────── */
 .toolsBanner {
     display: flex;
@@ -648,6 +840,170 @@ onUnmounted(() => {
 }
 .lineTitle.nonClickable { cursor: default; }
 
+/* ── Стрелочная навигация рядов (как в обычном поиске) ────────────── */
+.lineControls {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+}
+.lineControls button {
+    cursor: pointer;
+    border-radius: 9999px;
+    padding: 6px;
+    border: 2px solid hsla(0, 0%, 100%, 0.2);
+    background-color: var(--light-bg);
+    color: hsla(0, 0%, 100%, 0.6);
+    opacity: 0;
+    transition: .24s ease;
+}
+.lineControls button:hover {
+    border: 2px solid hsla(0, 0%, 100%, 0.4);
+    color: hsla(0, 0%, 100%, 0.95);
+}
+.lineControls button:disabled:hover {
+    border: 2px solid hsla(0, 0%, 100%, 0.2);
+    color: hsla(0, 0%, 100%, 0.6);
+}
+.pageLine:hover .lineControls button {
+    opacity: 1;
+}
+.pageLine:hover .lineControls button:disabled {
+    opacity: 0.65;
+}
+
+/* ── Исполнители: «бейджи» (как в обычном поиске) ─────────────────── */
+.artistsBlockWrap {
+    position: relative;
+}
+.artistsList {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+    overflow: hidden;
+    transition: max-height .28s ease;
+}
+.artistBadge {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 14px 4px 4px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.05);
+    color: hsla(0, 0%, 100%, 0.9);
+    font-size: 13px;
+    font-weight: 500;
+    height: 38px;
+    box-sizing: border-box;
+    cursor: pointer;
+    user-select: none;
+    max-width: 100%;
+    transition: background-color .2s ease, color .2s ease;
+}
+.artistBadge:hover {
+    background-color: hsla(0, 0%, 100%, 0.09);
+    color: hsla(0, 0%, 100%, 1);
+}
+.artistAvatar {
+    width: 30px;
+    height: 30px;
+    border-radius: 9999px;
+    background-color: #202020;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+.artistBadgeName {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+}
+.moreArtistsRow {
+    display: flex;
+    justify-content: center;
+    margin-top: 14px;
+}
+.moreArtistsRow.collapsed {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -6px;
+    margin-top: 0;
+    padding-top: 28px;
+    pointer-events: none;
+    background: linear-gradient(
+        to bottom,
+        hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 0) 0%,
+        hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 0.85) 55%,
+        hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 1) 100%
+    );
+}
+.moreArtistsRow.collapsed .moreArtistsBtn {
+    pointer-events: auto;
+}
+.moreArtistsBtn {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 6px 0 16px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.05);
+    color: hsla(0, 0%, 100%, 0.85);
+    font-size: 12px;
+    font-weight: 600;
+    transition: background-color .2s ease, color .2s ease, transform .2s ease;
+}
+.moreArtistsBtn:hover {
+    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.18);
+    color: #fff;
+    transform: translateY(-1px);
+}
+.moreArtistsLabel { line-height: 1; }
+.moreArtistsCount {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.08);
+    color: hsla(0, 0%, 100%, 0.7);
+    font-size: 11px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+.moreArtistsBtn:hover .moreArtistsCount {
+    background-color: hsla(0, 0%, 100%, 0.18);
+    color: #fff;
+}
+.moreArtistsBtn .chev {
+    margin-right: 6px;
+    color: hsla(0, 0%, 100%, 0.55);
+    transition: transform .24s ease, color .2s ease;
+}
+.moreArtistsBtn:hover .chev { color: #fff; }
+.moreArtistsBtn .chev.expanded { transform: rotate(180deg); }
+
+/* ── Альбомы: горизонтальный ряд (как в обычном поиске) ───────────── */
+.lineList {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    gap: 16px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+.lineList::-webkit-scrollbar { display: none; }
+
 /* ── Results track list ──────────────────────────────────────────── */
 .tracksList {
     display: flex;
@@ -657,111 +1013,6 @@ onUnmounted(() => {
 .vsPad {
     width: 100%;
     flex-shrink: 0;
-}
-.trackElem {
-    position: relative;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 8px 8px 8px;
-    border-radius: 9px;
-    height: 58px;
-    box-sizing: border-box;
-    transition: background-color .24s ease;
-}
-.trackElem:hover {
-    background-color: hsla(0, 0%, 100%, 0.03);
-}
-.trackCover {
-    width: 42px;
-    height: 42px;
-    background-color: #202020;
-    border-radius: 5px;
-    overflow: hidden;
-    flex-shrink: 0;
-}
-.trackCoverImg {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-    user-select: none;
-}
-.trackInfo {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    flex: 1;
-    min-width: 0;
-}
-.trackName {
-    user-select: none;
-    font-size: 14px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.trackArtist {
-    user-select: none;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.4);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.trackTime {
-    user-select: none;
-    font-size: 14px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    color: hsla(0, 0%, 100%, 0.4);
-    flex-shrink: 0;
-}
-.dlBtn {
-    cursor: pointer;
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 34px;
-    padding: 0 16px;
-    border-radius: 999px;
-    font-size: 13px;
-    font-weight: 700;
-    white-space: nowrap;
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 12%), 100%), 78%, 1);
-    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.16);
-    transition: background-color .2s ease, color .2s ease, transform .2s ease;
-}
-.dlBtn svg {
-    flex-shrink: 0;
-}
-.dlBtn:hover {
-    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.26);
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 12%), 100%), 86%, 1);
-}
-/* Уже в очереди — нейтральная «таблетка». */
-.dlBtn.added {
-    cursor: default;
-    color: hsla(0, 0%, 100%, 0.55);
-    background-color: hsla(0, 0%, 100%, 0.06);
-}
-/* Уже в библиотеке — зелёная «таблетка» (кликабельна: повторное скачивание). */
-.dlBtn.done {
-    cursor: pointer;
-    color: hsla(145, 50%, 64%, 0.95);
-    background-color: hsla(145, 45%, 50%, 0.12);
-}
-.dlBtn.done:hover {
-    background-color: hsla(145, 45%, 50%, 0.2);
-}
-/* Уже в очереди — неактивная «таблетка». */
-.dlBtn.added:hover {
-    background-color: hsla(0, 0%, 100%, 0.06);
 }
 
 .loadMoreRow {

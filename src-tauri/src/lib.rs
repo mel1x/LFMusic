@@ -1778,53 +1778,96 @@ async fn downloads_search(
             index.unwrap_or(0),
             limit.unwrap_or(30),
         );
-
-        // Индекс локального каталога — краткие блокировки настроек/библиотеки.
-        let separators = settings::get_artist_separators(&app.state::<SettingsState>());
-        let lib_index = app
-            .state::<LibraryState>()
-            .0
-            .lock()
-            .map(|lib| lib.catalog_artist_title_index(&separators))
-            .unwrap_or_default();
-
-        // Набор разделителей для нечёткого сопоставления готовим ОДИН раз до цикла:
-        // иначе на каждый из ~30 треков заново аллоцировался и сортировался их
-        // список (см. external::prepare_artist_separators).
-        let prepared_seps = external::prepare_artist_separators(&separators);
-
-        // Трек «уже в библиотеке», если совпало название (без шума), есть хотя бы
-        // один общий артист (поддержка мультиартистных треков) И альбом совместим.
-        // Альбом совместим, когда: у внешнего трека альбома нет, ИЛИ у локальной
-        // версии тег альбома пуст (не с чем сверять — не блокируем), ИЛИ ключи
-        // альбомов совпадают. Так одноимённый трек того же исполнителя из ДРУГОГО
-        // альбома НЕ помечается «скачанным» — только реально скачанная версия.
-        for t in &mut page.tracks {
-            let tkey = external::title_match_key(&t.title);
-            let Some(local_versions) = lib_index.get(&tkey) else {
-                continue;
-            };
-            let track_artists =
-                external::split_artists_for_match_prepared(&t.artist, &prepared_seps);
-            let ext_album_key = t
-                .album
-                .as_deref()
-                .map(external::album_match_key)
-                .unwrap_or_default();
-            let matched = local_versions.iter().any(|v| {
-                let artist_match = track_artists.iter().any(|a| v.artists.contains(a));
-                let album_match =
-                    ext_album_key.is_empty() || v.album_key.is_empty() || v.album_key == ext_album_key;
-                artist_match && album_match
-            });
-            if matched {
-                t.in_library = true;
-            }
-        }
+        mark_tracks_in_library(&app, &mut page.tracks);
         page
     })
     .await
     .map_err(|e| format!("Task error: {}", e))
+}
+
+/// Проставляет `in_library` внешним трекам, у которых в локальной библиотеке есть
+/// совпадающая версия: название совпало (без шума), есть хотя бы один общий артист
+/// (поддержка мультиартистных треков) И альбом совместим. Альбом совместим, когда:
+/// у внешнего трека альбома нет, ИЛИ у локальной версии тег альбома пуст (не с чем
+/// сверять — не блокируем), ИЛИ ключи альбомов совпадают. Так одноимённый трек
+/// того же исполнителя из ДРУГОГО альбома не помечается «скачанным» — только
+/// реально скачанная версия. Общий помощник для поиска/альбома/исполнителя.
+fn mark_tracks_in_library(app: &tauri::AppHandle, tracks: &mut [external::ExternalSearchTrack]) {
+    if tracks.is_empty() {
+        return;
+    }
+    // Индекс локального каталога — краткие блокировки настроек/библиотеки.
+    let separators = settings::get_artist_separators(&app.state::<SettingsState>());
+    let lib_index = app
+        .state::<LibraryState>()
+        .0
+        .lock()
+        .map(|lib| lib.catalog_artist_title_index(&separators))
+        .unwrap_or_default();
+
+    // Набор разделителей для нечёткого сопоставления готовим ОДИН раз до цикла:
+    // иначе на каждый трек заново аллоцировался и сортировался их список
+    // (см. external::prepare_artist_separators).
+    let prepared_seps = external::prepare_artist_separators(&separators);
+
+    for t in tracks.iter_mut() {
+        let tkey = external::title_match_key(&t.title);
+        let Some(local_versions) = lib_index.get(&tkey) else {
+            continue;
+        };
+        let track_artists =
+            external::split_artists_for_match_prepared(&t.artist, &prepared_seps);
+        let ext_album_key = t
+            .album
+            .as_deref()
+            .map(external::album_match_key)
+            .unwrap_or_default();
+        let matched = local_versions.iter().any(|v| {
+            let artist_match = track_artists.iter().any(|a| v.artists.contains(a));
+            let album_match =
+                ext_album_key.is_empty() || v.album_key.is_empty() || v.album_key == ext_album_key;
+            artist_match && album_match
+        });
+        if matched {
+            t.in_library = true;
+        }
+    }
+}
+
+/// Детальная карточка альбома (Deezer) для страницы скачивания альбома.
+/// Треки помечаются `in_library`, чтобы кнопки сразу отражали наличие в каталоге.
+#[tauri::command]
+async fn downloads_album(
+    app: tauri::AppHandle,
+    album_id: u64,
+) -> Result<Option<external::ExternalAlbumDetail>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut detail = external::album_detail(album_id)?;
+        if let Some(d) = detail.as_mut() {
+            mark_tracks_in_library(&app, &mut d.tracks);
+        }
+        Ok(detail)
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Детальная карточка исполнителя (Deezer): его альбомы и популярные треки.
+/// Популярные треки помечаются `in_library`.
+#[tauri::command]
+async fn downloads_artist(
+    app: tauri::AppHandle,
+    artist_id: u64,
+) -> Result<Option<external::ExternalArtistDetail>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut detail = external::artist_detail(artist_id)?;
+        if let Some(d) = detail.as_mut() {
+            mark_tracks_in_library(&app, &mut d.top_tracks);
+        }
+        Ok(detail)
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
 }
 
 /// Поставить трек в очередь скачивания. Возвращает id элемента очереди.
@@ -1834,6 +1877,16 @@ fn downloads_enqueue(
     request: downloads::DownloadRequest,
 ) -> Result<u64, String> {
     Ok(downloads::enqueue(&app, request))
+}
+
+/// Поставить пачку треков в очередь (кнопка «Скачать все треки» у альбома).
+/// Возвращает id элементов очереди в порядке запросов.
+#[tauri::command]
+fn downloads_enqueue_many(
+    app: tauri::AppHandle,
+    requests: Vec<downloads::DownloadRequest>,
+) -> Result<Vec<u64>, String> {
+    Ok(downloads::enqueue_many(&app, requests))
 }
 
 /// Текущий снимок очереди + статус утилит (для первичной загрузки страницы).
@@ -2401,7 +2454,10 @@ pub fn run() {
             external_prepare,
             // Скачивание треков
             downloads_search,
+            downloads_album,
+            downloads_artist,
             downloads_enqueue,
+            downloads_enqueue_many,
             downloads_snapshot,
             downloads_remove,
             downloads_retry,

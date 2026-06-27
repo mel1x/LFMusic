@@ -423,6 +423,44 @@ fn remove_file_with_retries(path: &Path) -> std::io::Result<()> {
 /// устаревшего UI; возвращается id уже существующего элемента. Одноимённый трек
 /// того же исполнителя из ДРУГОГО альбома дублем не считается — качается отдельно.
 pub fn enqueue(app: &AppHandle, req: DownloadRequest) -> u64 {
+    let (id, is_new) = with_manager(app, |m| insert_request(m, req));
+    if is_new {
+        emit_snapshot(app);
+        report_titlebar(app);
+        ensure_worker(app);
+    }
+    id
+}
+
+/// Поставить пачку треков в очередь одним проходом (кнопка «Скачать все треки» у
+/// альбома). Дедуп идентичен [`enqueue`]; снапшот/воркер дёргаются один раз на
+/// всю пачку. Возвращает id элементов (новых или уже существовавших) по порядку.
+pub fn enqueue_many(app: &AppHandle, reqs: Vec<DownloadRequest>) -> Vec<u64> {
+    if reqs.is_empty() {
+        return Vec::new();
+    }
+    let (ids, any_new) = with_manager(app, |m| {
+        let mut ids = Vec::with_capacity(reqs.len());
+        let mut any_new = false;
+        for req in reqs {
+            let (id, is_new) = insert_request(m, req);
+            any_new |= is_new;
+            ids.push(id);
+        }
+        (ids, any_new)
+    });
+    if any_new {
+        emit_snapshot(app);
+        report_titlebar(app);
+        ensure_worker(app);
+    }
+    ids
+}
+
+/// Вставляет один запрос в очередь менеджера (без побочных эффектов — снапшот/
+/// воркер дёргает вызывающий). Возвращает `(id, is_new)`: `is_new == false`, если
+/// такой трек уже в очереди/качается/скачан (дубль не добавляем; force обходит).
+fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) {
     let query = req
         .query
         .filter(|q| !q.trim().is_empty())
@@ -430,51 +468,41 @@ pub fn enqueue(app: &AppHandle, req: DownloadRequest) -> u64 {
     let key = crate::external::track_identity_key(&req.artist, &req.title, req.album.as_deref());
     let force = req.force.unwrap_or(false);
 
-    let (id, is_new) = with_manager(app, |m| {
-        // Уже в очереди/качается/скачан — не дублируем (ошибочные можно повторить).
-        // force обходит проверку (осознанное повторное скачивание из модалки).
-        if !force {
-            if let Some(existing) = m.items.iter().find(|i| {
-                i.status != "error"
-                    && crate::external::track_identity_key(&i.artist, &i.title, i.album.as_deref())
-                        == key
-            }) {
-                return (existing.id, false);
-            }
-        }
-        // Добавляем новый элемент → прежнюю ОШИБОЧНУЮ версию того же трека убираем
-        // из очереди: её заменяет новый queued-элемент (а не висит рядом дублем).
-        // Счётчики run_total/run_done трогать не нужно: ошибочный элемент уже зачёл
-        // свой +1 в run_done при провале, так что остаток (total−done) не меняется.
-        m.items.retain(|i| {
-            !(i.status == "error"
+    // Уже в очереди/качается/скачан — не дублируем (ошибочные можно повторить).
+    // force обходит проверку (осознанное повторное скачивание из модалки).
+    if !force {
+        if let Some(existing) = m.items.iter().find(|i| {
+            i.status != "error"
                 && crate::external::track_identity_key(&i.artist, &i.title, i.album.as_deref())
-                    == key)
-        });
-        let id = m.next_id;
-        m.next_id += 1;
-        m.items.push(DownloadItem {
-            id,
-            title: req.title,
-            artist: req.artist,
-            album: req.album,
-            query,
-            cover_url: req.cover_url,
-            status: "queued".into(),
-            progress: 0.0,
-            error: None,
-            file_path: None,
-        });
-        m.run_total += 1;
-        (id, true)
-    });
-
-    if is_new {
-        emit_snapshot(app);
-        report_titlebar(app);
-        ensure_worker(app);
+                    == key
+        }) {
+            return (existing.id, false);
+        }
     }
-    id
+    // Добавляем новый элемент → прежнюю ОШИБОЧНУЮ версию того же трека убираем
+    // из очереди: её заменяет новый queued-элемент (а не висит рядом дублем).
+    // Счётчики run_total/run_done трогать не нужно: ошибочный элемент уже зачёл
+    // свой +1 в run_done при провале, так что остаток (total−done) не меняется.
+    m.items.retain(|i| {
+        !(i.status == "error"
+            && crate::external::track_identity_key(&i.artist, &i.title, i.album.as_deref()) == key)
+    });
+    let id = m.next_id;
+    m.next_id += 1;
+    m.items.push(DownloadItem {
+        id,
+        title: req.title,
+        artist: req.artist,
+        album: req.album,
+        query,
+        cover_url: req.cover_url,
+        status: "queued".into(),
+        progress: 0.0,
+        error: None,
+        file_path: None,
+    });
+    m.run_total += 1;
+    (id, true)
 }
 
 /// Убрать элемент из очереди. Активный (скачивающийся) — отменяется (kill).
