@@ -672,6 +672,44 @@ fn cookies_file(app: &AppHandle) -> PathBuf {
     app_data_dir(app).join("youtube_cookies.txt")
 }
 
+/// Изолированная папка данных WebView2 для окна входа в YouTube (Windows). Окно
+/// входа держит собственную сессию Google в этой папке, а НЕ в общем профиле
+/// приложения. Это ключ к корректному «Выйти»: точечное удаление cookies не
+/// выкидывало сессию (Google мгновенно переавторизовывался из сохранённого профиля
+/// — окно входа закрывалось «уже вошедшим»). Свою папку можно снести целиком, не
+/// трогая localStorage/куки самого приложения.
+#[cfg(windows)]
+fn youtube_webview_dir(app: &AppHandle) -> PathBuf {
+    app_data_dir(app).join("youtube_webview")
+}
+
+/// Маркер «снести профиль webview при следующем входе». Ставится в [`logout`], если
+/// снести папку прямо там не удалось (WebView2 ещё держал её после недавнего окна).
+/// [`build_login_window`] снесёт её перед открытием — к тому моменту прошлый процесс
+/// webview уже завершён и папка свободна. Гарантирует РЕАЛЬНЫЙ вход после «Выйти».
+#[cfg(windows)]
+fn youtube_webview_reset_marker(app: &AppHandle) -> PathBuf {
+    app_data_dir(app).join("youtube_webview.reset")
+}
+
+/// Снести изолированный профиль webview окна входа (с повторами — WebView2 может
+/// держать папку ещё доли секунды после закрытия окна). `true`, если папки больше нет.
+#[cfg(windows)]
+fn purge_youtube_webview_dir(app: &AppHandle) -> bool {
+    let dir = youtube_webview_dir(app);
+    for _ in 0..10 {
+        if !dir.exists() {
+            return true;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        if !dir.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    !dir.exists()
+}
+
 /// Авторизованы ли мы (есть сохранённый файл cookies).
 pub fn is_authorized(app: &AppHandle) -> bool {
     cookies_file(app).exists()
@@ -785,26 +823,46 @@ pub fn open_login(app: &AppHandle) {
 
 fn build_login_window(app: &AppHandle) -> Result<(), String> {
     let url = tauri::Url::parse(LOGIN_URL).map_err(|e| e.to_string())?;
-    let win = tauri::WebviewWindowBuilder::new(app, LOGIN_LABEL, tauri::WebviewUrl::External(url))
-        .title("Вход в YouTube — LFMusic")
-        .inner_size(520.0, 720.0)
-        .min_inner_size(420.0, 560.0)
-        .center()
-        .focused(true)
-        .user_agent(LOGIN_UA)
-        // Логи в stderr (виден в терминале `tauri dev`) — диагностика пустого окна.
-        .on_navigation(|url| {
-            eprintln!("[youtube-login] navigate → {}", url);
-            true
-        })
-        .on_page_load(|_w, payload| {
-            eprintln!("[youtube-login] page_load → {}", payload.url());
-        })
-        .build()
-        .map_err(|e| {
-            eprintln!("[youtube-login] ошибка создания окна: {}", e);
-            e.to_string()
-        })?;
+
+    // Если «Выйти» запросил сброс, но папка тогда была занята — сносим профиль
+    // сейчас, перед открытием окна (прошлое окно входа уже закрыто → папка свободна).
+    // Маркер снимаем только при успехе: иначе оставляем — повторим при следующем входе.
+    #[cfg(windows)]
+    if youtube_webview_reset_marker(app).exists() && purge_youtube_webview_dir(app) {
+        let _ = std::fs::remove_file(youtube_webview_reset_marker(app));
+    }
+
+    let builder =
+        tauri::WebviewWindowBuilder::new(app, LOGIN_LABEL, tauri::WebviewUrl::External(url))
+            .title("Вход в YouTube — LFMusic")
+            .inner_size(520.0, 720.0)
+            .min_inner_size(420.0, 560.0)
+            .center()
+            .focused(true)
+            .user_agent(LOGIN_UA)
+            // Логи в stderr (виден в терминале `tauri dev`) — диагностика пустого окна.
+            .on_navigation(|url| {
+                eprintln!("[youtube-login] navigate → {}", url);
+                true
+            })
+            .on_page_load(|_w, payload| {
+                eprintln!("[youtube-login] page_load → {}", payload.url());
+            });
+
+    // Изолированный профиль WebView2 (Windows) — отдельная сессия Google, которую
+    // «Выйти» сносит целиком (см. youtube_webview_dir). На прочих платформах окно
+    // делит общий профиль приложения (там «Выйти» чистит cookies точечно).
+    #[cfg(windows)]
+    let builder = {
+        let dir = youtube_webview_dir(app);
+        let _ = std::fs::create_dir_all(&dir);
+        builder.data_directory(dir)
+    };
+
+    let win = builder.build().map_err(|e| {
+        eprintln!("[youtube-login] ошибка создания окна: {}", e);
+        e.to_string()
+    })?;
     eprintln!("[youtube-login] окно создано, грузим {}", LOGIN_URL);
     // Иногда созданное в рантайме окно WebView2 остаётся белым до первого события
     // фокуса/ресайза — подталкиваем его.
@@ -978,6 +1036,16 @@ fn write_private_atomic(target: &Path, data: &[u8]) -> Result<(), String> {
 /// негодность cookies выявит либо ручная «Проверить», либо бот-стена при
 /// скачивании (тогда выставится маркер «протухли»).
 fn finalize_login(app: &AppHandle) {
+    // Без авторизационных cookies вход НЕ фиксируем. Простое открытие формы входа
+    // Google (и последующее закрытие окна или нажатие «Отмена» БЕЗ входа) оставляет
+    // в общем cookie-хранилище неавторизационные google-cookies (CONSENT/NID/SOCS).
+    // write_cookies_file ниже записал бы и их (count > 0) — и приложение ошибочно
+    // считало бы вход выполненным. Проверяем то же условие, по которому
+    // login_watch_loop распознаёт реальный вход: «вход выполнен» выставляется ТОЛЬКО
+    // при настоящей авторизации, а закрытие/отмена окна больше ничего не ломают.
+    if !has_youtube_auth(app) {
+        return;
+    }
     let cookies = read_youtube_cookies(app);
     match write_cookies_file(app, &cookies) {
         Ok(_) => {
@@ -1015,8 +1083,11 @@ fn login_watch_loop(app: AppHandle) {
         if app.get_webview_window(LOGIN_LABEL).is_some() {
             window_seen = true;
         } else {
-            // Окно закрылось. Если успели его увидеть — пробуем зафиксировать вход
-            // (cookies в общем хранилище переживают закрытие окна).
+            // Окно закрылось. Если успели его увидеть — пробуем зафиксировать вход.
+            // finalize_login сам проверит наличие авторизационных cookies: если
+            // пользователь вошёл и закрыл окно — вход зафиксируется (cookies в общем
+            // хранилище переживают закрытие); если просто закрыл/нажал «Отмена» не
+            // войдя — ничего не произойдёт (вход «выполненным» не считается).
             if window_seen {
                 finalize_login(&app);
             }
@@ -1047,11 +1118,22 @@ fn login_watch_loop(app: AppHandle) {
     }
 }
 
-/// Выйти из аккаунта: удалить cookies.txt, очистить webview-сессию YouTube/Google
-/// и сбросить статус. Очистка webview нужна, чтобы при следующем входе можно было
-/// выбрать другой аккаунт (иначе старая сессия подхватилась бы автоматически).
+/// Выйти из аккаунта: удалить cookies.txt, снести webview-сессию YouTube/Google
+/// и сбросить статус. Без сноса сессии следующий вход тут же переавторизовывался бы
+/// из сохранённого профиля (окно входа закрывалось бы «уже вошедшим») — точечного
+/// удаления cookies для этого недостаточно (Google переавторизуется).
 pub fn logout(app: &AppHandle) {
     let _ = std::fs::remove_file(cookies_file(app));
+    // Windows: сносим изолированный профиль окна входа целиком. Если он ещё занят
+    // (WebView2 не успел освободить папку) — ставим маркер, и build_login_window
+    // снесёт его перед следующим входом (тогда папка точно свободна).
+    #[cfg(windows)]
+    if !purge_youtube_webview_dir(app) {
+        let _ = std::fs::write(youtube_webview_reset_marker(app), b"1");
+    }
+    // Точечная очистка cookies наших доменов из общего профиля: на прочих платформах
+    // это основной путь, а на Windows — подчистка возможной легаси-сессии из старого
+    // общего профиля (до перехода на изолированный профиль окна входа).
     clear_webview_youtube_cookies(app);
     clear_cookies_invalid(app);
     with_manager(app, |m| {

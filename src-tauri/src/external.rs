@@ -135,13 +135,16 @@ fn host_registry() -> &'static Mutex<HashMap<String, HostState>> {
 }
 
 /// Минимальный интервал между запросами к хосту. MusicBrainz / Cover Art Archive
-/// требуют ≤1 запроса в секунду; iTunes/Deezer ограничиваем мягче (плюс backoff
-/// на 429/503). Это сериализует и ленивые запросы фронта, и батч-подготовку,
-/// идущие параллельно.
+/// требуют ≤1 запроса в секунду. iTunes Search API жёстко ограничен ~20 запросами
+/// в минуту на IP — поэтому 3с между запросами (раньше было 300мс ≈ 200/мин: при
+/// последовательном проходе простои это маскировали, а параллельный пул держал
+/// темп на максимуме лимитера и упирался в 429 + пустые тела «error decoding»).
+/// Deezer терпимее (его и держим основным источником подготовки, см. *_providers).
+/// Это сериализует и ленивые запросы фронта, и батч-подготовку, идущие параллельно.
 fn host_min_gap(host: &str) -> Duration {
     match host {
         "musicbrainz.org" | "coverartarchive.org" => Duration::from_millis(1100),
-        "itunes.apple.com" => Duration::from_millis(300),
+        "itunes.apple.com" => Duration::from_millis(3000),
         "api.deezer.com" => Duration::from_millis(220),
         _ => Duration::from_millis(120),
     }
@@ -227,6 +230,27 @@ fn send_throttled(
         return Err(format!("{} ответил {} (backoff {}с)", host, code, secs));
     }
     Ok(resp)
+}
+
+/// Backoff на «мягкий» rate-limit (200 с пустым телом — так iTunes отвечает на
+/// перегруз вместо 429). Достаточно длинный, чтобы хост успел «остыть».
+const SOFT_RATE_LIMIT_BACKOFF_SECS: u64 = 20;
+
+/// Как [`send_throttled`], но сразу декодирует тело как JSON. Пустое тело при 200 —
+/// типичный «мягкий» rate-limit (особенно у iTunes): регистрируем backoff и
+/// возвращаем `Err`, ЧТОБЫ не долбить хост и не плодить «error decoding response
+/// body» (провайдер расценит это как временную ошибку и не закэширует «нет»).
+fn send_throttled_json<T: serde::de::DeserializeOwned>(
+    builder: reqwest::blocking::RequestBuilder,
+    host: &str,
+) -> Result<T, String> {
+    let resp = send_throttled(builder, host)?;
+    let text = resp.text().map_err(|e| e.to_string())?;
+    if text.trim().is_empty() {
+        register_backoff(host, SOFT_RATE_LIMIT_BACKOFF_SECS);
+        return Err(format!("{}: пустой ответ (мягкий лимит)", host));
+    }
+    serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
 /// GET изображения с лимитом по хосту (хост берётся из самого URL).
@@ -392,7 +416,7 @@ impl Provider for ITunes {
         }
 
         let term = format!("{} {}", artist, album);
-        let search: SearchResp = send_throttled(
+        let search: SearchResp = send_throttled_json(
             client.get("https://itunes.apple.com/search").query(&[
                 ("term", term.as_str()),
                 ("entity", "album"),
@@ -400,9 +424,7 @@ impl Provider for ITunes {
                 ("media", "music"),
             ]),
             "itunes.apple.com",
-        )?
-        .json()
-        .map_err(|e| e.to_string())?;
+        )?;
 
         // Лучший альбом-кандидат по названию.
         let best = search
@@ -443,16 +465,14 @@ impl Provider for ITunes {
             track_time_millis: Option<u64>,
         }
 
-        let lookup: LookupResp = send_throttled(
+        let lookup: LookupResp = send_throttled_json(
             client.get("https://itunes.apple.com/lookup").query(&[
                 ("id", collection_id.to_string().as_str()),
                 ("entity", "song"),
                 ("limit", "300"),
             ]),
             "itunes.apple.com",
-        )?
-        .json()
-        .map_err(|e| e.to_string())?;
+        )?;
 
         let mut tracks: Vec<ExternalTrack> = lookup
             .results
@@ -511,7 +531,7 @@ impl Provider for ITunes {
             ("song", format!("{} {}", artist, title), title)
         };
 
-        let resp: SearchResp = send_throttled(
+        let resp: SearchResp = send_throttled_json(
             client.get("https://itunes.apple.com/search").query(&[
                 ("term", query.as_str()),
                 ("entity", entity),
@@ -519,9 +539,7 @@ impl Provider for ITunes {
                 ("media", "music"),
             ]),
             "itunes.apple.com",
-        )?
-        .json()
-        .map_err(|e| e.to_string())?;
+        )?;
 
         let best = resp
             .results
@@ -1218,7 +1236,12 @@ impl Provider for Wikipedia {
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn album_providers() -> Vec<Box<dyn Provider>> {
-    vec![Box::new(ITunes), Box::new(Deezer), Box::new(MusicBrainz)]
+    // Deezer первым: его лимит на порядок выше iTunes (~20/мин), а данные альбома
+    // богатые и без ключа. На точном совпадении (score ≥ 0.97) перебор обрывается
+    // ещё на Deezer — iTunes/MusicBrainz тогда не дёргаются вовсе. iTunes остаётся
+    // фолбэком для того, чего у Deezer нет (туда уходит лишь хвост обращений, что
+    // и держит нас в пределах жёсткого лимита iTunes).
+    vec![Box::new(Deezer), Box::new(ITunes), Box::new(MusicBrainz)]
 }
 
 fn image_providers() -> Vec<Box<dyn Provider>> {
@@ -1228,9 +1251,12 @@ fn image_providers() -> Vec<Box<dyn Provider>> {
 }
 
 fn cover_providers() -> Vec<Box<dyn Provider>> {
-    // iTunes — хорошее качество артов; Deezer — фолбэк; Cover Art Archive —
+    // Deezer первым: перебор обрывается на ПЕРВОМ найденном (см. fetch_track_cover),
+    // и для большинства треков обложка берётся у Deezer (cover_xl 1000px, терпимый
+    // лимит), а до iTunes дело не доходит — иначе массовая подготовка упиралась бы в
+    // жёсткий лимит iTunes (429 + пустые тела). iTunes — фолбэк, Cover Art Archive —
     // последний рубеж (нишевые/региональные релизы, которых нет в стримингах).
-    vec![Box::new(ITunes), Box::new(Deezer), Box::new(CoverArtArchive)]
+    vec![Box::new(Deezer), Box::new(ITunes), Box::new(CoverArtArchive)]
 }
 
 /// Опрашивает источники и возвращает обложку трека/альбома (первое совпадение).
@@ -1992,7 +2018,7 @@ fn itunes_search_tracks(
         track_time_millis: Option<u64>,
     }
 
-    let resp: SearchResp = send_throttled(
+    let resp: SearchResp = send_throttled_json(
         client.get("https://itunes.apple.com/search").query(&[
             ("term", query),
             ("entity", "song"),
@@ -2000,9 +2026,7 @@ fn itunes_search_tracks(
             ("media", "music"),
         ]),
         "itunes.apple.com",
-    )?
-    .json()
-    .map_err(|e| e.to_string())?;
+    )?;
 
     Ok(resp
         .results
@@ -2478,7 +2502,39 @@ fn save_artists_manifest(
     manifest: &HashMap<String, ArtistImageRecord>,
 ) -> Result<(), String> {
     let content = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
-    fs::write(artists_manifest_path(app_data_dir), content).map_err(|e| e.to_string())
+    write_manifest_atomic(&artists_manifest_path(app_data_dir), content.as_bytes())
+}
+
+/// Атомарная запись манифеста (temp → rename): фоновая подготовка идёт в несколько
+/// потоков и параллельно может писать другой манифест, а протокол/старт читают эти
+/// JSON — атомарная подмена гарантирует, что читатель видит либо старый, либо новый
+/// ЦЕЛЫЙ файл (а не недописанный/порванный).
+fn write_manifest_atomic(target: &PathBuf, data: &[u8]) -> Result<(), String> {
+    let tmp = target.with_extension("json.tmp");
+    fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+/// Мьютекс read-modify-write манифеста аватарок. Фоновая подготовка обрабатывает
+/// исполнителей в несколько потоков (см. `run_external_preparation`), а манифест —
+/// один файл: без сериализации параллельные «загрузить → вставить → сохранить»
+/// затирали бы записи друг друга. Сетевые загрузки идут ВНЕ этого мьютекса, поэтому
+/// параллелизм сохраняется — под локом только короткое слияние с диском.
+fn artists_manifest_lock() -> &'static Mutex<()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
+/// Слить одну запись в манифест аватарок под локом (перечитать с диска свежий
+/// манифест → вставить → атомарно сохранить) — без потери чужих параллельных вставок.
+fn store_artist_record(app_data_dir: &PathBuf, key: String, rec: ArtistImageRecord) {
+    let _guard = artists_manifest_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let mut manifest = load_artists_manifest(app_data_dir);
+    manifest.insert(key, rec);
+    let _ = save_artists_manifest(app_data_dir, &manifest);
 }
 
 fn artist_key(name: &str) -> String {
@@ -2498,22 +2554,14 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Пометить ключ как «нет внешней картинки» (негативный кэш) и сохранить.
-fn cache_none_artist(
-    app_data_dir: &PathBuf,
-    manifest: &mut HashMap<String, ArtistImageRecord>,
-    key: String,
-) {
-    manifest.insert(
-        key,
-        ArtistImageRecord {
-            file: None,
-            source: None,
-            status: "none".into(),
-            fetched_secs: now_secs(),
-        },
-    );
-    let _ = save_artists_manifest(app_data_dir, manifest);
+/// Запись негативного кэша («нет внешней картинки»).
+fn none_image_record(now: u64) -> ArtistImageRecord {
+    ArtistImageRecord {
+        file: None,
+        source: None,
+        status: "none".into(),
+        fetched_secs: now,
+    }
 }
 
 /// Получить аватарку исполнителя: сначала из кэша, иначе из сети (если включено
@@ -2530,8 +2578,10 @@ pub fn get_or_fetch_artist_image(
     }
 
     ensure_artist_cache_version(app_data_dir);
-    let mut manifest = load_artists_manifest(app_data_dir);
+    // Проверка кэша — без лока: запись манифеста атомарна (см. write_manifest_atomic),
+    // поэтому чтение всегда видит целостный файл. Лок нужен только при ЗАПИСИ.
     if !refresh {
+        let manifest = load_artists_manifest(app_data_dir);
         if let Some(rec) = manifest.get(&key) {
             if rec.status == "ok" {
                 if let Some(file) = &rec.file {
@@ -2551,7 +2601,8 @@ pub fn get_or_fetch_artist_image(
         }
     }
 
-    // Идём в сеть.
+    // Идём в сеть — ВНЕ лока манифеста, чтобы параллельные потоки подготовки
+    // загружались одновременно (под локом — только короткое слияние результата).
     let now = now_secs();
     let filename = artist_file_name(&key);
     let target = artists_dir(app_data_dir).join(&filename);
@@ -2565,7 +2616,8 @@ pub fn get_or_fetch_artist_image(
                 Some(MIN_REAL_IMAGE_BYTES),
             ) {
                 ImageDownload::Saved => {
-                    manifest.insert(
+                    store_artist_record(
+                        app_data_dir,
                         key.clone(),
                         ArtistImageRecord {
                             file: Some(filename),
@@ -2574,7 +2626,6 @@ pub fn get_or_fetch_artist_image(
                             fetched_secs: now,
                         },
                     );
-                    let _ = save_artists_manifest(app_data_dir, &manifest);
                     ArtistImageResult {
                         status: "ok".into(),
                         source: Some(img.source),
@@ -2583,7 +2634,7 @@ pub fn get_or_fetch_artist_image(
                 }
                 // Скачали дефолтный плейсхолдер — это легитимное «нет реального фото».
                 ImageDownload::Placeholder => {
-                    cache_none_artist(app_data_dir, &mut manifest, key);
+                    store_artist_record(app_data_dir, key, none_image_record(now));
                     none_result()
                 }
                 // Сетевая/форматная ошибка — НЕ кэшируем, попробуем позже.
@@ -2595,7 +2646,7 @@ pub fn get_or_fetch_artist_image(
         }
         // Все провайдеры ответили «нет» — кэшируем негативный результат.
         FetchOutcome::NotFound => {
-            cache_none_artist(app_data_dir, &mut manifest, key);
+            store_artist_record(app_data_dir, key, none_image_record(now));
             none_result()
         }
         // Был сбой провайдера — НЕ кэшируем «нет», повторим при следующем заходе.
@@ -2676,7 +2727,21 @@ fn save_covers_manifest(
     manifest: &HashMap<String, ArtistImageRecord>,
 ) -> Result<(), String> {
     let content = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
-    fs::write(covers_manifest_path(app_data_dir), content).map_err(|e| e.to_string())
+    write_manifest_atomic(&covers_manifest_path(app_data_dir), content.as_bytes())
+}
+
+/// Мьютекс read-modify-write манифеста обложек (см. [`artists_manifest_lock`]).
+fn covers_manifest_lock() -> &'static Mutex<()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
+/// Слить одну запись в манифест обложек под локом (перечитать → вставить → сохранить).
+fn store_cover_record(app_data_dir: &PathBuf, key: String, rec: ArtistImageRecord) {
+    let _guard = covers_manifest_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let mut manifest = load_covers_manifest(app_data_dir);
+    manifest.insert(key, rec);
+    let _ = save_covers_manifest(app_data_dir, &manifest);
 }
 
 /// Ключ кэша обложки: артист + альбом (одна обложка на альбом), при пустом
@@ -2687,24 +2752,6 @@ fn cover_cache_key(artist: &str, album: &str, title: &str) -> String {
     } else {
         normalize(&format!("{} {} t", artist, title))
     }
-}
-
-/// Пометить ключ обложки как «нет внешней» (негативный кэш) и сохранить.
-fn cache_none_cover(
-    app_data_dir: &PathBuf,
-    manifest: &mut HashMap<String, ArtistImageRecord>,
-    key: String,
-) {
-    manifest.insert(
-        key,
-        ArtistImageRecord {
-            file: None,
-            source: None,
-            status: "none".into(),
-            fetched_secs: now_secs(),
-        },
-    );
-    let _ = save_covers_manifest(app_data_dir, manifest);
 }
 
 /// Получить обложку трека/альбома: сначала из кэша, иначе из сети.
@@ -2722,8 +2769,9 @@ pub fn get_or_fetch_track_cover(
     }
 
     ensure_covers_cache_version(app_data_dir);
-    let mut manifest = load_covers_manifest(app_data_dir);
+    // Проверка кэша — без лока (атомарная запись манифеста делает чтение целостным).
     if !refresh {
+        let manifest = load_covers_manifest(app_data_dir);
         if let Some(rec) = manifest.get(&key) {
             if rec.status == "ok" {
                 if let Some(file) = &rec.file {
@@ -2742,6 +2790,7 @@ pub fn get_or_fetch_track_cover(
         }
     }
 
+    // Сеть — ВНЕ лока манифеста (параллельные загрузки идут одновременно).
     let now = now_secs();
     let filename = cover_file_name(&key);
     let target = covers_dir(app_data_dir).join(&filename);
@@ -2750,7 +2799,8 @@ pub fn get_or_fetch_track_cover(
         FetchOutcome::Found(img) => {
             match download_validate_encode(&img.url, &target, COVER_IMAGE_MAX_DIM, None) {
                 ImageDownload::Saved => {
-                    manifest.insert(
+                    store_cover_record(
+                        app_data_dir,
                         key.clone(),
                         ArtistImageRecord {
                             file: Some(filename),
@@ -2759,7 +2809,6 @@ pub fn get_or_fetch_track_cover(
                             fetched_secs: now,
                         },
                     );
-                    let _ = save_covers_manifest(app_data_dir, &manifest);
                     ArtistImageResult {
                         status: "ok".into(),
                         source: Some(img.source),
@@ -2767,7 +2816,7 @@ pub fn get_or_fetch_track_cover(
                     }
                 }
                 ImageDownload::Placeholder => {
-                    cache_none_cover(app_data_dir, &mut manifest, key);
+                    store_cover_record(app_data_dir, key, none_image_record(now));
                     none_result()
                 }
                 ImageDownload::Error(e) => {
@@ -2777,7 +2826,7 @@ pub fn get_or_fetch_track_cover(
             }
         }
         FetchOutcome::NotFound => {
-            cache_none_cover(app_data_dir, &mut manifest, key);
+            store_cover_record(app_data_dir, key, none_image_record(now));
             none_result()
         }
         FetchOutcome::TemporaryError => none_result(),
@@ -2834,6 +2883,9 @@ pub fn mark_track_covers_none(app_data_dir: &PathBuf, keys: &[String]) {
         return;
     }
     ensure_covers_cache_version(app_data_dir);
+    // Под локом манифеста: параллельные потоки подготовки пишут обложки в тот же
+    // файл — без него это пакетное «слияние нет-ключей» затёрло бы их вставки.
+    let _guard = covers_manifest_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut manifest = load_covers_manifest(app_data_dir);
     let now = now_secs();
     for key in keys {

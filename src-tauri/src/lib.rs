@@ -24,7 +24,7 @@ use library::{AudioFeatureProgressEmitter, FolderInfo, GenreCount, MusicLibrary,
 use player_state::SavedPlayerState;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Instant;
@@ -1110,6 +1110,79 @@ struct CoverGroup {
     paths: Vec<String>,
 }
 
+/// Одно задание фоновой подготовки внешних источников (для пула воркеров).
+enum PrepTask {
+    /// Аватарка исполнителя (по имени).
+    Artist(String),
+    /// Внешняя обложка для группы треков (как правило — альбом).
+    Cover(CoverGroup),
+    /// Канонический порядок треков альбома + «фантомы» (по названию альбома).
+    Album(String),
+}
+
+/// Степень параллелизма фоновой подготовки. Задания бьют по разным хостам
+/// (Deezer/iTunes/MusicBrainz/CAA/Wikipedia), а пер-хост-лимитер
+/// (`external::send_throttled`) сам разводит запросы к одному хосту во времени —
+/// поэтому несколько потоков безопасны для rate-limit и дают кратный выигрыш:
+/// пропускная способность упирается в интервал хоста, а не в сумму сетевых задержек.
+/// Манифесты кэша сериализуются отдельными мьютексами (см. external.rs).
+const EXTERNAL_PREP_CONCURRENCY: usize = 6;
+
+/// Тело воркера пула подготовки: тянет задания по общему курсору, пока они есть
+/// (или пока проход не отменён сменой поколения). Прогресс — по общему атомарному
+/// счётчику готовых.
+#[allow(clippy::too_many_arguments)]
+fn external_prep_worker(
+    app: tauri::AppHandle,
+    tasks: Arc<Vec<PrepTask>>,
+    cursor: Arc<AtomicUsize>,
+    done: Arc<AtomicUsize>,
+    none_keys: Arc<Mutex<Vec<String>>>,
+    override_paths: Arc<HashSet<String>>,
+    dir: Arc<PathBuf>,
+    total: usize,
+    generation: u64,
+) {
+    loop {
+        if !external_prep_current(generation) {
+            return;
+        }
+        let idx = cursor.fetch_add(1, Ordering::SeqCst);
+        if idx >= tasks.len() {
+            return;
+        }
+        match &tasks[idx] {
+            PrepTask::Artist(name) => {
+                let _ = external::get_or_fetch_artist_image(&dir, name, false);
+            }
+            PrepTask::Cover(g) => {
+                // Альбом нуждается во внешней обложке, если хотя бы у одного трека
+                // нет ни override-, ни встроенной обложки.
+                let needs_external = g
+                    .paths
+                    .iter()
+                    .any(|p| !override_paths.contains(p) && !AudioPlayer::has_embedded_cover(p));
+                if needs_external {
+                    let _ =
+                        external::get_or_fetch_track_cover(&dir, &g.artist, &g.album, &g.title, false);
+                } else {
+                    // Локально покрыт — помечаем «нет внешней» (одним сохранением в
+                    // конце), чтобы при следующем старте не перечитывать теги альбома.
+                    none_keys
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(external::track_cover_key(&g.artist, &g.album, &g.title));
+                }
+            }
+            PrepTask::Album(name) => {
+                let _ = run_album_layout(&app, name, false);
+            }
+        }
+        let d = done.fetch_add(1, Ordering::SeqCst) + 1;
+        report_external_progress(&app, d, total);
+    }
+}
+
 fn run_external_preparation(
     app: tauri::AppHandle,
     dir: PathBuf,
@@ -1207,53 +1280,95 @@ fn run_external_preparation(
         return;
     }
 
-    let mut done = 0usize;
-    report_external_progress(&app, done, total);
+    report_external_progress(&app, 0, total);
 
-    // ── Аватарки исполнителей ──
-    for name in &pending_artists {
-        if !external_prep_current(generation) {
-            return;
+    // Единый список заданий, ЧЕРЕДУЯ типы (аватарка/обложка/альбом): так в каждый
+    // момент пул бьёт по разным хостам (аватарки → Deezer, обложки/альбомы → iTunes…),
+    // а не упирается всеми потоками в один хост.
+    let mut tasks: Vec<PrepTask> = Vec::with_capacity(total);
+    {
+        let mut ai = pending_artists.into_iter();
+        let mut ci = pending_covers.into_iter();
+        let mut bi = albums.into_iter();
+        loop {
+            let mut pushed = false;
+            if let Some(a) = ai.next() {
+                tasks.push(PrepTask::Artist(a));
+                pushed = true;
+            }
+            if let Some(c) = ci.next() {
+                tasks.push(PrepTask::Cover(c));
+                pushed = true;
+            }
+            if let Some(b) = bi.next() {
+                tasks.push(PrepTask::Album(b));
+                pushed = true;
+            }
+            if !pushed {
+                break;
+            }
         }
-        let _ = external::get_or_fetch_artist_image(&dir, name, false);
-        done += 1;
-        report_external_progress(&app, done, total);
     }
 
-    // ── Обложки треков без обложки ──
-    let mut none_keys: Vec<String> = Vec::new();
-    for g in &pending_covers {
-        if !external_prep_current(generation) {
-            return;
+    let tasks = Arc::new(tasks);
+    let cursor = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicUsize::new(0));
+    let none_keys = Arc::new(Mutex::new(Vec::<String>::new()));
+    let override_paths = Arc::new(override_paths);
+    let dir = Arc::new(dir);
+
+    // Пул воркеров: N−1 фоновых потоков + текущий поток как ещё один воркер (так
+    // прогресс гарантирован, даже если часть spawn не удалась, и поток подготовки
+    // не простаивает). Каждый воркер тянет задания по общему курсору.
+    let worker_count = EXTERNAL_PREP_CONCURRENCY.min(tasks.len()).max(1);
+    let mut handles = Vec::with_capacity(worker_count.saturating_sub(1));
+    for i in 1..worker_count {
+        let app = app.clone();
+        let tasks = Arc::clone(&tasks);
+        let cursor = Arc::clone(&cursor);
+        let done = Arc::clone(&done);
+        let none_keys = Arc::clone(&none_keys);
+        let override_paths = Arc::clone(&override_paths);
+        let dir = Arc::clone(&dir);
+        if let Ok(h) = std::thread::Builder::new()
+            .name(format!("external-prep-{}", i))
+            .spawn(move || {
+                external_prep_worker(
+                    app,
+                    tasks,
+                    cursor,
+                    done,
+                    none_keys,
+                    override_paths,
+                    dir,
+                    total,
+                    generation,
+                )
+            })
+        {
+            handles.push(h);
         }
-        // Альбом считается нуждающимся во внешней обложке, если хотя бы у одного
-        // его трека нет ни override-, ни встроенной обложки.
-        let needs_external = g
-            .paths
-            .iter()
-            .any(|p| !override_paths.contains(p) && !AudioPlayer::has_embedded_cover(p));
-        if needs_external {
-            let _ = external::get_or_fetch_track_cover(&dir, &g.artist, &g.album, &g.title, false);
-        } else {
-            // Локально покрыт — помечаем «нет внешней» (одним сохранением в конце),
-            // чтобы при следующем старте не перечитывать теги этого альбома.
-            none_keys.push(external::track_cover_key(&g.artist, &g.album, &g.title));
-        }
-        done += 1;
-        report_external_progress(&app, done, total);
     }
+    external_prep_worker(
+        app.clone(),
+        Arc::clone(&tasks),
+        Arc::clone(&cursor),
+        Arc::clone(&done),
+        Arc::clone(&none_keys),
+        Arc::clone(&override_paths),
+        Arc::clone(&dir),
+        total,
+        generation,
+    );
+    for h in handles {
+        let _ = h.join();
+    }
+
+    // Локально покрытые обложки помечаем «нет внешней» одним сохранением — после
+    // того как все воркеры закончили собирать их ключи.
     if external_prep_current(generation) {
-        external::mark_track_covers_none(&dir, &none_keys);
-    }
-
-    // ── Порядок треков альбомов (+ фантомы) ──
-    for name in &albums {
-        if !external_prep_current(generation) {
-            return;
-        }
-        let _ = run_album_layout(&app, name, false);
-        done += 1;
-        report_external_progress(&app, done, total);
+        let keys = none_keys.lock().unwrap_or_else(|e| e.into_inner());
+        external::mark_track_covers_none(&dir, &keys);
     }
 }
 
@@ -2061,7 +2176,15 @@ fn downloads_validate_cookies(app: tauri::AppHandle) {
 }
 
 /// Выйти из аккаунта YouTube (удалить сохранённые cookies).
-#[tauri::command]
+///
+/// `(async)` — ОБЯЗАТЕЛЬНО: logout чистит webview cookie store
+/// (`cookies_for_url`/`delete_cookie`), а эти вызовы WebView2 синхронно ждут, пока
+/// главный поток прокрутит цикл сообщений. На обычной (синхронной) команде тело
+/// исполняется НА главном потоке — он блокируется сам на себе (дедлок): зависает
+/// шапка/окно, приложение перестаёт закрываться. `(async)` уносит команду в
+/// отдельный поток, главный поток свободен и обслуживает запрос cookies (тот же
+/// приём, что у `login_watch_loop`, который читает cookies из фонового потока).
+#[tauri::command(async)]
 fn downloads_youtube_logout(app: tauri::AppHandle) {
     downloads::logout(&app);
 }
