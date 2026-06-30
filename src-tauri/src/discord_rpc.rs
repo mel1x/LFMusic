@@ -150,6 +150,45 @@ mod imp {
             state.client = None;
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn clamp_line_passes_through_normal_text_unchanged() {
+            assert_eq!(clamp_line("Bohemian Rhapsody"), "Bohemian Rhapsody");
+        }
+
+        #[test]
+        fn clamp_line_trims_surrounding_whitespace() {
+            assert_eq!(clamp_line("  Queen  "), "Queen");
+        }
+
+        #[test]
+        fn clamp_line_truncates_to_128_chars() {
+            let long = "x".repeat(300);
+            let clamped = clamp_line(&long);
+            assert_eq!(clamped.chars().count(), 128);
+        }
+
+        #[test]
+        fn clamp_line_pads_short_strings_to_minimum_two_chars() {
+            assert_eq!(clamp_line(""), "  ");
+            assert_eq!(clamp_line("x"), "x ");
+            assert_eq!(clamp_line("  ").chars().count(), 2);
+        }
+
+        #[test]
+        fn clamp_line_counts_unicode_chars_not_bytes() {
+            // Кириллица — несколько байт на символ; лимит должен считаться по
+            // символам (chars), а не по байтам, иначе строка обрезалась бы
+            // посередине UTF-8 последовательности и паниковала бы на индексации.
+            let long = "я".repeat(200);
+            let clamped = clamp_line(&long);
+            assert_eq!(clamped.chars().count(), 128);
+        }
+    }
 }
 
 // ── Заглушки для мобильных платформ ──────────────────────────────────────────

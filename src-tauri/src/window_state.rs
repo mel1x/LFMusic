@@ -24,9 +24,7 @@ pub struct SavedWindowGeometry {
     pub y: i32,
     pub width: u32,
     pub height: u32,
-    #[serde(default)]
     pub fullscreen: bool,
-    #[serde(default)]
     pub maximized: bool,
     pub monitor: MonitorSnapshot,
 }
@@ -378,29 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_old_window_state_without_fullscreen_as_windowed() {
-        let json = r#"{
-            "x": 10,
-            "y": 20,
-            "width": 1200,
-            "height": 720,
-            "monitor": {
-                "name": "DISPLAY1",
-                "x": 0,
-                "y": 0,
-                "width": 1920,
-                "height": 1080,
-                "scale_factor": 1.0
-            }
-        }"#;
-
-        let saved: SavedWindowGeometry = serde_json::from_str(json).unwrap();
-
-        assert!(!saved.fullscreen);
-        assert!(!saved.maximized);
-    }
-
-    #[test]
     fn serializes_and_restores_maximized_state() {
         let saved = SavedWindowGeometry {
             x: 10,
@@ -419,6 +394,76 @@ mod tests {
         let restored: SavedWindowGeometry = serde_json::from_str(&json).unwrap();
         assert!(restored.maximized);
         assert!(!restored.fullscreen);
+    }
+
+    #[test]
+    fn monitors_match_falls_back_to_position_when_name_present_only_on_one_side() {
+        // (Some, None)/(None, Some) не попадает в ветку сравнения по имени
+        // (нужны Some с обеих сторон) — должен сработать фолбэк по позиции.
+        let saved = MonitorSnapshot {
+            name: None,
+            ..monitor("IGNORED", 0, 0, 1920, 1080)
+        };
+        let current = monitor("DISPLAY1", 0, 0, 1920, 1080);
+        assert!(monitors_match(&saved, &current));
+    }
+
+    #[test]
+    fn monitors_match_by_name_ignores_position_drift() {
+        // С обеих сторон есть имя — сравнение идёт по имени, даже если позиция
+        // монитора изменилась (например, пользователь переставил мониторы местами).
+        let saved = monitor("DISPLAY2", 1920, 0, 2560, 1440);
+        let current = monitor("DISPLAY2", 0, 0, 2560, 1440);
+        assert!(monitors_match(&saved, &current));
+    }
+
+    #[test]
+    fn resolve_window_geometry_returns_none_without_monitors() {
+        assert_eq!(resolve_window_geometry(None, &[], 1460, 860), None);
+    }
+
+    #[test]
+    fn resolve_window_geometry_boundary_width_300_is_valid() {
+        let saved = SavedWindowGeometry {
+            x: 10,
+            y: 10,
+            width: 300,
+            height: 300,
+            fullscreen: false,
+            maximized: false,
+            monitor: monitor("DISPLAY1", 0, 0, 1920, 1080),
+        };
+        let monitors = [monitor("DISPLAY1", 0, 0, 1920, 1080)];
+        let resolved = resolve_window_geometry(Some(&saved), &monitors, 1460, 860).unwrap();
+        assert_eq!(resolved.width, 300);
+        assert_eq!(resolved.height, 300);
+    }
+
+    #[test]
+    fn resolve_window_geometry_boundary_width_299_is_invalid() {
+        let saved = SavedWindowGeometry {
+            x: 10,
+            y: 10,
+            width: 299,
+            height: 300,
+            fullscreen: false,
+            maximized: false,
+            monitor: monitor("DISPLAY1", 0, 0, 1920, 1080),
+        };
+        let monitors = [monitor("DISPLAY1", 0, 0, 1920, 1080)];
+        let resolved = resolve_window_geometry(Some(&saved), &monitors, 1460, 860).unwrap();
+        // 299 невалидно -> должно откатиться на центрирование дефолтного размера.
+        assert_eq!(resolved.width, 1460);
+    }
+
+    #[test]
+    fn resolve_window_geometry_clamps_default_size_to_small_monitor() {
+        let monitors = [monitor("DISPLAY1", 0, 0, 800, 600)];
+        let resolved = resolve_window_geometry(None, &monitors, 1460, 860).unwrap();
+        assert_eq!(resolved.width, 800);
+        assert_eq!(resolved.height, 600);
+        assert_eq!(resolved.x, 0);
+        assert_eq!(resolved.y, 0);
     }
 
     #[test]

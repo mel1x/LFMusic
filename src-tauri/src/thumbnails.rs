@@ -263,3 +263,87 @@ pub fn protocol_handler<R: Runtime>(
         responder.respond(build_response(&app, &uri));
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(test_name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lfmusic_thumbnails_{test_name}_{unique}"))
+    }
+
+    #[test]
+    fn override_sig_is_deterministic_and_content_sensitive() {
+        let a = override_sig("data:image/png;base64,AAAA");
+        let b = override_sig("data:image/png;base64,AAAA");
+        let c = override_sig("data:image/png;base64,BBBB");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a.starts_with('o'));
+    }
+
+    #[test]
+    fn embedded_sig_changes_with_file_mtime_and_is_stable_for_missing_file() {
+        let dir = temp_dir("embedded_sig");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("track.flac");
+        std::fs::write(&file, b"v1").unwrap();
+        let sig1 = embedded_sig(file.to_str().unwrap());
+        assert!(sig1.starts_with('e'));
+
+        // Файл, которого не существует, не должен паниковать — фолбэк "e0".
+        let missing_sig = embedded_sig(dir.join("missing.flac").to_str().unwrap());
+        assert_eq!(missing_sig, "e0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cover_protocol_url_encodes_path_and_includes_signature_and_size() {
+        let url = cover_protocol_url("C:\\Music\\Artist\\Track.flac", "o1234567890abcdef");
+        assert!(url.contains("s=o1234567890abcdef"));
+        assert!(url.contains(&format!("size={}", THUMB_SIZE)));
+        // Сегмент пути (между origin и `?`) — чистый base64url, без `\`/`:`/пробелов
+        // из исходного Windows-пути (которые сломали бы парсинг URL вебвью).
+        let path_segment = url.rsplit('/').next().unwrap().split('?').next().unwrap();
+        assert!(!path_segment.contains('\\'));
+        assert!(!path_segment.contains(':'));
+        assert!(!path_segment.contains(' '));
+    }
+
+    #[test]
+    fn cover_protocol_url_is_pure_and_repeatable() {
+        let url1 = cover_protocol_url("/music/a.mp3", "esig");
+        let url2 = cover_protocol_url("/music/a.mp3", "esig");
+        assert_eq!(url1, url2);
+    }
+
+    #[test]
+    fn decode_data_url_extracts_base64_payload() {
+        // "hello" в base64 = "aGVsbG8="
+        let data_url = "data:image/jpeg;base64,aGVsbG8=";
+        let bytes = decode_data_url(data_url).expect("should decode");
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn decode_data_url_rejects_malformed_input() {
+        assert_eq!(decode_data_url("not-a-data-url-at-all"), None);
+        assert_eq!(decode_data_url("data:image/jpeg;base64,not base64!!"), None);
+    }
+
+    #[test]
+    fn cache_dir_is_created_and_idempotent() {
+        let dir = temp_dir("cache_dir");
+        let cache1 = cache_dir(&dir);
+        assert!(cache1.exists());
+        // Повторный вызов не должен падать на уже существующей папке.
+        let cache2 = cache_dir(&dir);
+        assert_eq!(cache1, cache2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

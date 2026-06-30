@@ -285,16 +285,15 @@ fn normalize(s: &str) -> String {
 
 /// Убирает «шум» из названия трека/альбома: feat., remastered, скобочные
 /// уточнения и т.п. — чтобы сопоставление было устойчивее.
+///
+/// Скобочный шум (включая самый частый формат тегов `"Song (feat. X)"`)
+/// вырезает `strip_title_noise` (тот же алгоритм, что и в `title_match_key`,
+/// см. ниже) — раньше здесь искался только маркер `" feat."` БЕЗ учёта
+/// открывающей скобки перед ним, поэтому "(feat. …)" не срезался вовсе.
+/// Доп. проход replace() остаётся для legacy-конвенции без скобок
+/// (`"Song Title - Remastered"`), которую strip_title_noise не трогает.
 fn normalize_title(s: &str) -> String {
-    let lower = s.to_lowercase();
-    // Срезаем всё после маркеров фитов.
-    let mut base = lower.as_str();
-    for marker in [" feat.", " feat ", " ft.", " ft ", " featuring "] {
-        if let Some(idx) = base.find(marker) {
-            base = &base[..idx];
-        }
-    }
-    let cleaned: String = base
+    let cleaned: String = strip_title_noise(s)
         .replace("remastered", " ")
         .replace("remaster", " ")
         .replace("original mix", " ")
@@ -2905,4 +2904,353 @@ pub fn mark_track_covers_none(app_data_dir: &PathBuf, keys: &[String]) {
 /// Текущее время в секундах с эпохи (для команд).
 pub fn unix_secs() -> u64 {
     now_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── normalize / normalize_title ─────────────────────────────────────────
+
+    #[test]
+    fn normalize_lowercases_and_collapses_punctuation_to_single_spaces() {
+        assert_eq!(normalize("  Hello,   World!!  "), "hello world");
+        assert_eq!(normalize("Bohemian-Rhapsody"), "bohemian rhapsody");
+    }
+
+    #[test]
+    fn normalize_of_empty_and_all_punctuation_is_empty() {
+        assert_eq!(normalize(""), "");
+        assert_eq!(normalize("!!!---..."), "");
+    }
+
+    #[test]
+    fn normalize_title_strips_bare_feat_marker_without_parens() {
+        assert_eq!(normalize_title("Title ft. Someone"), normalize("Title"));
+        assert_eq!(normalize_title("Title feat Someone"), normalize("Title"));
+    }
+
+    /// Регрессионный тест: `normalize_title` раньше искала маркер как `" feat."`
+    /// (с пробелом перед "feat"), не учитывая открывающую скобку — реальные теги
+    /// почти всегда оформляют фита в скобках: "Song Title (feat. Artist X)".
+    /// Из-за этого локальный трек с таким тегом не матчился с каноничным "Song
+    /// Title" из внешнего источника и показывался в макете альбома «фантомом»
+    /// (как будто не скачан), хотя файл уже есть. Починено переиспользованием
+    /// bracket-aware `strip_title_noise` (тот же алгоритм, что в title_match_key
+    /// для страницы «Скачивание»).
+    #[test]
+    fn normalize_title_strips_parenthesized_feat_and_bracketed_remaster_marker() {
+        assert_eq!(
+            normalize_title("Song Title (feat. Artist X) [Remastered 2011]"),
+            normalize("Song Title")
+        );
+    }
+
+    // ── levenshtein / similarity ─────────────────────────────────────────────
+
+    #[test]
+    fn levenshtein_matches_known_distances() {
+        assert_eq!(levenshtein(&[], &[]), 0);
+        let empty: Vec<char> = vec![];
+        let abc: Vec<char> = "abc".chars().collect();
+        assert_eq!(levenshtein(&empty, &abc), 3);
+        let kitten: Vec<char> = "kitten".chars().collect();
+        let sitting: Vec<char> = "sitting".chars().collect();
+        assert_eq!(levenshtein(&kitten, &sitting), 3);
+    }
+
+    #[test]
+    fn similarity_is_one_for_identical_after_normalization() {
+        assert_eq!(similarity("Believer", "  BELIEVER!!"), 1.0);
+    }
+
+    #[test]
+    fn similarity_is_zero_when_either_side_normalizes_to_empty() {
+        assert_eq!(similarity("", "Believer"), 0.0);
+        assert_eq!(similarity("!!!", "Believer"), 0.0);
+    }
+
+    #[test]
+    fn similarity_gives_containment_bonus_for_deluxe_edition_style_suffix() {
+        let with_bonus = similarity("Album", "Album (Deluxe Edition)");
+        // Без contains_bonus схожесть была бы 0.25 (15 вставок на нормализованную
+        // длину 20: "album" -> "album deluxe edition"). Бонус за вхождение
+        // (+0.15) поднимает её до ~0.40 — заметно выше, но всё ещё далеко от
+        // «похожих», т.к. итоговая строка вдвое длиннее исходной.
+        assert!(with_bonus > 0.35, "ожидали эффект contains_bonus, similarity={with_bonus}");
+        assert!(with_bonus < 0.5, "similarity={with_bonus}");
+    }
+
+    #[test]
+    fn similarity_is_symmetric() {
+        let a = similarity("Imagine Dragons", "Imagin Dragons");
+        let b = similarity("Imagin Dragons", "Imagine Dragons");
+        assert!((a - b).abs() < 1e-6);
+    }
+
+    #[test]
+    fn similarity_stays_within_unit_range() {
+        let s = similarity("A", "Completely Different Long String Of Text");
+        assert!((0.0..=1.0).contains(&s));
+    }
+
+    // ── is_placeholder_image ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_placeholder_image_flags_known_deezer_defaults() {
+        assert!(is_placeholder_image(
+            "https://e-cdns-images.dzcdn.net/images/artist//1000x1000-000000-80-0-0.jpg"
+        ));
+        assert!(is_placeholder_image(
+            "https://e-cdns-images.dzcdn.net/images/cover/d41d8cd98f00b204e9800998ecf8427e/1000x1000.jpg"
+        ));
+    }
+
+    #[test]
+    fn is_placeholder_image_allows_real_looking_urls() {
+        assert!(!is_placeholder_image(
+            "https://e-cdns-images.dzcdn.net/images/artist/abc123def456/1000x1000.jpg"
+        ));
+    }
+
+    // ── album_score ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn album_score_rewards_title_match_more_than_artist_match() {
+        let album_title_match = ExternalAlbum {
+            source: "test".into(),
+            artist: "Totally Different Artist".into(),
+            title: "Greatest Hits".into(),
+            tracks: vec![],
+        };
+        let album_artist_match = ExternalAlbum {
+            source: "test".into(),
+            artist: "Queen".into(),
+            title: "Something Else Entirely".into(),
+            tracks: vec![],
+        };
+        let by_title = album_score("Queen", "Greatest Hits", &album_title_match);
+        let by_artist = album_score("Queen", "Greatest Hits", &album_artist_match);
+        assert!(by_title > by_artist, "title weight (0.7) should dominate over artist weight (0.3)");
+    }
+
+    #[test]
+    fn album_score_uses_neutral_artist_score_when_query_artist_is_empty() {
+        let album = ExternalAlbum {
+            source: "test".into(),
+            artist: "Anyone".into(),
+            title: "Best Of".into(),
+            tracks: vec![],
+        };
+        let score = album_score("", "Best Of", &album);
+        // title_sim ~= 1.0 (точное совпадение), artist_sim фиксирован 0.7.
+        assert!((score - (1.0 * 0.7 + 0.7 * 0.3)).abs() < 0.05);
+    }
+
+    // ── track_identity_key / title_match_key / album_match_key ───────────────
+
+    #[test]
+    fn track_identity_key_is_order_sensitive_concatenation() {
+        let key = track_identity_key("Queen", "Bohemian Rhapsody", Some("A Night at the Opera"));
+        assert_eq!(key, normalize("Queen Bohemian Rhapsody A Night at the Opera"));
+    }
+
+    #[test]
+    fn track_identity_key_handles_missing_album() {
+        let with_none = track_identity_key("Queen", "Bohemian Rhapsody", None);
+        let with_empty = track_identity_key("Queen", "Bohemian Rhapsody", Some(""));
+        assert_eq!(with_none, with_empty);
+    }
+
+    #[test]
+    fn title_match_key_strips_credit_noise_in_parentheses() {
+        assert_eq!(
+            title_match_key("Song Name (prod. by Someone)"),
+            normalize("Song Name")
+        );
+        assert_eq!(
+            title_match_key("Song Name (Official Video)"),
+            normalize("Song Name")
+        );
+        assert_eq!(
+            title_match_key("Song Name (feat. Other Artist)"),
+            normalize("Song Name")
+        );
+    }
+
+    #[test]
+    fn title_match_key_keeps_version_markers_in_parentheses() {
+        // remix/live/acoustic — НЕ шум, это разные версии трека и должны остаться
+        // (иначе ремикс с оригиналом ложно считались бы одним и тем же треком).
+        let key = title_match_key("Song Name (Live)");
+        assert_ne!(key, normalize("Song Name"));
+        assert_eq!(key, normalize("Song Name (Live)"));
+    }
+
+    #[test]
+    fn title_match_key_strips_trailing_feat_outside_parentheses() {
+        assert_eq!(
+            title_match_key("Song Name feat. Other Artist"),
+            normalize("Song Name")
+        );
+    }
+
+    #[test]
+    fn title_match_key_handles_unclosed_parenthesis_without_panicking() {
+        // Незакрытая скобка не должна паниковать — содержимое добавляется как есть,
+        // если оно не «шумовое».
+        let key = title_match_key("Song Name (Live forever");
+        assert!(!key.is_empty());
+    }
+
+    #[test]
+    fn album_match_key_normalizes_like_normalize() {
+        assert_eq!(album_match_key("Greatest Hits!"), normalize("Greatest Hits!"));
+        assert_eq!(album_match_key(""), "");
+    }
+
+    // ── prepare_artist_separators / split_artists_for_match_prepared ─────────
+
+    #[test]
+    fn split_artists_for_match_splits_on_common_conjunctions() {
+        let prepared = prepare_artist_separators(&[]);
+        let parts = split_artists_for_match_prepared("Queen & David Bowie", &prepared);
+        assert_eq!(parts, vec!["queen".to_string(), "david bowie".to_string()]);
+    }
+
+    #[test]
+    fn split_artists_for_match_handles_feat_and_vs() {
+        let prepared = prepare_artist_separators(&[]);
+        let a = split_artists_for_match_prepared("Artist A feat. Artist B", &prepared);
+        assert_eq!(a, vec!["artist a".to_string(), "artist b".to_string()]);
+        let b = split_artists_for_match_prepared("Artist One vs Artist Two", &prepared);
+        assert_eq!(b, vec!["artist one".to_string(), "artist two".to_string()]);
+    }
+
+    #[test]
+    fn split_artists_for_match_respects_custom_separators() {
+        let prepared = prepare_artist_separators(&["; ".to_string()]);
+        let parts = split_artists_for_match_prepared("Artist A; Artist B", &prepared);
+        assert_eq!(parts, vec!["artist a".to_string(), "artist b".to_string()]);
+    }
+
+    #[test]
+    fn split_artists_for_match_deduplicates_normalized_results() {
+        let prepared = prepare_artist_separators(&[]);
+        let parts = split_artists_for_match_prepared("Queen & Queen", &prepared);
+        assert_eq!(parts, vec!["queen".to_string()]);
+    }
+
+    #[test]
+    fn split_artists_for_match_single_artist_returns_one_entry() {
+        let prepared = prepare_artist_separators(&[]);
+        let parts = split_artists_for_match_prepared("Adele", &prepared);
+        assert_eq!(parts, vec!["adele".to_string()]);
+    }
+
+    #[test]
+    fn prepare_artist_separators_sorts_longest_first_to_avoid_prefix_collisions() {
+        // " feat " — префикс " featuring " (по первым символам с учётом
+        // паддинга); если короткий разделитель применится первым, он порвёт
+        // " featuring " на куски раньше, чем сработает более длинный/специфичный.
+        let prepared = prepare_artist_separators(&[]);
+        let feat_idx = prepared.iter().position(|s| s == " feat ").unwrap();
+        let featuring_idx = prepared.iter().position(|s| s == " featuring ").unwrap();
+        assert!(featuring_idx < feat_idx, "более длинный разделитель должен идти раньше");
+    }
+
+    #[test]
+    fn prepare_artist_separators_drops_empty_user_separators() {
+        let prepared = prepare_artist_separators(&["".to_string(), "; ".to_string()]);
+        assert!(!prepared.iter().any(|s| s.is_empty()));
+    }
+
+    // ── host_of / host_min_gap ────────────────────────────────────────────────
+
+    #[test]
+    fn host_of_extracts_hostname_from_various_url_shapes() {
+        assert_eq!(host_of("https://api.deezer.com/search/track"), "api.deezer.com");
+        assert_eq!(host_of("https://MusicBrainz.org/ws/2/"), "musicbrainz.org");
+        assert_eq!(host_of("https://user:pass@itunes.apple.com/path"), "itunes.apple.com");
+        assert_eq!(host_of("https://coverartarchive.org:443/release/x"), "coverartarchive.org");
+    }
+
+    #[test]
+    fn host_of_handles_malformed_input_without_panicking() {
+        assert_eq!(host_of(""), "");
+        assert_eq!(host_of("not-a-url"), "");
+    }
+
+    #[test]
+    fn host_min_gap_gives_itunes_the_longest_interval() {
+        let itunes = host_min_gap("itunes.apple.com");
+        let deezer = host_min_gap("api.deezer.com");
+        let unknown = host_min_gap("example.com");
+        assert!(itunes > deezer);
+        assert!(deezer > unknown);
+    }
+
+    // ── ключи кэша (артисты/обложки) ─────────────────────────────────────────
+
+    #[test]
+    fn artist_key_and_album_cache_key_are_normalized_and_deterministic() {
+        assert_eq!(artist_image_key("Queen"), artist_image_key("  queen  "));
+        let k1 = album_cache_key("Greatest Hits", "Queen");
+        let k2 = album_cache_key("greatest hits", "QUEEN");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn album_cache_key_distinguishes_album_and_artist_order() {
+        // Ключ не должен схлопывать разные (альбом, артист) пары в одну и ту же
+        // строку при перестановке слов между полями.
+        let a = album_cache_key("X Y", "Z");
+        let b = album_cache_key("X", "Y Z");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn track_cover_key_is_deterministic_for_same_inputs() {
+        let a = track_cover_key("Queen", "A Night at the Opera", "Bohemian Rhapsody");
+        let b = track_cover_key("Queen", "A Night at the Opera", "Bohemian Rhapsody");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn artist_image_url_and_cover_image_url_differ_for_same_key() {
+        // Один и тот же логический ключ не должен давать одинаковый URL для
+        // аватарки исполнителя и обложки альбома — иначе кэш-протокол отдал бы
+        // не ту картинку.
+        let artist_url = artist_image_url("queen", 1);
+        let cover_url = cover_image_url("queen", 1);
+        assert_ne!(artist_url, cover_url);
+        assert!(artist_url.contains("/artist/"));
+        assert!(cover_url.contains("/cover/"));
+    }
+
+    #[test]
+    fn image_urls_change_with_version_for_cache_busting() {
+        let v1 = artist_image_url("queen", 1);
+        let v2 = artist_image_url("queen", 2);
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn artist_file_name_and_cover_file_name_use_distinct_prefixes() {
+        let key = "queen";
+        let artist_file = artist_file_name(key);
+        let cover_file = cover_file_name(key);
+        assert!(artist_file.ends_with(".webp"));
+        assert!(cover_file.ends_with(".webp"));
+        assert!(cover_file.starts_with('c'));
+        assert_ne!(artist_file, cover_file);
+    }
+
+    #[test]
+    fn unix_secs_returns_a_plausible_current_timestamp() {
+        // Сверяем, что значение в разумных пределах (после 2024 года), а не 0
+        // и не какая-то совсем другая единица измерения (мс вместо с и т.п.).
+        let secs = unix_secs();
+        assert!(secs > 1_700_000_000, "secs={secs}");
+    }
 }

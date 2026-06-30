@@ -2696,4 +2696,244 @@ mod tests {
     fn error_empty_stderr_has_fallback() {
         assert_eq!(extract_ytdlp_error("  \n\n"), "yt-dlp завершился с ошибкой");
     }
+
+    // ── Классификация ошибок yt-dlp ─────────────────────────────────────────
+
+    #[test]
+    fn classify_detects_cookies_expired_before_generic_bot_wall() {
+        // Сообщение содержит оба маркера — "cookies"+"no longer valid" должно
+        // победить, т.к. это специфичнее и порядок проверки это гарантирует.
+        let stderr = "ERROR: [youtube] Sign in to confirm you're not a bot. \
+                       Your account cookies are no longer valid.";
+        assert_eq!(classify_ytdlp_error(stderr), DownloadErrorKind::CookiesExpired);
+    }
+
+    #[test]
+    fn classify_detects_bot_wall_network() {
+        let stderr = "ERROR: [youtube] abc: Sign in to confirm you're not a bot";
+        assert_eq!(classify_ytdlp_error(stderr), DownloadErrorKind::BotWallNetwork);
+    }
+
+    #[test]
+    fn classify_detects_bot_wall_via_cookies_authentication_required_combo() {
+        let stderr = "Use --cookies for the authentication; cookies required";
+        assert_eq!(classify_ytdlp_error(stderr), DownloadErrorKind::BotWallNetwork);
+    }
+
+    #[test]
+    fn classify_detects_network_timeout() {
+        for msg in [
+            "URLError: <urlopen error [Errno 11001] getaddrinfo failed>",
+            "Connection reset by peer",
+            "Read timed out",
+            "Temporary failure in name resolution",
+        ] {
+            assert_eq!(
+                classify_ytdlp_error(msg),
+                DownloadErrorKind::NetworkTimeout,
+                "msg={msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_detects_no_format() {
+        assert_eq!(
+            classify_ytdlp_error("ERROR: Requested format is not available"),
+            DownloadErrorKind::NoFormat
+        );
+        assert_eq!(
+            classify_ytdlp_error("ERROR: No video formats found!"),
+            DownloadErrorKind::NoFormat
+        );
+    }
+
+    #[test]
+    fn classify_falls_back_to_unknown() {
+        assert_eq!(
+            classify_ytdlp_error("ERROR: something completely unrelated happened"),
+            DownloadErrorKind::Unknown
+        );
+    }
+
+    #[test]
+    fn classify_is_case_insensitive() {
+        assert_eq!(
+            classify_ytdlp_error("SIGN IN TO CONFIRM YOU'RE NOT A BOT"),
+            DownloadErrorKind::BotWallNetwork
+        );
+    }
+
+    #[test]
+    fn is_bot_wall_does_not_misfire_on_unrelated_cookie_mentions() {
+        // Просто упоминание "cookies" без "authentication"+"required" вместе не
+        // должно классифицироваться как бот-стена.
+        assert!(!is_bot_wall("Loaded 12 cookies from file"));
+    }
+
+    // ── parse_download_percent ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_download_percent_extracts_value_from_progress_line() {
+        assert_eq!(
+            parse_download_percent("[download]  42.3% of 5.21MiB at 1.23MiB/s ETA 00:03"),
+            Some(42.3)
+        );
+        assert_eq!(parse_download_percent("[download] 100% of 5.21MiB"), Some(100.0));
+    }
+
+    #[test]
+    fn parse_download_percent_ignores_unrelated_lines() {
+        assert_eq!(parse_download_percent("[info] Writing video metadata"), None);
+        assert_eq!(parse_download_percent("some 50% unrelated text"), None);
+    }
+
+    #[test]
+    fn parse_download_percent_handles_malformed_percent_gracefully() {
+        assert_eq!(parse_download_percent("[download]  abc% of 1MiB"), None);
+    }
+
+    // ── Имена файлов / пути ──────────────────────────────────────────────────
+
+    #[test]
+    fn is_supported_audio_ext_matches_known_extensions_only() {
+        assert!(is_supported_audio_ext("mp3"));
+        assert!(is_supported_audio_ext("opus"));
+        assert!(!is_supported_audio_ext("exe"));
+        assert!(!is_supported_audio_ext(""));
+    }
+
+    #[test]
+    fn percent_encode_query_keeps_safe_chars_and_encodes_rest() {
+        assert_eq!(percent_encode_query("abc-_.~"), "abc-_.~");
+        assert_eq!(percent_encode_query("a b"), "a%20b");
+        assert_eq!(percent_encode_query("Imagine Dragons"), "Imagine%20Dragons");
+    }
+
+    #[test]
+    fn percent_encode_query_encodes_non_ascii_as_utf8_bytes() {
+        // "ё" в UTF-8 — два байта 0xD1 0x91.
+        let encoded = percent_encode_query("ё");
+        assert_eq!(encoded, "%D1%91");
+    }
+
+    #[test]
+    fn is_reserved_windows_name_matches_device_names_case_insensitively() {
+        for name in ["CON", "con", "PRN", "AUX", "NUL", "COM1", "com9", "LPT1", "lpt9"] {
+            assert!(is_reserved_windows_name(name), "{name} should be reserved");
+        }
+    }
+
+    #[test]
+    fn is_reserved_windows_name_rejects_normal_and_lookalike_names() {
+        assert!(!is_reserved_windows_name("Console"));
+        assert!(!is_reserved_windows_name("COM"));
+        assert!(!is_reserved_windows_name("COM0")); // COM0 не зарезервировано (цифра должна быть 1-9)
+        assert!(!is_reserved_windows_name("COM10")); // длиннее 4 символов
+        assert!(!is_reserved_windows_name("Imagine Dragons - Believer"));
+    }
+
+    #[test]
+    fn sanitize_replaces_forbidden_windows_chars_and_collapses_whitespace() {
+        assert_eq!(sanitize("AC/DC: Back   in   Black"), "AC DC Back in Black");
+        assert_eq!(sanitize("  ..hello..  "), "hello");
+    }
+
+    #[test]
+    fn sanitize_truncates_to_120_chars() {
+        let long = "a".repeat(500);
+        assert_eq!(sanitize(&long).chars().count(), 120);
+    }
+
+    #[test]
+    fn unique_stem_combines_artist_and_title() {
+        let dir = std::env::temp_dir().join(format!(
+            "lfmusic_unique_stem_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let stem = unique_stem(&dir, "Queen", "Bohemian Rhapsody");
+        assert_eq!(stem, "Queen - Bohemian Rhapsody");
+
+        // Создаём файл с этим именем — повторный вызов должен уникализировать.
+        std::fs::write(dir.join(format!("{stem}.mp3")), b"x").unwrap();
+        let stem2 = unique_stem(&dir, "Queen", "Bohemian Rhapsody");
+        assert_eq!(stem2, "Queen - Bohemian Rhapsody (2)");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_stem_falls_back_to_track_when_both_parts_are_fully_sanitized_away() {
+        let dir = std::env::temp_dir().join(format!(
+            "lfmusic_unique_stem_empty_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Артист и название состоят только из запрещённых символов — после
+        // sanitize обе части становятся пустыми.
+        let stem = unique_stem(&dir, "///", ":::");
+        assert_eq!(stem, "track");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_stem_appends_underscore_for_reserved_windows_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "lfmusic_unique_stem_reserved_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Только artist задан, а title пуст после санитайза -> base = "CON".
+        let stem = unique_stem(&dir, "CON", ":::");
+        assert_eq!(stem, "CON_");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lexical_normalize_resolves_parent_dir_without_touching_filesystem() {
+        let p = Path::new("/music/downloads/../../etc/passwd");
+        assert_eq!(lexical_normalize(p), PathBuf::from("/etc/passwd"));
+    }
+
+    #[test]
+    fn is_within_downloads_blocks_parent_dir_traversal_for_nonexistent_file() {
+        // Файла не существует -> canonicalize падает -> используется лексический
+        // фолбэк. Путь с `..`, выходящий за пределы папки скачиваний, должен
+        // блокироваться — это защита от path traversal при удалении треков.
+        let downloads_dir = Path::new("C:/Users/test/Music/LFMusic Downloads");
+        let traversal = Path::new("C:/Users/test/Music/LFMusic Downloads/../../Desktop/x.flac");
+        assert!(!is_within_downloads(downloads_dir, traversal));
+    }
+
+    #[test]
+    fn is_within_downloads_allows_direct_child_for_nonexistent_file() {
+        let downloads_dir = Path::new("C:/Users/test/Music/LFMusic Downloads");
+        let inside = Path::new("C:/Users/test/Music/LFMusic Downloads/Artist - Title.flac");
+        assert!(is_within_downloads(downloads_dir, inside));
+    }
+
+    #[test]
+    fn same_path_uses_lexical_fallback_for_nonexistent_paths() {
+        let a = Path::new("C:/music/../music/track.flac");
+        let b = Path::new("C:/music/track.flac");
+        assert!(same_path(a, b));
+
+        let c = Path::new("C:/music/other.flac");
+        assert!(!same_path(a, c));
+    }
 }

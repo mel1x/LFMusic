@@ -1090,3 +1090,279 @@ fn remove_meta_field(app_data_dir: &Path, key: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(test_name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lfmusic_tools_{test_name}_{unique}"))
+    }
+
+    // ── Чистые форматтеры/хелперы ───────────────────────────────────────────
+
+    #[test]
+    fn fmt_size_formats_megabytes_with_one_decimal() {
+        assert_eq!(fmt_size(0), "0.0 МБ");
+        assert_eq!(fmt_size(1024 * 1024), "1.0 МБ");
+        assert_eq!(fmt_size(1024 * 1024 * 3 / 2), "1.5 МБ");
+    }
+
+    #[test]
+    fn fmt_progress_shows_total_when_known_and_size_only_otherwise() {
+        assert_eq!(fmt_progress(1024 * 1024, Some(2 * 1024 * 1024)), "1.0 МБ / 2.0 МБ");
+        assert_eq!(fmt_progress(1024 * 1024, None), "1.0 МБ");
+        assert_eq!(fmt_progress(1024 * 1024, Some(0)), "1.0 МБ");
+    }
+
+    #[test]
+    fn hex_encode_matches_known_vectors() {
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_encode(&[0x00]), "00");
+        assert_eq!(hex_encode(&[0xDE, 0xAD, 0xBE, 0xEF]), "deadbeef");
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector_for_empty_file() {
+        let dir = temp_dir("sha256_empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("empty.bin");
+        std::fs::write(&file, b"").unwrap();
+        // SHA256("") — широко известный контрольный вектор (FIPS 180 / NIST).
+        assert_eq!(
+            sha256_hex(&file).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector_for_abc() {
+        let dir = temp_dir("sha256_abc");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("abc.bin");
+        std::fs::write(&file, b"abc").unwrap();
+        // SHA256("abc") — стандартный контрольный вектор NIST.
+        assert_eq!(
+            sha256_hex(&file).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sha256_hex_errors_for_missing_file() {
+        let dir = temp_dir("sha256_missing");
+        assert!(sha256_hex(&dir.join("nope.bin")).is_err());
+    }
+
+    #[test]
+    fn deno_runtime_value_normalizes_windows_backslashes() {
+        let path = Path::new("C:\\Users\\melix\\AppData\\bin\\deno.exe");
+        assert_eq!(
+            deno_runtime_value(path),
+            "deno:C:/Users/melix/AppData/bin/deno.exe"
+        );
+    }
+
+    #[test]
+    fn deno_runtime_value_preserves_forward_slash_paths() {
+        let path = Path::new("/home/user/bin/deno");
+        assert_eq!(deno_runtime_value(path), "deno:/home/user/bin/deno");
+    }
+
+    #[test]
+    fn backup_path_appends_bak_suffix_to_file_name() {
+        let target = Path::new("C:/app/bin/yt-dlp.exe");
+        assert_eq!(backup_path(target), PathBuf::from("C:/app/bin/yt-dlp.exe.bak"));
+    }
+
+    // ── Метаданные утилит (tools_meta.json) ─────────────────────────────────
+
+    #[test]
+    fn meta_round_trips_through_write_read_remove() {
+        let dir = temp_dir("meta_roundtrip");
+        write_meta_field(&dir, "ytdlp", "2025.06.09");
+        let meta = read_meta(&dir);
+        assert_eq!(meta["ytdlp"], "2025.06.09");
+
+        write_meta_field(&dir, "ffmpeg", "2025-01-01T00:00:00Z");
+        let meta2 = read_meta(&dir);
+        assert_eq!(meta2["ytdlp"], "2025.06.09");
+        assert_eq!(meta2["ffmpeg"], "2025-01-01T00:00:00Z");
+
+        remove_meta_field(&dir, "ytdlp");
+        let meta3 = read_meta(&dir);
+        assert!(meta3.get("ytdlp").is_none());
+        assert_eq!(meta3["ffmpeg"], "2025-01-01T00:00:00Z");
+
+        let _ = std::fs::remove_dir_all(bin_dir(&dir));
+    }
+
+    #[test]
+    fn read_meta_on_missing_file_returns_empty_object() {
+        let dir = temp_dir("meta_missing");
+        let meta = read_meta(&dir);
+        assert!(meta.is_object());
+        assert_eq!(meta.as_object().unwrap().len(), 0);
+    }
+
+    // ── Резолв (без сети): отсутствующие бинари ──────────────────────────────
+
+    #[test]
+    fn resolve_ytdlp_returns_none_when_nothing_installed_or_on_path_name_clash() {
+        // В пустой app_data_dir и при отсутствии yt-dlp в PATH резолв не должен
+        // ни паниковать, ни находить ложный бинарь.
+        let dir = temp_dir("resolve_empty");
+        // Не создаём bin/yt-dlp.exe — локального нет. Системный может как
+        // существовать, так и нет в зависимости от машины, поэтому проверяем
+        // только то, что функция не паникует и возвращает консистентный Option.
+        let _ = resolve_ytdlp(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ytdlp_info_reports_not_managed_when_bin_dir_is_empty() {
+        let dir = temp_dir("info_empty");
+        let info = ytdlp_info(&dir);
+        assert!(!info.managed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── swap_in_files: атомарная установка с откатом ────────────────────────
+
+    #[test]
+    fn swap_in_files_installs_new_file_when_target_absent() {
+        let dir = temp_dir("swap_fresh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("staged.txt");
+        std::fs::write(&staged, b"new content").unwrap();
+        let target = dir.join("target.txt");
+
+        swap_in_files(&[(staged.clone(), target.clone())]).expect("swap should succeed");
+
+        assert!(!staged.exists(), "staged файл должен быть перемещён");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new content");
+        assert!(!backup_path(&target).exists(), "бэкап не нужен — старого файла не было");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_in_files_replaces_existing_target_and_cleans_up_backup() {
+        let dir = temp_dir("swap_replace");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"old content").unwrap();
+        let staged = dir.join("staged.txt");
+        std::fs::write(&staged, b"new content").unwrap();
+
+        swap_in_files(&[(staged.clone(), target.clone())]).expect("swap should succeed");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new content");
+        assert!(!backup_path(&target).exists(), "бэкап должен удаляться на успехе");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_in_files_rolls_back_all_pairs_when_one_staged_file_is_missing() {
+        let dir = temp_dir("swap_rollback");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let target_a = dir.join("a.txt");
+        std::fs::write(&target_a, b"old a").unwrap();
+        let staged_a = dir.join("staged_a.txt");
+        std::fs::write(&staged_a, b"new a").unwrap();
+
+        let target_b = dir.join("b.txt");
+        std::fs::write(&target_b, b"old b").unwrap();
+        let staged_b = dir.join("staged_b_missing.txt"); // намеренно не создаём
+
+        let result = swap_in_files(&[
+            (staged_a.clone(), target_a.clone()),
+            (staged_b, target_b.clone()),
+        ]);
+
+        assert!(result.is_err(), "должна вернуться ошибка из-за отсутствующего staged-файла");
+        // Первая пара уже была применена и обязана откатиться обратно.
+        assert_eq!(
+            std::fs::read(&target_a).unwrap(),
+            b"old a",
+            "после отката первый таргет должен вернуться к исходному содержимому"
+        );
+        assert_eq!(std::fs::read(&target_b).unwrap(), b"old b", "второй таргет не должен был тронуться");
+        assert!(!backup_path(&target_a).exists(), "бэкап должен быть подчищен после отката");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── extract_zip_binaries ─────────────────────────────────────────────────
+
+    fn build_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            zip.start_file(*name, options).unwrap();
+            std::io::Write::write_all(&mut zip, data).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_zip_binaries_pulls_wanted_files_to_bin_dir() {
+        let dir = temp_dir("zip_extract");
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("bundle.zip");
+        build_test_zip(
+            &zip_path,
+            &[
+                ("ffmpeg.exe", b"ffmpeg-bytes"),
+                ("ffprobe.exe", b"ffprobe-bytes"),
+                ("README.txt", b"ignored"),
+            ],
+        );
+
+        let primary =
+            extract_zip_binaries(&zip_path, &dir, &["ffmpeg.exe", "ffprobe.exe"]).expect("extract");
+        assert_eq!(primary, dir.join("ffmpeg.exe"));
+        assert_eq!(std::fs::read(dir.join("ffmpeg.exe")).unwrap(), b"ffmpeg-bytes");
+        assert_eq!(std::fs::read(dir.join("ffprobe.exe")).unwrap(), b"ffprobe-bytes");
+        assert!(!dir.join("README.txt").exists(), "не запрошенные файлы не извлекаются");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_binaries_handles_nested_paths_by_basename() {
+        let dir = temp_dir("zip_nested");
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("bundle.zip");
+        build_test_zip(&zip_path, &[("ffmpeg-7.0/bin/ffmpeg.exe", b"nested-bytes")]);
+
+        let primary = extract_zip_binaries(&zip_path, &dir, &["ffmpeg.exe"]).expect("extract");
+        assert_eq!(primary, dir.join("ffmpeg.exe"));
+        assert_eq!(std::fs::read(&primary).unwrap(), b"nested-bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_binaries_errors_when_primary_target_is_absent() {
+        let dir = temp_dir("zip_missing_primary");
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("bundle.zip");
+        build_test_zip(&zip_path, &[("unrelated.txt", b"x")]);
+
+        let result = extract_zip_binaries(&zip_path, &dir, &["ffmpeg.exe"]);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

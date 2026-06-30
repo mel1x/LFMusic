@@ -2352,21 +2352,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Полностью удалить переопределение для трека (вернуть оригинальные значения)
-    pub fn clear_track_override(&self, file_path: &str) -> Result<(), String> {
-        mark_track_indexes_dirty();
-        // Сначала подчищаем осиротевший файл обложки (если он больше ничей).
-        if let Some(sig) = self.get_override_cover_sig(file_path) {
-            self.remove_orphan_cover_file(&sig, file_path);
-        }
-        self.conn
-            .execute(
-                "DELETE FROM track_overrides WHERE file_path = ?1",
-                params![file_path],
-            )
-            .map_err(|e| format!("Ошибка удаления переопределения: {}", e))?;
-        Ok(())
-    }
 
     /// Удалить ВСЕ переопределения треков. Возвращает количество сброшенных треков.
     /// Также сбрасывает кэшированный accent_color, чтобы следующее воспроизведение
@@ -3348,6 +3333,920 @@ mod tests {
 
         assert_eq!(incremental.analyzed_tracks, 3, "three tracks listened");
         assert_profiles_close(&incremental, &full);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Доп. покрытие
+    // ════════════════════════════════════════════════════════════════════════
+
+    fn insert_track_row(
+        library: &MusicLibrary,
+        path: &str,
+        title: Option<&str>,
+        artist: Option<&str>,
+        album: Option<&str>,
+        genre: Option<&str>,
+        sort_order: i64,
+    ) {
+        library
+            .conn
+            .execute(
+                "INSERT INTO tracks
+                 (file_path, folder_path, title, artist, album, genre, duration_secs, format,
+                  sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
+                 VALUES (?1, '/music', ?2, ?3, ?4, ?5, 180.0, 'flac', 44100, 16, 2, 320, 1, 1, ?6)",
+                params![path, title, artist, album, genre, sort_order],
+            )
+            .expect("insert track row");
+    }
+
+    /// Пишет минимальный валидный 16-бит PCM WAV — для тестов, которым нужен
+    /// реально читаемый аудиофайл на диске (insert_downloaded_track/add_folder
+    /// читают метаданные через AudioPlayer::get_metadata_light).
+    fn write_test_wav(path: &Path, sample_rate: u32, channels: u16, num_frames: u32) {
+        let bits_per_sample: u16 = 16;
+        let block_align: u16 = channels * (bits_per_sample / 8);
+        let byte_rate: u32 = sample_rate * block_align as u32;
+        let data_size: u32 = num_frames * block_align as u32;
+
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..(num_frames as usize * channels as usize) {
+            let sample = (((i % 200) as i32 - 100) * 300) as i16;
+            buf.extend_from_slice(&sample.to_le_bytes());
+        }
+        fs::write(path, buf).expect("write test wav");
+    }
+
+    // ── split_artists ────────────────────────────────────────────────────────
+
+    #[test]
+    fn split_artists_applies_each_separator_in_sequence() {
+        let seps = vec!["; ".to_string(), ", ".to_string()];
+        assert_eq!(
+            split_artists("Artist A; Artist B, Artist C", &seps),
+            vec!["Artist A", "Artist B", "Artist C"]
+        );
+    }
+
+    #[test]
+    fn split_artists_trims_and_drops_empty_pieces() {
+        let seps = vec![";".to_string()];
+        assert_eq!(split_artists("A; ;B; ", &seps), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn split_artists_with_no_separators_returns_trimmed_whole_string() {
+        let seps: Vec<String> = vec![];
+        assert_eq!(split_artists("  Single Artist  ", &seps), vec!["Single Artist"]);
+    }
+
+    #[test]
+    fn split_artists_ignores_empty_separator_strings() {
+        let seps = vec!["".to_string(), ", ".to_string()];
+        assert_eq!(split_artists("A, B", &seps), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn split_artists_of_empty_input_is_empty_vec() {
+        let seps = vec![", ".to_string()];
+        assert!(split_artists("", &seps).is_empty());
+        assert!(split_artists("   ", &seps).is_empty());
+    }
+
+    // ── insert_downloaded_track / covering_folder / add_folder (реальный I/O) ─
+
+    #[test]
+    fn insert_downloaded_track_reads_real_metadata_and_registers_folder() {
+        let dir = temp_library_dir("insert_downloaded");
+        let downloads = dir.join("downloads");
+        fs::create_dir_all(&downloads).unwrap();
+        let track_path = downloads.join("clip.wav");
+        write_test_wav(&track_path, 8_000, 1, 8_000 * 2);
+
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        library
+            .insert_downloaded_track(track_path.to_str().unwrap(), downloads.to_str().unwrap(), &[])
+            .expect("insert downloaded track");
+
+        let track = library.get_track(track_path.to_str().unwrap()).expect("track exists");
+        assert_eq!(track.format, "WAV");
+        assert!(track.is_lossless);
+
+        let folders = library.get_folders();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].track_count, 1);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn insert_downloaded_track_into_already_covered_subfolder_does_not_duplicate_folder() {
+        let dir = temp_library_dir("covering_folder");
+        let root = dir.join("root");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        library
+            .add_folder(root.to_str().unwrap().to_string(), &[], None, |_, _| {})
+            .expect("add root folder");
+        assert_eq!(library.get_folders().len(), 1);
+
+        let track_path = sub.join("track.wav");
+        write_test_wav(&track_path, 8_000, 1, 8_000);
+        library
+            .insert_downloaded_track(track_path.to_str().unwrap(), sub.to_str().unwrap(), &[])
+            .expect("insert into subfolder");
+
+        // Подпапка уже накрыта корневой — новой записи в folders быть не должно.
+        assert_eq!(library.get_folders().len(), 1, "не должно появиться дублирующей папки");
+
+        let folder_path: String = library
+            .conn
+            .query_row(
+                "SELECT folder_path FROM tracks WHERE file_path = ?1",
+                params![track_path.to_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(folder_path, root.to_str().unwrap());
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_folder_rejects_nonexistent_directory() {
+        let dir = temp_library_dir("add_folder_missing");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        let result = library.add_folder(
+            dir.join("does_not_exist").to_str().unwrap().to_string(),
+            &[],
+            None,
+            |_, _| {},
+        );
+        assert!(result.is_err());
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_folder_with_one_audio_file_scans_it_in() {
+        let dir = temp_library_dir("add_folder_scan");
+        let music = dir.join("music");
+        fs::create_dir_all(&music).unwrap();
+        write_test_wav(&music.join("a.wav"), 44_100, 2, 44_100);
+
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        let tracks = library
+            .add_folder(music.to_str().unwrap().to_string(), &[], None, |_, _| {})
+            .expect("add folder");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(library.get_all_tracks().len(), 1);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── remove_track / move_track_to_top ────────────────────────────────────
+
+    #[test]
+    fn remove_track_deletes_row_statistics_and_overrides() {
+        let dir = temp_library_dir("remove_track");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), Some("Y"), None, None, 2);
+        library
+            .set_track_override("/m/a.flac", Some("Override Title"), None, None, None, false)
+            .unwrap();
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/a.flac".to_string(),
+                listen_count_delta: 1,
+                ..Default::default()
+            })
+            .unwrap();
+
+        library.remove_track("/m/a.flac", &[]).expect("remove track");
+
+        assert!(library.get_track("/m/a.flac").is_none());
+        assert!(library.get_track("/m/b.flac").is_some());
+        let remaining: i64 = library
+            .conn
+            .query_row("SELECT COUNT(*) FROM track_statistics WHERE file_path = '/m/a.flac'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "статистика удалённого трека должна быть очищена");
+        let overrides: i64 = library
+            .conn
+            .query_row("SELECT COUNT(*) FROM track_overrides WHERE file_path = '/m/a.flac'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(overrides, 0, "переопределение удалённого трека должно быть очищено");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn move_track_to_top_reorders_and_records_statistic() {
+        let dir = temp_library_dir("move_to_top");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), Some("Y"), None, None, 2);
+
+        // B имеет больший sort_order -> по умолчанию идёт первым.
+        let before = library.get_all_tracks();
+        assert_eq!(before[0].file_path, "/m/b.flac");
+
+        library.move_track_to_top("/m/a.flac").expect("move to top");
+        let after = library.get_all_tracks();
+        assert_eq!(after[0].file_path, "/m/a.flac");
+
+        let stats = library.get_track_statistics("/m/a.flac").unwrap();
+        assert_eq!(stats.move_to_top_count, 1);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── list_genres / search_tracks / get_catalog_paths ────────────────────
+
+    #[test]
+    fn list_genres_excludes_genres_with_only_one_track() {
+        let dir = temp_library_dir("list_genres");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/1.flac", Some("1"), Some("A"), None, Some("Rock"), 1);
+        insert_track_row(&library, "/m/2.flac", Some("2"), Some("A"), None, Some("Rock"), 2);
+        insert_track_row(&library, "/m/3.flac", Some("3"), Some("A"), None, Some("Jazz"), 3);
+
+        let genres = library.list_genres();
+        let names: Vec<&str> = genres.iter().map(|g| g.name.as_str()).collect();
+        assert!(names.contains(&"Rock"));
+        assert!(
+            !names.contains(&"Jazz"),
+            "жанр только с одним треком не должен попадать в список фильтров (HAVING cnt > 1)"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_tracks_ranks_exact_substring_before_basename_only_match() {
+        let dir = temp_library_dir("search_tracks");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/exact.flac", Some("Believer"), Some("Imagine Dragons"), None, None, 1);
+        insert_track_row(&library, "/m/other.flac", Some("Unrelated"), Some("Someone"), None, None, 2);
+
+        let results = library.search_tracks("believer", None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, "/m/exact.flac");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_catalog_paths_filters_by_genre_without_search_query() {
+        let dir = temp_library_dir("catalog_paths_genre");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/rock.flac", Some("R"), Some("A"), None, Some("Rock"), 1);
+        insert_track_row(&library, "/m/jazz.flac", Some("J"), Some("A"), None, Some("Jazz"), 2);
+
+        let paths = library.get_catalog_paths(Some("Rock"), None);
+        assert_eq!(paths, vec!["/m/rock.flac".to_string()]);
+
+        let all = library.get_catalog_paths(None, None);
+        assert_eq!(all.len(), 2);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── Плейлисты ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn user_playlist_crud_round_trip() {
+        let dir = temp_library_dir("playlist_crud");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+
+        let playlist = library.create_playlist("My Mix".to_string()).expect("create playlist");
+        assert_eq!(playlist.kind, PlaylistKind::User);
+        assert_eq!(playlist.track_count, 0);
+
+        library.add_track_to_playlist(playlist.id, "/m/a.flac").expect("add track");
+        let tracks = library.get_playlist_tracks(playlist.id);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].file_path, "/m/a.flac");
+
+        let ids = library.get_user_playlist_ids_for_track("/m/a.flac");
+        assert_eq!(ids, vec![playlist.id]);
+
+        library.rename_playlist(playlist.id, "Renamed".to_string()).expect("rename");
+        let playlists = library.get_user_playlists();
+        assert_eq!(playlists[0].name, "Renamed");
+
+        library.remove_track_from_playlist(playlist.id, "/m/a.flac").expect("remove track");
+        assert!(library.get_playlist_tracks(playlist.id).is_empty());
+
+        library.delete_playlist(playlist.id).expect("delete playlist");
+        assert!(library.get_user_playlists().is_empty());
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_track_to_playlist_increments_playlist_add_count_statistic() {
+        let dir = temp_library_dir("playlist_stat");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+        let playlist = library.create_playlist("Mix".to_string()).unwrap();
+
+        library.add_track_to_playlist(playlist.id, "/m/a.flac").unwrap();
+        let stats = library.get_track_statistics("/m/a.flac").unwrap();
+        assert_eq!(stats.playlist_add_count, 1);
+
+        library.remove_track_from_playlist(playlist.id, "/m/a.flac").unwrap();
+        let stats_after = library.get_track_statistics("/m/a.flac").unwrap();
+        assert_eq!(stats_after.playlist_add_count, 0);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cannot_rename_delete_or_modify_album_playlists() {
+        let dir = temp_library_dir("album_playlist_protection");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/1.flac", Some("1"), Some("A"), Some("Greatest Hits"), None, 1);
+        insert_track_row(&library, "/m/2.flac", Some("2"), Some("A"), Some("Greatest Hits"), None, 2);
+        library.rebuild_album_playlists().expect("rebuild albums");
+
+        let albums = library.get_albums();
+        assert_eq!(albums.len(), 1, "альбом с >1 треком должен получить системный плейлист");
+        let album_id = albums[0].id;
+
+        assert!(library.rename_playlist(album_id, "Hacked".to_string()).is_err());
+        assert!(library.add_track_to_playlist(album_id, "/m/1.flac").is_err());
+        assert!(library.remove_track_from_playlist(album_id, "/m/1.flac").is_err());
+        assert!(library.delete_playlist(album_id).is_err());
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rebuild_album_playlists_skips_albums_with_only_one_track() {
+        let dir = temp_library_dir("album_single_track");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/1.flac", Some("1"), Some("A"), Some("Solo Album"), None, 1);
+        library.rebuild_album_playlists().expect("rebuild");
+
+        assert!(
+            library.get_albums().is_empty(),
+            "альбом с одним треком не должен формировать отдельный плейлист"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rebuild_artist_playlists_splits_multi_artist_tracks_by_separators() {
+        let dir = temp_library_dir("artist_split");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        let seps = vec!["; ".to_string(), ", ".to_string()];
+        insert_track_row(&library, "/m/1.flac", Some("Collab"), Some("Artist A; Artist B"), None, None, 1);
+        library.rebuild_artist_playlists(&seps).expect("rebuild artists");
+
+        let names: Vec<String> = library.get_artists().into_iter().map(|p| p.name).collect();
+        assert!(names.contains(&"Artist A".to_string()));
+        assert!(names.contains(&"Artist B".to_string()));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rebuild_artist_playlists_merges_artists_case_insensitively() {
+        let dir = temp_library_dir("artist_case_merge");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        let seps: Vec<String> = vec![];
+        insert_track_row(&library, "/m/1.flac", Some("1"), Some("MZLFF"), None, None, 1);
+        insert_track_row(&library, "/m/2.flac", Some("2"), Some("mzlff"), None, None, 2);
+        library.rebuild_artist_playlists(&seps).expect("rebuild artists");
+
+        let artists = library.get_artists();
+        assert_eq!(
+            artists.len(),
+            1,
+            "разные написания одного артиста должны слиться в один плейлист"
+        );
+        assert_eq!(artists[0].track_count, 2);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rebuild_artist_playlists_creates_playlist_even_for_single_track_artist() {
+        // В отличие от альбомов, у плейлистов исполнителей нет фильтра «>1 трек»
+        // — это намеренная асимметрия (см. rebuild_album_playlists/rebuild_artist_playlists).
+        let dir = temp_library_dir("artist_single_track");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/1.flac", Some("Solo"), Some("Solo Artist"), None, None, 1);
+        library.rebuild_artist_playlists(&[]).expect("rebuild artists");
+
+        assert_eq!(library.get_artists().len(), 1);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── Статистика ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn sum_track_listen_count_aggregates_across_paths() {
+        let dir = temp_library_dir("sum_listen_count");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", None, None, None, None, 1);
+        insert_track_row(&library, "/m/b.flac", None, None, None, None, 2);
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/a.flac".to_string(),
+                listen_count_delta: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/b.flac".to_string(),
+                listen_count_delta: 5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let total = library
+            .sum_track_listen_count(&["/m/a.flac".to_string(), "/m/b.flac".to_string()])
+            .unwrap();
+        assert_eq!(total, 7);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_collection_full_listen_increments_collection_stats() {
+        let dir = temp_library_dir("collection_listen");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        library.add_collection_full_listen(CollectionKind::Playlist, "3").unwrap();
+        library.add_collection_full_listen(CollectionKind::Playlist, "3").unwrap();
+
+        let count: i64 = library
+            .conn
+            .query_row(
+                "SELECT full_listen_count FROM collection_statistics WHERE collection_key = '3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── Переопределения треков (overrides) ──────────────────────────────────
+
+    #[test]
+    fn set_track_override_overlays_title_and_artist_on_get_track() {
+        let dir = temp_library_dir("override_basic");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("Original"), Some("OrigArtist"), None, None, 1);
+
+        library
+            .set_track_override("/m/a.flac", Some("Custom Title"), Some("Custom Artist"), None, None, false)
+            .unwrap();
+
+        let track = library.get_track("/m/a.flac").unwrap();
+        assert_eq!(track.title.as_deref(), Some("Custom Title"));
+        assert_eq!(track.artist.as_deref(), Some("Custom Artist"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_track_override_with_all_empty_fields_deletes_override_row() {
+        let dir = temp_library_dir("override_clear_via_empty");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("Original"), Some("OrigArtist"), None, None, 1);
+        library
+            .set_track_override("/m/a.flac", Some("Custom"), None, None, None, false)
+            .unwrap();
+        assert_eq!(library.get_track("/m/a.flac").unwrap().title.as_deref(), Some("Custom"));
+
+        // Передаём всё как None/пусто без keep_existing_cover -> запись должна удалиться.
+        library
+            .set_track_override("/m/a.flac", None, None, None, None, false)
+            .unwrap();
+        let track = library.get_track("/m/a.flac").unwrap();
+        assert_eq!(track.title.as_deref(), Some("Original"), "должен вернуться оригинал из tracks");
+
+        let remaining: i64 = library
+            .conn
+            .query_row("SELECT COUNT(*) FROM track_overrides", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clear_all_track_overrides_removes_every_override_and_cached_accent() {
+        let dir = temp_library_dir("clear_all_overrides");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), None, None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), None, None, None, 2);
+        library.set_track_override("/m/a.flac", Some("X"), None, None, Some("#112233"), false).unwrap();
+        library.set_accent_color("/m/b.flac", "#445566").unwrap();
+
+        let cleared = library.clear_all_track_overrides().expect("clear all");
+        assert_eq!(cleared, 1, "должна была удалиться ровно одна запись overrides");
+
+        assert_eq!(library.get_track("/m/a.flac").unwrap().title.as_deref(), Some("A"));
+        assert_eq!(
+            library.get_accent_color("/m/b.flac"),
+            None,
+            "clear_all_track_overrides должен сбрасывать accent_color и у НЕ-override треков"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_accent_color_prefers_override_over_cached_original() {
+        let dir = temp_library_dir("accent_priority");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), None, None, None, 1);
+        library.set_accent_color("/m/a.flac", "#111111").unwrap();
+        assert_eq!(library.get_accent_color("/m/a.flac").as_deref(), Some("#111111"));
+
+        library
+            .set_track_override("/m/a.flac", None, None, None, Some("#222222"), false)
+            .unwrap();
+        assert_eq!(
+            library.get_accent_color("/m/a.flac").as_deref(),
+            Some("#222222"),
+            "override accent_color должен иметь приоритет над оригинальным"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── Топы/недавнее/сводка ─────────────────────────────────────────────────
+
+    #[test]
+    fn get_recently_played_orders_by_most_recent_first() {
+        let dir = temp_library_dir("recently_played");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/old.flac", Some("Old"), None, None, None, 1);
+        insert_track_row(&library, "/m/new.flac", Some("New"), None, None, None, 2);
+
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/old.flac".to_string(),
+                listen_count_delta: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/new.flac".to_string(),
+                listen_count_delta: 1,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let recent = library.get_recently_played(10);
+        assert_eq!(recent.first().map(|t| t.file_path.as_str()), Some("/m/new.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_most_played_orders_by_listen_count_descending() {
+        let dir = temp_library_dir("most_played");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), None, None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), None, None, None, 2);
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/a.flac".to_string(),
+                listen_count_delta: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/b.flac".to_string(),
+                listen_count_delta: 9,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let most_played = library.get_most_played(10);
+        assert_eq!(most_played.first().map(|t| t.file_path.as_str()), Some("/m/b.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_top_artists_merges_case_variants_and_sums_listens() {
+        let dir = temp_library_dir("top_artists");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("Queen"), None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), Some("queen"), None, None, 2);
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/a.flac".to_string(),
+                listen_count_delta: 3,
+                ..Default::default()
+            })
+            .unwrap();
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/b.flac".to_string(),
+                listen_count_delta: 4,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let top = library.get_top_artists(10);
+        assert_eq!(top.len(), 1, "разные написания должны слиться в одного артиста");
+        assert_eq!(top[0].listen_count, 7);
+        assert_eq!(top[0].track_count, 2);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_summary_stats_totals_tracks_folders_and_listens() {
+        let dir = temp_library_dir("summary_stats");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        library.conn.execute("INSERT INTO folders(path) VALUES ('/music')", []).unwrap();
+        insert_track_row(&library, "/m/a.flac", Some("A"), None, None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), None, None, None, 2);
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/a.flac".to_string(),
+                listen_count_delta: 2,
+                total_listened_secs_delta: 100.0,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let summary = library.get_summary_stats();
+        assert_eq!(summary.total_tracks, 2);
+        assert_eq!(summary.total_folders, 1);
+        assert_eq!(summary.total_listens, 2);
+        assert_eq!(summary.total_listened_secs, 100.0);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── Рекомендации по настроению ───────────────────────────────────────────
+
+    #[test]
+    fn get_recommendations_by_mood_filters_energetic_tracks() {
+        let dir = temp_library_dir("mood_energetic");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_listened_track(&library, "/m/energetic.flac", 1, (0.8, 0.7, 128.0, 3000.0, -6.0));
+        insert_listened_track(&library, "/m/calm.flac", 1, (0.1, 0.2, 70.0, 1000.0, -20.0));
+
+        let recs = library.get_recommendations_by_mood("energetic", "balanced", false, 10);
+        let paths: Vec<&str> = recs.iter().map(|t| t.file_path.as_str()).collect();
+        assert!(paths.contains(&"/m/energetic.flac"));
+        assert!(!paths.contains(&"/m/calm.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_recommendations_by_mood_respects_lossless_only_filter() {
+        let dir = temp_library_dir("mood_lossless");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        // insert_listened_track всегда ставит format='flac', is_lossless=0 —
+        // правим вручную, чтобы получить ровно один lossless и один lossy трек.
+        insert_listened_track(&library, "/m/lossless.flac", 1, (0.8, 0.7, 128.0, 3000.0, -6.0));
+        library
+            .conn
+            .execute("UPDATE tracks SET is_lossless = 1 WHERE file_path = '/m/lossless.flac'", [])
+            .unwrap();
+        insert_listened_track(&library, "/m/lossy.mp3", 1, (0.8, 0.7, 128.0, 3000.0, -6.0));
+
+        let recs = library.get_recommendations_by_mood("energetic", "balanced", true, 10);
+        let paths: Vec<&str> = recs.iter().map(|t| t.file_path.as_str()).collect();
+        assert!(paths.contains(&"/m/lossless.flac"));
+        assert!(!paths.contains(&"/m/lossy.mp3"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_recommendations_by_mood_forgotten_excludes_listened_tracks() {
+        let dir = temp_library_dir("mood_forgotten");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/never_played.flac", Some("Never"), None, None, None, 1);
+        insert_track_row(&library, "/m/played.flac", Some("Played"), None, None, None, 2);
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/m/played.flac".to_string(),
+                listen_count_delta: 5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let recs = library.get_recommendations_by_mood("forgotten", "balanced", false, 10);
+        let paths: Vec<&str> = recs.iter().map(|t| t.file_path.as_str()).collect();
+        assert!(paths.contains(&"/m/never_played.flac"));
+        assert!(!paths.contains(&"/m/played.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn taste_profile_on_empty_library_has_zero_analyzed_tracks() {
+        let dir = temp_library_dir("taste_profile_empty");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        let profile = library.taste_profile();
+        assert_eq!(profile.analyzed_tracks, 0);
+        assert_eq!(profile.energy, None);
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── Порядок треков в альбоме / внешний кэш альбомов ─────────────────────
+
+    #[test]
+    fn album_track_order_round_trips_and_is_none_when_unset() {
+        let dir = temp_library_dir("album_order");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        assert_eq!(library.get_album_track_order("Unknown Album").unwrap(), None);
+
+        let order = vec!["/m/1.flac".to_string(), "/m/2.flac".to_string()];
+        library.set_album_track_order("Greatest Hits", &order).unwrap();
+        assert_eq!(library.get_album_track_order("Greatest Hits").unwrap(), Some(order));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn album_track_order_empty_list_reads_back_as_none() {
+        let dir = temp_library_dir("album_order_empty");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        library.set_album_track_order("Some Album", &[]).unwrap();
+        assert_eq!(
+            library.get_album_track_order("Some Album").unwrap(),
+            None,
+            "пустой список треков должен читаться обратно как отсутствие порядка"
+        );
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn external_album_cache_round_trips_and_negative_cache_clears_selectively() {
+        let dir = temp_library_dir("external_album_cache");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        let tracks = vec![ExternalTrack {
+            position: 1,
+            disc: 1,
+            title: "Track One".to_string(),
+            artist: "Artist".to_string(),
+            duration_secs: Some(180),
+        }];
+        library
+            .set_external_album("key-ok", Some("deezer"), "ok", &tracks, 1_700_000_000)
+            .unwrap();
+        library
+            .set_external_album("key-none", None, "none", &[], 1_700_000_000)
+            .unwrap();
+
+        let (source, status, _fetched, got_tracks) = library.get_external_album("key-ok").unwrap();
+        assert_eq!(source.as_deref(), Some("deezer"));
+        assert_eq!(status, "ok");
+        assert_eq!(got_tracks.len(), 1);
+        assert_eq!(got_tracks[0].title, "Track One");
+
+        assert!(library.get_external_album("key-missing").is_none());
+
+        let cleared = library.clear_external_album_negative_cache().unwrap();
+        assert_eq!(cleared, 1);
+        assert!(library.get_external_album("key-none").is_none());
+        assert!(library.get_external_album("key-ok").is_some(), "'ok' записи не должны затрагиваться");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── override_cover_paths / catalog_artist_title_index / album_local_tracks
+
+    #[test]
+    fn override_cover_paths_only_returns_tracks_with_nonempty_cover_sig() {
+        let dir = temp_library_dir("override_cover_paths");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), None, None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), None, None, None, 2);
+        // a.flac получает реальную обложку через override (data URL -> cover_sig).
+        library
+            .set_track_override(
+                "/m/a.flac",
+                None,
+                None,
+                Some("data:image/png;base64,aGVsbG8="),
+                None,
+                false,
+            )
+            .unwrap();
+        // b.flac — override только title, без обложки.
+        library.set_track_override("/m/b.flac", Some("B2"), None, None, None, false).unwrap();
+
+        let paths = library.override_cover_paths();
+        assert!(paths.contains("/m/a.flac"));
+        assert!(!paths.contains("/m/b.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn catalog_artist_title_index_matches_multi_artist_tracks_by_any_artist() {
+        let dir = temp_library_dir("catalog_index");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(
+            &library,
+            "/m/collab.flac",
+            Some("Collab Song"),
+            Some("Artist A; Artist B"),
+            Some("Some Album"),
+            None,
+            1,
+        );
+
+        let index = library.catalog_artist_title_index(&[]);
+        let key = crate::external::title_match_key("Collab Song");
+        let matches = index.get(&key).expect("должна найтись запись по нормализованному названию");
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].artists.contains("artist a"));
+        assert!(matches[0].artists.contains("artist b"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_album_local_tracks_uses_override_title_and_artist_when_present() {
+        let dir = temp_library_dir("album_local_tracks");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("Orig"), Some("OrigArtist"), Some("Album X"), None, 1);
+        library
+            .set_track_override("/m/a.flac", Some("Overridden"), None, None, None, false)
+            .unwrap();
+
+        let local = library.get_album_local_tracks("Album X");
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].1, "Overridden");
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

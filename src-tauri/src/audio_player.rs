@@ -81,7 +81,6 @@ pub struct EqSettings {
     /// Усиление каждой полосы в dB (от -12 до +12)
     pub bands: Vec<f32>,
     /// Общий уровень (preamp) в dB (от -12 до +12)
-    #[serde(default)]
     pub gain: f32,
 }
 
@@ -135,17 +134,27 @@ struct BiquadState {
 }
 
 /// Мягкий лимитер: линейный при |x| <= T, ниже — плавное насыщение через tanh.
-/// При |x| <= 0.97 эффекта нет; выше — плавно сжимается к ±1, никогда не превышая.
+/// При |x| <= 0.97 эффекта нет; выше — плавно сжимается к потолку CEILING.
+///
+/// KNEE (ширина "колена" по входу) намеренно отвязана от зазора (CEILING - T):
+/// раньше `over` делился на (1.0 - T) = 0.03, и tanh насыщался до ровно 1.0
+/// уже при x≈1.2 — для большей части громкого диапазона лимитер был фактически
+/// жёстким, а не мягким. CEILING выбран строго меньше 1.0, чтобы сэмпл никогда
+/// не возвращал ровно ±1.0 — это задел на случай будущей конвертации в
+/// целочисленный формат, где сэмпл == 1.0 при пересчёте даёт значение на
+/// единицу больше максимума (переполнение).
 #[inline(always)]
 fn soft_clip(x: f32) -> f32 {
     const T: f32 = 0.97;
+    const CEILING: f32 = 0.999;
+    const KNEE: f32 = 0.5;
     let a = x.abs();
     if a <= T {
         x
     } else {
         let sign = if x >= 0.0 { 1.0 } else { -1.0 };
-        let over = (a - T) / (1.0 - T);
-        sign * (T + (1.0 - T) * over.tanh())
+        let over = (a - T) / KNEE;
+        sign * (T + (CEILING - T) * over.tanh())
     }
 }
 
@@ -1619,11 +1628,6 @@ impl AudioPlayer {
         self.volume = vol;
     }
 
-    /// Получить текущую громкость
-    pub fn get_volume(&self) -> f32 {
-        self.volume
-    }
-
     /// Перемотка на указанную позицию (в секундах)
     pub fn seek(&mut self, position_secs: f64) -> Result<(), String> {
         let file_path = self.current_track
@@ -1729,11 +1733,6 @@ impl AudioPlayer {
         }
     }
 
-    /// Получить текущие значения полос эквалайзера
-    pub fn get_eq_bands(&self) -> Vec<f32> {
-        self.eq_settings.read().map(|s| s.bands.clone()).unwrap_or_else(|_| vec![0.0; 10])
-    }
-
     /// Установить общий уровень эквалайзера (в dB, от -12 до +12)
     pub fn set_eq_gain(&self, gain: f32) {
         if let Ok(mut settings) = self.eq_settings.write() {
@@ -1741,21 +1740,11 @@ impl AudioPlayer {
         }
     }
 
-    /// Получить общий уровень эквалайзера
-    pub fn get_eq_gain(&self) -> f32 {
-        self.eq_settings.read().map(|s| s.gain).unwrap_or(0.0)
-    }
-
     /// Включить/выключить эквалайзер
     pub fn set_eq_enabled(&self, enabled: bool) {
         if let Ok(mut settings) = self.eq_settings.write() {
             settings.enabled = enabled;
         }
-    }
-
-    /// Получить состояние эквалайзера
-    pub fn get_eq_enabled(&self) -> bool {
-        self.eq_settings.read().map(|s| s.enabled).unwrap_or(false)
     }
 
     /// Получить полные настройки эквалайзера
@@ -1857,5 +1846,381 @@ mod accent_color_tests {
                 "разрыв потолка насыщенности на {h}°"
             );
         }
+    }
+
+    #[test]
+    fn extract_accent_color_returns_none_for_invalid_image_bytes() {
+        assert_eq!(extract_accent_color(&[]), None);
+        assert_eq!(extract_accent_color(b"not an image"), None);
+    }
+
+    #[test]
+    fn rgb_hsl_round_trip_is_stable() {
+        for (r, g, b) in [(255u8, 0u8, 0u8), (0, 255, 0), (0, 0, 255), (30, 144, 255), (128, 128, 128)] {
+            let (h, s, l) = rgb_to_hsl(r, g, b);
+            let (r2, g2, b2) = hsl_to_rgb(h, s, l);
+            assert!((r as i16 - r2 as i16).abs() <= 1, "r drift: {r} vs {r2}");
+            assert!((g as i16 - g2 as i16).abs() <= 1, "g drift: {g} vs {g2}");
+            assert!((b as i16 - b2 as i16).abs() <= 1, "b drift: {b} vs {b2}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod eq_math_tests {
+    use super::*;
+
+    #[test]
+    fn peaking_eq_is_exact_passthrough_for_near_zero_gain() {
+        let c = BiquadCoeffs::peaking_eq(44_100.0, 1000.0, 0.0, 1.4);
+        assert_eq!(c.b0, 1.0);
+        assert_eq!(c.b1, 0.0);
+        assert_eq!(c.b2, 0.0);
+        assert_eq!(c.a1, 0.0);
+        assert_eq!(c.a2, 0.0);
+
+        let mut state = BiquadState::default();
+        for i in 0..32 {
+            let x = (i as f32 * 0.37).sin();
+            assert_eq!(state.process(&c, x), x, "нейтральный фильтр не должен менять сигнал");
+        }
+    }
+
+    /// Установившийся (steady-state) RMS отклик биквадратного фильтра на синус
+    /// заданной частоты — после периода прогрева (затухание переходного процесса).
+    fn steady_state_rms(coeffs: &BiquadCoeffs, freq: f32, sample_rate: f32, cycles: usize) -> f32 {
+        let mut state = BiquadState::default();
+        let samples_per_cycle = (sample_rate / freq).round() as usize;
+        let total = samples_per_cycle * cycles;
+        let warmup = total / 4;
+        let mut sum_sq = 0.0f64;
+        let mut counted = 0usize;
+        for i in 0..total {
+            let t = i as f32 / sample_rate;
+            let x = (2.0 * std::f32::consts::PI * freq * t).sin();
+            let y = state.process(coeffs, x);
+            if i >= warmup {
+                sum_sq += (y as f64) * (y as f64);
+                counted += 1;
+            }
+        }
+        ((sum_sq / counted.max(1) as f64).sqrt()) as f32
+    }
+
+    #[test]
+    fn peaking_eq_boosts_signal_at_center_frequency() {
+        let sample_rate = 44_100.0;
+        let freq = 1000.0;
+        let flat = BiquadCoeffs::peaking_eq(sample_rate, freq, 0.0, 1.4);
+        let boosted = BiquadCoeffs::peaking_eq(sample_rate, freq, 6.0, 1.4);
+
+        let flat_rms = steady_state_rms(&flat, freq, sample_rate, 40);
+        let boosted_rms = steady_state_rms(&boosted, freq, sample_rate, 40);
+
+        // +6dB ~ x1.995 в амплитуде на самой резонансной частоте.
+        let ratio = boosted_rms / flat_rms;
+        assert!(
+            (1.7..2.3).contains(&ratio),
+            "ожидали усиление ~x2.0 на центральной частоте, получили x{ratio}"
+        );
+    }
+
+    #[test]
+    fn peaking_eq_cut_attenuates_signal_at_center_frequency() {
+        let sample_rate = 44_100.0;
+        let freq = 1000.0;
+        let flat = BiquadCoeffs::peaking_eq(sample_rate, freq, 0.0, 1.4);
+        let cut = BiquadCoeffs::peaking_eq(sample_rate, freq, -6.0, 1.4);
+
+        let flat_rms = steady_state_rms(&flat, freq, sample_rate, 40);
+        let cut_rms = steady_state_rms(&cut, freq, sample_rate, 40);
+
+        assert!(cut_rms < flat_rms, "срез на центральной частоте должен ослаблять сигнал");
+    }
+
+    #[test]
+    fn peaking_eq_barely_affects_far_off_center_frequency() {
+        // Полоса на 60Гц с большим усилением почти не должна задевать 12кГц.
+        let sample_rate = 44_100.0;
+        let coeffs = BiquadCoeffs::peaking_eq(sample_rate, 60.0, 12.0, 1.4);
+        let flat = BiquadCoeffs::peaking_eq(sample_rate, 60.0, 0.0, 1.4);
+
+        let far_rms = steady_state_rms(&coeffs, 12_000.0, sample_rate, 40);
+        let far_flat_rms = steady_state_rms(&flat, 12_000.0, sample_rate, 40);
+
+        let ratio = far_rms / far_flat_rms;
+        assert!(
+            (0.9..1.1).contains(&ratio),
+            "усиление баса не должно заметно влиять на 12кГц, x{ratio}"
+        );
+    }
+
+    #[test]
+    fn soft_clip_passes_through_within_threshold() {
+        for x in [0.0f32, 0.5, -0.5, 0.97, -0.97] {
+            assert_eq!(soft_clip(x), x);
+        }
+    }
+
+    #[test]
+    fn soft_clip_never_reaches_unity() {
+        // Контракт после фикса находки ниже: CEILING < 1.0, поэтому выход остаётся
+        // СТРОГО внутри (-1.0, 1.0), даже когда tanh насыщается до 1.0 в f32 —
+        // это и есть защита от переполнения при будущей конвертации в int.
+        for x in [0.98f32, 1.0, 2.0, 10.0, 1000.0] {
+            let y = soft_clip(x);
+            assert!(y < 1.0, "soft_clip({x}) = {y} должен быть строго меньше 1.0");
+        }
+        for x in [-0.98f32, -1.0, -2.0, -10.0] {
+            let y = soft_clip(x);
+            assert!(y > -1.0, "soft_clip({x}) = {y} должен быть строго больше -1.0");
+        }
+    }
+
+    #[test]
+    fn soft_clip_is_smooth_just_above_threshold() {
+        // У самого порога (T=0.97) насыщение ещё мягкое — значение строго между
+        // T и 1.0, не прыгает сразу в 1.0.
+        let y = soft_clip(0.98);
+        assert!(y > 0.97 && y < 1.0, "y={y}");
+    }
+
+    /// РЕГРЕССИЯ на исправленную находку: раньше `over = (a - T) / (1.0 - T)`
+    /// делил на узкий запас (0.03), из-за чего tanh насыщался до РОВНО 1.0 в f32
+    /// уже при x≈1.2 — лимитер был фактически жёстким для большей части
+    /// «громкого» диапазона, хотя формальный контракт («никогда не превышая»)
+    /// не нарушался. Теперь ширина колена (KNEE) отвязана от зазора до потолка,
+    /// поэтому при умеренной перегрузке (x=1.2) выход заметно ниже потолка.
+    #[test]
+    fn soft_clip_is_gradual_over_wide_overdrive_range() {
+        let moderate_overdrive = soft_clip(1.2);
+        assert!(
+            moderate_overdrive < 0.99,
+            "ожидали плавное насыщение при x=1.2 (значение заметно ниже потолка), получили {moderate_overdrive}"
+        );
+    }
+
+    #[test]
+    fn soft_clip_is_odd_symmetric() {
+        for x in [0.5f32, 0.97, 1.5, 5.0] {
+            assert!((soft_clip(x) + soft_clip(-x)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn soft_clip_is_monotonically_increasing() {
+        let xs: Vec<f32> = (0..200).map(|i| -5.0 + i as f32 * 0.05).collect();
+        let mut prev = soft_clip(xs[0]);
+        for &x in &xs[1..] {
+            let y = soft_clip(x);
+            assert!(y >= prev, "soft_clip должен быть монотонным: {prev} -> {y} at x={x}");
+            prev = y;
+        }
+    }
+
+    #[test]
+    fn eq_settings_default_is_flat_and_disabled() {
+        let s = EqSettings::default();
+        assert!(!s.enabled);
+        assert_eq!(s.gain, 0.0);
+        assert_eq!(s.bands.len(), 10);
+        assert!(s.bands.iter().all(|&b| b == 0.0));
+    }
+
+    #[test]
+    fn is_lossless_codec_classifies_known_codecs() {
+        use symphonia::core::codecs::*;
+        assert!(is_lossless_codec(CODEC_TYPE_FLAC));
+        assert!(is_lossless_codec(CODEC_TYPE_ALAC));
+        assert!(is_lossless_codec(CODEC_TYPE_PCM_S16LE));
+        assert!(!is_lossless_codec(CODEC_TYPE_MP3));
+        assert!(!is_lossless_codec(CODEC_TYPE_AAC));
+    }
+
+    #[test]
+    fn format_name_from_ext_maps_known_and_unknown_extensions() {
+        assert_eq!(format_name_from_ext("flac"), "FLAC");
+        assert_eq!(format_name_from_ext("mp3"), "MP3");
+        assert_eq!(format_name_from_ext("opus"), "Opus");
+        // Неизвестное расширение возвращается как есть (используется для m4a/mp4
+        // отдельной веткой в get_metadata_inner, но как фолбэк для прочих).
+        assert_eq!(format_name_from_ext("xyz"), "xyz");
+    }
+
+    #[test]
+    fn supported_formats_includes_common_audio_types() {
+        let formats = AudioPlayer::supported_formats();
+        for f in ["flac", "mp3", "wav", "ogg", "m4a", "opus"] {
+            assert!(formats.contains(&f), "{f} должен быть в списке поддерживаемых форматов");
+        }
+        assert!(!formats.contains(&"wma"), "wma не поддерживается symphonia/rodio в этом стеке");
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use std::path::PathBuf as StdPathBuf;
+
+    fn temp_path(name: &str) -> StdPathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lfmusic_audio_player_{unique}_{name}"))
+    }
+
+    /// Пишет минимальный валидный 16-бит PCM WAV (без тегов) — достаточно, чтобы
+    /// lofty/symphonia прочли формат/свойства без внешних аудио-фикстур.
+    fn write_test_wav(path: &std::path::Path, sample_rate: u32, channels: u16, num_frames: u32) {
+        let bits_per_sample: u16 = 16;
+        let block_align: u16 = channels * (bits_per_sample / 8);
+        let byte_rate: u32 = sample_rate * block_align as u32;
+        let data_size: u32 = num_frames * block_align as u32;
+
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..(num_frames as usize * channels as usize) {
+            let sample = (((i % 200) as i32 - 100) * 300) as i16;
+            buf.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(path, buf).expect("write test wav");
+    }
+
+    #[test]
+    fn get_metadata_for_missing_file_is_an_error() {
+        let path = temp_path("missing.flac");
+        let err = AudioPlayer::get_metadata(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("не найден") || err.contains("not found"), "err={err}");
+    }
+
+    #[test]
+    fn get_metadata_light_reads_wav_properties_without_real_audio_fixture() {
+        let path = temp_path("clip.wav");
+        write_test_wav(&path, 8_000, 1, 8_000 * 2); // 2 секунды, моно, 8кГц
+
+        let m = AudioPlayer::get_metadata_light(path.to_str().unwrap()).expect("metadata read");
+        assert_eq!(m.format, "WAV");
+        assert!(m.is_lossless, "WAV должен определяться как lossless");
+        assert_eq!(m.sample_rate, Some(8_000));
+        assert_eq!(m.channels, Some(1));
+        let duration = m.duration_secs.expect("duration");
+        assert!((duration - 2.0).abs() < 0.05, "duration={duration}");
+        assert_eq!(m.cover_art, None, "get_metadata_light не должен читать обложку");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn get_metadata_for_untagged_wav_has_no_cover_or_accent() {
+        let path = temp_path("untagged.wav");
+        write_test_wav(&path, 44_100, 2, 44_100); // 1 секунда, стерео
+
+        let m = AudioPlayer::get_metadata(path.to_str().unwrap()).expect("metadata read");
+        assert_eq!(m.channels, Some(2));
+        assert_eq!(m.sample_rate, Some(44_100));
+        assert_eq!(m.cover_art, None);
+        assert_eq!(m.accent_color, None);
+        assert!(!AudioPlayer::has_embedded_cover(path.to_str().unwrap()));
+        assert_eq!(AudioPlayer::extract_cover_art(path.to_str().unwrap()), None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod player_instance_tests {
+    use super::*;
+
+    // ВАЖНО: эти тесты создают реальный `AudioPlayer` (реальный аудио-вывод
+    // устройства), но НИКОГДА не вызывают play()/play_paused()/play_crossfade()
+    // на существующем файле — это реально воспроизвело бы звук через колонки
+    // во время `cargo test`. Проверяется только состояние/управление до старта
+    // воспроизведения.
+
+    #[test]
+    fn new_player_starts_stopped_with_full_volume() {
+        let mut player = AudioPlayer::new().expect("audio output should initialize");
+        let status = player.get_status();
+        assert_eq!(status.state, PlaybackState::Stopped);
+        assert_eq!(status.volume, 1.0);
+        assert_eq!(status.current_file_path, None);
+        assert_eq!(player.current_file_path(), None);
+    }
+
+    #[test]
+    fn set_volume_clamps_to_unit_range() {
+        let mut player = AudioPlayer::new().expect("audio output should initialize");
+        player.set_volume(1.5);
+        assert_eq!(player.get_status().volume, 1.0);
+        player.set_volume(-0.5);
+        assert_eq!(player.get_status().volume, 0.0);
+        player.set_volume(0.42);
+        assert_eq!(player.get_status().volume, 0.42);
+    }
+
+    #[test]
+    fn play_missing_file_returns_error_and_does_not_change_state() {
+        let mut player = AudioPlayer::new().expect("audio output should initialize");
+        let result = player.play("Z:/definitely/not/a/real/path.flac");
+        assert!(result.is_err());
+        let status = player.get_status();
+        assert_eq!(status.state, PlaybackState::Stopped);
+        assert_eq!(status.current_file_path, None);
+    }
+
+    #[test]
+    fn eq_settings_round_trip_through_setters_and_getters() {
+        let player = AudioPlayer::new().expect("audio output should initialize");
+        player.set_eq_enabled(true);
+        player.set_eq_gain(4.0);
+        player.set_eq_bands(vec![1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0]);
+
+        let settings = player.get_eq_settings();
+        assert!(settings.enabled);
+        assert_eq!(settings.gain, 4.0);
+        assert_eq!(settings.bands, vec![1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0]);
+    }
+
+    #[test]
+    fn eq_bands_and_gain_are_clamped_to_plus_minus_12_db() {
+        let player = AudioPlayer::new().expect("audio output should initialize");
+        player.set_eq_bands(vec![100.0, -100.0]);
+        player.set_eq_gain(50.0);
+
+        let settings = player.get_eq_settings();
+        assert_eq!(settings.bands[0], 12.0);
+        assert_eq!(settings.bands[1], -12.0);
+        assert_eq!(settings.gain, 12.0);
+
+        player.set_eq_gain(-50.0);
+        assert_eq!(player.get_eq_settings().gain, -12.0);
+    }
+
+    #[test]
+    fn set_eq_settings_replaces_whole_struct() {
+        let player = AudioPlayer::new().expect("audio output should initialize");
+        let custom = EqSettings {
+            enabled: true,
+            bands: vec![2.0; 10],
+            gain: -3.0,
+        };
+        player.set_eq_settings(custom.clone());
+        let read_back = player.get_eq_settings();
+        assert_eq!(read_back.enabled, custom.enabled);
+        assert_eq!(read_back.bands, custom.bands);
+        assert_eq!(read_back.gain, custom.gain);
     }
 }

@@ -128,6 +128,135 @@ pub fn remove_custom_cover(app_data_dir: &PathBuf, kind: &str, key: &str) -> Res
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(test_name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lfmusic_covers_{test_name}_{unique}"))
+    }
+
+    #[test]
+    fn detect_ext_from_path_recognizes_known_extensions_case_insensitively() {
+        assert_eq!(detect_ext_from_path("cover.JPG"), "jpg");
+        assert_eq!(detect_ext_from_path("cover.jpeg"), "jpg");
+        assert_eq!(detect_ext_from_path("cover.PNG"), "png");
+        assert_eq!(detect_ext_from_path("cover.webp"), "webp");
+        assert_eq!(detect_ext_from_path("cover.gif"), "gif");
+        assert_eq!(detect_ext_from_path("cover.bmp"), "bmp");
+        assert_eq!(detect_ext_from_path("cover.tiff"), "img");
+        assert_eq!(detect_ext_from_path("no_extension"), "img");
+    }
+
+    #[test]
+    fn mime_for_ext_covers_all_detected_extensions() {
+        assert_eq!(mime_for_ext("jpg"), "image/jpeg");
+        assert_eq!(mime_for_ext("jpeg"), "image/jpeg");
+        assert_eq!(mime_for_ext("png"), "image/png");
+        assert_eq!(mime_for_ext("webp"), "image/webp");
+        assert_eq!(mime_for_ext("gif"), "image/gif");
+        assert_eq!(mime_for_ext("bmp"), "image/bmp");
+        assert_eq!(mime_for_ext("img"), "application/octet-stream");
+    }
+
+    #[test]
+    fn entry_id_combines_kind_and_key_with_colon_separator() {
+        assert_eq!(entry_id("playlist", "42"), "playlist:42");
+        assert_eq!(entry_id("artist", "Queen"), "artist:Queen");
+    }
+
+    /// `entry_id` не экранирует `:` внутри `kind`/`key` — два РАЗНЫХ значения
+    /// kind+key теоретически могут дать одинаковую строку (напр. kind="a",
+    /// key="b:c" и kind="a:b", key="c" оба дают "a:b:c"). На практике это не
+    /// эксплуатируется: `kind` всюду в кодовой базе — один из 4 жёстко заданных
+    /// литералов ("catalog"/"playlist"/"album"/"artist"), никогда не
+    /// пользовательский ввод, поэтому реального коллижна между РАЗНЫМИ kind не
+    /// возникает. Тест документирует это намеренное ограничение, а не баг.
+    #[test]
+    fn entry_id_is_not_collision_proof_for_arbitrary_kind_values() {
+        assert_eq!(entry_id("a", "b:c"), entry_id("a:b", "c"));
+    }
+
+    #[test]
+    fn entry_id_distinguishes_real_kinds_for_the_same_key_containing_colon() {
+        // Реалистичный сценарий: ключ (имя артиста/альбома) содержит «:», но kind
+        // всегда один из фиксированных литералов — коллизий между ними не бывает.
+        let key_with_colon = "Greatest Hits: Volume 1";
+        assert_ne!(
+            entry_id("artist", key_with_colon),
+            entry_id("album", key_with_colon)
+        );
+    }
+
+    #[test]
+    fn set_custom_cover_writes_file_and_returns_matching_data_url() {
+        let dir = temp_dir("set_cover");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.png");
+        let bytes = vec![137u8, 80, 78, 71, 1, 2, 3];
+        std::fs::write(&source, &bytes).unwrap();
+
+        let data_url =
+            set_custom_cover(&dir, "playlist", "7", source.to_str().unwrap()).expect("set cover");
+        assert!(data_url.starts_with("data:image/png;base64,"));
+
+        let all = load_all(&dir);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].kind, "playlist");
+        assert_eq!(all[0].key, "7");
+        assert_eq!(all[0].data_url, data_url);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_custom_cover_replaces_previous_file_for_same_id() {
+        let dir = temp_dir("replace_cover");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source1 = dir.join("s1.png");
+        std::fs::write(&source1, vec![1u8, 2, 3]).unwrap();
+        let source2 = dir.join("s2.png");
+        std::fs::write(&source2, vec![4u8, 5, 6, 7]).unwrap();
+
+        set_custom_cover(&dir, "album", "X", source1.to_str().unwrap()).unwrap();
+        set_custom_cover(&dir, "album", "X", source2.to_str().unwrap()).unwrap();
+
+        let all = load_all(&dir);
+        assert_eq!(all.len(), 1, "повторная установка должна заменить, а не дублировать");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_custom_cover_deletes_entry_and_is_idempotent() {
+        let dir = temp_dir("remove_cover");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("s.png");
+        std::fs::write(&source, vec![1u8, 2]).unwrap();
+        set_custom_cover(&dir, "artist", "Queen", source.to_str().unwrap()).unwrap();
+        assert_eq!(load_all(&dir).len(), 1);
+
+        remove_custom_cover(&dir, "artist", "Queen").expect("remove cover");
+        assert_eq!(load_all(&dir).len(), 0);
+
+        // Удаление уже отсутствующей записи не должно возвращать ошибку.
+        remove_custom_cover(&dir, "artist", "Queen").expect("idempotent remove");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_all_on_empty_app_data_dir_is_empty() {
+        let dir = temp_dir("empty");
+        assert!(load_all(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Получить все кастомные обложки в виде data-URL, чтобы фронт мог
 /// быстро ими отрисоваться без последующих запросов.
 pub fn load_all(app_data_dir: &PathBuf) -> Vec<CustomCoverEntry> {

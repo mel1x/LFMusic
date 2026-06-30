@@ -1155,6 +1155,98 @@ mod imp {
                 );
             }
         }
+
+        #[test]
+        fn rect_contains_includes_boundary_and_excludes_outside() {
+            assert!(rect_contains(Point { x: 0.0, y: 0.0 }, 0.0, 0.0, 1.0, 1.0));
+            assert!(rect_contains(Point { x: 1.0, y: 1.0 }, 0.0, 0.0, 1.0, 1.0));
+            assert!(rect_contains(Point { x: 0.5, y: 0.5 }, 0.0, 0.0, 1.0, 1.0));
+            assert!(!rect_contains(Point { x: 1.01, y: 0.5 }, 0.0, 0.0, 1.0, 1.0));
+            assert!(!rect_contains(Point { x: -0.01, y: 0.5 }, 0.0, 0.0, 1.0, 1.0));
+        }
+
+        #[test]
+        fn triangle_contains_vertices_and_centroid_but_not_far_outside() {
+            let a = Point { x: 0.0, y: 0.0 };
+            let b = Point { x: 4.0, y: 0.0 };
+            let c = Point { x: 0.0, y: 4.0 };
+            let centroid = Point { x: 4.0 / 3.0, y: 4.0 / 3.0 };
+            assert!(triangle_contains(centroid, a, b, c));
+            assert!(triangle_contains(a, a, b, c), "вершина считается внутри");
+            assert!(!triangle_contains(Point { x: 10.0, y: 10.0 }, a, b, c));
+        }
+
+        #[test]
+        fn ease_is_clamped_and_passes_through_endpoints() {
+            assert_eq!(ease(0.0), 0.0);
+            assert_eq!(ease(1.0), 1.0);
+            assert_eq!(ease(-5.0), 0.0, "должен клэмпиться снизу");
+            assert_eq!(ease(5.0), 1.0, "должен клэмпиться сверху");
+            // Smoothstep симметричен относительно t=0.5: ease(0.5) == 0.5.
+            assert!((ease(0.5) - 0.5).abs() < 1e-6);
+        }
+
+        #[test]
+        fn ease_is_monotonically_non_decreasing_on_unit_interval() {
+            let mut prev = ease(0.0);
+            for i in 1..=20 {
+                let t = i as f32 / 20.0;
+                let v = ease(t);
+                assert!(v >= prev - 1e-6, "ease должен быть неубывающим: {prev} -> {v} at t={t}");
+                prev = v;
+            }
+        }
+
+        #[test]
+        fn layout_step_is_always_larger_than_base_size() {
+            for ch in [1u32, 32, 96, 384, 1000] {
+                let (s, step) = layout(ch);
+                assert!(s > 0.0, "сторона базовой обложки должна быть положительной для ch={ch}");
+                assert!(step > s, "между обложками всегда должен быть зазор для ch={ch}");
+            }
+        }
+
+        #[test]
+        fn layout_base_side_matches_bottom_pad_formula() {
+            let (s, _) = layout(384);
+            let expected = 384.0 * (1.0 - BOTTOM_PAD_FRAC);
+            assert!((s - expected).abs() < 0.001);
+        }
+
+        #[test]
+        fn round_corners_keeps_center_opaque_and_clips_corner() {
+            let mut img = RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+            round_corners(&mut img, 12.0);
+
+            let center = img.get_pixel(32, 32);
+            assert_eq!(center[3], 255, "центр не должен обрезаться скруглением");
+
+            let corner = img.get_pixel(0, 0);
+            assert!(corner[3] < 255, "угол должен стать частично/полностью прозрачным");
+        }
+
+        #[test]
+        fn prep_cover_resizes_to_requested_square_side() {
+            let img = RgbaImage::from_pixel(100, 100, image::Rgba([10, 20, 30, 255]));
+            let resized = prep_cover(&img, 40);
+            assert_eq!(resized.width(), 40);
+            assert_eq!(resized.height(), 40);
+        }
+
+        #[test]
+        fn compose_with_no_covers_is_fully_transparent() {
+            let covers = Covers { prev: None, current: None, next: None };
+            let canvas = compose(&covers, 200, 100, PLAY_SCALE);
+            assert!(canvas.pixels().all(|p| p[3] == 0));
+        }
+
+        #[test]
+        fn compose_draws_something_when_current_cover_is_set() {
+            let solid = RgbaImage::from_pixel(WORK_SIZE, WORK_SIZE, image::Rgba([200, 50, 50, 255]));
+            let covers = Covers { prev: None, current: Some(solid), next: None };
+            let canvas = compose(&covers, 200, 100, PLAY_SCALE);
+            assert!(canvas.pixels().any(|p| p[3] > 0), "текущая обложка должна что-то нарисовать");
+        }
     }
 }
 

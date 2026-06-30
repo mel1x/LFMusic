@@ -216,3 +216,108 @@ fn compute_bars_from_samples(samples: &[f32], sample_rate: u32, bars: usize) -> 
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine(freq: f32, sample_rate: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                (2.0 * std::f32::consts::PI * freq * t).sin() * 0.8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compute_bars_clamps_count_into_valid_range() {
+        let analyzer = SpectrumAnalyzer::new();
+        assert_eq!(analyzer.compute_bars(0).len(), 1);
+        assert_eq!(analyzer.compute_bars(500).len(), 128);
+        assert_eq!(analyzer.compute_bars(16).len(), 16);
+    }
+
+    #[test]
+    fn compute_bars_is_zero_when_disabled() {
+        let analyzer = SpectrumAnalyzer::new();
+        assert!(!analyzer.is_enabled());
+        let bars = analyzer.compute_bars(8);
+        assert!(bars.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn compute_bars_is_zero_before_buffer_fills_even_when_enabled() {
+        let analyzer = SpectrumAnalyzer::new();
+        analyzer.set_enabled(true);
+        // Подаём меньше сэмплов, чем FFT_SIZE -> буфер ещё не наполнен.
+        analyzer.push_mono(&vec![0.5f32; 100], 44_100);
+        let bars = analyzer.compute_bars(8);
+        assert!(bars.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn compute_bars_is_zero_for_silence_once_filled() {
+        let analyzer = SpectrumAnalyzer::new();
+        analyzer.set_enabled(true);
+        analyzer.push_mono(&vec![0.0f32; FFT_SIZE], 44_100);
+        let bars = analyzer.compute_bars(8);
+        assert!(bars.iter().all(|&v| v == 0.0), "тишина не должна давать полос: {bars:?}");
+    }
+
+    #[test]
+    fn set_enabled_false_resets_buffer_so_reenabling_starts_silent() {
+        let analyzer = SpectrumAnalyzer::new();
+        analyzer.set_enabled(true);
+        analyzer.push_mono(&sine(1000.0, 44_100, FFT_SIZE * 2), 44_100);
+        let active_bars = analyzer.compute_bars(8);
+        assert!(active_bars.iter().any(|&v| v > 0.0), "ожидался ненулевой спектр от синусоиды");
+
+        analyzer.set_enabled(false);
+        analyzer.set_enabled(true);
+        let after_reset = analyzer.compute_bars(8);
+        assert!(
+            after_reset.iter().all(|&v| v == 0.0),
+            "после выключения/включения буфер должен быть пуст: {after_reset:?}"
+        );
+    }
+
+    #[test]
+    fn set_active_false_silences_output_without_clearing_enabled_flag() {
+        let analyzer = SpectrumAnalyzer::new();
+        analyzer.set_enabled(true);
+        analyzer.push_mono(&sine(1000.0, 44_100, FFT_SIZE * 2), 44_100);
+        assert!(analyzer.compute_bars(8).iter().any(|&v| v > 0.0));
+
+        analyzer.set_active(false);
+        let bars = analyzer.compute_bars(8);
+        assert!(bars.iter().all(|&v| v == 0.0));
+        assert!(analyzer.is_enabled(), "set_active не должен трогать enabled");
+    }
+
+    #[test]
+    fn compute_bars_from_samples_handles_degenerate_input() {
+        assert_eq!(compute_bars_from_samples(&[], 44_100, 8), vec![0.0; 8]);
+        assert_eq!(compute_bars_from_samples(&[0.1, 0.2], 0, 8), vec![0.0; 8]);
+    }
+
+    #[test]
+    fn compute_bars_from_samples_peaks_near_tone_frequency() {
+        // 1кГц синус: ожидаем заметную энергию в средней полосе и почти ничего
+        // в самой нижней (около FREQ_MIN=30Гц).
+        let sample_rate = 44_100u32;
+        let samples = sine(1000.0, sample_rate, FFT_SIZE);
+        let bars = compute_bars_from_samples(&samples, sample_rate, 16);
+
+        let max_idx = bars
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+
+        // Полосы разнесены логарифмически от FREQ_MIN(30) до FREQ_MAX(16000);
+        // 1кГц должен попасть в среднюю часть шкалы, точно не в самый нижний бин.
+        assert!(max_idx > 0, "пик не должен быть в самом нижнем (басовом) бине");
+    }
+}

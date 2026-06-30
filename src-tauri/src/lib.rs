@@ -379,12 +379,6 @@ fn player_set_volume(state: State<PlayerState>, volume: f32) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn player_get_volume(state: State<PlayerState>) -> Result<f32, String> {
-    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(player.get_volume())
-}
-
-#[tauri::command]
 fn player_seek(state: State<PlayerState>, position_secs: f64) -> Result<(), String> {
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     player.seek(position_secs)
@@ -485,14 +479,6 @@ fn get_original_track(
         cover_art: metadata.cover_art,
         has_override_cover,
     })
-}
-
-#[tauri::command]
-fn get_supported_formats() -> Vec<String> {
-    AudioPlayer::supported_formats()
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -618,13 +604,6 @@ fn library_remove_folder(
         &separators,
         Some(audio_feature_progress_emitter(app)),
     )
-}
-
-/// Получить все треки из кэша (без пересканирования)
-#[tauri::command(async)]
-fn library_get_tracks(state: State<LibraryState>) -> Result<Vec<TrackMetadata>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(library.get_all_tracks())
 }
 
 /// Упорядоченные пути каталога с фильтром по жанру и/или поисковому запросу.
@@ -1508,12 +1487,6 @@ fn eq_set_bands(
 }
 
 #[tauri::command]
-fn eq_get_bands(state: State<PlayerState>) -> Result<Vec<f32>, String> {
-    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(player.get_eq_bands())
-}
-
-#[tauri::command]
 fn eq_set_gain(
     player_state: State<PlayerState>,
     settings_state: State<SettingsState>,
@@ -1526,12 +1499,6 @@ fn eq_set_gain(
     player.set_eq_gain(gain);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
-}
-
-#[tauri::command]
-fn eq_get_gain(state: State<PlayerState>) -> Result<f32, String> {
-    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(player.get_eq_gain())
 }
 
 #[tauri::command]
@@ -1550,30 +1517,9 @@ fn eq_set_enabled(
 }
 
 #[tauri::command]
-fn eq_get_enabled(state: State<PlayerState>) -> Result<bool, String> {
-    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(player.get_eq_enabled())
-}
-
-#[tauri::command]
 fn eq_get_settings(state: State<PlayerState>) -> Result<EqSettings, String> {
     let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
     Ok(player.get_eq_settings())
-}
-
-#[tauri::command]
-fn eq_set_settings(
-    player_state: State<PlayerState>,
-    settings_state: State<SettingsState>,
-    eq_settings: EqSettings,
-) -> Result<(), String> {
-    let player = player_state
-        .0
-        .read()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    player.set_eq_settings(eq_settings);
-    let eq = player.get_eq_settings();
-    eq_persist(&settings_state, &eq)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1721,19 +1667,6 @@ fn read_image_as_data_url(source_path: String) -> Result<String, String> {
 fn track_clear_all_overrides(library: State<LibraryState>) -> Result<usize, String> {
     let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     lib.clear_all_track_overrides()
-}
-
-/// Полностью сбросить пользовательское переопределение трека
-#[tauri::command]
-fn track_clear_override(
-    library: State<LibraryState>,
-    file_path: String,
-) -> Result<TrackMetadata, String> {
-    {
-        let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        lib.clear_track_override(&file_path)?;
-    }
-    fetch_track_with_override(&library, &file_path)
 }
 
 fn fetch_track_with_override(
@@ -2540,7 +2473,6 @@ pub fn run() {
             player_resume,
             player_stop,
             player_set_volume,
-            player_get_volume,
             player_seek,
             player_seek_crossfade,
             player_get_status,
@@ -2549,13 +2481,11 @@ pub fn run() {
             get_track_metadata,
             get_cover_art,
             get_original_cover_art,
-            get_supported_formats,
             // Библиотека
             library_get_folders,
             library_add_folder,
             library_add_android_music_folders,
             library_remove_folder,
-            library_get_tracks,
             library_get_catalog_paths,
             library_get_tracks_by_paths,
             library_list_genres,
@@ -2622,13 +2552,9 @@ pub fn run() {
             statistics_get_taste_profile,
             // Эквалайзер
             eq_set_bands,
-            eq_get_bands,
             eq_set_gain,
-            eq_get_gain,
             eq_set_enabled,
-            eq_get_enabled,
             eq_get_settings,
-            eq_set_settings,
             // Настройки
             get_settings,
             save_settings,
@@ -2644,7 +2570,6 @@ pub fn run() {
             cover_load_all,
             // Переопределения метаданных трека
             track_set_override,
-            track_clear_override,
             track_clear_all_overrides,
             get_original_track,
             read_image_as_data_url,

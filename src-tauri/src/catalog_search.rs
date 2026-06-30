@@ -387,4 +387,151 @@ mod tests {
         let res = paths(rank(&entries, "imagine", None));
         assert_eq!(res.first(), Some(&"/m/1.mp3"));
     }
+
+    // ── Доп. покрытие ────────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_query_returns_all_entries_in_index_order() {
+        let entries = vec![
+            entry("/m/1.mp3", "B", "X", "Al", None),
+            entry("/m/2.mp3", "A", "X", "Al", None),
+        ];
+        // Пустой запрос не сортирует по алфавиту — отдаёт канонический порядок индекса.
+        assert_eq!(paths(rank(&entries, "", None)), vec!["/m/1.mp3", "/m/2.mp3"]);
+        assert_eq!(paths(rank(&entries, "   ", None)), vec!["/m/1.mp3", "/m/2.mp3"]);
+    }
+
+    #[test]
+    fn empty_query_still_respects_genre_filter() {
+        let entries = vec![
+            entry("/m/1.mp3", "A", "X", "Al", Some("Rock")),
+            entry("/m/2.mp3", "B", "X", "Al", Some("Jazz")),
+        ];
+        assert_eq!(paths(rank(&entries, "", Some("Jazz"))), vec!["/m/2.mp3"]);
+    }
+
+    #[test]
+    fn search_is_case_insensitive() {
+        let entries = vec![entry("/m/1.mp3", "Bohemian Rhapsody", "Queen", "A", None)];
+        assert_eq!(paths(rank(&entries, "RHAPSODY", None)), vec!["/m/1.mp3"]);
+        assert_eq!(paths(rank(&entries, "queen", None)), vec!["/m/1.mp3"]);
+    }
+
+    #[test]
+    fn fuzzy_requires_minimum_length() {
+        // 3-символьный запрос короче FUZZY_MIN_LEN (4) — нечёткое совпадение не
+        // должно срабатывать даже при опечатке в один символ.
+        let entries = vec![entry("/m/1.mp3", "Cat", "X", "Al", None)]; // "Cwt" -> "Cat", 1 правка, но длина 3
+        assert!(rank(&entries, "Cwt", None).is_empty());
+    }
+
+    #[test]
+    fn fuzzy_rejects_too_many_edits() {
+        // 4 символа, порог 0.2 -> floor(4*0.2)=0 правок допустимо => полностью
+        // отличающаяся строка той же длины не должна совпадать.
+        let entries = vec![entry("/m/1.mp3", "Wxyz", "X", "Al", None)];
+        assert!(rank(&entries, "Abcd", None).is_empty());
+    }
+
+    #[test]
+    fn basename_is_searchable_when_tags_are_missing() {
+        let mut entries = vec![SearchEntry::new(
+            "/music/Artist - Great Song.mp3".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )];
+        let res = rank(&entries, "great song", None);
+        assert_eq!(res.len(), 1);
+        // Без тегов остаются только запись и поиск по basename.
+        entries.clear();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn windows_backslash_paths_are_normalized_for_basename() {
+        let e = SearchEntry::new(
+            "C:\\Music\\Artist\\Track Name.flac".to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let entries = vec![e];
+        assert_eq!(paths(rank(&entries, "track name", None)), vec!["C:\\Music\\Artist\\Track Name.flac"]);
+    }
+
+    #[test]
+    fn is_format_query_is_case_and_space_insensitive() {
+        assert!(is_format_query("FLAC"));
+        assert!(is_format_query("  lossless  "));
+        assert!(is_format_query("Mp3"));
+        assert!(!is_format_query("flacx"));
+        assert!(!is_format_query(""));
+    }
+
+    #[test]
+    fn format_query_skips_fuzzy_text_matching() {
+        // is_format_query("flac") == true => allow_fuzzy == false, поэтому трек,
+        // чьё название лишь НЕЧЁТКО похоже на "flac", не должен попасть в выдачу
+        // через текстовый тир — только через точное вхождение или формат файла.
+        let entries = vec![
+            entry("/m/1.mp3", "Flac", "X", "Al", None), // точное вхождение "flac" в title
+            entry("/m/2.flac", "Unrelated", "Y", "Bl", None), // реальный .flac файл
+            entry("/m/3.mp3", "Flak", "Z", "Cl", None), // нечёткое совпадение с "flac" (1 правка) — НЕ должно попасть
+        ];
+        let res = paths(rank(&entries, "flac", None));
+        assert_eq!(res, vec!["/m/1.mp3", "/m/2.flac"]);
+    }
+
+    #[test]
+    fn switch_layout_is_involutive_for_mapped_chars() {
+        // Перевод раскладки туда-обратно должен возвращать исходную строку для
+        // символов, присутствующих в обеих картах.
+        let original = "hello world";
+        let switched = switch_layout(original);
+        let back = switch_layout(&switched);
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn switch_layout_passes_through_unmapped_chars() {
+        // Цифры и большинство пунктуации не размечены ни в одной карте.
+        assert_eq!(switch_layout("12345"), "12345");
+    }
+
+    #[test]
+    fn strip_ext_handles_dotfiles_and_no_extension() {
+        assert_eq!(strip_ext("track"), "track");
+        assert_eq!(strip_ext("track.mp3"), "track");
+        assert_eq!(strip_ext("a.b.c.mp3"), "a.b.c");
+        // Точка в самом конце не считается валидным разделителем расширения.
+        assert_eq!(strip_ext("track."), "track.");
+    }
+
+    #[test]
+    fn extension_ignores_dots_in_directory_components() {
+        // Точка встречается в имени папки, а не в имени файла — расширения нет.
+        assert_eq!(extension("C:/My.Folder/track"), "");
+        assert_eq!(extension("/music/Artist.Name/track.flac"), "flac");
+    }
+
+    #[test]
+    fn genre_filter_excludes_entries_without_genre() {
+        let entries = vec![
+            entry("/m/1.mp3", "Track", "A", "Al", None),
+            entry("/m/2.mp3", "Track", "A", "Al", Some("Rock")),
+        ];
+        let res = paths(rank(&entries, "track", Some("Rock")));
+        assert_eq!(res, vec!["/m/2.mp3"]);
+    }
+
+    #[test]
+    fn levenshtein_distance_basic_cases() {
+        assert_eq!(levenshtein(&[], &[]), 0);
+        let a: Vec<char> = "kitten".chars().collect();
+        let b: Vec<char> = "sitting".chars().collect();
+        assert_eq!(levenshtein(&a, &b), 3);
+    }
 }

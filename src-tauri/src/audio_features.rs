@@ -682,4 +682,119 @@ mod tests {
         assert!(TARGET_SAMPLE_RATE <= 8_000);
         assert!(FFT_SIZE <= 512);
     }
+
+    #[test]
+    fn analyze_samples_below_fft_size_returns_all_none() {
+        let samples = vec![0.3f32; FFT_SIZE - 1];
+        let features = analyze_samples_for_tests(&samples, 11_025);
+        assert_eq!(features.bpm, None);
+        assert_eq!(features.loudness, None);
+        assert_eq!(features.energy, None);
+        assert_eq!(features.danceability, None);
+        assert_eq!(features.spectral_centroid, None);
+        assert_eq!(features.key, None);
+        assert_eq!(features.audio_fingerprint, None);
+    }
+
+    #[test]
+    fn analyze_samples_with_zero_sample_rate_returns_all_none() {
+        let samples = vec![0.3f32; FFT_SIZE * 4];
+        let features = analyze_samples_for_tests(&samples, 0);
+        assert_eq!(features.loudness, None);
+        assert_eq!(features.audio_fingerprint, None);
+    }
+
+    #[test]
+    fn silence_yields_minimum_loudness_and_zero_energy() {
+        let samples = vec![0.0f32; FFT_SIZE * 4];
+        let features = analyze_samples_for_tests(&samples, 11_025);
+        // global_rms(0) -> log10(1e-7) clamped to -90.0 (минимум диапазона).
+        assert_eq!(features.loudness, Some(-90.0));
+        assert_eq!(features.energy, Some(0.0));
+        assert_eq!(features.key, None, "у тишины не должно быть определяемой тональности");
+    }
+
+    #[test]
+    fn normalize_bpm_doubles_slow_tempo_into_target_range() {
+        assert_eq!(normalize_bpm(45.0), 90.0);
+        assert_eq!(normalize_bpm(50.0), 100.0);
+    }
+
+    #[test]
+    fn normalize_bpm_halves_fast_tempo_into_target_range() {
+        assert_eq!(normalize_bpm(200.0), 100.0);
+        assert_eq!(normalize_bpm(300.0), 150.0);
+    }
+
+    #[test]
+    fn normalize_bpm_leaves_in_range_tempo_untouched() {
+        assert_eq!(normalize_bpm(120.0), 120.0);
+        assert_eq!(normalize_bpm(90.0), 90.0);
+        assert_eq!(normalize_bpm(180.0), 180.0);
+    }
+
+    #[test]
+    fn estimate_danceability_is_maximal_for_ideal_dance_tempo() {
+        let d = estimate_danceability(Some(120.0), 1.0, 1.0);
+        assert!((d - 1.0).abs() < 1e-6, "d={d}");
+    }
+
+    #[test]
+    fn estimate_danceability_without_bpm_ignores_tempo_term() {
+        let with_bpm = estimate_danceability(Some(120.0), 0.5, 0.5);
+        let without_bpm = estimate_danceability(None, 0.5, 0.5);
+        assert!(without_bpm < with_bpm);
+        // Без bpm danceability = 0.5*0.68 + 0.5*0.10 (никакого вклада tempo_fit).
+        assert!((without_bpm - (0.5 * 0.68 + 0.5 * 0.10)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn estimate_danceability_clamps_to_unit_range() {
+        assert!(estimate_danceability(Some(120.0), 2.0, 2.0) <= 1.0);
+        assert!(estimate_danceability(Some(-1000.0), 0.0, 0.0) >= 0.0);
+    }
+
+    #[test]
+    fn round2_and_round4_truncate_to_expected_precision() {
+        assert_eq!(round2(1.23456), 1.23);
+        assert_eq!(round2(-1.236), -1.24);
+        assert_eq!(round4(1.234567), 1.2346);
+    }
+
+    #[test]
+    fn detect_key_returns_none_for_silent_chroma() {
+        assert_eq!(detect_key(&[0.0; 12]), None);
+    }
+
+    #[test]
+    fn fft_radix2_matches_naive_dft_for_random_signal() {
+        // Сверяем кастомный in-place radix-2 БПФ с прямым (наивным) ДПФ —
+        // ловит ошибки в перестановке/бабочках, которые синус-тесты выше могут
+        // не заметить (амплитуда верна, но фаза/бины слегка не те).
+        let n = 64usize;
+        let mut input: Vec<Complex> = (0..n)
+            .map(|i| Complex::new(((i * 37 % 13) as f32) - 6.0, ((i * 19 % 11) as f32) - 5.0))
+            .collect();
+
+        // Наивное ДПФ для сверки.
+        let mut expected = vec![Complex::new(0.0, 0.0); n];
+        for (k, slot) in expected.iter_mut().enumerate() {
+            let mut re = 0.0f32;
+            let mut im = 0.0f32;
+            for (t, sample) in input.iter().enumerate() {
+                let angle = -2.0 * std::f32::consts::PI * (k as f32) * (t as f32) / n as f32;
+                let (s, c) = angle.sin_cos();
+                re += sample.re * c - sample.im * s;
+                im += sample.re * s + sample.im * c;
+            }
+            *slot = Complex::new(re, im);
+        }
+
+        fft_radix2(&mut input);
+
+        for (got, exp) in input.iter().zip(expected.iter()) {
+            assert!((got.re - exp.re).abs() < 0.01, "re mismatch: {} vs {}", got.re, exp.re);
+            assert!((got.im - exp.im).abs() < 0.01, "im mismatch: {} vs {}", got.im, exp.im);
+        }
+    }
 }

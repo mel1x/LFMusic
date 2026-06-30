@@ -129,4 +129,99 @@ mod tests {
             "пустой download_dir не должен сериализоваться"
         );
     }
+
+    #[test]
+    fn proxy_fields_round_trip_and_are_absent_when_none() {
+        let s: AppSettings = serde_json::from_str(
+            r#"{"proxy_mode": "custom", "proxy_url": "socks5://127.0.0.1:1080"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.proxy_mode.as_deref(), Some("custom"));
+        assert_eq!(s.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
+        assert!(!s.options.contains_key("proxy_mode"));
+        assert!(!s.options.contains_key("proxy_url"));
+
+        let empty: AppSettings = serde_json::from_str("{}").unwrap();
+        let out = serde_json::to_string(&empty).unwrap();
+        assert!(!out.contains("proxy_mode"));
+        assert!(!out.contains("proxy_url"));
+    }
+
+    #[test]
+    fn eq_settings_defaults_when_absent_from_json() {
+        let s: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!s.eq_settings.enabled);
+        assert_eq!(s.eq_settings.bands.len(), 10);
+        assert!(s.eq_settings.bands.iter().all(|&b| b == 0.0));
+    }
+
+    #[test]
+    fn option_bool_reads_present_value() {
+        let mut s = AppSettings::default();
+        s.options
+            .insert("crossfade_on_seek".to_string(), serde_json::Value::Bool(true));
+        assert!(option_bool(&s, "crossfade_on_seek", false));
+    }
+
+    #[test]
+    fn option_bool_falls_back_to_default_when_missing_or_wrong_type() {
+        let mut s = AppSettings::default();
+        assert!(!option_bool(&s, "missing_key", false));
+        assert!(option_bool(&s, "missing_key", true));
+
+        // Значение неверного типа (строка вместо bool) не должно паниковать и
+        // должно трактоваться как «значения нет» -> дефолт.
+        s.options.insert(
+            "static_accent_color".to_string(),
+            serde_json::Value::String("#3D3D3D".to_string()),
+        );
+        assert!(!option_bool(&s, "static_accent_color", false));
+        assert!(option_bool(&s, "static_accent_color", true));
+    }
+
+    #[test]
+    fn load_missing_file_returns_default_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "lfmusic_settings_missing_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Папка намеренно не создаётся — файла settings.json там нет и быть не может.
+        let s = load(&dir);
+        assert!(s.options.is_empty());
+        assert_eq!(s.download_dir, None);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "lfmusic_settings_roundtrip_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        let mut original = AppSettings::default();
+        original
+            .options
+            .insert("show_github_badge".to_string(), serde_json::Value::Bool(false));
+        original.download_dir = Some("D:/Music/Downloads".to_string());
+        original.proxy_mode = Some("none".to_string());
+
+        save(&dir, &original).expect("save settings");
+        let loaded = load(&dir);
+
+        assert_eq!(loaded.download_dir, original.download_dir);
+        assert_eq!(loaded.proxy_mode, original.proxy_mode);
+        assert_eq!(
+            loaded.options.get("show_github_badge"),
+            Some(&serde_json::Value::Bool(false))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
