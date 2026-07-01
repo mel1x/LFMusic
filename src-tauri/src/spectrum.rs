@@ -1,11 +1,9 @@
-//! Реальный анализатор спектра воспроизводимого аудио.
+//! Real-time spectrum analyzer for playing audio.
 //!
-//! Продюсер — это `AnalyzerSource` в аудио-потоке (см. `audio_player`), который
-//! сводит выходной сигнал (после EQ, т.е. то, что реально слышно) в моно и
-//! складывает блоки сэмплов в кольцевой буфер. Консьюмер — IPC-команда
-//! `audio_get_spectrum`, которую фронтенд опрашивает на каждом кадре rAF
-//! (30/60 fps). Для каждого запроса по последнему окну буфера считается БПФ
-//! и сворачивается в `bars` логарифмически разнесённых частотных полос.
+//! Producer: `AnalyzerSource` in the audio thread (see `audio_player`) mixes
+//! the post-EQ output to mono into a ring buffer. Consumer: the
+//! `audio_get_spectrum` IPC command, polled by the frontend every rAF frame
+//! (30/60 fps), which FFTs the latest window into `bars` log-spaced bands.
 
 use crate::audio_features::hann_window;
 use rustfft::num_complex::Complex32;
@@ -14,38 +12,34 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Размер окна БПФ (степень двойки). При 44.1 кГц это ~46 мс сигнала —
-/// достаточно для разрешения низов и при этом отзывчиво на кадрах 60 fps.
+/// FFT window size (power of two). At 44.1kHz this is ~46ms — enough bass
+/// resolution while staying responsive at 60fps.
 const FFT_SIZE: usize = 2048;
 
-/// Нижняя/верхняя границы видимого спектра. Низ обрезаем по 30 Гц (ниже —
-/// субинфразвук, на полосах не виден), верх — по 16 кГц.
+/// Visible spectrum range: below 30Hz is inaudible on bars, above 16kHz is cut.
 const FREQ_MIN: f32 = 30.0;
 const FREQ_MAX: f32 = 16_000.0;
 
-/// Диапазон отображаемой громкости в дБ. Магнитуды переводятся в дБ и
-/// линейно нормируются из [FLOOR, CEIL] в [0, 1].
+/// dB range mapped linearly to [0, 1] for bar height.
 const DB_FLOOR: f32 = -72.0;
 const DB_CEIL: f32 = -14.0;
 
 pub struct SpectrumAnalyzer {
-    /// Нужен ли визуализатор сейчас (включён ли блок на фронтенде). Пока
-    /// выключен — продюсер (`AnalyzerSource`) не делает вообще ничего, кроме
-    /// одной relaxed-загрузки этого флага на сэмпл. Лежит отдельно от мьютекса,
-    /// чтобы проверка в аудио-потоке была без блокировки.
+    /// Single global flag (not per-visualizer): kept outside the mutex so the
+    /// audio thread can check it with a lock-free relaxed load per sample.
+    /// Multiple visualizer instances share this one flag.
     enabled: AtomicBool,
     inner: Mutex<Inner>,
 }
 
 struct Inner {
-    /// Кольцевой буфер моно-сэмплов.
     ring: Box<[f32; FFT_SIZE]>,
-    /// Индекс следующей записи (он же — позиция самого старого сэмпла).
+    /// Next write index; also the position of the oldest sample.
     write: usize,
-    /// Сколько сэмплов уже записано (до FFT_SIZE).
+    /// Samples written so far, capped at FFT_SIZE.
     filled: usize,
     sample_rate: u32,
-    /// Идёт ли сейчас подача звука (для возврата нулей в покое/после стопа).
+    /// Whether audio is currently flowing (returns zeros when idle/stopped).
     active: bool,
 }
 
@@ -63,12 +57,10 @@ impl SpectrumAnalyzer {
         }
     }
 
-    /// Включить/выключить визуализатор. Управляется фронтендом по настройке
-    /// блока плеера: пока выключено — спектр не снимается и не считается.
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
         if !enabled {
-            // Чтобы при повторном включении не мигнуть «хвостом» прошлого звука.
+            // Clear buffer so re-enabling doesn't flash a stale tail.
             if let Ok(mut g) = self.inner.lock() {
                 g.active = false;
                 g.filled = 0;
@@ -77,13 +69,12 @@ impl SpectrumAnalyzer {
         }
     }
 
-    /// Снимается ли сейчас спектр (проверяется продюсером без блокировки).
     #[inline]
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    /// Продюсер: добавить блок моно-сэмплов из аудио-потока.
+    /// Producer: append a mono sample block from the audio thread.
     pub fn push_mono(&self, block: &[f32], sample_rate: u32) {
         if let Ok(mut g) = self.inner.lock() {
             if sample_rate > 0 {
@@ -101,15 +92,14 @@ impl SpectrumAnalyzer {
         }
     }
 
-    /// Пометить поток как активный/неактивный (стоп воспроизведения).
     pub fn set_active(&self, active: bool) {
         if let Ok(mut g) = self.inner.lock() {
             g.active = active;
         }
     }
 
-    /// Консьюмер: посчитать `bars` нормированных (0..1) частотных полос по
-    /// последнему окну буфера. В покое и при недоборе сэмплов возвращает нули.
+    /// Consumer: compute `bars` normalized (0..1) frequency bands from the
+    /// latest buffer window; zeros when idle or buffer isn't full yet.
     pub fn compute_bars(&self, bars: usize) -> Vec<f32> {
         let bars = bars.clamp(1, 128);
         if !self.is_enabled() {
@@ -124,7 +114,7 @@ impl SpectrumAnalyzer {
             if !g.active || g.filled < FFT_SIZE {
                 return vec![0.0; bars];
             }
-            // Копируем кольцо в хронологическом порядке (от старого к новому).
+            // Copy the ring in chronological (oldest-to-newest) order.
             let mut buf = vec![0.0f32; FFT_SIZE];
             let start = g.write;
             for (i, slot) in buf.iter_mut().enumerate() {
@@ -133,14 +123,12 @@ impl SpectrumAnalyzer {
             (buf, g.sample_rate)
         };
 
-        // Тяжёлую часть (БПФ) считаем уже без блокировки.
+        // FFT itself runs without holding the lock.
         compute_bars_from_samples(&samples, sample_rate, bars)
     }
 }
 
-/// Спланированный rustfft на текущий размер окна. Планировщик кэширует план
-/// внутри, поэтому повторные вызовы (на каждом кадре) дёшевы; SIMD-ядро
-/// (SSE/AVX/NEON) выбирается под CPU автоматически.
+/// rustfft caches the plan internally, so repeated per-frame calls are cheap.
 fn fft_plan(n: usize) -> Arc<dyn Fft<f32>> {
     static PLANNER: OnceLock<Mutex<FftPlanner<f32>>> = OnceLock::new();
     PLANNER
@@ -151,10 +139,8 @@ fn fft_plan(n: usize) -> Arc<dyn Fft<f32>> {
 }
 
 thread_local! {
-    /// Кэш окна Ханна (пара «размер → окно»): косинусы считаются один раз, а не
-    /// на каждом кадре rAF.
     static HANN_CACHE: RefCell<(usize, Vec<f32>)> = const { RefCell::new((0, Vec::new())) };
-    /// Переиспользуемый scratch-буфер rustfft — без аллокаций на кадр.
+    /// Reused rustfft scratch buffer, avoids per-frame allocation.
     static FFT_SCRATCH: RefCell<Vec<Complex32>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -192,7 +178,7 @@ fn compute_bars_from_samples(samples: &[f32], sample_rate: u32, bars: usize) -> 
 
     let mut out = vec![0.0f32; bars];
     for (b, slot) in out.iter_mut().enumerate() {
-        // Логарифмически разнесённые границы полосы.
+        // Log-spaced band boundaries.
         let lo = FREQ_MIN * ratio.powf(b as f32 / bars as f32);
         let hi = FREQ_MIN * ratio.powf((b + 1) as f32 / bars as f32);
         let bin_lo = ((lo / bin_hz).floor() as usize).max(1);
@@ -200,17 +186,15 @@ fn compute_bars_from_samples(samples: &[f32], sample_rate: u32, bars: usize) -> 
 
         let mut sum = 0.0f32;
         for bin in bin_lo..bin_hi {
-            // Нормируем магнитуду на размер окна, чтобы шкала не зависела от FFT_SIZE.
+            // Normalize by window size so scale doesn't depend on FFT_SIZE.
             sum += buffer[bin].norm() / n as f32;
         }
         let avg = sum / (bin_hi - bin_lo) as f32;
 
-        // Перцептивная шкала: магнитуда → дБ → [0, 1].
         let db = 20.0 * (avg + 1e-7).log10();
         let norm = ((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR)).clamp(0.0, 1.0);
 
-        // Лёгкий подъём верхов: высокочастотные полосы обычно тише, без наклона
-        // визуализатор «проседает» справа.
+        // Slight high-frequency boost: without it, high bands look flat/dead.
         let tilt = 1.0 + 0.5 * (b as f32 / bars.max(1) as f32);
         *slot = (norm * tilt).clamp(0.0, 1.0);
     }
@@ -250,7 +234,7 @@ mod tests {
     fn compute_bars_is_zero_before_buffer_fills_even_when_enabled() {
         let analyzer = SpectrumAnalyzer::new();
         analyzer.set_enabled(true);
-        // Подаём меньше сэмплов, чем FFT_SIZE -> буфер ещё не наполнен.
+        // Fewer samples than FFT_SIZE -> buffer not yet full.
         analyzer.push_mono(&vec![0.5f32; 100], 44_100);
         let bars = analyzer.compute_bars(8);
         assert!(bars.iter().all(|&v| v == 0.0));
@@ -303,8 +287,7 @@ mod tests {
 
     #[test]
     fn compute_bars_from_samples_peaks_near_tone_frequency() {
-        // 1кГц синус: ожидаем заметную энергию в средней полосе и почти ничего
-        // в самой нижней (около FREQ_MIN=30Гц).
+        // 1kHz sine: expect energy in the mid band, near-nothing in the lowest.
         let sample_rate = 44_100u32;
         let samples = sine(1000.0, sample_rate, FFT_SIZE);
         let bars = compute_bars_from_samples(&samples, sample_rate, 16);
@@ -316,8 +299,8 @@ mod tests {
             .map(|(i, _)| i)
             .unwrap();
 
-        // Полосы разнесены логарифмически от FREQ_MIN(30) до FREQ_MAX(16000);
-        // 1кГц должен попасть в среднюю часть шкалы, точно не в самый нижний бин.
+        // Bands are log-spaced from FREQ_MIN(30) to FREQ_MAX(16000); 1kHz
+        // should land mid-scale, not in the lowest (bass) bin.
         assert!(max_idx > 0, "пик не должен быть в самом нижнем (басовом) бине");
     }
 }

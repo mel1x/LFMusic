@@ -1,17 +1,12 @@
-//! Резолвер внешних утилит **yt-dlp** и **ffmpeg** для страницы «Скачивание».
+//! Resolver for external **yt-dlp** and **ffmpeg** binaries used by the download page.
 //!
-//! Резолв (`resolve_ytdlp`/`resolve_ffmpeg`): bin-папка приложения
-//! (`<app_data_dir>/bin`) → системный `PATH`. Автоскачивания при резолве нет —
-//! установка только явная, со страницы настроек (`install_ytdlp`/`install_ffmpeg`,
-//! у yt-dlp с привязкой к версии и проверкой контрольной суммы). Так воркер
-//! скачивания не тянет бинари из сети молча (supply-chain).
+//! Resolve order: app bin dir (`<app_data_dir>/bin`) → system `PATH`. No silent
+//! auto-download on resolve — install is explicit only, so the download worker
+//! never pulls binaries from the network unnoticed (supply-chain).
 //!
-//! - **yt-dlp** распространяется одним бинарём — качается напрямую с GitHub
-//!   releases под текущую платформу (обязателен для скачивания треков).
-//! - **ffmpeg** ставится из готовых сборок под ОС: Windows/Linux —
-//!   `yt-dlp/FFmpeg-Builds` (zip / `tar.xz`), macOS — `evermeet.cx` (zip). Он
-//!   опционален: большинство аудиопотоков скачиваются и без него (с ним — лучший
-//!   выбор форматов и ремукс в поддерживаемый библиотекой контейнер).
+//! - **yt-dlp**: single binary, fetched from GitHub releases for the current platform.
+//! - **ffmpeg**: optional (most audio downloads work without it); prebuilt from
+//!   `yt-dlp/FFmpeg-Builds` on Windows/Linux, `evermeet.cx` on macOS.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,68 +15,77 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-/// Сериализуем подготовку утилит: воркер очереди, кнопка «Установить» на странице
-/// настроек и обновление могут вызвать скачивание одновременно — без блокировки
-/// они писали бы в один `.part` и портили бинарь. Конкурентный вызов дождётся и
-/// найдёт уже скачанное.
+/// Serializes tool installs: queue worker, settings "Install" button, and
+/// update could all trigger a download at once and race on the same `.part`
+/// file. A concurrent call just waits and finds the already-downloaded binary.
 static ENSURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Резолвнутые пути к утилитам. `ffmpeg`/`deno` опциональны.
 pub struct ResolvedTools {
     pub ytdlp: PathBuf,
     pub ffmpeg: Option<PathBuf>,
-    /// JS-движок для yt-dlp (расшифровка nsig YouTube). Без него часть форматов
-    /// недоступна.
+    /// JS runtime for yt-dlp (YouTube nsig decryption); some formats unavailable without it.
     pub deno: Option<PathBuf>,
-    /// Файл cookies (Netscape) для yt-dlp (`--cookies`), если пользователь
-    /// авторизовался в YouTube.
     pub cookies_file: Option<PathBuf>,
-    /// Значение для `--proxy` yt-dlp по настройкам. `None` — флаг не передаём
-    /// (системный прокси/окружение). `Some("")` — прямое соединение (режим «нет»).
-    /// `Some(url)` — заданный прокси (режим «указать»).
+    /// `--proxy` value: `None` = don't pass the flag (system proxy/env), `Some("")` =
+    /// direct connection, `Some(url)` = explicit proxy.
     pub proxy: Option<String>,
+    /// PO-token provider for YouTube's bot-wall (script/CLI mode, no server).
+    pub pot: Option<PotProvider>,
 }
 
-/// Информация об одной внешней утилите (для страницы настроек/уведомлений).
+/// Resolved PO-token provider (bgutil-pot): a plain executable invoked fresh
+/// per token by yt-dlp's own plugin — there is no persistent server/port to
+/// manage here, matching how yt-dlp/ffmpeg/Deno are already just short-lived
+/// subprocesses. `cli_path` becomes the plugin's `cli_path=` extractor-arg,
+/// `plugin_dir` becomes yt-dlp's `--plugin-dirs` so the plugin is found at all.
+#[derive(Debug, Clone)]
+pub struct PotProvider {
+    pub cli_path: PathBuf,
+    pub plugin_dir: PathBuf,
+}
+
+/// Normalizes a path for passing through yt-dlp's Python arg parser, where a
+/// literal backslash can be read as an escape char (forward slashes work fine
+/// on Windows and the drive letter is kept as-is).
+pub fn normalize_path_arg(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ToolInfo {
-    /// Утилита доступна (в bin-папке приложения или в системном `PATH`).
     pub installed: bool,
-    /// Установлена приложением (лежит в bin-папке) — её можно обновлять/удалять.
+    /// Installed by the app (lives in the bin dir) — can be updated/removed.
     pub managed: bool,
-    /// Версия установленной утилиты (человекочитаемая), если удалось получить.
     pub version: Option<String>,
-    /// Доступна более новая версия. Для yt-dlp определяется и для системного
-    /// (PATH) — обновление скачается как управляемое приложением; для ffmpeg —
-    /// только для managed (версию системной сборки надёжно не сравнить).
+    /// yt-dlp: computed even for a system (PATH) install, since an update lands
+    /// in the app bin dir and becomes managed. ffmpeg: only for managed (can't
+    /// reliably version-compare a system build).
     pub update_available: bool,
 }
 
-/// Сведения об утилитах. Deno ставится/удаляется вместе с yt-dlp, но статус несём
-/// полноценным `ToolInfo` (а не голым флагом): UI должен видеть `managed`, чтобы
-/// разрешить удаление app-managed Deno в сценарии «yt-dlp из PATH + Deno от
-/// приложения», а также показать версию.
+/// Deno installs/removes alongside yt-dlp, but is tracked as a full `ToolInfo`
+/// (not a bare flag) so the UI can show its version and allow removing an
+/// app-managed Deno even when yt-dlp itself comes from PATH.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ToolsInfo {
     pub ytdlp: ToolInfo,
     pub ffmpeg: ToolInfo,
-    /// JS-движок Deno (нужен yt-dlp для YouTube).
     pub deno: ToolInfo,
+    /// PO-token provider for YouTube's bot-wall — desktop-only, installed
+    /// independently of the rest (not part of "install all").
+    pub pot: ToolInfo,
 }
 
-/// Создаёт `Command` без всплывающего консольного окна на Windows.
+/// `Command` without a flashing console window on Windows.
 pub fn silent_command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
-    // Примечание: yt-dlp (frozen-exe) принудительно ставит кодировку stdout по
-    // локали (на Windows — cp1251) и игнорирует PYTHONIOENCODING/PYTHONUTF8.
-    // Поэтому кодировку не навязываем здесь, а делаем чтение его stdout/stderr
-    // устойчивым к не-UTF-8 (потерьное декодирование в downloads.rs) — иначе
-    // строгий UTF-8-ридер обрывался бы на кириллице и yt-dlp падал с [Errno 22].
+    // yt-dlp (frozen-exe) forces stdout encoding to the OS locale (cp1251 on
+    // Windows) and ignores PYTHONIOENCODING/PYTHONUTF8. We don't fight it here;
+    // downloads.rs does lossy decoding instead, since a strict UTF-8 reader
+    // would abort on Cyrillic output and yt-dlp would fail with [Errno 22].
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW — чтобы при каждом запуске yt-dlp/ffmpeg не мигала
-        // консоль (приложение с decorations:false, окна быть не должно).
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
@@ -114,7 +118,36 @@ fn deno_local(app_data_dir: &Path) -> PathBuf {
     bin_dir(app_data_dir).join(if cfg!(windows) { "deno.exe" } else { "deno" })
 }
 
-/// Запускается ли программа с аргументом версии (проверка работоспособности).
+fn pot_local(app_data_dir: &Path) -> PathBuf {
+    bin_dir(app_data_dir).join(if cfg!(windows) {
+        "bgutil-pot.exe"
+    } else {
+        "bgutil-pot"
+    })
+}
+
+/// Directory passed to yt-dlp's `--plugin-dirs`; holds only the POT provider's
+/// script/CLI plugin as a `yt_dlp_plugins/extractor/...` namespace package.
+fn pot_plugin_dir(app_data_dir: &Path) -> PathBuf {
+    bin_dir(app_data_dir).join("yt-dlp-plugins")
+}
+
+/// The script/CLI provider's files, relative to [`pot_plugin_dir`]. The
+/// HTTP-server provider (`getpot_bgutil_http.py`) is deliberately not
+/// installed — we only ever run bgutil-pot in one-shot CLI mode, and shipping
+/// the HTTP provider too would make yt-dlp waste a request probing a server
+/// that will never exist (it's tried at higher preference than the CLI one).
+const POT_PLUGIN_FILES: &[&str] = &[
+    "yt_dlp_plugins/extractor/getpot_bgutil.py",
+    "yt_dlp_plugins/extractor/getpot_bgutil_cli.py",
+];
+
+fn pot_plugin_files_present(app_data_dir: &Path) -> bool {
+    let dir = pot_plugin_dir(app_data_dir);
+    POT_PLUGIN_FILES.iter().all(|rel| dir.join(rel).exists())
+}
+
+/// Sanity-checks that `program` runs by invoking it with a version argument.
 fn runs(program: &Path, version_arg: &str) -> bool {
     silent_command(program)
         .arg(version_arg)
@@ -126,7 +159,6 @@ fn runs(program: &Path, version_arg: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Находит рабочий yt-dlp (bin-папка → PATH), без скачивания.
 pub fn resolve_ytdlp(app_data_dir: &Path) -> Option<PathBuf> {
     let local = ytdlp_local(app_data_dir);
     if local.exists() && runs(&local, "--version") {
@@ -139,7 +171,6 @@ pub fn resolve_ytdlp(app_data_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Находит рабочий ffmpeg (bin-папка → PATH), без скачивания.
 pub fn resolve_ffmpeg(app_data_dir: &Path) -> Option<PathBuf> {
     let local = ffmpeg_local(app_data_dir);
     if local.exists() && runs(&local, "-version") {
@@ -152,9 +183,8 @@ pub fn resolve_ffmpeg(app_data_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Находит рабочий Deno (bin-папка → PATH), без скачивания. Deno — JS-движок для
-/// yt-dlp (расшифровка nsig YouTube); без него часть форматов недоступна и для
-/// некоторых потоков скачивание падает с `[Errno 22]`.
+/// Deno is yt-dlp's JS runtime for YouTube nsig decryption; without it some
+/// streams fail to download with `[Errno 22]`.
 pub fn resolve_deno(app_data_dir: &Path) -> Option<PathBuf> {
     let local = deno_local(app_data_dir);
     if local.exists() && runs(&local, "--version") {
@@ -167,22 +197,37 @@ pub fn resolve_deno(app_data_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Аргумент `--js-runtimes deno:<путь>` для yt-dlp, если Deno доступен. Наш бинарь
-/// лежит в bin-папке (не в PATH), поэтому передаём абсолютный путь явно.
+/// PO-token provider for YouTube's bot-wall. `Some` only when both the binary
+/// and its yt-dlp plugin files are present — installed as a unit by
+/// [`install_pot`], so a half-finished install just resolves to `None`
+/// (downloads fall back to today's behavior) rather than a broken state.
+pub fn resolve_pot(app_data_dir: &Path) -> Option<PotProvider> {
+    let local = pot_local(app_data_dir);
+    if !local.exists() || !runs(&local, "--version") {
+        return None;
+    }
+    if !pot_plugin_files_present(app_data_dir) {
+        return None;
+    }
+    Some(PotProvider {
+        cli_path: local,
+        plugin_dir: pot_plugin_dir(app_data_dir),
+    })
+}
+
 pub fn deno_js_runtime_arg(app_data_dir: &Path) -> Option<String> {
     let deno = resolve_deno(app_data_dir)?;
     Some(deno_runtime_value(&deno))
 }
 
-/// Значение `deno:<путь>` для `--js-runtimes`. Обратные слэши Windows заменяем на
-/// прямые: внутри yt-dlp путь проходит через парсер аргументов Python, где `\`
-/// может быть истолкован как экранирующий символ. Прямые слэши Windows принимает
-/// штатно, а драйв-литера (`C:/…`) сохраняется (это НЕ MSYS-форма `/c/…`).
+/// Backslashes are converted to forward slashes: the path passes through
+/// yt-dlp's Python arg parser where `\` can be read as an escape char. Forward
+/// slashes work fine on Windows and the drive letter (`C:/…`) is kept as-is
+/// (not the MSYS `/c/…` form).
 pub fn deno_runtime_value(deno: &Path) -> String {
-    format!("deno:{}", deno.to_string_lossy().replace('\\', "/"))
+    format!("deno:{}", normalize_path_arg(deno))
 }
 
-/// Текущая доступность утилит (без скачивания) — для статуса на странице.
 pub fn check(app_data_dir: &Path) -> (bool, bool) {
     (
         resolve_ytdlp(app_data_dir).is_some(),
@@ -193,7 +238,7 @@ pub fn check(app_data_dir: &Path) -> (bool, bool) {
 fn http_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .user_agent("LFMusic/0.1.0 (+https://github.com/mel1x/LFMusic)")
-        // Бинари крупные (десятки МБ) — общий таймаут не ставим, только на коннект.
+        // Binaries are large (tens of MB) — only bound the connect, not the whole transfer.
         .connect_timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())
@@ -211,7 +256,7 @@ fn fmt_progress(done: u64, total: Option<u64>) -> String {
     }
 }
 
-/// Качает файл по URL в `target` (атомарно: `.part` → rename), сообщая прогресс.
+/// Downloads to `target` atomically (`.part` → rename), reporting progress.
 fn download_to_file(
     url: &str,
     target: &Path,
@@ -251,7 +296,6 @@ fn download_to_file(
     Ok(())
 }
 
-/// Имя ассета yt-dlp под текущую платформу (как в релизе на GitHub).
 fn ytdlp_asset_name() -> &'static str {
     #[cfg(windows)]
     {
@@ -267,7 +311,6 @@ fn ytdlp_asset_name() -> &'static str {
     }
 }
 
-/// Имя zip-ассета Deno под текущую платформу (как в релизе на GitHub).
 fn deno_asset_name() -> &'static str {
     let arm = std::env::consts::ARCH == "aarch64";
     #[cfg(windows)]
@@ -296,6 +339,27 @@ fn deno_asset_name() -> &'static str {
     }
 }
 
+/// `None` on platforms/architectures with no published release asset (Android,
+/// 32-bit, Windows on ARM64) — the tool is simply not offered there.
+fn pot_asset_name() -> Option<&'static str> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    return Some("bgutil-pot-windows-x86_64.exe");
+    #[cfg(target_os = "macos")]
+    return Some(if std::env::consts::ARCH == "aarch64" {
+        "bgutil-pot-macos-aarch64"
+    } else {
+        "bgutil-pot-macos-x86_64"
+    });
+    #[cfg(target_os = "linux")]
+    return Some(if std::env::consts::ARCH == "aarch64" {
+        "bgutil-pot-linux-aarch64"
+    } else {
+        "bgutil-pot-linux-x86_64"
+    });
+    #[allow(unreachable_code)]
+    None
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -306,7 +370,6 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// SHA256 файла в hex (нижний регистр).
 fn sha256_hex(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -315,12 +378,11 @@ fn sha256_hex(path: &Path) -> Result<String, String> {
     Ok(hex_encode(hasher.finalize().as_slice()))
 }
 
-/// Ожидаемый SHA256 ассета из файла `SHA256SUMS` конкретного релиза yt-dlp.
-/// Привязка к версии (tag) гарантирует, что сумма и бинарь — из одного релиза.
+/// Fetches the expected SHA256 from a specific yt-dlp release's checksums file,
+/// pinned by tag so the checksum and binary come from the same release.
 fn fetch_ytdlp_sha256(tag: &str, asset: &str) -> Option<String> {
-    // ВАЖНО: ассет с суммами называется `SHA2-256SUMS` (а НЕ `SHA256SUMS`).
-    // С неверным именем GitHub отдавал 404 — сумма не находилась, и install_ytdlp
-    // удалял уже скачанный бинарь, считая его непроверяемым.
+    // The checksums asset is named `SHA2-256SUMS`, not `SHA256SUMS` — the wrong
+    // name 404s and install_ytdlp would discard the binary as unverifiable.
     let url = format!(
         "https://github.com/yt-dlp/yt-dlp/releases/download/{}/SHA2-256SUMS",
         tag
@@ -340,7 +402,7 @@ fn fetch_ytdlp_sha256(tag: &str, asset: &str) -> Option<String> {
         let (Some(hash), Some(name)) = (it.next(), it.next()) else {
             continue;
         };
-        // Формат sha256sum может пометить бинарный режим звёздочкой перед именем.
+        // sha256sum binary-mode entries may prefix the name with '*'.
         if name.trim_start_matches('*') == asset {
             return Some(hash.to_lowercase());
         }
@@ -358,10 +420,8 @@ fn make_executable(p: &Path) -> Result<(), String> {
     std::fs::set_permissions(p, perms).map_err(|e| e.to_string())
 }
 
-/// Извлекает указанные бинарники из zip-архива (по базовому имени файла) в
-/// bin-папку. На Unix проставляет +x. Возвращает путь к первому из `wanted`.
-/// Доступно на всех десктоп-платформах: ffmpeg-zip (Windows/macOS) и Deno-zip
-/// (Windows/macOS/Linux) распаковываются одинаково.
+/// Extracts the named binaries from a zip (matched by basename, ignoring
+/// internal path) into `bin`, setting +x on Unix. Returns the path to `wanted[0]`.
 fn extract_zip_binaries(zip_path: &Path, bin: &Path, wanted: &[&str]) -> Result<PathBuf, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -388,8 +448,39 @@ fn extract_zip_binaries(zip_path: &Path, bin: &Path, wanted: &[&str]) -> Result<
     }
 }
 
-/// Качает ffmpeg (Windows: zip из yt-dlp/FFmpeg-Builds) и распаковывает
-/// `ffmpeg.exe`/`ffprobe.exe` в bin-папку.
+/// Extracts specific entries (matched by full in-archive path, not basename)
+/// into `dest_root`, recreating their parent directories. Unlike
+/// [`extract_zip_binaries`] this preserves the archive's internal layout —
+/// needed for a Python namespace-package plugin, where the
+/// `yt_dlp_plugins/extractor/` structure must stay intact for yt-dlp's
+/// `--plugin-dirs` to discover it.
+fn extract_zip_paths(zip_path: &Path, dest_root: &Path, wanted: &[&str]) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut found = vec![false; wanted.len()];
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().replace('\\', "/");
+        let Some(idx) = wanted.iter().position(|w| *w == name) else {
+            continue;
+        };
+        let out = dest_root.join(&name);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut out_file = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
+        found[idx] = true;
+    }
+    if let Some(pos) = found.iter().position(|f| !f) {
+        return Err(format!("{} не найден в архиве", wanted[pos]));
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn download_ffmpeg_impl(
     dest: &Path,
@@ -407,9 +498,8 @@ fn download_ffmpeg_impl(
     result
 }
 
-/// Качает ffmpeg (Linux: tar.xz из yt-dlp/FFmpeg-Builds). Поток: скачиваем .tar.xz
-/// → распаковываем xz на диск во .tar (чистый Rust, без системного liblzma) →
-/// извлекаем из tar `ffmpeg`/`ffprobe` в bin-папку и ставим +x.
+/// Linux ffmpeg: download .tar.xz, decompress to .tar with pure-Rust lzma
+/// (no system liblzma dependency), then extract ffmpeg/ffprobe and chmod +x.
 #[cfg(target_os = "linux")]
 fn download_ffmpeg_impl(
     dest: &Path,
@@ -426,7 +516,7 @@ fn download_ffmpeg_impl(
     download_to_file(url, &xz_path, &mut progress)?;
 
     let result = (|| -> Result<PathBuf, String> {
-        // xz → tar (стримим файл→файл, чтобы не держать ~150 МБ в памяти).
+        // Stream xz -> tar file-to-file rather than buffering ~150MB in memory.
         {
             let xz_file = std::fs::File::open(&xz_path).map_err(|e| e.to_string())?;
             let mut reader = std::io::BufReader::new(xz_file);
@@ -469,8 +559,8 @@ fn download_ffmpeg_impl(
     result
 }
 
-/// Качает ffmpeg (macOS: zip с evermeet.cx — по одиночному бинарю на архив).
-/// Сборки Intel; на Apple Silicon запускаются через Rosetta. ffprobe — опционально.
+/// macOS ffmpeg from evermeet.cx (Intel builds, run under Rosetta on Apple
+/// Silicon). ffprobe is best-effort/optional.
 #[cfg(target_os = "macos")]
 fn download_ffmpeg_impl(
     dest: &Path,
@@ -488,7 +578,6 @@ fn download_ffmpeg_impl(
     let _ = std::fs::remove_file(&ffmpeg_zip);
     let ffmpeg = ffmpeg_res?;
 
-    // ffprobe — best-effort (для нашего сценария не критичен).
     let ffprobe_zip = bin.join("ffprobe-download.zip");
     if download_to_file(
         "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
@@ -504,11 +593,6 @@ fn download_ffmpeg_impl(
     Ok(ffmpeg)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Версии / статус утилит (страница настроек, уведомления)
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Запускает программу и возвращает её stdout (trim), если завершилась успешно.
 fn run_capture(program: &Path, args: &[&str]) -> Option<String> {
     let out = silent_command(program)
         .args(args)
@@ -523,13 +607,11 @@ fn run_capture(program: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Версия yt-dlp (`--version` → строка вида `2025.06.09`).
 fn ytdlp_version(path: &Path) -> Option<String> {
     run_capture(path, &["--version"]).filter(|s| !s.is_empty())
 }
 
-/// Версия ffmpeg: первый токен первой строки `-version`
-/// («ffmpeg version <ver> Copyright …»).
+/// Parses "ffmpeg version <ver> Copyright …" (first token of first line).
 fn ffmpeg_version(path: &Path) -> Option<String> {
     let out = run_capture(path, &["-version"])?;
     let first = out.lines().next()?;
@@ -542,7 +624,7 @@ fn ffmpeg_version(path: &Path) -> Option<String> {
     }
 }
 
-/// Версия Deno: второй токен первой строки `--version` («deno <ver> (release …)»).
+/// Parses "deno <ver> (release …)" (second token of first line).
 fn deno_version(path: &Path) -> Option<String> {
     let out = run_capture(path, &["--version"])?;
     let first = out.lines().next()?;
@@ -558,7 +640,22 @@ fn deno_version(path: &Path) -> Option<String> {
     }
 }
 
-/// Локальные сведения о yt-dlp (без обращения к сети).
+/// Parses "bgutil-pot <ver>" (second token of first line).
+fn pot_version(path: &Path) -> Option<String> {
+    let out = run_capture(path, &["--version"])?;
+    let first = out.lines().next()?;
+    let token = first
+        .strip_prefix("bgutil-pot ")
+        .unwrap_or(first)
+        .split_whitespace()
+        .next()?;
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
 pub fn ytdlp_info(app_data_dir: &Path) -> ToolInfo {
     let resolved = resolve_ytdlp(app_data_dir);
     let managed = ytdlp_local(app_data_dir).exists();
@@ -571,7 +668,6 @@ pub fn ytdlp_info(app_data_dir: &Path) -> ToolInfo {
     }
 }
 
-/// Локальные сведения о ffmpeg (без обращения к сети).
 pub fn ffmpeg_info(app_data_dir: &Path) -> ToolInfo {
     let resolved = resolve_ffmpeg(app_data_dir);
     let managed = ffmpeg_local(app_data_dir).exists();
@@ -584,8 +680,7 @@ pub fn ffmpeg_info(app_data_dir: &Path) -> ToolInfo {
     }
 }
 
-/// Локальные сведения о Deno (без обращения к сети). `update_available` для Deno
-/// не вычисляем: он ставится по принципу «latest» вместе с yt-dlp.
+/// `update_available` is never set for Deno: it always installs as "latest" alongside yt-dlp.
 pub fn deno_info(app_data_dir: &Path) -> ToolInfo {
     let resolved = resolve_deno(app_data_dir);
     let managed = deno_local(app_data_dir).exists();
@@ -598,32 +693,43 @@ pub fn deno_info(app_data_dir: &Path) -> ToolInfo {
     }
 }
 
-/// Локальный статус всех утилит (быстро, без сети) — для первичной отрисовки.
+/// `update_available` is filled in separately by `check_updates` (needs a
+/// network round-trip); a plain `info()` call stays offline like the others.
+pub fn pot_info(app_data_dir: &Path) -> ToolInfo {
+    let resolved = resolve_pot(app_data_dir);
+    let managed = pot_local(app_data_dir).exists();
+    let version = resolved.as_ref().and_then(|p| pot_version(&p.cli_path));
+    ToolInfo {
+        installed: resolved.is_some(),
+        managed,
+        version,
+        update_available: false,
+    }
+}
+
 pub fn info(app_data_dir: &Path) -> ToolsInfo {
     ToolsInfo {
         ytdlp: ytdlp_info(app_data_dir),
         ffmpeg: ffmpeg_info(app_data_dir),
         deno: deno_info(app_data_dir),
+        pot: pot_info(app_data_dir),
     }
 }
 
-/// Статус утилит с проверкой обновлений (обращается к GitHub).
 pub fn check_updates(app_data_dir: &Path) -> ToolsInfo {
     let mut out = info(app_data_dir);
 
-    // yt-dlp: сравниваем установленную версию с последним релизом. Версии вида
-    // YYYY.MM.DD — лексикографическое сравнение совпадает с хронологическим.
-    // Проверяем для ЛЮБОГО установленного yt-dlp (в т.ч. системного из PATH), а не
-    // только managed: обновление скачается в bin-папку приложения, после чего
-    // resolve начнёт предпочитать его — устаревший системный станет управляемым.
+    // Versions are YYYY.MM.DD, so lexicographic compare matches chronological.
+    // Checked for any installed yt-dlp (including system PATH), not just
+    // managed: an update lands in the app bin dir and resolve then prefers it.
     if out.ytdlp.installed {
         if let (Some(cur), Some(latest)) = (out.ytdlp.version.clone(), fetch_ytdlp_latest()) {
             out.ytdlp.update_available = cur.as_str() < latest.as_str();
         }
     }
 
-    // ffmpeg: сравниваем сохранённый при скачивании маркер (updated_at ассета)
-    // с актуальным. Парсить версию rolling-сборки ненадёжно, поэтому маркер.
+    // ffmpeg has no parseable version (rolling build), so we compare the
+    // asset's updated_at marker saved at download time against the current one.
     if out.ffmpeg.managed {
         let stored = read_meta(app_data_dir)
             .get("ffmpeg")
@@ -634,12 +740,20 @@ pub fn check_updates(app_data_dir: &Path) -> ToolsInfo {
         }
     }
 
+    // Simple inequality (not `<`) to sidestep semver-ordering bugs: this repo's
+    // tags aren't the sortable YYYY.MM.DD scheme yt-dlp uses.
+    if out.pot.managed {
+        let stored = read_meta(app_data_dir)
+            .get("pot")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let (Some(stored), Some(latest)) = (stored, fetch_pot_latest()) {
+            out.pot.update_available = stored != latest;
+        }
+    }
+
     out
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Сеть: последние доступные версии
-// ──────────────────────────────────────────────────────────────────────────────
 
 fn fetch_json(url: &str) -> Option<serde_json::Value> {
     let client = http_client().ok()?;
@@ -653,7 +767,6 @@ fn fetch_json(url: &str) -> Option<serde_json::Value> {
     resp.json::<serde_json::Value>().ok()
 }
 
-/// Последний релиз yt-dlp (`tag_name`, например `2025.06.09`).
 fn fetch_ytdlp_latest() -> Option<String> {
     let v = fetch_json("https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest")?;
     v.get("tag_name")
@@ -662,8 +775,18 @@ fn fetch_ytdlp_latest() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Маркер актуальности ffmpeg-сборки (updated_at нужного ассета rolling-релиза
-/// `latest` репозитория yt-dlp/FFmpeg-Builds). На Windows/Linux.
+fn fetch_pot_latest() -> Option<String> {
+    let v = fetch_json(
+        "https://api.github.com/repos/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest",
+    )?;
+    v.get("tag_name")
+        .and_then(|t| t.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Windows/Linux ffmpeg freshness marker: `updated_at` of the matching asset
+/// in the yt-dlp/FFmpeg-Builds rolling "latest" release.
 #[cfg(any(windows, target_os = "linux"))]
 fn fetch_ffmpeg_latest() -> Option<String> {
     let want = {
@@ -697,9 +820,8 @@ fn fetch_ffmpeg_latest() -> Option<String> {
     None
 }
 
-/// macOS качает ffmpeg с evermeet.cx (не GitHub). Маркер актуальности — поле
-/// `version` из публичного info-API текущего релиза. Без него macOS-пользователи
-/// никогда не увидели бы уведомление об обновлении ffmpeg.
+/// macOS ffmpeg comes from evermeet.cx, not GitHub — freshness marker is the
+/// `version` field from its public release info API.
 #[cfg(not(any(windows, target_os = "linux")))]
 fn fetch_ffmpeg_latest() -> Option<String> {
     let v = fetch_json("https://evermeet.cx/ffmpeg/info/ffmpeg/release")?;
@@ -709,17 +831,8 @@ fn fetch_ffmpeg_latest() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Установка / обновление / удаление (управляемые приложением бинари)
-// ──────────────────────────────────────────────────────────────────────────────
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Атомарная установка: staging → проверка → атомарная подмена с backup/rollback
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Временная подпапка staging внутри bin (скачиваем и проверяем здесь, затем
-/// переносим в bin). Чистится перед использованием, чтобы не тащить хвосты
-/// прошлой неудачной попытки.
+/// Scratch subfolder under bin used for download+verify before the atomic
+/// swap; wiped before use to avoid leftovers from a previous failed attempt.
 fn staging_dir(bin: &Path, name: &str) -> Result<PathBuf, String> {
     let dir = bin.join(format!(".staging-{}", name));
     let _ = std::fs::remove_dir_all(&dir);
@@ -727,11 +840,10 @@ fn staging_dir(bin: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// RAII-обёртка над staging-папкой: удаляет её при выходе из области видимости —
-/// при успехе, на любой ветке `Err` И при панике. Раньше чистка делалась вручную
-/// на каждом раннем выходе, и непредвиденная паника (в скачивании/распаковке)
-/// оставила бы скрытую `.staging-*` висеть на диске. Итоговые файлы выносятся из
-/// staging до выхода (`swap_in_files`), поэтому удалять пустой остаток безопасно.
+/// RAII wrapper that removes the staging dir on any exit path (success, `Err`,
+/// or panic) — manual cleanup at each early return used to leave orphaned
+/// `.staging-*` dirs behind on a panic during download/extract. Final files
+/// are moved out via `swap_in_files` before drop, so removing the rest is safe.
 struct StagingDir {
     path: PathBuf,
 }
@@ -754,7 +866,6 @@ impl Drop for StagingDir {
     }
 }
 
-/// Путь резервной копии для атомарной подмены (`<target>.bak`).
 fn backup_path(target: &Path) -> PathBuf {
     let name = target
         .file_name()
@@ -763,14 +874,11 @@ fn backup_path(target: &Path) -> PathBuf {
     target.with_file_name(format!("{}.bak", name))
 }
 
-/// Атомарно ставит уже проверенные файлы из staging на их конечные места:
-/// существующий `target` отводится в `.bak`, затем staged переносится на его
-/// место (rename в пределах одной ФС атомарен). При ЛЮБОМ сбое — откат всех уже
-/// выполненных подмен из бэкапов (старые версии возвращаются на место). На успехе
-/// бэкапы удаляются. Так обновление либо проходит целиком, либо не трогает
-/// работающую установку.
+/// Atomically installs already-verified staged files: existing `target` is
+/// moved aside to `.bak`, then staged is renamed into place (same-filesystem
+/// rename is atomic). Any failure rolls back all swaps done so far from their
+/// backups, so an update either fully succeeds or leaves the install untouched.
 fn swap_in_files(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
-    // (target, бэкап-или-None) для уже выполненных подмен — для отката.
     fn rollback(done: &[(PathBuf, Option<PathBuf>)]) {
         for (target, bak) in done.iter().rev() {
             let _ = std::fs::remove_file(target);
@@ -801,8 +909,7 @@ fn swap_in_files(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
             None
         };
         if let Err(e) = std::fs::rename(staged, target) {
-            // Не получилось поставить новый — возвращаем только что отведённый
-            // бэкап и откатываем всё остальное.
+            // Restore the backup we just moved aside, then roll back the rest.
             if let Some(b) = &bak {
                 let _ = std::fs::rename(b, target);
             }
@@ -811,7 +918,7 @@ fn swap_in_files(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
         }
         done.push((target.clone(), bak));
     }
-    // Успех — удаляем бэкапы (best-effort; занятый старый exe уберётся позже).
+    // Best-effort cleanup; a locked old exe will get removed later via retry.
     for (_, bak) in &done {
         if let Some(b) = bak {
             let _ = remove_file_retry(b);
@@ -820,25 +927,21 @@ fn swap_in_files(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
     Ok(())
 }
 
-/// (Пере)скачать yt-dlp. Версия фиксируется конкретным релизом (не
-/// `latest/download`), целостность проверяется по SHA256 из `SHA2-256SUMS` того
-/// же релиза. Скачивание и проверки идут в staging-папке; в bin бинарь попадает
-/// только после успешной проверки — атомарной подменой с backup/rollback, чтобы
-/// неудачное обновление не сломало уже работающую установку.
+/// (Re)installs yt-dlp pinned to a specific release tag (not `latest/download`),
+/// verified against that same release's SHA256 checksum. Download+verify happen
+/// in staging; only a verified binary is atomically swapped into bin.
 pub fn install_ytdlp(
     app_data_dir: &Path,
     report: &(dyn Fn(String) + Sync),
 ) -> Result<ToolInfo, String> {
     let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    // Резолвим конкретную версию: бинарь и его контрольная сумма берутся из
-    // одного неизменяемого релиза (а не из подвижного latest-редиректа).
     let tag =
         fetch_ytdlp_latest().ok_or_else(|| "Не удалось определить версию yt-dlp".to_string())?;
     let asset = ytdlp_asset_name();
 
-    // Сперва получаем ожидаемую контрольную сумму — ДО скачивания бинаря. Если
-    // суммы недоступны, незачем качать впустую десятки МБ; фейлимся сразу.
+    // Fetch the checksum before downloading the binary — no point pulling
+    // down tens of MB if we can't verify it anyway.
     report("Получение контрольной суммы yt-dlp…".to_string());
     let expected = fetch_ytdlp_sha256(&tag, asset)
         .ok_or_else(|| "Не удалось получить контрольную сумму yt-dlp для проверки".to_string())?;
@@ -849,7 +952,6 @@ pub fn install_ytdlp(
     );
     let target = ytdlp_local(app_data_dir);
     let bin = bin_dir(app_data_dir);
-    // RAII: staging удалится на любом выходе (Err/успех/паника) — см. StagingDir.
     let staging = StagingDir::new(&bin, "ytdlp")?;
     let local_name = target
         .file_name()
@@ -865,7 +967,6 @@ pub fn install_ytdlp(
         return Err(format!("Не удалось скачать yt-dlp: {}", e));
     }
 
-    // Проверка целостности по контрольной сумме релиза (на staged-файле).
     report("Проверка контрольной суммы yt-dlp…".to_string());
     let actual = sha256_hex(&staged)
         .map_err(|e| format!("Не удалось посчитать контрольную сумму: {}", e))?;
@@ -879,7 +980,6 @@ pub fn install_ytdlp(
         return Err("yt-dlp скачан, но не запускается".to_string());
     }
 
-    // Всё проверено — атомарно подменяем рабочий бинарь.
     swap_in_files(&[(staged, target)])
         .map_err(|e| format!("Не удалось установить yt-dlp: {}", e))?;
 
@@ -887,9 +987,8 @@ pub fn install_ytdlp(
     Ok(ytdlp_info(app_data_dir))
 }
 
-/// (Пере)скачать ffmpeg. Скачивание и распаковка идут в staging-папке; в bin
-/// бинари (`ffmpeg` + `ffprobe`) попадают только после проверки запуска —
-/// атомарной подменой с backup/rollback (см. [`swap_in_files`]).
+/// (Re)installs ffmpeg into bin, verified by a successful run before the
+/// atomic swap (see [`swap_in_files`]).
 pub fn install_ffmpeg(
     app_data_dir: &Path,
     report: &(dyn Fn(String) + Sync),
@@ -898,7 +997,6 @@ pub fn install_ffmpeg(
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     {
         let bin = bin_dir(app_data_dir);
-        // RAII: staging удалится на любом выходе (Err/успех/паника) — см. StagingDir.
         let staging = StagingDir::new(&bin, "ffmpeg")?;
 
         report("Скачивание ffmpeg…".to_string());
@@ -910,7 +1008,7 @@ pub fn install_ffmpeg(
             return Err("ffmpeg скачан, но не запускается".to_string());
         }
 
-        // Подменяем ffmpeg и (если есть) ffprobe одной транзакцией.
+        // ffmpeg and ffprobe (if present) swap in as a single transaction.
         let ff_name = if cfg!(windows) {
             "ffmpeg.exe"
         } else {
@@ -939,10 +1037,9 @@ pub fn install_ffmpeg(
     }
 }
 
-/// Удалить файл с повторными попытками. На Windows только что отработавший
-/// (или фоном проверяющий cookies) yt-dlp/Deno может держать .exe ещё доли
-/// секунды — `remove_file` падает с `os error 5` (Отказано в доступе) /
-/// `os error 32` (занят). Отсутствие файла считаем успехом. ~6 с попыток.
+/// On Windows a just-exited yt-dlp/Deno process (or one still checking cookies
+/// in the background) can hold the .exe locked for a moment — `remove_file`
+/// fails with os error 5/32. Retries for ~6s; a missing file counts as success.
 fn remove_file_retry(path: &Path) -> std::io::Result<()> {
     let mut last_err: Option<std::io::Error> = None;
     for _ in 0..20 {
@@ -958,7 +1055,6 @@ fn remove_file_retry(path: &Path) -> std::io::Result<()> {
     Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "remove failed")))
 }
 
-/// Удалить скачанный приложением yt-dlp (только из bin-папки).
 pub fn delete_ytdlp(app_data_dir: &Path) -> Result<(), String> {
     let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let p = ytdlp_local(app_data_dir);
@@ -970,12 +1066,11 @@ pub fn delete_ytdlp(app_data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Удалить скачанный приложением ffmpeg (ffmpeg + ffprobe из bin-папки) и маркер.
 pub fn delete_ffmpeg(app_data_dir: &Path) -> Result<(), String> {
     let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let bin = bin_dir(app_data_dir);
-    // Не глотаем ошибки удаления: занятый/заблокированный бинарь оставил бы
-    // утилиту «частично установленной», а вызывающий считал бы удаление успешным.
+    // Don't swallow delete errors: a locked binary would leave the tool
+    // "partially installed" while the caller thinks removal succeeded.
     let mut errors: Vec<String> = Vec::new();
     for name in ["ffmpeg", "ffmpeg.exe", "ffprobe", "ffprobe.exe"] {
         let p = bin.join(name);
@@ -992,20 +1087,16 @@ pub fn delete_ffmpeg(app_data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Установить Deno (JS-движок для yt-dlp) в bin-папку. Идемпотентно: если рабочий
-/// Deno уже доступен (в bin-папке или системном PATH) — пропускаем скачивание.
-/// Скачивается одним zip с GitHub-релиза denoland/deno под текущую платформу.
-/// Привязан к жизненному циклу yt-dlp (ставится/удаляется вместе с ним).
+/// Idempotent: skips the download if a working Deno is already resolvable
+/// (bin dir or system PATH). Lifecycle is tied to yt-dlp (installed/removed together).
 pub fn install_deno(app_data_dir: &Path, report: &(dyn Fn(String) + Sync)) -> Result<(), String> {
     let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    // Уже есть рабочий Deno (наш или системный) — не качаем повторно.
     if resolve_deno(app_data_dir).is_some() {
         return Ok(());
     }
 
     let bin = bin_dir(app_data_dir);
-    // RAII: staging удалится на любом выходе (Err/успех/паника) — см. StagingDir.
     let staging = StagingDir::new(&bin, "deno")?;
     let asset = deno_asset_name();
     let url = format!(
@@ -1040,8 +1131,7 @@ pub fn install_deno(app_data_dir: &Path, report: &(dyn Fn(String) + Sync)) -> Re
     Ok(())
 }
 
-/// Удалить скачанный приложением Deno (только из bin-папки). Системный Deno из
-/// PATH не трогаем. Best-effort: ошибка удаления возвращается вызывающему.
+/// Only removes the app-managed copy in the bin dir; a system Deno on PATH is left alone.
 pub fn delete_deno(app_data_dir: &Path) -> Result<(), String> {
     let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let p = deno_local(app_data_dir);
@@ -1053,9 +1143,90 @@ pub fn delete_deno(app_data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Метаданные утилит (bin/tools_meta.json): маркеры версий для проверки обновлений
-// ──────────────────────────────────────────────────────────────────────────────
+/// (Re)installs the PO-token provider (bgutil-pot) for YouTube's bot-wall —
+/// script/CLI mode only, no persistent server (see [`PotProvider`]). Two
+/// artifacts installed as a unit: the executable itself (staged, verified by
+/// running, atomically swapped in like the other tools) and its yt-dlp plugin
+/// (plain files, no lock-contention risk, written directly). No SHA256 is
+/// published upstream for this repo — same trust level already accepted for
+/// ffmpeg/Deno, verified by successfully running `--version` instead.
+pub fn install_pot(app_data_dir: &Path, report: &(dyn Fn(String) + Sync)) -> Result<ToolInfo, String> {
+    let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let asset = pot_asset_name().ok_or_else(|| {
+        "Обход бот-проверки YouTube не поддерживается на этой платформе".to_string()
+    })?;
+
+    report("Получение версии bgutil-pot…".to_string());
+    let tag =
+        fetch_pot_latest().ok_or_else(|| "Не удалось определить версию bgutil-pot".to_string())?;
+
+    let bin = bin_dir(app_data_dir);
+    let staging = StagingDir::new(&bin, "pot")?;
+
+    let url = format!(
+        "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/download/{}/{}",
+        tag, asset
+    );
+    let local_name = pot_local(app_data_dir)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bgutil-pot")
+        .to_string();
+    let staged = staging.path().join(&local_name);
+
+    report(format!("Скачивание bgutil-pot {}…", tag));
+    download_to_file(&url, &staged, |d, t| {
+        report(format!(
+            "Скачивание bgutil-pot {}… {}",
+            tag,
+            fmt_progress(d, t)
+        ))
+    })
+    .map_err(|e| format!("Не удалось скачать bgutil-pot: {}", e))?;
+
+    #[cfg(unix)]
+    make_executable(&staged)?;
+    if !runs(&staged, "--version") {
+        return Err("bgutil-pot скачан, но не запускается".to_string());
+    }
+
+    report("Скачивание плагина yt-dlp…".to_string());
+    let plugin_zip_url = format!(
+        "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/download/{}/bgutil-ytdlp-pot-provider-rs.zip",
+        tag
+    );
+    let plugin_zip = staging.path().join("plugin.zip");
+    download_to_file(&plugin_zip_url, &plugin_zip, |_, _| {})
+        .map_err(|e| format!("Не удалось скачать плагин yt-dlp: {}", e))?;
+    extract_zip_paths(&plugin_zip, &pot_plugin_dir(app_data_dir), POT_PLUGIN_FILES)
+        .map_err(|e| format!("Не удалось распаковать плагин yt-dlp: {}", e))?;
+
+    // Only swap the live binary in once the plugin is confirmed in place too —
+    // a plugin-side failure above leaves the previous (or no) exe untouched.
+    swap_in_files(&[(staged, pot_local(app_data_dir))])
+        .map_err(|e| format!("Не удалось установить bgutil-pot: {}", e))?;
+
+    write_meta_field(app_data_dir, "pot", &tag);
+    Ok(pot_info(app_data_dir))
+}
+
+/// Removes both the binary and its yt-dlp plugin directory — installed and
+/// removed as a unit, like Deno is paired with yt-dlp.
+pub fn delete_pot(app_data_dir: &Path) -> Result<(), String> {
+    let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let p = pot_local(app_data_dir);
+    if p.exists() {
+        remove_file_retry(&p).map_err(|e| format!("Не удалось удалить bgutil-pot: {}", e))?;
+    }
+    let plugin_dir = pot_plugin_dir(app_data_dir);
+    if plugin_dir.exists() {
+        std::fs::remove_dir_all(&plugin_dir)
+            .map_err(|e| format!("Не удалось удалить плагин yt-dlp: {}", e))?;
+    }
+    remove_meta_field(app_data_dir, "pot");
+    Ok(())
+}
 
 fn meta_path(app_data_dir: &Path) -> PathBuf {
     bin_dir(app_data_dir).join("tools_meta.json")
@@ -1103,8 +1274,6 @@ mod tests {
         std::env::temp_dir().join(format!("lfmusic_tools_{test_name}_{unique}"))
     }
 
-    // ── Чистые форматтеры/хелперы ───────────────────────────────────────────
-
     #[test]
     fn fmt_size_formats_megabytes_with_one_decimal() {
         assert_eq!(fmt_size(0), "0.0 МБ");
@@ -1132,7 +1301,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("empty.bin");
         std::fs::write(&file, b"").unwrap();
-        // SHA256("") — широко известный контрольный вектор (FIPS 180 / NIST).
+        // SHA256("") — well-known test vector (FIPS 180 / NIST).
         assert_eq!(
             sha256_hex(&file).unwrap(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -1146,7 +1315,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("abc.bin");
         std::fs::write(&file, b"abc").unwrap();
-        // SHA256("abc") — стандартный контрольный вектор NIST.
+        // SHA256("abc") — standard NIST test vector.
         assert_eq!(
             sha256_hex(&file).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -1181,8 +1350,6 @@ mod tests {
         assert_eq!(backup_path(target), PathBuf::from("C:/app/bin/yt-dlp.exe.bak"));
     }
 
-    // ── Метаданные утилит (tools_meta.json) ─────────────────────────────────
-
     #[test]
     fn meta_round_trips_through_write_read_remove() {
         let dir = temp_dir("meta_roundtrip");
@@ -1211,16 +1378,11 @@ mod tests {
         assert_eq!(meta.as_object().unwrap().len(), 0);
     }
 
-    // ── Резолв (без сети): отсутствующие бинари ──────────────────────────────
-
     #[test]
     fn resolve_ytdlp_returns_none_when_nothing_installed_or_on_path_name_clash() {
-        // В пустой app_data_dir и при отсутствии yt-dlp в PATH резолв не должен
-        // ни паниковать, ни находить ложный бинарь.
         let dir = temp_dir("resolve_empty");
-        // Не создаём bin/yt-dlp.exe — локального нет. Системный может как
-        // существовать, так и нет в зависимости от машины, поэтому проверяем
-        // только то, что функция не паникует и возвращает консистентный Option.
+        // No local bin/yt-dlp.exe created. A system yt-dlp may or may not exist
+        // depending on the machine, so we only assert no panic + a consistent Option.
         let _ = resolve_ytdlp(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1232,8 +1394,6 @@ mod tests {
         assert!(!info.managed);
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    // ── swap_in_files: атомарная установка с откатом ────────────────────────
 
     #[test]
     fn swap_in_files_installs_new_file_when_target_absent() {
@@ -1281,7 +1441,7 @@ mod tests {
 
         let target_b = dir.join("b.txt");
         std::fs::write(&target_b, b"old b").unwrap();
-        let staged_b = dir.join("staged_b_missing.txt"); // намеренно не создаём
+        let staged_b = dir.join("staged_b_missing.txt"); // intentionally not created
 
         let result = swap_in_files(&[
             (staged_a.clone(), target_a.clone()),
@@ -1289,7 +1449,6 @@ mod tests {
         ]);
 
         assert!(result.is_err(), "должна вернуться ошибка из-за отсутствующего staged-файла");
-        // Первая пара уже была применена и обязана откатиться обратно.
         assert_eq!(
             std::fs::read(&target_a).unwrap(),
             b"old a",
@@ -1300,8 +1459,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    // ── extract_zip_binaries ─────────────────────────────────────────────────
 
     fn build_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).unwrap();

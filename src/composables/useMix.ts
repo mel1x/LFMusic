@@ -1,12 +1,9 @@
 import { ref, watch } from "vue";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// «Мой микс» — настройки волны и её очередь.
-// Настройки (настроение, состав, lossless) — модульный синглтон с сохранением
-// в localStorage: переживают и навигацию между страницами, и перезапуск.
-// Очередь микса существует только во фронтенде, поэтому тоже сохраняется здесь
-// (списком file_path), а восстанавливается в usePlayer.restoreState().
-// ──────────────────────────────────────────────────────────────────────────────
+// "My Mix" settings and queue: module-level singleton persisted to localStorage
+// so it survives page navigation and restart. The mix queue only exists on the
+// frontend, so it's persisted here too (as file_path list) and restored by
+// usePlayer.restoreState().
 
 export interface Mood {
   id: string;
@@ -71,7 +68,7 @@ export function useMixSettings() {
   return { selectedMood, familiarity, losslessOnly };
 }
 
-// ── Очередь микса ─────────────────────────────────────────────────────────────
+// Mix queue
 
 export function saveMixQueuePaths(paths: string[]) {
   try {

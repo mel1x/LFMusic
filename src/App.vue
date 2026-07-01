@@ -33,14 +33,11 @@ const { currentTrack, isPlaying, saveState } = usePlayer();
 const { loadCustomCovers } = useCustomCovers();
 const { loadCachedAvatars } = useExternalSources();
 
-// Кросс-секционные системы вынесены в composables (поведение без изменений):
-// масштабирование UI, динамическое темирование, панель задач, Android-оболочка.
 useUiScale();
 useAccentTheme();
 useTaskbar();
 useAndroidShell();
 
-// ── Splash ──────────────────────────────────────────────────────────────────
 const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
 if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
 
@@ -54,32 +51,29 @@ function onSplashEnded() {
   }, 600);
 }
 
-// ── Глобальные клавиши / блокировка контекстного меню ─────────────────────────
-// Перехват F5 / Ctrl+R — сохраняем состояние перед перезагрузкой.
-// (Escape для модалок «треки готовы» и оверлея обложки теперь обрабатывается
-// в самих компонентах TracksReadyModal / FullscreenCover.)
+// Escape for the "tracks ready" modal and cover overlay is handled inside
+// TracksReadyModal / FullscreenCover themselves.
 async function handleReloadKey(e: KeyboardEvent) {
-  // Гасим вход Windows в «меню-режим» по Alt (в т.ч. Alt+Shift при смене
-  // раскладки клавиатуры). Иначе окно входит в menu mode, и следующая клавиша
-  // трактуется как мнемоника меню: символ съедается, играет системный «бип» и
-  // первая буква не печатается. Меню у окна нет (decorations: false), поэтому
-  // блокировать дефолт Alt безопасно — системные Alt+F4/Alt+Tab обрабатываются
-  // ОС по своим клавишам и этим не ломаются.
+  // Suppress Windows' Alt menu-mode (incl. Alt+Shift layout switch): otherwise
+  // the window enters menu mode and the next keystroke is eaten as a menu
+  // mnemonic (system beep, first letter lost). Safe since there's no window
+  // menu (decorations: false); system Alt+F4/Alt+Tab are handled by the OS
+  // regardless.
   if (e.key === 'Alt') {
     e.preventDefault();
     return;
   }
 
-  // F11 — переключение полноэкранного режима окна (как в браузере).
-  // Логика на стороне Rust: при входе снимает maximized (иначе на Windows
-  // переход maximized→fullscreen ломается) и восстанавливает его при выходе.
+  // F11 toggles fullscreen (browser-like). Rust side un-maximizes on enter
+  // (else Windows breaks the maximized->fullscreen transition) and restores
+  // maximized on exit.
   if (e.key === 'F11') {
     e.preventDefault();
     if (isAndroidRuntime()) return;
     try {
       await invoke('toggle_window_fullscreen');
     } catch {
-      // Игнорируем — на платформах без поддержки fullscreen просто ничего не делаем.
+      // No-op on platforms without fullscreen support.
     }
     return;
   }
@@ -91,7 +85,7 @@ async function handleReloadKey(e: KeyboardEvent) {
   }
 }
 
-// Блокируем стандартное контекстное меню браузера (содержит «Обновить»)
+// Blocks the browser's default context menu (has "Reload").
 function handleContextMenu(e: MouseEvent) {
   e.preventDefault();
 }
@@ -110,7 +104,6 @@ onUnmounted(() => {
   document.removeEventListener('contextmenu', handleContextMenu);
 });
 
-// Заголовок окна: текущий трек во время воспроизведения, иначе «LFMusic».
 watchEffect(() => {
   const track = currentTrack.value;
   let title = 'LFMusic';
@@ -174,11 +167,11 @@ watchEffect(() => {
   font-weight: 500;
   cursor: default;
   user-select: none;
-  /* НЕ задаём здесь transform / transition: ими управляет сам vue-sonner на
-     элементе [data-sonner-toast] (transform: var(--y) — выезд/стек, transition с
-     height — анимация появления). Свой transform/transition тут перекрыл бы их
-     (равная специфичность, но это правило идёт позже) и ломал бы высоту и
-     анимацию появления тоста. */
+  /* Don't set transform/transition here: vue-sonner controls them on
+     [data-sonner-toast] itself (transform: var(--y) for slide/stack, transition
+     with height for the entry animation). Overriding them here (same
+     specificity, but this rule comes later) would break the toast's height
+     and entry animation. */
 }
 .toast [data-close-button] {
   order: 99;
@@ -232,13 +225,13 @@ svg {
   display: block;
 }
 html {
-  /* Фоны используют ту же насыщенность что и акцент (с потолком),
-     чтобы все три тона --accent-color / --dark-bg / --light-bg стакались. */
+  /* Backgrounds reuse the accent's saturation (capped) so --accent-color /
+     --dark-bg / --light-bg all stack visually as the same hue family. */
   --dark-bg: hsl(var(--accent-h), min(var(--accent-s), 50%), 8%);
   --light-bg: hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 1);
-  /* Отдельный «быстрый» акцент для блока плеера: те же значения, но анимируются
-     по своему (более короткому) таймингу в useAccentTheme, чтобы плеер менялся
-     первым. Фолбэк на общий акцент — на случай до первого кадра анимации. */
+  /* Separate "fast" accent for the player bar: same values, but animated on
+     its own (shorter) timing in useAccentTheme so the player leads the color
+     change. Falls back to the shared accent before the first animation frame. */
   --player-accent-h: var(--accent-h);
   --player-accent-s: var(--accent-s);
   --player-accent-l: var(--accent-l);

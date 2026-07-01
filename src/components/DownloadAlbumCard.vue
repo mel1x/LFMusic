@@ -9,14 +9,13 @@ import defaultCover from '../assets/cover.webp'
 import { useDownloads, type ExternalSearchAlbum } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 
-// Карточка альбома из внешней выдачи (в стиле карточек обычного поиска): обложка
-// ведёт на страницу скачивания альбома, кнопка-кружок снизу слева ставит весь
-// альбом в очередь (подтянув треклист по Deezer-id). Ширину задаёт родительский
-// .lineList через CSS-переменную --card-w.
+// External-results album card (mirrors regular search card style): cover opens
+// the album download page, the circle button queues the whole album (fetching
+// its tracklist by Deezer id). Width comes from the parent .lineList's --card-w.
 const props = defineProps<{ album: ExternalSearchAlbum }>()
 
-// open/download — сигналы «карточкой воспользовались» для подсказок поиска
-// (родитель на странице поиска слушает; на странице исполнителя — нет).
+// open/download: "card was used" signals for search suggestions (listened to on
+// the search page; not on the artist page).
 const emit = defineEmits<{ (e: 'open'): void; (e: 'download'): void }>()
 
 const { t } = useI18n()

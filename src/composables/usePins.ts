@@ -85,7 +85,7 @@ watch(
   { deep: true },
 );
 
-// Единственный экземпляр: resolvedPins и замыкания создаются один раз.
+// Singleton: resolvedPins and closures are created once.
 let pinsInstance: ReturnType<typeof createPins> | null = null;
 
 export function usePins() {
@@ -197,7 +197,6 @@ function createPins() {
         firstPath: al?.first_file_path ?? null,
       };
     }
-    // artist
     const ar = artists.value.find((x) => x.name === key);
     const first = ar?.first_file_path ? getTrackByPath(ar.first_file_path) : undefined;
     return {

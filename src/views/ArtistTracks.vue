@@ -47,18 +47,17 @@ const rawArtistName = computed(() => {
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
-// Плейлист исполнителя ищем регистронезависимо: бэкенд группирует артистов по
-// нижнему регистру имени, поэтому «Pyrokinesis» и «pyrokinesis» — один артист.
+// Case-insensitive lookup: backend groups artists by lowercased name, so
+// "Pyrokinesis" and "pyrokinesis" are the same artist.
 const artistPlaylist = computed(() => {
     const lower = rawArtistName.value.toLowerCase()
     return artistPlaylists.value.find(p => p.name.toLowerCase() === lower)
 })
 
-// Каноничное имя артиста (как в плейлисте) — гарантирует один ник и одну
-// аватарку независимо от регистра в ссылке. До загрузки плейлистов — исходное.
+// Canonical artist name (from the playlist) ensures one nickname/avatar
+// regardless of URL casing. Falls back to the raw name before playlists load.
 const artistName = computed(() => artistPlaylist.value?.name ?? rawArtistName.value)
 
-// Треки исполнителя — из плейлиста исполнителя (бэкенд группирует по артисту).
 const artistTracks = ref<TrackMetadata[]>([])
 async function loadArtistTracks() {
     const pl = artistPlaylist.value
@@ -66,10 +65,9 @@ async function loadArtistTracks() {
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
-        // Берём живые объекты из кэша: cacheTracks мог слить метаданные в уже
-        // существующий объект (Object.assign в cacheTrack), и обложка пишется
-        // именно в него. Если оставить сырые объекты, у ранее закэшированных
-        // треков обложка не отобразится (грузится в кэш-объект, рендерится сырой).
+        // Use live cache objects: cacheTracks merges into an existing cached
+        // object, and covers are written there too, so raw (uncached) track
+        // references would never show a cover for already-cached tracks.
         artistTracks.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     } catch {
         artistTracks.value = []
@@ -93,7 +91,7 @@ const artistCover = computed(() => {
     return t?.cover_art || defaultTrackCover
 })
 
-// ── Search ──────────────────────────────────────────────────────────────────
+// ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -136,7 +134,7 @@ const filteredTracks = computed(() => {
     )
 })
 
-// ── Header height ─────────────────────────────────────────────────────────
+// ── Header height ──
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
@@ -164,7 +162,7 @@ onUnmounted(() => {
     headerResizeObserver?.disconnect()
 })
 
-// ── Virtual scroll ──────────────────────────────────────────────────────────
+// ── Virtual scroll ──
 
 const {
     containerEl: trackListEl,
@@ -186,7 +184,7 @@ watch(visibleTracks, (tracks) => {
     }
 }, { immediate: true })
 
-// ── Play button ─────────────────────────────────────────────────────────────
+// ── Play button ──
 
 const isArtistActive = computed(() =>
     activePlaylistSource.value === sourceId.value
@@ -202,7 +200,7 @@ function onPlayArtist() {
     }
 }
 
-// ── Sticky header ───────────────────────────────────────────────────────────
+// ── Sticky header ──
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -222,7 +220,7 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// ── Track click ─────────────────────────────────────────────────────────────
+// ── Track click ──
 
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
@@ -241,7 +239,7 @@ function onCoverClick(track: TrackMetadata) {
     playTrack(track, { manualListStart: true })
 }
 
-// ── Context menu ────────────────────────────────────────────────────────────
+// ── Context menu ──
 
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
@@ -256,7 +254,7 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
 
-// ── Back ────────────────────────────────────────────────────────────────────
+// ── Back ──
 
 function goBack() {
     router.back()

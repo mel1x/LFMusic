@@ -25,7 +25,6 @@ const sortedFolders = computed(() =>
 
 onMounted(load);
 
-// ── Сброс редактирования треков ────────────────────────────────────────────
 const showResetEditsConfirm = ref(false);
 const resettingEdits = ref(false);
 
@@ -40,10 +39,8 @@ async function confirmResetEdits() {
     resettingEdits.value = true;
     try {
         await invoke<number>('track_clear_all_overrides');
-        // После сброса плейлисты исполнителей всё ещё содержат переименованные
-        // имена — пересобираем их по оригинальному tracks.artist.
+        // Artist playlists still hold the renamed names — rebuild from tracks.artist.
         await rebuildArtists();
-        // Перезагружаем библиотеку — get_all_tracks теперь отдаст оригиналы.
         await refreshLibrary();
     } catch (e) {
         console.error('Не удалось сбросить редактирование:', e);
@@ -52,7 +49,6 @@ async function confirmResetEdits() {
     }
 }
 
-// ── Artist separators ─────────────────────────────────────────────────────
 const newSeparator = ref('');
 const separatorInput = ref<HTMLInputElement | null>(null);
 
@@ -88,7 +84,6 @@ function onSeparatorKey(e: KeyboardEvent) {
     }
 }
 
-// ── Открыть папку в проводнике (клик по иконке папки в списке) ──────────────
 async function openFolder(path: string) {
     try {
         await invoke('open_folder_in_explorer', { path });

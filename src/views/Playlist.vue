@@ -92,7 +92,7 @@ const playlistCover = computed(() => {
     return firstCoverTrack.value?.cover_art || defaultPlaylistCover
 })
 
-// ── Search ──────────────────────────────────────────────────────────────────
+// ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -135,15 +135,14 @@ const filteredTracks = computed(() => {
     )
 })
 
-// ── Header height ─────────────────────────────────────────────────────────
+// ── Header height ──
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
 let headerResizeObserver: ResizeObserver | null = null
 
-// Треки плейлиста загружены. До этого гейт обложек не должен открываться —
-// иначе он откроется на пустом списке, контент мелькнёт, а лоадер появится уже
-// поверх подгрузки обложек (обратный порядок).
+// Gate must stay closed until playlist tracks are loaded, or it opens on an
+// empty list, content flashes, then the loader appears over the cover fetch.
 const dataReady = ref(false)
 
 onMounted(async () => {
@@ -176,10 +175,8 @@ onUnmounted(() => {
 })
 
 watch(playlistId, async () => {
-    // Закрываем гейт обложек на время смены плейлиста: иначе, пока грузятся треки
-    // нового плейлиста, gate (armed=dataReady) оставался бы открытым и мелькнул бы
-    // контент предыдущего плейлиста. Сброс в false разоружает гейт (ready→false),
-    // а по завершении загрузки снова взводим — гейт перепроверит новые обложки.
+    // Close the gate while switching playlists, or it'd stay open and flash
+    // the previous playlist's content while the new one's tracks load.
     dataReady.value = false
     await reloadPlaylistTracks()
     dataReady.value = true
@@ -191,7 +188,7 @@ watch(firstCoverTrack, (track) => {
     }
 }, { immediate: true })
 
-// ── Virtual scroll ──────────────────────────────────────────────────────────
+// ── Virtual scroll ──
 
 const {
     containerEl: trackListEl,
@@ -217,7 +214,7 @@ watch(visibleTracks, (tracks) => {
     }
 }, { immediate: true })
 
-// ── Play button ─────────────────────────────────────────────────────────────
+// ── Play button ──
 
 const isPlaylistActive = computed(() =>
     activePlaylistSource.value === sourceId.value
@@ -233,7 +230,7 @@ function onPlayPlaylist() {
     }
 }
 
-// ── Sticky header ───────────────────────────────────────────────────────────
+// ── Sticky header ──
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -253,7 +250,7 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// ── Track click ─────────────────────────────────────────────────────────────
+// ── Track click ──
 
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
@@ -272,7 +269,7 @@ function onCoverClick(track: TrackMetadata) {
     playTrack(track, { manualListStart: true })
 }
 
-// ── Context menu ────────────────────────────────────────────────────────────
+// ── Context menu ──
 
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
@@ -293,8 +290,8 @@ async function onRemoveFromPlaylist(track: TrackMetadata) {
     await removeTrackFromPlaylist(playlistId.value, track.file_path)
 }
 
-// «Поднять» доступно всегда в плейлисте — порядок воспроизведения
-// пересинхронизируется только если этот плейлист сейчас активный источник.
+// "Move to top" is always available here; playback order only resyncs if
+// this playlist is the active source.
 const canMoveToTop = computed(() => true)
 
 async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
@@ -304,19 +301,19 @@ async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
     playlistTrackPaths.value.unshift(track.file_path)
     await invoke('playlist_move_track_to_top', { playlistId: playlistId.value, filePath: track.file_path })
     if (isPlaylistActive.value) {
-        // Пересобираем источник (пути + объекты) из переупорядоченного плейлиста.
+        // Rebuild the source from the reordered playlist.
         setPlaylistSource(sourceId.value, playlistTracks.value.slice())
     }
     window.dispatchEvent(new CustomEvent('lfmusic:playlist-track-moved-to-top', { detail: { playlistId: playlistId.value } }))
 }
 
-// ── Back ────────────────────────────────────────────────────────────────────
+// ── Back ──
 
 function goBack() {
     router.back()
 }
 
-// ── Playlist context menu ───────────────────────────────────────────────────
+// ── Playlist context menu ──
 
 const playlistMenu = ref<{ x: number; y: number } | null>(null)
 const { isPinned: isPinnedFn, togglePin, updatePinName, unpin } = usePins()
@@ -359,7 +356,7 @@ async function onConfirmDeletePlaylist() {
     await deletePlaylist(id)
 }
 
-// ── Rename playlist ─────────────────────────────────────────────────────────
+// ── Rename playlist ──
 
 const isEditingName = ref(false)
 const editingName = ref('')

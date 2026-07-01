@@ -1,9 +1,9 @@
-//! Интеграция с панелью задач Windows:
-//!  * кнопки-миниатюры (shuffle / prev / play-pause / next / repeat) через ITaskbarList3;
-//!  * замена «живого» превью окна на обложки треков (предыдущий | текущий | следующий)
-//!    через DWM iconic bitmap.
+//! Windows taskbar integration:
+//!  * thumbnail buttons (shuffle / prev / play-pause / next / repeat) via ITaskbarList3;
+//!  * replacing the live window preview with track covers (prev | current | next)
+//!    via DWM iconic bitmap.
 //!
-//! Весь модуль — no-op на не-Windows платформах (см. заглушки в конце файла).
+//! No-op on non-Windows platforms (see stubs at the end of the file).
 
 #[cfg(windows)]
 mod imp {
@@ -47,28 +47,27 @@ mod imp {
         PW_RENDERFULLCONTENT, WM_COMMAND,
     };
 
-    // ── Идентификаторы кнопок ────────────────────────────────────────────────
     const ID_SHUFFLE: u32 = 1;
     const ID_PREV: u32 = 2;
     const ID_PLAYPAUSE: u32 = 3;
     const ID_NEXT: u32 = 4;
     const ID_REPEAT: u32 = 5;
 
-    // ── Сообщения окна, не объявленные в крейте ──────────────────────────────
+    // Window messages not exposed by the `windows` crate.
     const WM_DWMSENDICONICTHUMBNAIL: u32 = 0x0323;
     const WM_DWMSENDICONICLIVEPREVIEW: u32 = 0x0326;
     const THBN_CLICKED: u32 = 0x1800;
     const SUBCLASS_ID: usize = 0x4C46_4D31; // "LFM1"
-    const TRANS_MS: f32 = 170.0; // длительность кроссфейда/слайда обложек
-    const SCALE_MS: f32 = 180.0; // длительность анимации размера при play/pause
-    // Нижний отступ боковых обложек (доля высоты превью). Верх у всех трёх обложек
-    // на одной линии (y=0); этот отступ оставляет небольшой зазор снизу.
+    const TRANS_MS: f32 = 170.0; // cover crossfade/slide duration
+    const SCALE_MS: f32 = 180.0; // play/pause size-animation duration
+    // Bottom padding of the preview (fraction of height). All three covers are
+    // top-aligned (y=0); this leaves a small gap at the bottom.
     const BOTTOM_PAD_FRAC: f32 = 0.07;
-    // Центральная обложка при игре растёт ровно на нижний отступ и занимает всю
-    // высоту превью (s × PLAY_SCALE = ch). На паузе она равна боковым.
+    // While playing, the center cover grows by exactly the bottom pad to fill
+    // the preview height (s × PLAY_SCALE = ch); on pause it matches the side covers.
     const PLAY_SCALE: f32 = 1.0 / (1.0 - BOTTOM_PAD_FRAC);
 
-    // ── Глифы Segoe MDL2 Assets ──────────────────────────────────────────────
+    // Segoe MDL2 Assets glyphs.
     const GLYPH_SHUFFLE: u16 = 0xE8B1;
     const GLYPH_REPEAT_ALL: u16 = 0xE8EE;
     const GLYPH_REPEAT_ONE: u16 = 0xE8ED;
@@ -76,19 +75,17 @@ mod imp {
     const ICON_SIZE: i32 = 32;
     const LEVEL_BRIGHT: u8 = 255;
     const LEVEL_DIM: u8 = 160;
-    // Рабочий размер обложек в превью — кадры рендерятся из него, не из оригинала.
-    // Запас по разрешению: даже центральная обложка (×PLAY_SCALE) на крупных
-    // эскизах масштабируется вниз, без апскейла и «мыла».
+    // Working cover resolution frames are rendered from (not the original).
+    // High enough that even the enlarged center cover (×PLAY_SCALE) downscales
+    // on large thumbnails instead of upscaling and blurring.
     const WORK_SIZE: u32 = 384;
 
-    // Дефолтная обложка для треков без встроенной/кастомной картинки — та же,
-    // что показывает фронтенд (src/assets/trackCover.webp). Благодаря ей слот
-    // соседа (напр. «предыдущий» = последний трек по закольцованной очереди)
-    // никогда не остаётся пустым, а превью не «ломается» в обычное окно при
-    // переходе на трек без обложки.
+    // Fallback cover for tracks without art, matching the frontend's default
+    // (src/assets/trackCover.webp). Keeps neighbor slots (e.g. "prev" wrapping
+    // to the last track) from going empty and the preview from falling back to
+    // a plain window when the current track has no cover.
     const DEFAULT_COVER: &[u8] = include_bytes!("../../src/assets/trackCover.webp");
 
-    // ── Глобальное состояние (только Send-данные) ────────────────────────────
     static APP: OnceLock<AppHandle> = OnceLock::new();
     static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
     static PLAYING: AtomicBool = AtomicBool::new(false);
@@ -96,7 +93,7 @@ mod imp {
     static REPEAT_TRACK: AtomicBool = AtomicBool::new(false);
     static TASKBAR_MSG: AtomicU32 = AtomicU32::new(0);
 
-    // Готовый «мастер» обложки: WORK_SIZE×WORK_SIZE, углы уже скруглены.
+    // Prepared "master" cover: WORK_SIZE×WORK_SIZE, corners already rounded.
     type Img = RgbaImage;
     struct Covers {
         prev: Option<Img>,
@@ -108,14 +105,13 @@ mod imp {
         current: None,
         next: None,
     });
-    // Предыдущий набор обложек — для кроссфейда/слайда.
+    // Previous cover set, kept for crossfade/slide transitions.
     static OLD_COVERS: Mutex<Covers> = Mutex::new(Covers {
         prev: None,
         current: None,
         next: None,
     });
 
-    // Тип перехода между наборами обложек.
     #[derive(Clone, Copy, PartialEq)]
     enum Anim {
         None,
@@ -123,10 +119,10 @@ mod imp {
         SlideFwd,
         SlideBack,
     }
-    // (тип перехода, время старта).
+    // (transition kind, start time).
     static TRANSITION: Mutex<(Anim, Option<Instant>)> = Mutex::new((Anim::None, None));
 
-    // Анимация размера центральной обложки (play/pause): (старт, от, до).
+    // Center-cover size animation for play/pause: (start, from, to).
     struct ScaleAnim {
         start: Option<Instant>,
         from: f32,
@@ -138,14 +134,13 @@ mod imp {
         to: 1.0,
     });
 
-    // Габариты последнего запрошенного DWM эскиза — чтобы пушить кадры анимации.
+    // Size of the last DWM-requested thumbnail, so animation frames can be pushed at the same size.
     static LAST_W: AtomicI32 = AtomicI32::new(0);
     static LAST_H: AtomicI32 = AtomicI32::new(0);
 
-    // Пробуждение выделенного потока-аниматора.
     static WAKE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
-    // COM-интерфейс и HICON не Send — держим в TLS главного потока.
+    // COM interface and HICON aren't Send — kept in main-thread TLS.
     struct Icons {
         shuffle_dim: HICON,
         shuffle_on: HICON,
@@ -269,7 +264,7 @@ mod imp {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: size,
-                biHeight: -size, // top-down
+                biHeight: -size, // top-down DIB
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: 0, // BI_RGB
@@ -312,8 +307,8 @@ mod imp {
         create_icon_from_bgra(ICON_SIZE, &pixels)
     }
 
-    // ── Рендер глифа шрифта в HICON (32bpp с альфой) ─────────────────────────
-    // `level` управляет яркостью (255 — белый, меньше — приглушённый серый).
+    /// Renders a font glyph to an HICON (32bpp with alpha). `level` controls
+    /// brightness (255 = white, lower = dimmed gray).
     unsafe fn render_glyph_icon(glyph: u16, level: u8) -> Option<HICON> {
         let size = ICON_SIZE;
         let screen = GetDC(None);
@@ -367,8 +362,8 @@ mod imp {
             );
             let _ = GdiFlush();
 
-            // Альфа из яркости (белый текст на чёрном фоне), цвет — приглушённый
-            // серый по `level`, premultiplied.
+            // Alpha from brightness (white text on black bg); color dimmed by
+            // `level`, premultiplied.
             let px = std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize);
             for chunk in px.chunks_exact_mut(4) {
                 let a = chunk[0].max(chunk[1]).max(chunk[2]); // BGRA
@@ -453,7 +448,7 @@ mod imp {
         btn
     }
 
-    /// Собирает 5 кнопок по текущему состоянию (play/pause, shuffle, repeat).
+    /// Builds the 5 buttons from current state (play/pause, shuffle, repeat).
     fn build_buttons() -> Option<[THUMBBUTTON; 5]> {
         let playing = PLAYING.load(Ordering::Relaxed);
         let shuffled = SHUFFLED.load(Ordering::Relaxed);
@@ -476,7 +471,7 @@ mod imp {
         })
     }
 
-    /// (Пере)создаёт набор кнопок-миниатюр. Главный поток.
+    /// (Re)creates the thumbnail button set. Must run on the main thread.
     fn setup_thumbbar() {
         let h = hwnd();
         if h.0.is_null() {
@@ -488,7 +483,7 @@ mod imp {
         });
     }
 
-    /// Обновляет иконки/подсказки кнопок без пересоздания. Главный поток.
+    /// Updates button icons/tooltips without recreating them. Main thread only.
     fn update_buttons() {
         let h = hwnd();
         if h.0.is_null() {
@@ -500,9 +495,7 @@ mod imp {
         });
     }
 
-    // ── Обложки как iconic bitmap ────────────────────────────────────────────
-
-    /// Скругляет углы квадратной обложки (alpha-маска по SDF rounded-box, с AA).
+    /// Rounds the corners of a square cover (SDF rounded-box alpha mask, antialiased).
     fn round_corners(img: &mut RgbaImage, r: f32) {
         let w = img.width() as f32;
         let h = img.height() as f32;
@@ -520,32 +513,27 @@ mod imp {
         }
     }
 
-    /// Масштабирует готовый мастер до квадрата `side`. Скругление углов уже
-    /// запечено в мастере (альфа масштабируется вместе с картинкой), поэтому
-    /// на кадр анимации остаётся только один дешёвый ресайз.
+    /// Resizes the master cover to a `side`×`side` square. Corner rounding is
+    /// already baked into the master, so each animation frame is just one cheap resize.
     fn prep_cover(img: &Img, side: u32) -> RgbaImage {
         image::imageops::resize(img, side, side, image::imageops::FilterType::CatmullRom)
     }
 
-    /// Плавное замедление на концах (smoothstep).
+    /// Smoothstep ease (slows at both ends).
     fn ease(t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
 
-    /// Геометрия раскладки: (сторона базовой обложки `s`, шаг между центрами).
-    /// Обложки выровнены по верху (y=0); базовая высота `s` оставляет снизу зазор
-    /// `BOTTOM_PAD_FRAC`. Между обложками — небольшой горизонтальный зазор.
+    /// Layout geometry: (base cover side `s`, step between slot centers).
     fn layout(ch: u32) -> (f32, f32) {
         let s = ((ch as f32) * (1.0 - BOTTOM_PAD_FRAC)).max(1.0);
         let hgap = ((ch as f32) * 0.1).max(2.0);
         (s, s + hgap)
     }
 
-    /// Рисует одну обложку в позиции слота `slot` (0 — центр, ±1 — соседи).
-    /// Чем ближе к центру, тем крупнее (до `play_scale`) — индикатор воспроизведения.
-    /// Обложки выровнены по верху (y=0); центральная при игре растёт вниз на весь
-    /// нижний отступ. Размер ограничен высотой превью, чтобы ничего не вылезало.
+    /// Draws one cover at slot position `slot` (0 = center, ±1 = neighbors).
+    /// Covers scale up toward the center (up to `play_scale`) as a play indicator.
     fn draw_slot(
         canvas: &mut RgbaImage,
         cover: &Option<Img>,
@@ -566,19 +554,19 @@ mod imp {
         image::imageops::overlay(canvas, &img, x, 0);
     }
 
-    /// Статичная раскладка «предыдущий | текущий | следующий».
+    /// Static "prev | current | next" layout.
     fn compose(c: &Covers, cw: u32, ch: u32, play_scale: f32) -> RgbaImage {
         let mut canvas = RgbaImage::from_pixel(cw, ch, image::Rgba([0, 0, 0, 0]));
         let (s, step) = layout(ch);
-        // Соседи под центром (центр может быть крупнее) — рисуем его последним.
+        // Draw neighbors first so the (possibly larger) center cover ends up on top.
         draw_slot(&mut canvas, &c.prev, -1.0, step, s, cw, ch, play_scale);
         draw_slot(&mut canvas, &c.next, 1.0, step, s, cw, ch, play_scale);
         draw_slot(&mut canvas, &c.current, 0.0, step, s, cw, ch, play_scale);
         canvas
     }
 
-    /// Раскладка во время слайда: обложки сдвигаются влево (вперёд) или вправо
-    /// (назад) на один шаг; обложка, проходящая центр, плавно укрупняется.
+    /// Slide transition: covers shift left (forward) or right (backward) by
+    /// one step; the cover passing through center scales up smoothly.
     fn compose_slide(
         old: &Covers,
         new: &Covers,
@@ -592,7 +580,7 @@ mod imp {
         let (s, step) = layout(ch);
         let shift = if forward { -t } else { t };
 
-        // (обложка, слот при t=0). Четвёртая обложка въезжает с края.
+        // (cover, slot at t=0). The 4th cover enters from off-screen.
         let items: [(&Option<Img>, f32); 4] = if forward {
             [
                 (&old.prev, -1.0),
@@ -609,7 +597,7 @@ mod imp {
             ]
         };
 
-        // Рисуем от дальних к ближним, чтобы центральная была сверху.
+        // Draw farthest-to-nearest so the center cover ends up on top.
         let mut order: [usize; 4] = [0, 1, 2, 3];
         order.sort_by(|&a, &b| {
             let pa = (items[a].1 + shift).abs();
@@ -623,7 +611,7 @@ mod imp {
         canvas
     }
 
-    /// Текущий переход обложек: (тип, t∈[0;1]).
+    /// Current transition: (kind, t∈[0;1]).
     fn transition_state() -> (Anim, f32) {
         if let Ok(g) = TRANSITION.lock() {
             let (kind, start) = *g;
@@ -651,7 +639,6 @@ mod imp {
         s.to
     }
 
-    /// Текущее значение масштаба центральной обложки (с учётом анимации).
     fn play_scale_now() -> f32 {
         if let Ok(s) = SCALE.lock() {
             scale_value(&s)
@@ -673,7 +660,7 @@ mod imp {
         transition_active() || scale_active()
     }
 
-    /// Строит превью с учётом перехода обложек и масштаба центральной.
+    /// Builds a thumbnail frame accounting for the active transition and center-cover scale.
     fn make_thumbnail(max_w: i32, max_h: i32) -> Option<HBITMAP> {
         let cw = max_w.max(1) as u32;
         let ch = max_h.max(1) as u32;
@@ -717,8 +704,8 @@ mod imp {
         }
     }
 
-    /// Создаёт HBITMAP (premultiplied BGRA) из нового кадра, при наличии старого —
-    /// смешивая их по `t` в premultiplied-пространстве (корректный кроссфейд).
+    /// Builds an HBITMAP (premultiplied BGRA), blending with the old frame by
+    /// `t` in premultiplied space (for a correct crossfade) if given.
     unsafe fn blend_to_hbitmap(newi: &RgbaImage, oldi: Option<&RgbaImage>, t: f32) -> Option<HBITMAP> {
         let (w, h) = (newi.width() as i32, newi.height() as i32);
         let bmi = BITMAPINFO {
@@ -741,7 +728,7 @@ mod imp {
         }
         let dst = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
         let np = newi.as_raw();
-        // premultiply одного пикселя RGBA → (b, g, r, a) с весом w∈[0;1].
+        // Premultiplies one RGBA pixel to (b, g, r, a) with weight w∈[0;1].
         let pm = |s: &[u8], o: usize, weight: f32| -> (f32, f32, f32, f32) {
             let a = s[o + 3] as f32 / 255.0;
             (
@@ -785,13 +772,12 @@ mod imp {
         }
     }
 
-    /// Снимок настоящего окна для Aero Peek (большое превью при наведении на
-    /// эскиз в панели задач). Захватывает содержимое окна вместе с веб-вью через
-    /// `PrintWindow(PW_RENDERFULLCONTENT)`. Возвращает `None`, если окно свёрнуто
-    /// или снять кадр не удалось — тогда вызывающий откатывается на обложки.
+    /// Captures the real window (incl. WebView2 content) for Aero Peek via
+    /// `PrintWindow(PW_RENDERFULLCONTENT)`. Returns `None` if minimized or the
+    /// capture fails, so the caller falls back to covers.
     unsafe fn capture_window(h: HWND) -> Option<HBITMAP> {
         if IsIconic(h).as_bool() {
-            return None; // у свёрнутого окна нет содержимого для снимка
+            return None; // a minimized window has no content to capture
         }
         let mut rc = RECT::default();
         GetClientRect(h, &mut rc).ok()?;
@@ -823,14 +809,13 @@ mod imp {
                 return None;
             }
             let old = SelectObject(memdc, HGDIOBJ(hbm.0));
-            // PW_RENDERFULLCONTENT захватывает в т.ч. содержимое WebView2 (DComp).
+            // PW_RENDERFULLCONTENT also captures WebView2 (DComp) content.
             let ok = PrintWindow(h, memdc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
             SelectObject(memdc, old);
             if !ok {
                 return None;
             }
-            // GDI не выставляет альфу — форсим непрозрачность, иначе DWM может
-            // показать прозрачный/чёрный кадр.
+            // GDI doesn't set alpha — force opaque or DWM may show a transparent/black frame.
             let px = std::slice::from_raw_parts_mut(bits as *mut u8, (w * ht * 4) as usize);
             for chunk in px.chunks_exact_mut(4) {
                 chunk[3] = 255;
@@ -848,7 +833,6 @@ mod imp {
         result
     }
 
-    // ── Оконная subclass-процедура ───────────────────────────────────────────
     unsafe extern "system" fn subclass_proc(
         h: HWND,
         msg: u32,
@@ -890,8 +874,8 @@ mod imp {
                 return LRESULT(0);
             }
             WM_DWMSENDICONICLIVEPREVIEW => {
-                // Aero Peek показывает настоящее окно, а не увеличенные обложки.
-                // Если окно свёрнуто и снять кадр нельзя — откатываемся на обложки.
+                // Aero Peek shows the real window, not enlarged covers; fall
+                // back to covers if minimized or capture fails.
                 let hbm = capture_window(h).or_else(|| make_thumbnail(640, 400));
                 if let Some(hbm) = hbm {
                     let _ = DwmSetIconicLivePreviewBitmap(h, hbm, None, Default::default());
@@ -908,9 +892,8 @@ mod imp {
         DefSubclassProc(h, msg, wparam, lparam)
     }
 
-    // ── Поток-аниматор ───────────────────────────────────────────────────────
-    // Рендерит и пушит кадры напрямую в DWM (~60fps), минуя цикл сообщений tao
-    // и главный поток (иначе WM_TIMER пампится медленно — отсюда «5 fps»).
+    // Renders and pushes frames directly to DWM (~60fps), bypassing tao's
+    // message loop and the main thread — pumping via WM_TIMER was capped at ~5fps.
 
     fn push_frame() {
         let (w, h) = (LAST_W.load(Ordering::Relaxed), LAST_H.load(Ordering::Relaxed));
@@ -931,20 +914,20 @@ mod imp {
 
     fn spawn_animator() {
         std::thread::spawn(|| loop {
-            // Спим на condvar, пока нет активной анимации.
+            // Sleep on the condvar until an animation starts.
             {
                 let mut g = WAKE.0.lock().unwrap();
                 while !any_anim_active() {
-                    // С таймаутом — на случай пропущенного уведомления.
+                    // Timeout guards against a missed notify.
                     g = WAKE.1.wait_timeout(g, Duration::from_millis(250)).unwrap().0;
                 }
             }
-            // На время анимации поднимаем точность системного таймера: иначе
-            // sleep квантуется по ~15.6 мс и вместо 60 fps выходит ~30 и рвано.
+            // Raise timer resolution during animation: default sleep quantizes
+            // to ~15.6ms, giving ~30fps and jitter instead of a smooth 60fps.
             unsafe {
                 let _ = timeBeginPeriod(1);
             }
-            // Кадры по абсолютным дедлайнам — джиттер сна не накапливается.
+            // Frame pacing uses absolute deadlines so sleep jitter doesn't accumulate.
             let frame = Duration::from_micros(16_667);
             let mut next = Instant::now();
             while any_anim_active() {
@@ -954,23 +937,19 @@ mod imp {
                 if next > now {
                     std::thread::sleep(next - now);
                 } else {
-                    next = now; // отстали — пропускаем, не догоняем пачкой кадров
+                    next = now; // fell behind — skip ahead instead of bursting frames
                 }
             }
-            // Финальный (устоявшийся) кадр.
-            push_frame();
+            push_frame(); // final settled frame
             unsafe {
                 let _ = timeEndPeriod(1);
             }
         });
     }
 
-    /// Будит поток-аниматор (после изменения состояния анимации).
     fn wake_animator() {
         WAKE.1.notify_one();
     }
-
-    // ── Публичный API ─────────────────────────────────────────────────────────
 
     pub fn init(app: &AppHandle, hwnd_raw: isize) {
         let _ = APP.set(app.clone());
@@ -982,7 +961,7 @@ mod imp {
 
             let _ = SetWindowSubclass(h, Some(subclass_proc), SUBCLASS_ID, 0);
 
-            // Включаем поддержку iconic bitmap (обложки вместо превью).
+            // Enables iconic bitmap support (covers instead of the default preview).
             let yes: i32 = 1;
             let _ = DwmSetWindowAttribute(
                 h,
@@ -998,7 +977,6 @@ mod imp {
     pub fn set_playing(app: &AppHandle, playing: bool) {
         PLAYING.store(playing, Ordering::Relaxed);
 
-        // Анимация размера центральной обложки: больше при игре, обратно на паузе.
         let target = if playing { PLAY_SCALE } else { 1.0 };
         let mut animate = false;
         if let Ok(mut sc) = SCALE.lock() {
@@ -1026,8 +1004,8 @@ mod imp {
         }
     }
 
-    // Сигнатура последнего набора обложек — чтобы не перезапускать декод и
-    // анимацию, когда фронтенд шлёт тот же набор повторно.
+    // Signature of the last cover set, to skip re-decoding/re-animating when
+    // the frontend resends the same set.
     static LAST_COVERS_SIG: AtomicU64 = AtomicU64::new(0);
 
     pub fn set_covers(
@@ -1042,7 +1020,7 @@ mod imp {
             prev.hash(&mut h);
             current.hash(&mut h);
             next.hash(&mut h);
-            h.finish().max(1) // 0 зарезервирован как «ещё не было вызовов»
+            h.finish().max(1) // 0 is reserved for "no calls yet"
         };
         if LAST_COVERS_SIG.swap(sig, Ordering::Relaxed) == sig {
             return;
@@ -1050,15 +1028,13 @@ mod imp {
 
         let decode = |file_path: Option<String>| -> Option<Img> {
             let file_path = file_path?;
-            // prev/current/next приходят как file_path; обложку берём из кэша
-            // WebP-миниатюр (или генерируем) — без base64 в IPC. Если у трека
-            // обложки нет — подставляем дефолтную картинку, чтобы слот не пустовал.
+            // Covers come from the WebP thumbnail cache (generated on demand),
+            // avoiding base64 over IPC; fall back to the default image if none.
             let bytes = crate::thumbnails::cover_bytes(app, &file_path, 512)
                 .unwrap_or_else(|| DEFAULT_COVER.to_vec());
             let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
-            // Готовим «мастер» один раз: рабочий размер + скруглённые углы.
-            // Кадры анимации дальше только масштабируют его — иначе покадровый
-            // ресайз из полного разрешения и SDF-скругление съедают весь кадр.
+            // Prepare the "master" once (working size + rounded corners); animation
+            // frames only resize it, since full-res resize + SDF rounding per frame is too slow.
             let mut img = image::imageops::resize(
                 &img,
                 WORK_SIZE,
@@ -1068,14 +1044,13 @@ mod imp {
             round_corners(&mut img, WORK_SIZE as f32 * 0.09);
             Some(img)
         };
-        // Есть ли играющий трек — независимо от наличия обложки (для force-iconic).
+        // Whether a track is playing at all (regardless of cover), for force-iconic.
         let has_current_track = current.is_some();
         let new = Covers {
             prev: decode(prev),
             current: decode(current),
             next: decode(next),
         };
-        // Удалось ли получить кадр центральной обложки (для запуска анимации).
         let has_current_cover = new.current.is_some();
         let kind = match transition.as_str() {
             "forward" => Anim::SlideFwd,
@@ -1084,7 +1059,7 @@ mod imp {
             _ => Anim::None,
         };
 
-        // Текущий набор уходит в «старый», запускаем переход, если было от чего.
+        // Current set becomes "old"; start a transition if there was something to transition from.
         let mut animate = false;
         if let (Ok(mut cur), Ok(mut old), Ok(mut tr)) =
             (COVERS.lock(), OLD_COVERS.lock(), TRANSITION.lock())
@@ -1182,7 +1157,7 @@ mod imp {
             assert_eq!(ease(1.0), 1.0);
             assert_eq!(ease(-5.0), 0.0, "должен клэмпиться снизу");
             assert_eq!(ease(5.0), 1.0, "должен клэмпиться сверху");
-            // Smoothstep симметричен относительно t=0.5: ease(0.5) == 0.5.
+            // Smoothstep is symmetric around t=0.5: ease(0.5) == 0.5.
             assert!((ease(0.5) - 0.5).abs() < 1e-6);
         }
 
@@ -1250,7 +1225,6 @@ mod imp {
     }
 }
 
-// ── Заглушки для не-Windows платформ ─────────────────────────────────────────
 #[cfg(not(windows))]
 mod imp {
     use tauri::AppHandle;

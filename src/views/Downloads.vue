@@ -41,29 +41,26 @@ const {
     trackKey,
 } = useDownloads()
 
-// ── Гейт: вход в YouTube необязателен. Скачивание/поиск блокирует ТОЛЬКО
-// отсутствие обязательного yt-dlp. Cookies нужны лишь при «бот-стене» (см.
-// botWallHit) — тогда показываем мягкую подсказку войти, но не блокируем. ──────
+// Login is optional; only missing yt-dlp blocks search/download. Cookies are only
+// needed for the bot-wall case (see botWallHit), which shows a soft hint, not a block.
 const downloadsLocked = computed(() => ytdlpMissing.value)
 const searchDisabledText = computed(() => t('downloads.searchDisabledPlaceholder'))
 
-// Была ли среди ошибок очереди «бот-стена» YouTube — по ТИПУ ошибки
-// (error_kind === 'bot_wall_network'), а не по тексту. Это IP/сетевая стена (не
-// протухание входа); если пользователь ещё не входил — вход одна из мер обхода.
+// Detected by error_kind === 'bot_wall_network' (not by message text): an IP/network
+// wall, not an expired login. Logging in is one way to work around it.
 const botWallHit = computed(() =>
     queue.value.some(i => i.status === 'error' && i.error_kind === 'bot_wall_network'),
 )
 
-// ── Search input (debounced, network) ───────────────────────────────────────
+// Search input (debounced, network)
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
 useTypeToSearch(searchInput)
 const rawSearch = ref('')
 const debouncedSearch = ref('')
-// Точные исполнитель/название из клика по «фантому» альбома: пока ввод не тронут,
-// по ним идёт точный поиск по полям Deezer (иначе трек с «общим» названием, напр.
-// «Интро», теряется в свободной выдаче). Любой ручной ввод сбрасывает — дальше
-// обычный свободный поиск.
+// Exact artist/title from clicking an album "phantom" track: until the input is
+// touched, search uses exact Deezer field match (otherwise a generic title like
+// "Intro" gets lost in free-text search). Any manual typing resets this.
 const exactMatch = ref<{ artist: string; title: string } | null>(null)
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -90,14 +87,14 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-// Enter — мгновенный поиск, не дожидаясь дебаунса (и сохраняем запрос в подсказки).
+// Enter triggers search immediately, skipping the debounce, and saves the query.
 function onSearchEnter() {
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
     debouncedSearch.value = rawSearch.value.trim()
     rememberCurrentSearch()
 }
 
-// ── Подсказки прошлых запросов (как в обычном поиске) ─────────────────────────
+// Past search suggestions (mirrors the regular search page)
 const PAST_SEARCHES_KEY = 'lfmusic_past_downloads'
 const MAX_PAST_SEARCHES = 15
 const pastSearches = ref<string[]>([])
@@ -121,8 +118,8 @@ function addPastSearch(queryStr: string) {
     }
     savePastSearches()
 }
-// Любое целевое действие над результатами (скачивание, открытие альбома/
-// исполнителя) означает, что запрос оказался полезным — сохраняем его.
+// Any meaningful action on results (download, opening an album/artist) means the
+// query was useful, so save it.
 function rememberCurrentSearch() {
     addPastSearch(rawSearch.value.trim())
 }
@@ -140,36 +137,35 @@ function onPastSearchClick(q: string) {
 
 const query = computed(() => debouncedSearch.value.trim())
 const hasQuery = computed(() => !!query.value)
-// Есть ли в выдаче хоть что-то (треки/альбомы/исполнители) — для «спиннера
-// загрузки» и состояния «ничего не найдено».
+// Whether the response has anything at all (tracks/albums/artists), for the
+// loading spinner and "nothing found" state.
 const hasAnyResults = computed(
     () => results.value.length > 0 || resultAlbums.value.length > 0 || resultArtists.value.length > 0,
 )
 
-// ── Results (постранично, с подгрузкой при прокрутке) ────────────────────────
+// Results (paged, loaded further on scroll)
 const PAGE_SIZE = 30
 const results = ref<ExternalSearchTrack[]>([])
-// Альбомы и исполнители приходят только с первой страницей выдачи (index 0) и
-// показываются отдельными секциями над списком треков.
+// Albums and artists only arrive with the first page (index 0) and are shown
+// as separate sections above the track list.
 const resultAlbums = ref<ExternalSearchAlbum[]>([])
 const resultArtists = ref<ExternalSearchArtist[]>([])
-const searching = ref(false)     // первичная загрузка для нового запроса
-const loadingMore = ref(false)   // подгрузка следующей страницы
+const searching = ref(false)     // initial load for a new query
+const loadingMore = ref(false)   // loading the next page
 const hasMore = ref(false)
-let nextIndex = 0                 // смещение (Deezer index) для следующей страницы
-// Запрос, фактически ушедший в Deezer: может отличаться от введённого, если
-// сработала «починка раскладки» (см. runSearch). По нему идёт подгрузка страниц.
+let nextIndex = 0                 // offset (Deezer index) for the next page
+// Query actually sent to Deezer: may differ from the typed one if layout-swap
+// fixup kicked in (see runSearch). Paging uses this value.
 let effectiveQuery = ''
 let searchReqId = 0
 
-// ── Виртуализация списка результатов ─────────────────────────────────────────
-// Скролл-контейнер — сам pageRoot; над списком переменная по высоте «шапка»
-// (поиск, баннер, очереди), поэтому смещение списка измеряем динамически и
-// отдаём как scrollOffset (вычитается из scrollTop при расчёте видимого окна).
+// Virtualized results list: the scroll container is pageRoot itself, and the
+// header above the list has variable height, so the list offset is measured
+// dynamically and passed as scrollOffset (subtracted from scrollTop).
 const resultsListEl = ref<HTMLElement | null>(null)
-// Контейнер «шапки» (поиск, баннеры, очереди) — его высоту отслеживает
-// ResizeObserver, чтобы точно пересчитывать смещение виртуального списка при
-// любом изменении DOM-высоты шапки (без хрупкого watch по куче реактивных полей).
+// Header container height is tracked with a ResizeObserver to recompute the
+// virtual list offset on any DOM height change, instead of a fragile watch
+// over many reactive fields.
 const headerEl = ref<HTMLElement | null>(null)
 const resultsOffset = ref(0)
 const {
@@ -181,16 +177,16 @@ const {
     resetScroll: vsResetScroll,
 } = useVirtualScroll(results, { itemHeight: 58, buffer: 6, scrollOffset: resultsOffset })
 
-/** Пересчитать смещение списка результатов от верха скролл-контейнера. */
+/** Recompute the results list offset from the top of the scroll container. */
 function measureResultsOffset() {
     const list = resultsListEl.value
     if (!list || !pageRootEl.value) { resultsOffset.value = 0; return }
-    // offsetTop относительно pageRoot (position: relative) = высота «шапки» выше списка.
+    // offsetTop relative to pageRoot (position: relative) = header height above the list.
     resultsOffset.value = list.offsetTop
 }
 
-/** Склеить страницы, отбросив дубликаты по «исполнитель + название» — как между
- *  страницами, так и ВНУТРИ новой пачки (set пополняется по ходу фильтрации). */
+/** Merge pages, dropping duplicates by "artist + title" both across pages and
+ *  within the new batch (the seen set grows as it filters). */
 function dedupeInto(base: ExternalSearchTrack[], extra: ExternalSearchTrack[]): ExternalSearchTrack[] {
     const seen = new Set(base.map(t => trackKey(t.artist, t.title, t.album)))
     const fresh = extra.filter(t => {
@@ -204,7 +200,7 @@ function dedupeInto(base: ExternalSearchTrack[], extra: ExternalSearchTrack[]): 
 
 watch(query, (q) => { void runSearch(q) })
 
-/** Пуста ли выдача целиком (нет ни треков, ни альбомов, ни исполнителей). */
+/** Whether the page has nothing at all (no tracks, albums, or artists). */
 function isEmptyPage(p: { tracks: unknown[]; albums?: unknown[]; artists?: unknown[] }): boolean {
     return p.tracks.length === 0 && (p.albums?.length ?? 0) === 0 && (p.artists?.length ?? 0) === 0
 }
@@ -218,8 +214,8 @@ async function runSearch(q: string) {
     hasMore.value = false
     loadingMore.value = false
     effectiveQuery = q
-    // Новый запрос — возвращаем виртуальный список в начало, иначе при прокрутке
-    // вниз старой выдачи новая открылась бы с середины или с пустым окном.
+    // New query resets the virtual list to the top, otherwise it could open mid-scroll
+    // or with an empty window if the previous results were scrolled down.
     vsResetScroll()
     if (!q) {
         searching.value = false
@@ -229,9 +225,9 @@ async function runSearch(q: string) {
     try {
         let page = await search(q, 0, PAGE_SIZE, exactMatch.value ?? undefined)
         let usedQuery = q
-        // Починка раскладки (как в обычном поиске): если по введённому запросу
-        // пусто — частый случай «набрал не в той раскладке». Пробуем ту же строку
-        // в перевёрнутой раскладке и, если там что-то нашлось, показываем её.
+        // Layout-swap fixup (mirrors regular search): empty results for the typed
+        // query often mean the user typed in the wrong keyboard layout. Retry with
+        // the swapped-layout string and use it if it finds something.
         if (isEmptyPage(page)) {
             const switched = switchLayout(q)
             if (switched && switched !== q) {
@@ -277,7 +273,7 @@ function onScroll(e: Event) {
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 360) void loadMore()
 }
 
-// ── Исполнители: «бейджи» с переносом и сворачиванием (как в обычном поиске) ──
+// Artists: wrapping/collapsible badges (mirrors regular search)
 const artistsExpanded = ref(false)
 const artistsContainer = ref<HTMLElement | null>(null)
 const artistsOverflow = ref(false)
@@ -319,18 +315,18 @@ function openArtist(a: ExternalSearchArtist) {
     router.push(`/downloads/artist/${a.id}`)
 }
 
-// ── Альбомы: горизонтальный ряд со стрелочной навигацией (как в обычном поиске) ──
+// Albums: horizontal row with arrow navigation (mirrors regular search)
 const albumsLine = useScrollLine(190, 16)
 watch(resultAlbums, async () => {
     await nextTick()
     albumsLine.observe()
 })
 
-// Состояние строки трека (в очереди/в библиотеке) и кнопка скачивания живут в
-// DownloadTrackRow; повторное скачивание (трек уже в библиотеке) строка делегирует
-// сюда через событие redownload — общая модалка подтверждения ниже.
+// Track row state (queued/in library) and the download button live in
+// DownloadTrackRow; it delegates redownload confirmation here via the
+// redownload event, using the shared confirm modal below.
 
-// ── Повторное скачивание (модалка «уже в библиотеке») ────────────────────────
+// Redownload confirmation (already in library)
 const confirmTrack = ref<ExternalSearchTrack | null>(null)
 const confirmMessage = computed(() =>
     confirmTrack.value
@@ -350,8 +346,8 @@ async function confirmRedownload() {
     }
 }
 
-// Когда трек докачался — помечаем совпадающий результат как «в библиотеке», чтобы
-// после «Очистить» кнопка осталась «Скачано», а не снова «Скачать».
+// Once a track finishes downloading, mark the matching result as "in library" so
+// the button stays "Downloaded" after clearing the queue instead of reverting.
 watch(queue, (items) => {
     const doneKeys = new Set(
         items.filter(i => i.status === 'done').map(i => trackKey(i.artist, i.title, i.album)),
@@ -362,21 +358,16 @@ watch(queue, (items) => {
     }
 })
 
-// Очередь скачивания переехала в шапку приложения (DownloadQueueIndicator) —
-// она глобальна и видна с любой страницы. Здесь оставляем только `queue` для
-// пометки результатов «уже в очереди»/«в библиотеке» (см. queuedKeys и watch).
+// The download queue itself moved to the app header (DownloadQueueIndicator),
+// visible globally. `queue` here only marks results as queued/in-library.
 
-// ── Tools status ──────────────────────────────────────────────────────────────
-// Уведомление о компонентах. Приоритет: установить обязательный yt-dlp →
-// выбрать браузер с валидными cookies (обязательно для скачивания) → обновить
-// установленное → рекомендовать ffmpeg (необязательный, для качества).
-// Кнопка ведёт на страницу настроек, где всё это настраивается.
+// Tools status banner. Priority: install required yt-dlp -> install Deno (needed
+// for stable YouTube downloads) -> soft-prompt login on bot-wall -> update
+// available -> recommend optional ffmpeg. Button opens settings for all of this.
 type DepsBannerMode = 'install' | 'deno' | 'botwall' | 'update' | 'recommend' | 'none'
 const depsBannerMode = computed<DepsBannerMode>(() => {
     if (depsMissing.value) return 'install'
-    // yt-dlp есть, а Deno нет — YouTube-загрузки нестабильны; зовём доустановить.
     if (denoMissing.value) return 'deno'
-    // Бот-стена и не входили — мягко предлагаем авторизацию (не блокируя).
     if (botWallHit.value && !cookiesAuthorized.value) return 'botwall'
     if (depsUpdateAvailable.value) return 'update'
     if (ffmpegMissing.value) return 'recommend'
@@ -388,41 +379,41 @@ function goToToolsSettings() {
     router.push('/settings/external')
 }
 
-// Список монтируется, только когда есть результаты (иначе показан спиннер/пустое
-// состояние). На его появление — один пересчёт смещения (ResizeObserver на шапке
-// в этот момент не срабатывает, т.к. высота самой шапки не менялась).
+// List only mounts once there are results (otherwise a spinner/empty state is
+// shown), so its appearance triggers one offset recompute (the header's
+// ResizeObserver won't fire since the header's own height hasn't changed).
 watch(resultsListEl, (el) => { if (el) void nextTick(measureResultsOffset) })
 
-// Любое изменение высоты шапки (баннер, очереди, перенос строк при ресайзе окна)
-// триггерит точный пересчёт смещения — надёжнее ручного watch по набору полей.
+// Any header height change (banner, queue, line wraps on window resize) triggers
+// a precise offset recompute, more reliable than a manual watch over many fields.
 let headerRO: ResizeObserver | null = null
 
 onMounted(async () => {
     loadPastSearches()
-    // Предзаполнение поиска из query-параметра (переход с фантомного трека альбома).
+    // Prefill search from query params (navigating from an album's phantom track).
     const pickParam = (v: typeof route.query[string]) => (Array.isArray(v) ? v[0] : v) || ''
     const q = pickParam(route.query.q)
     const dlArtist = pickParam(route.query.dlArtist)
     const dlTitle = pickParam(route.query.dlTitle)
     if (q) {
         rawSearch.value = q
-        // Точные поля задаём ДО debouncedSearch: watch(query) → runSearch прочитает
-        // их и включит точный поиск по полям Deezer.
+        // Exact match fields must be set before debouncedSearch: watch(query) ->
+        // runSearch reads them to enable exact Deezer field matching.
         if (dlArtist && dlTitle) exactMatch.value = { artist: dlArtist, title: dlTitle }
         debouncedSearch.value = q.trim()
     }
-    // Локальный статус утилит (мгновенно, без сети) определяет, доступен ли
-    // поиск. Дожидаемся его, прежде чем ставить фокус, — иначе фокус попадёт на
-    // поле, которое тут же окажется заблокированным (yt-dlp отсутствует).
+    // Local tools status (instant, no network) determines whether search is
+    // available. Wait for it before focusing, otherwise focus could land on a
+    // field that immediately becomes disabled (yt-dlp missing).
     try {
         await refreshToolsInfo()
-    } catch { /* статус останется оптимистичным — фокусируемся как обычно */ }
+    } catch { /* stays optimistic; focus as usual */ }
     if (!downloadsLocked.value) {
         await nextTick()
         searchInput.value?.focus()
     }
-    // Проверка обновлений (сеть) для баннера — не блокирует фокус.
-    void checkToolUpdates().catch(() => { /* без сети просто без обновлений */ })
+    // Update check (network) for the banner; doesn't block focus.
+    void checkToolUpdates().catch(() => { /* no network, just no update info */ })
     await nextTick()
     measureResultsOffset()
     if (headerEl.value) {
@@ -443,7 +434,7 @@ onUnmounted(() => {
 
 <template>
     <div class="pageRoot downloadsPage" ref="pageRootEl" @scroll="onScroll">
-        <!-- «Шапка»: всё над списком результатов. Её высоту отслеживает ResizeObserver. -->
+        <!-- Header: everything above the results list; height tracked by ResizeObserver. -->
         <div class="downloadsHeader" ref="headerEl">
         <h1 class="pageTitle">{{ t('downloads.title') }}</h1>
 
@@ -469,7 +460,7 @@ onUnmounted(() => {
             </div>
         </div>
 
-        <!-- Подсказки прошлых запросов (когда поле пустое) -->
+        <!-- Past search suggestions (when input is empty) -->
         <div class="pastSearchesBar" v-if="!downloadsLocked && pastSearches.length > 0 && !rawSearch.trim()">
             <button
                 v-for="(pq, idx) in filteredPastSearches"
@@ -505,7 +496,7 @@ onUnmounted(() => {
             <button class="toolsBtn" @click="goToToolsSettings">{{ t('downloads.depsOpenSettings') }}</button>
         </div>
 
-        <!-- Artists (только первая страница выдачи) -->
+        <!-- Artists (first page of results only) -->
         <section v-if="hasQuery && resultArtists.length" class="pageLine">
             <div class="lineHat">
                 <div class="lineTitle nonClickable">{{ t('downloads.artistsTitle') }}</div>
@@ -538,7 +529,7 @@ onUnmounted(() => {
             </div>
         </section>
 
-        <!-- Albums (только первая страница выдачи) -->
+        <!-- Albums (first page of results only) -->
         <section v-if="hasQuery && resultAlbums.length" class="pageLine">
             <div class="lineHat">
                 <div class="lineTitle nonClickable">{{ t('downloads.albumsTitle') }}</div>
@@ -564,7 +555,7 @@ onUnmounted(() => {
         </section>
 
         </div>
-        <!-- /шапка -->
+        <!-- /header -->
 
         <!-- Initial loading for a fresh query (no results of any kind yet) -->
         <LoadingSpinner v-if="hasQuery && searching && !hasAnyResults" />
@@ -636,8 +627,8 @@ onUnmounted(() => {
     background: rgba(255, 255, 255, 0.12);
     border-radius: 3px;
 }
-/* Контейнер «шапки»: тот же flex-column, что и pageRoot, чтобы отступы детей
-   (поиск/баннер/очереди) остались прежними. Сам по себе не сжимается. */
+/* Same flex-column as pageRoot so children's spacing (search/banner/queue) stays
+   the same; doesn't shrink itself. */
 .downloadsHeader {
     display: flex;
     flex-direction: column;
@@ -645,7 +636,7 @@ onUnmounted(() => {
     width: 100%;
 }
 
-/* ── Search input (mirrors Search.vue) ───────────────────────────── */
+/* Search input (mirrors Search.vue) */
 .searchZone {
     position: relative;
     width: 100%;
@@ -698,7 +689,7 @@ onUnmounted(() => {
     font-size: 14px;
     font-weight: 600;
 }
-/* Без yt-dlp поиск недоступен — приглушаем зону и блокируем ввод. */
+/* Search unavailable without yt-dlp: dim the zone and block input. */
 .searchZone.disabled {
     opacity: 0.55;
 }
@@ -709,7 +700,7 @@ onUnmounted(() => {
     cursor: not-allowed;
 }
 
-/* ── Подсказки прошлых запросов (как в обычном поиске) ────────────── */
+/* Past search suggestions (mirrors regular search) */
 .pastSearchesBar {
     display: flex;
     flex-direction: row;
@@ -745,7 +736,7 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.8);
 }
 
-/* ── Tools banner ────────────────────────────────────────────────── */
+/* Tools banner */
 .toolsBanner {
     display: flex;
     flex-direction: row;
@@ -757,7 +748,7 @@ onUnmounted(() => {
     background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 22%, 0.6), hsla(var(--accent-h), var(--accent-s), 14%, 0.6));
     flex-shrink: 0;
 }
-/* Не хватает только ffmpeg — некритичная подсказка, оформляем нейтрально. */
+/* Only ffmpeg missing: non-critical, styled neutrally. */
 .toolsBanner.soft {
     background: hsla(0, 0%, 100%, 0.04);
 }
@@ -815,7 +806,7 @@ onUnmounted(() => {
     transform: translateY(-1px);
 }
 
-/* ── Sections ────────────────────────────────────────────────────── */
+/* Sections */
 .pageLine {
     width: 100%;
     display: flex;
@@ -841,7 +832,7 @@ onUnmounted(() => {
 }
 .lineTitle.nonClickable { cursor: default; }
 
-/* ── Стрелочная навигация рядов (как в обычном поиске) ────────────── */
+/* Arrow navigation for rows (mirrors regular search) */
 .lineControls {
     display: flex;
     flex-direction: row;
@@ -873,7 +864,7 @@ onUnmounted(() => {
     opacity: 0.65;
 }
 
-/* ── Исполнители: «бейджи» (как в обычном поиске) ─────────────────── */
+/* Artists: badges (mirrors regular search) */
 .artistsBlockWrap {
     position: relative;
 }
@@ -990,7 +981,7 @@ onUnmounted(() => {
 .moreArtistsBtn:hover .chev { color: #fff; }
 .moreArtistsBtn .chev.expanded { transform: rotate(180deg); }
 
-/* ── Альбомы: горизонтальный ряд (как в обычном поиске) ───────────── */
+/* Albums: horizontal row (mirrors regular search) */
 .lineList {
     position: relative;
     display: flex;
@@ -1005,12 +996,12 @@ onUnmounted(() => {
 }
 .lineList::-webkit-scrollbar { display: none; }
 
-/* ── Results track list ──────────────────────────────────────────── */
+/* Results track list */
 .tracksList {
     display: flex;
     flex-direction: column;
 }
-/* Распорки виртуального скролла (резервируют высоту вне видимого окна). */
+/* Virtual scroll spacers (reserve height outside the visible window). */
 .vsPad {
     width: 100%;
     flex-shrink: 0;
@@ -1023,7 +1014,7 @@ onUnmounted(() => {
     padding: 18px 0 6px;
 }
 
-/* ── Empty states ────────────────────────────────────────────────── */
+/* Empty states */
 .emptyState {
     flex: 1;
     display: flex;

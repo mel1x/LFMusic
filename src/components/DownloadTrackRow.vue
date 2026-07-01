@@ -10,21 +10,21 @@ import { usePlayer } from '../composables/usePlayer'
 import { useDownloads, type ExternalSearchTrack } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 
-// Строка трека-кандидата на скачивание. Общая для страницы поиска и страниц
-// скачивания альбома/исполнителя. Артист и альбом кликабельны (→ страницы
-// скачивания), если у трека есть соответствующий Deezer-id.
+// Candidate track row, shared by the search page and album/artist download pages.
+// Artist and album are clickable (to their download pages) when the track has
+// a matching Deezer id.
 const props = withDefaults(
     defineProps<{
         track: ExternalSearchTrack
-        /** Показывать ли «· альбом» (на странице самого альбома он избыточен). */
+        /** Whether to show "· album" (redundant on the album's own page). */
         showAlbum?: boolean
     }>(),
     { showAlbum: true },
 )
 
-// redownload — запрос на повторное скачивание (трек уже в библиотеке): модалку
-// показывает родитель (один диалог на список). download — обычное добавление в
-// очередь: родитель использует это как сигнал «запрос был полезен» (подсказки).
+// redownload: request to redownload (track already in library); parent shows
+// the confirm modal (one dialog per list). download: normal enqueue; parent
+// uses it as a "query was useful" signal for search suggestions.
 const emit = defineEmits<{
     (e: 'redownload', track: ExternalSearchTrack): void
     (e: 'download', track: ExternalSearchTrack): void
@@ -199,7 +199,7 @@ function openAlbum() {
 .dlBtn:disabled {
     cursor: default;
 }
-/* Уже в очереди — нейтральная «таблетка». */
+/* Already queued: neutral pill. */
 .dlBtn.added {
     cursor: default;
     color: hsla(0, 0%, 100%, 0.55);
@@ -208,7 +208,7 @@ function openAlbum() {
 .dlBtn.added:hover {
     background-color: hsla(0, 0%, 100%, 0.06);
 }
-/* Уже в библиотеке — зелёная «таблетка» (кликабельна: повторное скачивание). */
+/* Already in library: green pill, clickable for redownload. */
 .dlBtn.done {
     cursor: pointer;
     color: hsla(145, 50%, 64%, 0.95);

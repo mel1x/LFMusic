@@ -7,8 +7,8 @@ const props = withDefaults(defineProps<{
     message?: string
     confirmText?: string
     cancelText?: string
-    /** Скрыть кнопку отмены — для модалок-уведомлений с единственным действием
-     *  (например, показ ошибки), где «Отмена» дублировала бы «ОК». */
+    /** Hide the cancel button for single-action notification modals (e.g. an
+     *  error message), where "Cancel" would just duplicate "OK". */
     hideCancel?: boolean
 }>(), {
     confirmText: 'Подтвердить',

@@ -136,7 +136,6 @@ async function copyPath() {
         if (copyTimer) clearTimeout(copyTimer)
         copyTimer = setTimeout(() => { copiedPath.value = false }, 1400)
     } catch {
-        // ничего
     }
 }
 

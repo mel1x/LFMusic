@@ -268,8 +268,6 @@ pub fn apply_collection_full_listen(
 mod tests {
     use super::*;
 
-    // ── listen_threshold_secs ───────────────────────────────────────────────
-
     #[test]
     fn listen_threshold_defaults_to_90_without_duration() {
         assert_eq!(listen_threshold_secs(None), 90.0);
@@ -295,8 +293,6 @@ mod tests {
         assert_eq!(listen_threshold_secs(Some(f64::INFINITY)), 90.0);
     }
 
-    // ── day_part_for_hour ────────────────────────────────────────────────────
-
     #[test]
     fn day_part_boundaries_are_correct() {
         assert_eq!(day_part_for_hour(0), DayPart::Night);
@@ -312,19 +308,15 @@ mod tests {
 
     #[test]
     fn day_part_wraps_hours_above_24() {
-        // 29 % 24 == 5 -> утро, как и час 5.
+        // 29 % 24 == 5 -> morning, same as hour 5.
         assert_eq!(day_part_for_hour(29), DayPart::Morning);
         assert_eq!(day_part_for_hour(24), day_part_for_hour(0));
     }
 
-    // ── DB-backed: create_tables / apply_track_delta / get_track_statistics ──
-
     fn memory_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory db");
-        // track_statistics.file_path REFERENCES tracks(file_path) — нужна хотя бы
-        // заглушка таблицы tracks, иначе INSERT в track_statistics падает с
-        // "no such table: main.tracks" (этот SQLite-сборка проверяет FK даже без
-        // явного PRAGMA foreign_keys=ON).
+        // track_statistics.file_path has an FK to tracks; this SQLite build
+        // enforces it even without PRAGMA foreign_keys=ON, so a stub table is needed.
         conn.execute_batch("CREATE TABLE tracks (file_path TEXT PRIMARY KEY NOT NULL);")
             .expect("create stub tracks table");
         create_tables(&conn).expect("create tables");
@@ -379,8 +371,8 @@ mod tests {
 
     #[test]
     fn apply_track_delta_clamps_counters_at_zero() {
-        // Удаление трека из плейлиста на «свежей» (нулевой) статистике не должно
-        // увести счётчик в минус — иначе UI показывал бы отрицательные счётчики.
+        // Removing from a playlist on zeroed stats must not go negative, or
+        // the UI would show negative counters.
         let conn = memory_conn();
         let path = "/music/b.flac".to_string();
         stub_track(&conn, &path);

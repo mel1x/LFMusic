@@ -1,11 +1,8 @@
 import { onMounted, onUnmounted } from "vue";
 import { isPhoneViewport, updateRuntimeClasses } from "./usePlatform";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Масштабирование интерфейса под размер окна (base 1460×860) через body { zoom }.
-// Полноэкранные fixed-оверлеи масштабируются отдельной переменной --overlay-scale.
-// Вынесено из App.vue без изменения поведения; вызывается один раз в корне.
-// ──────────────────────────────────────────────────────────────────────────────
+// Scales the UI to window size (base 1460x860) via body { zoom }; call once at the app root.
+// Full-viewport fixed overlays scale separately via --overlay-scale.
 
 const BASE_W = 1460;
 const BASE_H = 860;
@@ -26,11 +23,10 @@ export function useUiScale() {
         (window as any).__uiScale = 1;
     }
 
-    // Полноэкранные fixed-оверлеи (модалки, затемнённые фоны) масштабируем через
-    // отдельную переменную --overlay-scale. В Chromium (WebView2) `zoom` не влияет на
-    // vw, поэтому 100vw-оверлей внутри отмасштабированного body перекрывает вьюпорт в
-    // `scale` раз — делим на это. Замеряем коэффициент напрямую, а не берём scale
-    // вслепую. (На WebKitGTK zoom не используется вовсе — там путь resetUiScale.)
+    // In Chromium (WebView2), `zoom` doesn't affect `vw`, so a 100vw overlay inside a
+    // zoomed body overflows the viewport by the scale factor — measure the actual
+    // divisor instead of assuming it equals `scale`. WebKitGTK doesn't use zoom at all
+    // (goes through resetUiScale instead).
     function measureOverlayScale(fallback: number) {
         let divisor = fallback;
         try {
@@ -43,7 +39,7 @@ export function useUiScale() {
             const vw = window.innerWidth;
             if (measured > 0 && vw > 0) divisor = measured / vw;
         } catch {
-            // На ошибке оставляем fallback (scale) — поведение как раньше.
+            // Fall back to `scale` on measurement failure.
         }
         if (!isFinite(divisor) || divisor <= 0) divisor = fallback;
         document.documentElement.style.setProperty("--overlay-scale", String(divisor));

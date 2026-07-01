@@ -20,8 +20,7 @@ interface AudioFeatureProgressPayload {
     total: number;
     percent: number;
     active: boolean;
-    // Активная фаза: анализ треков для рекомендаций, получение из интернета или
-    // скачивание треков (последняя по очереди).
+    // Active phase, in order: recommendation analysis, external fetch, download.
     phase?: 'analysis' | 'external' | 'download' | 'done';
 }
 
@@ -30,7 +29,7 @@ const { settings } = useSettings();
 const { t } = useI18n();
 const { currentTrack, saveState } = usePlayer();
 
-// ── Прогресс фонового воркера аудио-фич ─────────────────────────────────────
+// Background audio-feature worker progress
 const featureProgressVisible = ref(false);
 const featureProgress = ref<AudioFeatureProgressPayload>({
     current: 0,
@@ -40,10 +39,7 @@ const featureProgress = ref<AudioFeatureProgressPayload>({
     phase: 'analysis',
 });
 
-// Идёт ли сейчас получение данных из интернета (внешние источники). По этой
-// фазе выбираем текст: анализ рекомендаций ↔ получение из интернета.
 const featureProgressIsExternal = computed(() => featureProgress.value.phase === 'external');
-// Идёт ли сейчас скачивание треков (фаза «download», последняя по очереди).
 const featureProgressIsDownload = computed(() => featureProgress.value.phase === 'download');
 
 let unlistenAudioFeatureProgress: UnlistenFn | null = null;
@@ -94,12 +90,11 @@ const featureProgressAriaLabel = computed(() => {
     return `${featureProgressTooltipHeading.value}. ${featureProgressTooltipText.value}`;
 });
 
-// ── Плавный бар прогресса ───────────────────────────────────────────────────
-// Реальный процент приходит дискретно и с «провалами»: yt-dlp долго извлекает
-// формат, не сообщая прогресса, а сам файл качается рывком — отсюда скачки
-// 0→100. Сглаживаем на клиенте: экспоненциальное приближение displayPercent к
-// цели + лёгкий «ручеёк» во время фазы скачивания, чтобы бар не висел на месте,
-// но и не вылезал за долю текущего трека (потолок = конец слота (current+1)/total).
+// Smooth progress bar. Real percent arrives in discrete jumps (yt-dlp reports
+// no progress while extracting the format, then the file downloads in bursts),
+// so we smooth client-side: exponential approach to the target, plus a slow
+// "trickle" during download phase capped at the current track's slot end
+// ((current+1)/total) so it never overtakes reality.
 const displayPercent = ref(0);
 let progressRaf: number | null = null;
 let lastFrameTs = 0;
@@ -115,19 +110,18 @@ function progressFrame(ts: number) {
     const p = featureProgress.value;
     const target = featureProgressPercent.value;
 
-    // Новый прогон: реальная цель резко упала (бэкенд сбросил счётчики) —
-    // перезапускаем сглаживание снизу. ВАЖНО сравнивать с предыдущей РЕАЛЬНОЙ
-    // целью (lastTarget), а не с displayPercent: «ручеёк», убежавший выше цели,
-    // иначе сам бы вызывал ложный сброс — и бар циклически откатывался бы к нулю.
+    // New run: real target dropped sharply (backend reset counters) — restart
+    // smoothing from the bottom. Compare against lastTarget (the previous real
+    // target), not displayPercent, or the trickle overshoot would falsely
+    // trigger this reset and cycle the bar back to zero.
     if (p.active && target < lastTarget - 25) {
         displayPercent.value = target;
         trickle = target;
         stalledMs = 0;
     }
 
-    // Отслеживаем «застой» реального процента: пока приходят новые данные — ведём
-    // бар по ним; если данные встали (yt-dlp извлекает формат) — добавляем
-    // «ручеёк», чтобы бар не выглядел замёрзшим.
+    // Track stalls in the real percent; if it stops updating (yt-dlp extracting
+    // format), the trickle keeps the bar from looking frozen.
     if (Math.abs(target - lastTarget) > 0.1) {
         stalledMs = 0;
     } else {
@@ -138,11 +132,9 @@ function progressFrame(ts: number) {
 
     let goal: number;
     if (!p.active) {
-        // Фаза завершена — добиваем до 100%.
         goal = 100;
     } else if (featureProgressIsDownload.value) {
-        // Подползаем только при застое (>350мс без новых данных) и не дальше конца
-        // слота текущего трека ((current+1)/total) — чтобы не обгонять реальность.
+        // Trickle only once stalled >350ms, capped at the current slot end.
         if (stalledMs > 350) {
             const slotEnd = p.total > 0
                 ? ((Math.min(p.current, p.total) + 1) / p.total) * 100
@@ -154,11 +146,10 @@ function progressFrame(ts: number) {
         }
         goal = Math.max(target, trickle);
     } else {
-        // Анализ / внешние источники — данных много, сглаживаем без «ручейка».
         goal = target;
     }
 
-    // Экспоненциальное приближение с постоянной времени ≈0.25 с.
+    // Exponential approach, time constant ~0.25s.
     const k = 1 - Math.pow(0.018, dt / 1000);
     displayPercent.value += (goal - displayPercent.value) * k;
     if (Math.abs(goal - displayPercent.value) < 0.05) displayPercent.value = goal;
@@ -183,7 +174,6 @@ function stopProgressAnim() {
     lastFrameTs = 0;
 }
 
-// Анимируем, только пока бар виден (фоновая подготовка/скачивание идёт).
 watch(featureProgressVisible, (vis) => {
     if (vis) startProgressAnim(featureProgressPercent.value);
     else stopProgressAnim();
@@ -230,11 +220,11 @@ onMounted(() => {
         unlistenAudioFeatureProgress = unlisten;
         return invoke<number>('library_resume_audio_features');
     }).then(() => {
-        // Догружаем данные включённых внешних источников одним фоновым проходом
-        // (его шаги дописываются к тому же прогресс-бару, что и анализ).
+        // Fetches enabled external sources in the background; its steps report
+        // to the same progress bar as the feature analysis.
         return invoke('external_prepare');
     }).catch(() => {
-        // Продолжение фоновой подготовки не должно мешать запуску интерфейса.
+        // Background prep failing shouldn't block UI startup.
     });
 });
 
@@ -250,10 +240,9 @@ onUnmounted(() => {
     stopProgressAnim();
 });
 
-// ── Window controls ─────────────────────────────────────────────────────────
 const minimizeWindow = () => win.minimize();
-// Через backend: в полноэкранном режиме (F11) клик выходит из него и
-// разворачивает окно, иначе — обычное переключение maximized.
+// Backend handles this: if in fullscreen (F11), click exits fullscreen and
+// maximizes; otherwise it's a normal maximize toggle.
 const maximizeWindow = () => invoke('toggle_window_maximize');
 const closeWindow = async () => {
     await saveState();
@@ -321,9 +310,8 @@ const closeWindow = async () => {
     </div>
 </template>
 
-<!-- Стили НЕ scoped: классы (.hat/.featureWorker*/.controlsButton) уникальны, а в
-     App.vue остаются глобальные мобильные оверрайды (.hat { display:none }), которые
-     должны матчить эти элементы с прежней специфичностью. -->
+<!-- Not scoped: class names are unique, and App.vue's global mobile overrides
+     (.hat { display:none }) need to match these elements at the same specificity. -->
 <style>
 .hat {
     display: flex;
@@ -400,8 +388,8 @@ const closeWindow = async () => {
     min-width: 4px;
     border-radius: inherit;
     background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%, 0.95);
-    /* Ширину покадрово двигает rAF-сглаживание в скрипте — CSS-переход по width
-       тут только мешал бы (двойное сглаживание). */
+    /* Width is driven frame-by-frame by the rAF smoothing in script; a CSS
+       transition on width would double up the smoothing. */
     transition: background .24s ease;
 }
 .featureWorkerPercent {

@@ -1,12 +1,10 @@
-//! Интеграция с системным медиа-управлением на Linux через MPRIS (souvlaki):
-//!  * в системе (GNOME/KDE/панели, экран блокировки) отображается текущий трек
-//!    (название, исполнитель, альбом, обложка);
-//!  * системные кнопки play/pause/next/prev/stop прокидываются в плеер.
+//! Linux system media integration via MPRIS (souvlaki): shows the current
+//! track (title/artist/album/cover) in GNOME/KDE panels and lock screen, and
+//! forwards system play/pause/next/prev/stop buttons to the player.
 //!
-//! Метаданные и состояние присылает фронтенд (он держит всю реактивную модель),
-//! а входящие команды эмитятся как событие `mpris_media` — его слушает Player.vue.
-//!
-//! Весь модуль — no-op на не-Linux платформах (см. заглушки в конце файла).
+//! Frontend sends metadata/state; incoming commands are emitted as the
+//! `mpris_media` event, listened to by Player.vue. No-op on non-Linux (see
+//! stubs at the end of this file).
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -20,7 +18,7 @@ mod imp {
     };
     use tauri::{AppHandle, Emitter};
 
-    // MediaControls держит dbus-поток (souvlaki). Создаётся один раз при старте.
+    // Holds souvlaki's dbus thread; created once at startup.
     static CONTROLS: OnceLock<Mutex<MediaControls>> = OnceLock::new();
 
     pub fn init(app: &AppHandle, _cover_dir: PathBuf) {
@@ -71,9 +69,8 @@ mod imp {
         duration_secs: f64,
     ) {
         let Some(lock) = CONTROLS.get() else { return };
-        // Обложка — file:// на кэшированную WebP-миниатюру по file_path трека
-        // (генерируется лениво). Путь меняется при смене обложки (сигнатура в
-        // имени файла), поэтому MPRIS-клиенты корректно обновляют artwork.
+        // file:// URL to the lazily-generated cached WebP thumbnail; the path
+        // changes with the cover signature, so MPRIS clients refresh artwork correctly.
         let cover_url = file_path
             .as_deref()
             .and_then(|fp| crate::thumbnails::cover_file(app, fp, 512))
@@ -106,13 +103,11 @@ mod imp {
     }
 }
 
-// ── Заглушки для не-Linux платформ ───────────────────────────────────────────
 #[cfg(not(target_os = "linux"))]
 mod imp {
     use std::path::PathBuf;
     use tauri::AppHandle;
 
-    // `init` вызывается только из linux-ветки setup(), на прочих платформах не нужен.
     #[allow(dead_code)]
     pub fn init(_app: &AppHandle, _cover_dir: PathBuf) {}
     pub fn update_metadata(

@@ -40,7 +40,7 @@ const {
     fetchTracksByPaths,
 } = usePlayer();
 
-// ── Mix settings («Моя волна» style tuning) ──────────────────────────────────
+// Mix settings ("wave" style tuning)
 
 const familiarityOptions: { id: Familiarity; label: string }[] = [
     { id: 'fresh', label: 'Незнакомое' },
@@ -48,15 +48,14 @@ const familiarityOptions: { id: Familiarity; label: string }[] = [
     { id: 'favorite', label: 'Любимое' },
 ];
 
-// Настройки микса — синглтон с сохранением в localStorage:
-// переживают навигацию между страницами и перезапуск приложения.
+// Mix settings singleton persisted to localStorage: survives navigation and app restart.
 const { selectedMood, familiarity, losslessOnly } = useMixSettings();
 const settingsOpen = ref(false);
 const isBuildingMix = ref(false);
 
 const currentMood = computed(() => moods.find(m => m.id === selectedMood.value) ?? moods[0]);
 
-// Чипы настроений раскладываются на две центрированные строки (3 + остаток).
+// Mood chips are split into two centered rows (3 + remainder).
 const moodRowSplit = Math.ceil(moods.length / 2);
 const moodRows = [moods.slice(0, moodRowSplit), moods.slice(moodRowSplit)];
 
@@ -70,11 +69,9 @@ const mixOptions = computed<RecommendationOptions>(() => ({
     losslessOnly: losslessOnly.value || undefined,
 }));
 
-// ── Mix playback ────────────────────────────────────────────────────────────
+// Mix playback
 
-/** Пути очереди микса. Рекомендации (движок учитывает всю библиотеку) → их пути;
- *  если рекомендаций нет — фолбэк на ВЕСЬ каталог вперемешку (только пути, объекты
- *  резолвятся лениво через кэш). */
+/** Mix queue paths: recommendation engine results, or shuffled full catalog as fallback (paths only, resolved lazily via cache). */
 async function buildMixPaths(mood: string): Promise<string[]> {
     let recs: TrackMetadata[] = [];
     try {
@@ -86,22 +83,21 @@ async function buildMixPaths(mood: string): Promise<string[]> {
         cacheTracks(recs);
         return recs.map(t => t.file_path);
     }
-    // Фолбэк: вся библиотека вперемешку (как было до пагинации).
     return [...catalogPaths.value].sort(() => Math.random() - 0.5);
 }
 
-/** Прогрев обложек первых N путей очереди (резолв в объекты + загрузка обложек). */
+/** Warm up covers for the first N queue paths (resolve to objects + load covers). */
 async function warmCovers(paths: string[]) {
     const tracks = await fetchTracksByPaths(paths);
     if (tracks.length) loadCoversForTracks(tracks);
 }
 
 /**
- * Запуск/обновление волны.
- * По умолчанию собирается полностью новая очередь и включается её первый трек —
- * перемешивание и смена настроения меняют в том числе текущий трек.
- * @param keepCurrent true — текущий трек продолжает играть, пересобирается
- *                    только хвост очереди (для смены состава волны/lossless).
+ * Start/refresh the wave.
+ * By default builds a fully new queue and plays its first track — shuffle and
+ * mood changes also change the current track.
+ * @param keepCurrent true — current track keeps playing, only the queue tail
+ *                    is rebuilt (used for wave composition/lossless changes).
  */
 async function startMix(mood: string, keepCurrent = false) {
     if (!hasLibrary.value || isBuildingMix.value) return;
@@ -110,19 +106,18 @@ async function startMix(mood: string, keepCurrent = false) {
         const fresh = await buildMixPaths(mood);
         if (fresh.length === 0) return;
 
-        // Детерминированная очередь волны (без глобального шаффла).
+        // Deterministic wave queue (no global shuffle).
         shuffled.value = false;
 
         if (keepCurrent && isMixActive.value && currentTrack.value && currentTrackIndex.value >= 0) {
-            // Мягкое обновление: текущий трек продолжает играть, хвост пересобирается.
             const keepPaths = playbackOrder.value.slice(0, currentTrackIndex.value + 1);
             const keepSet = new Set(keepPaths);
             const tail = fresh.filter(p => !keepSet.has(p));
             setMixSourceFromPaths([...keepPaths, ...tail]);
             void warmCovers(tail.slice(0, 24));
         } else {
-            // Новая волна: если рекомендации снова поставили играющий трек первым,
-            // убираем его с первой позиции, чтобы текущий трек гарантированно сменился.
+            // If recommendations put the currently playing track first again,
+            // move it off position 0 so the current track is guaranteed to change.
             const currentPath = currentTrack.value?.file_path;
             if (currentPath && fresh.length > 1 && fresh[0] === currentPath) {
                 const j = 1 + Math.floor(Math.random() * (fresh.length - 1));
@@ -145,20 +140,20 @@ function onPlayMix() {
     void startMix(selectedMood.value);
 }
 
-/** Перемешать — новая очередь рекомендаций и новый текущий трек. */
+/** Shuffle — new recommendation queue and new current track. */
 function onShuffleMix() {
     void startMix(selectedMood.value);
 }
 
 function selectMood(id: string) {
     selectedMood.value = id;
-    // Смена настроения перезапускает волну вместе с текущим треком.
+    // Mood change restarts the wave along with the current track.
     if (isMixActive.value) void startMix(id);
 }
 
 function selectFamiliarity(id: Familiarity) {
     familiarity.value = id;
-    // Состав волны меняет только хвост — текущий трек продолжает играть.
+    // Changing wave composition only affects the tail — current track keeps playing.
     if (isMixActive.value) void startMix(selectedMood.value, true);
 }
 
@@ -167,11 +162,9 @@ function toggleLossless() {
     if (isMixActive.value) void startMix(selectedMood.value, true);
 }
 
-// ── Mix stage ───────────────────────────────────────────────────────────────
-
 const familiarityLabel = computed(() => familiarityOptions.find(o => o.id === familiarity.value)?.label ?? '');
 
-// ── Statistics modal ────────────────────────────────────────────────────────
+// Statistics modal
 
 const statsOpen = ref(false);
 const statsLoading = ref(false);
@@ -213,7 +206,7 @@ const metrics = computed(() => {
     ];
 });
 
-// ── Радар характера звучания (SVG spider chart) ──────────────────────────────
+// Sound character radar (SVG spider chart)
 const RADAR = { w: 360, h: 248, cx: 180, cy: 118, r: 86, labelR: 110 };
 
 const radarAxes = computed(() => {
@@ -266,8 +259,6 @@ const character = computed(() => {
     return t('stats.characterSentence', { traits });
 });
 
-// ── Lifecycle ───────────────────────────────────────────────────────────────
-
 function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     if (statsOpen.value) statsOpen.value = false;
@@ -286,7 +277,6 @@ onUnmounted(() => {
 <template>
     <div class="mainRoot">
         <div class="pageRoot">
-            <!-- ── Музыкальный профиль ──────────────────────────────────────── -->
             <button class="statsBtn" @click="openStats" v-tooltip:bottom="'Ваш музыкальный профиль'">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M3 3v16a2 2 0 0 0 2 2h16"/>
@@ -296,9 +286,7 @@ onUnmounted(() => {
                 </svg>
             </button>
 
-            <!-- ── «Мой микс»: персональная волна на всю страницу ───────────── -->
             <template v-if="hasLibrary">
-                <!-- Блок с текстом и кнопками — по центру свободной высоты страницы. -->
                 <div class="stageArea">
                     <div class="mixStage">
                         <div class="mixHeader">
@@ -345,7 +333,6 @@ onUnmounted(() => {
                     </div>
                 </div>
 
-                <!-- Настроение — внизу страницы, две центрированные строки. -->
                 <div class="moodStrip">
                     <div class="moodStripLabel">Настроение</div>
                     <div class="moodChips">
@@ -366,7 +353,6 @@ onUnmounted(() => {
                 </div>
             </template>
 
-            <!-- ── Empty state (no library) ────────────────────────────────── -->
             <div v-else class="emptyState">
                 <div class="emptyIcon"><CatalogIcon width="16" height="16" /></div>
                 <div class="emptyText">Ваша библиотека пуста</div>
@@ -375,7 +361,6 @@ onUnmounted(() => {
             </div>
         </div>
 
-        <!-- ── Settings panel (внутри viewport, без размытия) ──────────────── -->
         <Transition name="panel">
             <div v-if="settingsOpen" class="panelCatcher" @click="settingsOpen = false">
                 <div class="settingsPanel" @click.stop>
@@ -437,7 +422,6 @@ onUnmounted(() => {
             </div>
         </Transition>
 
-        <!-- ── Statistics modal ────────────────────────────────────────────── -->
         <Teleport to="body">
             <Transition name="stats">
                 <div v-if="statsOpen" class="statsBackdrop" @click="statsOpen = false">
@@ -550,9 +534,7 @@ onUnmounted(() => {
     padding: 24px 28px;
     box-sizing: border-box;
     background-color: var(--light-bg);
-    /* Окружающий accent-свет: мягкие засветки сверху и снизу + лёгкая виньетка.
-       Привязаны к краям, поэтому читаются как освещение сцены, а не «шар».
-       Всё на accent-переменных — фон подстраивается под цвет текущего трека. */
+    /* Ambient accent light: soft top/bottom glows + subtle vignette, all on accent vars so it follows the current track's color. */
     background-image:
         radial-gradient(120% 75% at 50% -12%, hsla(var(--accent-h), var(--accent-s), 62%, 0.20), transparent 60%),
         radial-gradient(100% 58% at 50% 116%, hsla(var(--accent-h), var(--accent-s), 55%, 0.17), transparent 62%),
@@ -562,7 +544,6 @@ onUnmounted(() => {
     overflow: hidden;
 }
 
-/* Блок с текстом/кнопками центрируется в свободной высоте над настроениями. */
 .stageArea {
     flex: 1;
     min-height: 0;
@@ -572,7 +553,6 @@ onUnmounted(() => {
     justify-content: center;
 }
 
-/* ── «Статистика» (круглая кнопка-иконка) ───────────────────────────────── */
 .statsBtn {
     position: absolute;
     top: 20px;
@@ -597,7 +577,6 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 1);
 }
 
-/* ── Сцена волны (центрированная, на весь viewport) ─────────────────────── */
 .mixStage {
     position: relative;
     z-index: 1;
@@ -609,7 +588,6 @@ onUnmounted(() => {
     max-width: 760px;
 }
 
-/* ── Текстовый блок волны ───────────────────────────────────────────────── */
 .mixHeader {
     display: flex;
     flex-direction: column;
@@ -679,7 +657,6 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.9);
 }
 
-/* ── Контролы волны ─────────────────────────────────────────────────────── */
 .mixControls {
     display: flex;
     flex-direction: row;
@@ -740,7 +717,6 @@ onUnmounted(() => {
     color: #fff;
 }
 
-/* ── Быстрый выбор настроения ───────────────────────────────────────────── */
 .moodStrip {
     flex-shrink: 0;
     display: flex;
@@ -774,7 +750,6 @@ onUnmounted(() => {
     gap: 8px;
     max-width: 620px;
 }
-/* Каждая строка настроений центрируется независимо. */
 .moodChipsRow {
     display: flex;
     flex-direction: row;
@@ -810,7 +785,6 @@ onUnmounted(() => {
 }
 .moodChip.active svg { opacity: 1; }
 
-/* ── Empty state ────────────────────────────────────────────────────────── */
 .emptyState {
     flex: 1;
     display: flex;
@@ -860,7 +834,6 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 1);
 }
 
-/* ── Settings panel (within viewport, no blur, no borders) ──────────────── */
 .panelCatcher {
     position: absolute;
     inset: 0;
@@ -937,7 +910,6 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.4);
 }
 
-/* Mood list (вертикальный список с радио-индикатором) */
 .moodList {
     display: flex;
     flex-direction: column;
@@ -1041,8 +1013,6 @@ onUnmounted(() => {
 }
 .moodRow.active .moodRadioDot { transform: scale(1); }
 
-/* Сегментированный переключатель в стиле «режим блока» из настроек:
-   тёмная дорожка с inset-обводкой, активная опция — белая на прозрачном. */
 .segmented {
     display: flex;
     flex-direction: row;
@@ -1122,7 +1092,6 @@ onUnmounted(() => {
 .panel-enter-from, .panel-leave-to { opacity: 0; }
 .panel-enter-from .settingsPanel, .panel-leave-to .settingsPanel { transform: translateX(calc(100% + 12px)); }
 
-/* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-height: 800px) {
     .mixName { font-size: 40px; }
     .moodStrip { margin-top: 26px; }
@@ -1132,17 +1101,16 @@ onUnmounted(() => {
     .mixName { font-size: 42px; }
 }
 
-/* Телефоны (канонический брейкпоинт приложения, как в остальных вью). */
+/* Phone breakpoint (canonical for this app; see other views too). */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .pageRoot { padding: 16px 10px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
     .mixName { font-size: 34px; letter-spacing: -0.8px; }
-    /* Описание не во всю ширину: добавляем собственный отступ, чтобы текст
-       не упирался в края даже при маленьком padding страницы. */
+    /* Own padding so text doesn't hit the edges even with the page's small padding. */
     .mixDesc { font-size: 14px; max-width: 100%; padding: 0 18px; box-sizing: border-box; }
     .playListBtn { min-width: 150px; min-height: 42px; padding: 13px 22px; font-size: 13px; }
     .roundBtn { width: 46px; height: 46px; }
-    /* Настройки микса — на весь экран, без отступов по краям. */
+    /* Mix settings full-screen, no edge padding. */
     .settingsPanel {
         top: 0;
         right: 0;
@@ -1220,7 +1188,6 @@ onUnmounted(() => {
     box-shadow: none;
 }
 
-/* Profile header */
 .statsHead {
     display: flex;
     flex-direction: column;
@@ -1257,12 +1224,10 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.5);
 }
 
-/* Profile sections */
 .statsSection {
     margin-top: 28px;
 }
 
-/* Sound character: radar (spider) chart */
 .radarWrap {
     position: relative;
     display: flex;
@@ -1270,7 +1235,7 @@ onUnmounted(() => {
     justify-content: center;
     margin: -4px 0 2px;
 }
-/* Мягкий accent-свет за радаром — в духе орба на странице. */
+/* Soft accent glow behind the radar, matching the page's orb style. */
 .radarWrap::before {
     content: "";
     position: absolute;
@@ -1332,7 +1297,7 @@ onUnmounted(() => {
     font-variant-numeric: tabular-nums;
 }
 
-/* Hero stat cards: верхняя строка — 2 карточки, нижняя — одна широкая. */
+/* Hero stat cards: top row has 2 cards, bottom row 1 wide card. */
 .statCards {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1383,7 +1348,7 @@ onUnmounted(() => {
     user-select: none;
 }
 
-/* Широкая нижняя карточка (время прослушивания): иконка слева, текст справа. */
+/* Wide bottom card (listening time): icon on the left, text on the right. */
 .statCard.wide {
     grid-column: 1 / -1;
     flex-direction: row;
@@ -1421,7 +1386,7 @@ onUnmounted(() => {
 .stats-enter-from, .stats-leave-to { opacity: 0; }
 .stats-enter-from .statsModal, .stats-leave-to .statsModal { transform: scale(0.96) translateY(6px); opacity: 0; }
 
-/* Телефоны: модалка статистики на весь экран, без отступов по краям. */
+/* Phones: stats modal full-screen, no edge padding. */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .statsBackdrop { padding: 0; }
     .statsModal {

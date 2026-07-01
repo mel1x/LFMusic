@@ -54,27 +54,24 @@ const albumName = computed(() => {
 
 const { loadOrder: loadAlbumOrder, applyOrder: applyAlbumOrder, setOrder: setAlbumOrder } = useAlbumTrackOrder()
 
-// Загружаем порядок из БД при открытии альбома (и при смене маршрута).
+// Load saved order from DB on album open / route change.
 watch(albumName, (name) => { if (name) loadAlbumOrder(name) }, { immediate: true })
 
-// Треки альбома — из плейлиста альбома (бэкенд), а не из полного trackList.
 const albumPlaylistForTracks = computed(() =>
     albumPlaylists.value.find(p => p.name === albumName.value) || null
 )
 const albumTracksRaw = ref<TrackMetadata[]>([])
-// Имя альбома, для которого треки уже загружены (для гейта первой отрисовки).
 const tracksLoadedFor = ref<string | null>(null)
 async function loadAlbumTracks() {
     const name = albumName.value
     const pl = albumPlaylistForTracks.value
-    // Плейлисты ещё не загружены — ждём (готовым не помечаем).
     if (!pl) { albumTracksRaw.value = []; return }
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
         if (albumName.value === name) {
-            // Живые объекты из кэша — иначе у ранее закэшированных треков обложка
-            // не отобразится (грузится в кэш-объект, а рендерится сырой). См. cacheTrack.
+            // Use live cache objects, not raw ones — otherwise covers loaded
+            // earlier into the cache object won't show on the raw copy. See cacheTrack.
             albumTracksRaw.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
             tracksLoadedFor.value = name
         }
@@ -97,27 +94,23 @@ const albumArtist = computed(() =>
 
 const sourceId = computed(() => `album:${albumName.value}`)
 
-// ── Внешний порядок треков + фантомные (не скачанные) треки ──────────────────
+// External track order + phantom (not downloaded) tracks
 const { settings } = useSettings()
 const { getAlbumLayout } = useExternalSources()
 
 const albumLayout = ref<AlbumLayout | null>(null)
-// Имя альбома, для которого внешний макет уже получен (ok/none/ошибка).
 const layoutSettledFor = ref<string | null>(null)
 
 const layoutOk = computed(() =>
     albumLayout.value?.status === 'ok' && (albumLayout.value?.entries.length ?? 0) > 0
 )
-// Внешний порядок треков активен (переставляем локальные треки).
 const externalOrderActive = computed(() => settings.value.external_album_order && layoutOk.value)
-// Дополнение недостающими треками активно (показываем фантомы).
 const supplementActive = computed(() => settings.value.external_supplement_missing && layoutOk.value)
 
-// Фантомный трек кликабелен (→ поиск на странице «Скачивание»), если установлен
-// yt-dlp и включена страница скачивания. Иначе фантом — просто информационный.
+// Phantom is clickable only if yt-dlp is installed and downloads page is enabled;
+// otherwise it's purely informational.
 const { ytdlpMissing } = useDownloads()
 const phantomClickable = computed(() => !ytdlpMissing.value && settings.value.show_downloads_page)
-// Нужен ли вообще внешний макет.
 const layoutNeeded = computed(() =>
     settings.value.external_album_order || settings.value.external_supplement_missing
 )
@@ -128,7 +121,7 @@ async function refreshAlbumLayout() {
     layoutSettledFor.value = null
     if (!layoutNeeded.value || !name) return
     const layout = await getAlbumLayout(name)
-    // Защита от гонки: альбом мог смениться, пока шёл запрос.
+    // Guard against race: album may have changed while the request was in flight.
     if (albumName.value === name) {
         albumLayout.value = layout
         layoutSettledFor.value = name
@@ -140,10 +133,8 @@ watch(
     { immediate: true },
 )
 
-// ── Гейт первой отрисовки ────────────────────────────────────────────────────
-// Альбом не показываем сразу: ждём загрузки треков и (если включён внешний
-// порядок) внешнего макета — чтобы порядок и фантомы были видны сразу, без
-// «прыжка». Но не дольше 2.5с — тогда показываем что есть.
+// First-paint gate: wait for tracks (and external layout, if enabled) to load
+// before showing the album, so order/phantoms appear without a jump. Capped at 2.5s.
 const PAGE_LOAD_TIMEOUT_MS = 2500
 
 const tracksReady = computed(() => tracksLoadedFor.value === albumName.value)
@@ -171,8 +162,8 @@ watch([tracksReady, layoutReady], () => {
     }
 }, { immediate: true })
 
-// Единый элемент списка: реальный локальный трек либо «фантом» (есть в каноне
-// альбома, но отсутствует в библиотеке — показывается полупрозрачным).
+// A row is either a real local track or a "phantom" (present in the canonical
+// album but missing from the library — rendered semi-transparent).
 interface AlbumRow {
     phantom: boolean
     key: string
@@ -186,9 +177,8 @@ function filenameOf(t: TrackMetadata): string {
     return t.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || ''
 }
 
-// Шумовые токены — порт TITLE_NOISE_TOKENS из src-tauri/src/external.rs.
-// Скобочная группа, содержащая любой из них, считается «шумом» и вырезается
-// целиком; версийные пометки (remix/live/…) сохраняются.
+// Port of TITLE_NOISE_TOKENS from src-tauri/src/external.rs. A bracketed group
+// containing any of these is stripped entirely; version tags (remix/live/…) stay.
 const TITLE_NOISE_TOKENS = new Set([
     'feat', 'ft', 'featuring', 'prod', 'produced', 'official', 'lyric', 'lyrics',
     'visualizer', 'remaster', 'remastered', 'explicit', 'mv',
@@ -200,16 +190,14 @@ function groupIsNoise(buf: string): boolean {
         .some(w => w.length > 0 && TITLE_NOISE_TOKENS.has(w))
 }
 
-// Нормализация названия трека для сопоставления с каноном альбома — зеркало
-// `external::title_match_key` = normalize(strip_title_noise(title)). Раньше фронт
-// удалял лишь маркеры фитов и пару ключевых слов, а бэкенд вырезал ВСЕ скобочные
-// шумовые группы ((Official Video)/(prod. by X)). Из-за рассинхрона «Believer
-// (Official Video)» из канона не матчился с локальным «Believer», и скачанный
-// трек висел фантомом. Держим логику идентичной бэкенду.
+// Mirrors `external::title_match_key` = normalize(strip_title_noise(title)) on the
+// backend. Must stay identical: a prior mismatch (frontend stripped only feat.
+// markers, backend stripped ALL noise groups) left "Believer (Official Video)"
+// unmatched against local "Believer", so a downloaded track stayed a phantom.
 function albumNormalizeTitle(s: string): string {
     const lower = (s || '').toLowerCase()
-    // 1) strip_title_noise: посимвольно вырезаем шумовые скобочные группы,
-    //    сохраняя осмысленные (remix/live/…).
+    // 1) strip_title_noise: strip noise bracket groups char by char, keeping
+    //    meaningful ones (remix/live/…).
     let stripped = ''
     let buf = ''
     let depth = 0
@@ -230,14 +218,14 @@ function albumNormalizeTitle(s: string): string {
             stripped += ch
         }
     }
-    // Незакрытая скобка — добавляем остаток, если он не «шум».
+    // Unclosed bracket — keep the remainder if it's not noise.
     if (buf.length > 0 && !groupIsNoise(buf)) stripped += buf
-    // Хвостовые кредиты вне скобок.
+    // Trailing credits outside brackets.
     for (const marker of [' feat.', ' feat ', ' ft.', ' ft ', ' featuring ', ' prod.', ' prod ']) {
         const i = stripped.indexOf(marker)
         if (i !== -1) stripped = stripped.slice(0, i)
     }
-    // 2) normalize: только буквы/цифры, прочее — одиночные пробелы, без хвоста.
+    // 2) normalize: letters/digits only, everything else collapses to single spaces.
     let out = ''
     let prevSpace = true
     for (const ch of stripped) {
@@ -275,22 +263,20 @@ const rawByPath = computed(() => {
     return m
 })
 
-// Полный упорядоченный список строк (без учёта поиска). Зависит от двух
-// независимых настроек: внешний порядок (переставляет локальные треки) и
-// дополнение недостающими (показывает фантомы).
+// Full ordered row list (before search filtering). Depends on two independent
+// settings: external order (reorders local tracks) and supplement (shows phantoms).
 const orderedRows = computed<AlbumRow[]>(() => {
     const layout = albumLayout.value
     const order = externalOrderActive.value
     const supplement = supplementActive.value
 
-    // Ни порядок, ни дополнение не активны — обычное поведение.
     if ((!order && !supplement) || !layout) {
         return albumTracks.value.map(realRow)
     }
 
-    // Пул локальных треков по нормализованному названию — чтобы только что
-    // скачанный трек (которого ещё нет в кэшированном макете с file_path) встал
-    // на своё место в каноне и заменил собой фантом.
+    // Pool of local tracks by normalized title, so a just-downloaded track (not
+    // yet in the cached layout by file_path) can take its canonical slot and
+    // replace a phantom.
     const localByTitle = new Map<string, TrackMetadata[]>()
     for (const t of albumTracks.value) {
         const k = albumNormalizeTitle(t.title || filenameOf(t))
@@ -299,8 +285,8 @@ const orderedRows = computed<AlbumRow[]>(() => {
         if (arr) arr.push(t); else localByTitle.set(k, [t])
     }
     const used = new Set<string>()
-    // Локальный трек для записи канона: сперва по точному пути из макета, затем
-    // по совпадению нормализованного названия (свежескачанные треки).
+    // Match canon entry to a local track: exact file_path from layout first,
+    // then normalized title (for freshly downloaded tracks).
     const matchLocal = (e: AlbumLayoutEntry): TrackMetadata | undefined => {
         if (e.file_path) {
             const t = rawByPath.value.get(e.file_path)
@@ -314,7 +300,7 @@ const orderedRows = computed<AlbumRow[]>(() => {
     }
 
     if (order) {
-        // Канонический порядок. Фантомы — только если включено дополнение.
+        // Canonical order; phantoms only if supplement is enabled.
         const rows: AlbumRow[] = []
         for (const e of layout.entries) {
             const local = matchLocal(e)
@@ -325,19 +311,19 @@ const orderedRows = computed<AlbumRow[]>(() => {
                 rows.push(phantomRow(e, rows.length))
             }
         }
-        // Локальные треки, которых нет в каноне (бонус-треки и т.п.) — в конец.
+        // Local tracks not in canon (bonus tracks etc.) go at the end.
         for (const t of albumTracks.value) {
             if (!used.has(t.file_path)) rows.push(realRow(t))
         }
         return rows
     }
 
-    // Дополнение без переупорядочивания: локальный порядок + недостающие в конец.
+    // Supplement without reordering: local order + missing tracks appended.
     const rows = albumTracks.value.map(realRow)
     let idx = rows.length
     for (const e of layout.entries) {
-        // Фантом только если соответствующего локального трека нет ни по пути,
-        // ни по названию (иначе только что скачанный трек дублировался бы).
+        // Phantom only if no local track matches by path or title (otherwise a
+        // freshly downloaded track would show twice).
         if (!matchLocal(e)) {
             rows.push(phantomRow(e, idx++))
         }
@@ -347,9 +333,8 @@ const orderedRows = computed<AlbumRow[]>(() => {
 
 const { getCustomCover } = useCustomCovers()
 
-// Канонический «первый» трек альбома берём из плейлиста — тот же, что и
-// карточка в сетке (PlaylistInfo.first_file_path). Это синхронизирует
-// обложку в шапке альбома с обложкой в сетке альбомов.
+// The canonical "first" track comes from the playlist, same as the grid card
+// (PlaylistInfo.first_file_path) — keeps the header cover in sync with the grid.
 const albumPlaylist = computed(() =>
     albumPlaylists.value.find(p => p.name === albumName.value) || null
 )
@@ -363,26 +348,25 @@ const albumFirstTrack = computed<TrackMetadata | null>(() => {
 const albumCover = computed(() => {
     const custom = getCustomCover('album', albumName.value)
     if (custom) return custom
-    // Сначала пытаемся показать обложку «первого» трека из плейлиста; если у
-    // него ещё не подгружена — фолбэчимся на любой загруженный трек альбома,
-    // и затем на дефолт. Это убирает рассинхрон с сеткой.
+    // Prefer the "first" track's cover; fall back to any loaded track cover,
+    // then the default — keeps this in sync with the grid.
     return albumFirstTrack.value?.cover_art
         || albumTracks.value.find(t => t.cover_art)?.cover_art
         || defaultTrackCover
 })
 
-// Гарантируем, что обложка «первого» трека подгрузится — иначе в шапке
-// будет дефолт, пока пользователь не доскроллит до этого трека в списке.
+// Force-load the "first" track's cover, otherwise the header shows the default
+// until the user scrolls that track into view.
 watch(albumFirstTrack, (t) => {
     if (t && !t.cover_art) loadCoversForTracks([t])
 }, { immediate: true })
 
-// Плейлисты могут быть не загружены при прямом переходе по URL — догружаем.
+// Playlists may not be loaded yet on direct URL navigation.
 onMounted(() => {
     if (!albumPlaylists.value.length) loadPlaylists()
 })
 
-// ── Search ──────────────────────────────────────────────────────────────────
+// ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -425,12 +409,12 @@ const displayRows = computed<AlbumRow[]>(() => {
     )
 })
 
-// Только проигрываемые (реальные) треки — для очереди и кнопки «Слушать».
+// Playable (real) tracks only — for the queue and the "Listen" button.
 const playableTracks = computed<TrackMetadata[]>(() =>
     displayRows.value.filter(r => !r.phantom).map(r => r.track!)
 )
 
-// ── Header height ─────────────────────────────────────────────────────────
+// ── Header height ──
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
@@ -453,7 +437,7 @@ onUnmounted(() => {
     clearPageReadyTimer()
 })
 
-// ── Virtual scroll ──────────────────────────────────────────────────────────
+// ── Virtual scroll ──
 
 const {
     containerEl: trackListEl,
@@ -469,9 +453,8 @@ watch(albumName, () => resetScroll())
 
 const isScrollingToTop = ref(false)
 
-// Hold back first paint until the first 20 covers have resolved. Гейт «вооружён»
-// только когда треки альбома загружены — иначе он открылся бы на пустом списке
-// (контент мелькнёт, лоадер появится уже поверх подгрузки обложек).
+// Hold back first paint until the first 20 covers have resolved. Only armed once
+// tracks are loaded — otherwise it'd open on an empty list (content would flash).
 const { ready: coversReady } = useCoverGate(
     () => displayRows.value.filter(r => !r.phantom).slice(0, 20).map(r => r.track!),
     { armed: () => tracksReady.value },
@@ -483,7 +466,7 @@ watch(visibleTracks, (rows) => {
     }
 }, { immediate: true })
 
-// ── Play button ─────────────────────────────────────────────────────────────
+// ── Play button ──
 
 const isAlbumActive = computed(() =>
     activePlaylistSource.value === sourceId.value
@@ -499,7 +482,7 @@ function onPlayAlbum() {
     }
 }
 
-// ── Sticky header ───────────────────────────────────────────────────────────
+// ── Sticky header ──
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -519,7 +502,7 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// ── Track click ─────────────────────────────────────────────────────────────
+// ── Track click ──
 
 function onRowClick(e: MouseEvent, row: AlbumRow) {
     if (row.phantom || !row.track) return
@@ -530,11 +513,9 @@ function onRowClick(e: MouseEvent, row: AlbumRow) {
     createRipple(e)
 }
 
-// Клик по фантомному (не скачанному) треку: подставляем «название исполнитель»
-// в поиск страницы «Скачивание» и переходим на неё (через query-параметр). Точные
-// исполнитель/название передаём отдельно (dlArtist/dlTitle) — по ним страница
-// запускает точный поиск по полям Deezer, иначе трек с «общим» названием
-// («Интро») потерялся бы в свободной выдаче.
+// Phantom click: seed the downloads page search with "artist title" and navigate
+// there. dlArtist/dlTitle are passed separately for an exact Deezer field search —
+// a generic title (e.g. "Intro") would otherwise get lost in free-text search.
 function onPhantomClick(row: AlbumRow) {
     if (!phantomClickable.value) return
     const q = [row.title, row.artist].map(s => (s || '').trim()).filter(Boolean).join(' ')
@@ -550,7 +531,7 @@ function onCoverClick(track: TrackMetadata) {
     playTrack(track, { manualListStart: true })
 }
 
-// ── Context menu ────────────────────────────────────────────────────────────
+// ── Context menu ──
 
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
@@ -565,7 +546,7 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
 
-// ── Поднять трек в альбоме ────────────────────────────────────────────────────
+// ── Move track to top of album ──
 
 async function moveTrackToTopOfAlbum(track: TrackMetadata) {
     const paths = albumTracks.value.map(t => t.file_path)
@@ -575,12 +556,12 @@ async function moveTrackToTopOfAlbum(track: TrackMetadata) {
     paths.unshift(track.file_path)
     await setAlbumOrder(albumName.value, paths)
     if (isAlbumActive.value) {
-        // Пересобираем источник из переупорядоченных треков альбома.
+        // Rebuild the queue source from the reordered album tracks.
         setPlaylistSource(sourceId.value, albumTracks.value.slice())
     }
 }
 
-// ── Back ────────────────────────────────────────────────────────────────────
+// ── Back ──
 
 function goBack() {
     router.back()
@@ -664,8 +645,8 @@ function onCoverImgClick() {
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
             <template v-for="row in visibleTracks" :key="row.key">
-                <!-- Фантомный (не скачанный) трек: полупрозрачный. Кликабелен →
-                     поиск на странице «Скачивание», если установлен yt-dlp. -->
+                <!-- Phantom (not downloaded) track: semi-transparent, clickable
+                     to search the downloads page if yt-dlp is installed. -->
                 <div
                     v-if="row.phantom"
                     class="trackElem phantom"
@@ -688,7 +669,6 @@ function onCoverImgClick() {
                     </div>
                     <div class="trackTime">{{ row.duration_secs ? formatTime(row.duration_secs) : '' }}</div>
                 </div>
-                <!-- Обычный локальный трек -->
                 <div
                     v-else
                     class="trackElem"
@@ -1250,10 +1230,9 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.3);
 }
 
-/* ── Фантомные (не скачанные) треки ──────────────────────────────────────── */
-/* Прозрачность не на всю строку (чтобы не путать с активным треком, у которого
-   полупрозрачная обложка): обложку фантома делаем заметно прозрачнее, текст
-   приглушаем умеренно — он остаётся читаемым. */
+/* ── Phantom (not downloaded) tracks ── */
+/* Don't fade the whole row (would be confused with the active-track look, which
+   also dims the cover) — fade the cover more, text less, so text stays readable. */
 .trackElem.phantom {
     cursor: default;
 }
@@ -1282,7 +1261,7 @@ function onCoverImgClick() {
 .trackElem.phantom .trackTime {
     margin-left: 0;
 }
-/* Кликабельный фантом (есть yt-dlp): подсказываем, что трек можно скачать. */
+/* Clickable phantom (yt-dlp available): hint that the track can be downloaded. */
 .trackElem.phantom.downloadable {
     cursor: pointer;
 }
@@ -1310,7 +1289,6 @@ function onCoverImgClick() {
 .trackElem.phantom.downloadable:hover .phantomDlIcon {
     opacity: 1;
 }
-/* На наведении показываем иконку скачивания поверх приглушённой обложки. */
 .trackElem.phantom.downloadable:hover .trackCover {
     opacity: 0.5;
 }

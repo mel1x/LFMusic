@@ -27,9 +27,9 @@ const {
     </div>
 </template>
 
-<!-- Стили НЕ scoped: в App.vue остаются глобальные мобильные оверрайды
-     (.androidPermissionWarning/.androidPermissionCard) без !important, поэтому база
-     должна сохранять прежнюю (глобальную) специфичность. -->
+<!-- Not scoped: App.vue has global mobile overrides
+     (.androidPermissionWarning/.androidPermissionCard) without !important, so
+     specificity here must stay global to not outrank them. -->
 <style>
 .androidPermissionWarning {
     position: fixed;

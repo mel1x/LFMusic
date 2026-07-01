@@ -394,16 +394,12 @@ fn spectral_stats(samples: &[f32], sample_rate: u32) -> SpectralStats {
 }
 
 thread_local! {
-    /// Предрасчитанные twiddle-факторы W_n^k = exp(-2πi·k/n) для k∈[0, n/2),
-    /// ключ — размер БПФ. Считаются один раз на размер и переиспользуются на
-    /// каждом кадре визуализатора/анализа — вместо вычисления cos/sin в цикле
-    /// бабочек на каждый вызов.
+    /// Twiddle factors cached per FFT size, avoids recomputing cos/sin every call.
     static TWIDDLES: RefCell<HashMap<usize, Vec<Complex>>> = RefCell::new(HashMap::new());
-    /// Кэш окон Ханна по размеру (cos считается один раз на размер).
+    /// Hann window cache per size.
     static HANN: RefCell<HashMap<usize, Vec<f32>>> = RefCell::new(HashMap::new());
 }
 
-/// Построить таблицу twiddle-факторов для БПФ размера `n` (n/2 значений).
 fn build_twiddles(n: usize) -> Vec<Complex> {
     (0..n / 2)
         .map(|k| {
@@ -437,7 +433,7 @@ pub(crate) fn fft_radix2(buffer: &mut [Complex]) {
         return;
     }
 
-    // Перестановка по обратному биту (in-place).
+    // Bit-reversal permutation (in-place).
     let mut j = 0usize;
     for i in 1..n {
         let mut bit = n >> 1;
@@ -451,8 +447,8 @@ pub(crate) fn fft_radix2(buffer: &mut [Complex]) {
         }
     }
 
-    // Бабочки с предрасчитанными twiddle-факторами. Для стадии длины `len`
-    // нужный фактор exp(-2πi·k/len) = table[k·(n/len)], где table[m]=exp(-2πi·m/n).
+    // Butterfly stage using cached twiddles: for stage length `len`, the
+    // factor exp(-2pi*i*k/len) = table[k*(n/len)].
     TWIDDLES.with(|cache| {
         let mut cache = cache.borrow_mut();
         let table = cache.entry(n).or_insert_with(|| build_twiddles(n));
@@ -708,7 +704,7 @@ mod tests {
     fn silence_yields_minimum_loudness_and_zero_energy() {
         let samples = vec![0.0f32; FFT_SIZE * 4];
         let features = analyze_samples_for_tests(&samples, 11_025);
-        // global_rms(0) -> log10(1e-7) clamped to -90.0 (минимум диапазона).
+        // global_rms(0) -> log10(1e-7) clamped to range minimum -90.0.
         assert_eq!(features.loudness, Some(-90.0));
         assert_eq!(features.energy, Some(0.0));
         assert_eq!(features.key, None, "у тишины не должно быть определяемой тональности");
@@ -744,7 +740,7 @@ mod tests {
         let with_bpm = estimate_danceability(Some(120.0), 0.5, 0.5);
         let without_bpm = estimate_danceability(None, 0.5, 0.5);
         assert!(without_bpm < with_bpm);
-        // Без bpm danceability = 0.5*0.68 + 0.5*0.10 (никакого вклада tempo_fit).
+        // Without bpm, tempo_fit contributes nothing: 0.5*0.68 + 0.5*0.10.
         assert!((without_bpm - (0.5 * 0.68 + 0.5 * 0.10)).abs() < 1e-6);
     }
 
@@ -768,15 +764,13 @@ mod tests {
 
     #[test]
     fn fft_radix2_matches_naive_dft_for_random_signal() {
-        // Сверяем кастомный in-place radix-2 БПФ с прямым (наивным) ДПФ —
-        // ловит ошибки в перестановке/бабочках, которые синус-тесты выше могут
-        // не заметить (амплитуда верна, но фаза/бины слегка не те).
+        // Cross-check against a naive DFT: catches permutation/butterfly bugs
+        // that the sine-wave tests above could miss (right magnitude, wrong phase/bin).
         let n = 64usize;
         let mut input: Vec<Complex> = (0..n)
             .map(|i| Complex::new(((i * 37 % 13) as f32) - 6.0, ((i * 19 % 11) as f32) - 5.0))
             .collect();
 
-        // Наивное ДПФ для сверки.
         let mut expected = vec![Complex::new(0.0, 0.0); n];
         for (k, slot) in expected.iter_mut().enumerate() {
             let mut re = 0.0f32;

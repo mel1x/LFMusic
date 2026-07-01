@@ -43,9 +43,7 @@ struct AudioFeatureProgress {
     total: usize,
     percent: f64,
     active: bool,
-    /// Текущая активная фаза подготовки: "analysis" (анализ треков для
-    /// рекомендаций), "external" (получение данных из интернета), "download"
-    /// (скачивание треков) или "done". Фронт по ней выбирает текст прогресса.
+    /// Current phase: "analysis" | "external" | "download" | "done" — frontend picks progress text by this.
     phase: &'static str,
 }
 
@@ -110,10 +108,8 @@ fn emit_audio_feature_progress(
     );
 }
 
-/// Объединённый прогресс «подготовки»: фаза анализа аудио-фич (`f_*`), фаза
-/// подготовки внешних источников (`e_*`) и фаза скачивания треков (`d_*`)
-/// складываются в один прогресс-бар (TitleBar.vue). Внешние шаги дописываются к
-/// анализу, скачивание — последней фазой (см. выбор `phase` ниже).
+/// Combined "prep" progress bar (TitleBar.vue): audio-feature analysis (`f_*`),
+/// external-source fetch (`e_*`), and downloads (`d_*`) phases in one bar.
 #[derive(Clone, Copy)]
 struct PrepCounts {
     f_done: usize,
@@ -122,9 +118,8 @@ struct PrepCounts {
     e_total: usize,
     d_done: usize,
     d_total: usize,
-    /// Доля прогресса текущего скачиваемого трека (0..1). Прибавляется к числу
-    /// готовых только при расчёте процента — чтобы бар в шапке шёл плавно, а не
-    /// прыгал «потреково». На счётчик «готово/всего» (current/total) не влияет.
+    /// Fractional progress (0..1) of the track currently downloading; only affects the
+    /// displayed percent (not the done/total count), so the bar moves smoothly instead of jumping per-track.
     d_frac: f64,
 }
 
@@ -144,9 +139,8 @@ fn prep_clock() -> &'static Instant {
     START.get_or_init(Instant::now)
 }
 
-/// Применить изменение к счётчикам и (с троттлингом) эмитнуть объединённый
-/// прогресс. По достижении 100% счётчики сбрасываются — следующий проход
-/// (новый анализ/подготовка) начинается с чистого листа.
+/// Apply a mutation to the counters and (throttled) emit combined progress.
+/// Counters reset to zero once 100% is reached, so the next pass starts clean.
 fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCounts)) {
     let (current, total, percent, force_done, phase) = {
         let mut p = PREP_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -154,9 +148,8 @@ fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCou
         let current = p.f_done + p.e_done + p.d_done;
         let total = p.f_total + p.e_total + p.d_total;
         let done = total == 0 || current >= total;
-        // Фаза для текста прогресса: получение из интернета ("external")
-        // приоритетнее анализа ("analysis"); скачивание ("download") показывается
-        // последним — только когда анализ и внешние источники уже завершены.
+        // Phase priority: external > analysis > download (download shows last,
+        // only once analysis and external sources are done).
         let phase = if p.e_total > 0 && p.e_done < p.e_total {
             "external"
         } else if p.f_total > 0 && p.f_done < p.f_total {
@@ -166,8 +159,7 @@ fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCou
         } else {
             "done"
         };
-        // Плавный процент: к числу готовых добавляем долю текущего скачиваемого
-        // трека (d_frac ∈ [0,1)). Так бар не прыгает с 0 сразу на «трек готов».
+        // Add the current track's fractional progress so the bar doesn't jump 0 -> done per track.
         let percent = if total > 0 {
             ((current as f64 + p.d_frac.clamp(0.0, 1.0)) / total as f64 * 100.0).clamp(0.0, 100.0)
         } else {
@@ -210,7 +202,6 @@ fn audio_feature_progress_emitter(app: tauri::AppHandle) -> AudioFeatureProgress
     })
 }
 
-/// Обновить «внешнюю» фазу объединённого прогресса.
 fn report_external_progress(app: &tauri::AppHandle, done: usize, total: usize) {
     report_prep_progress(app, |p| {
         p.e_total = total;
@@ -218,22 +209,18 @@ fn report_external_progress(app: &tauri::AppHandle, done: usize, total: usize) {
     });
 }
 
-/// Обновить фазу «скачивание треков» объединённого прогресса (вызывается из
-/// менеджера загрузок). Эта фаза показывается последней — после анализа и
-/// внешних источников.
+/// Called by the download manager; shown as the last phase after analysis/external.
 pub(crate) fn report_download_progress(app: &tauri::AppHandle, done: usize, total: usize) {
     report_prep_progress(app, |p| {
         p.d_total = total;
         p.d_done = done.min(total);
-        // Целочисленное обновление (трек поставлен/завершён/убран) — сбрасываем
-        // дробь текущего трека, чтобы она не «висела» от предыдущего скачивания.
+        // Reset stale fraction from a previous download.
         p.d_frac = 0.0;
     });
 }
 
-/// То же, но с долей прогресса текущего скачиваемого трека (`frac` ∈ [0,1]) — для
-/// плавного процента в шапке во время загрузки. `done`/`total` остаются числом
-/// готовых/всего треков (счётчик в тексте прогресса не дробится).
+/// Same as above but with the current track's fractional progress (`frac` in [0,1])
+/// for a smooth percent while downloading; done/total stay whole track counts.
 pub(crate) fn report_download_progress_frac(
     app: &tauri::AppHandle,
     done: usize,
@@ -247,22 +234,16 @@ pub(crate) fn report_download_progress_frac(
     });
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// State types
-// ──────────────────────────────────────────────────────────────────────────────
+// ── State types ──────────────────────────────────────────────────────────────
 
 pub struct PlayerState(pub RwLock<AudioPlayer>);
 pub struct LibraryState(pub Mutex<MusicLibrary>);
 pub struct SettingsState(pub Mutex<(settings::AppSettings, PathBuf)>);
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды плеера
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Player commands ──────────────────────────────────────────────────────────
 
-/// Применить кэшированный accent_color из БД или сохранить новый,
-/// а также наложить пользовательские переопределения трека
-/// (название, исполнитель, обложка) — чтобы при воспроизведении плеер
-/// показывал отредактированные пользователем значения.
+/// Apply cached accent_color (or save a newly computed one) and overlay user
+/// track overrides (title/artist/cover) onto the metadata.
 fn apply_accent_color(
     library: &State<LibraryState>,
     file_path: &str,
@@ -273,7 +254,6 @@ fn apply_accent_color(
         Err(_) => return,
     };
 
-    // Переопределения title/artist/cover
     if let Some(t) = lib.get_track(file_path) {
         if let Some(ref title) = t.title {
             metadata.title = Some(title.clone());
@@ -288,20 +268,17 @@ fn apply_accent_color(
         metadata.spectral_centroid = t.spectral_centroid;
         metadata.key = t.key.clone();
         metadata.audio_fingerprint = t.audio_fingerprint.clone();
-        // Пользовательская обложка имеет приоритет; встроенная уже проставлена
-        // миниатюрой-URL в get_metadata (см. get_metadata_inner).
+        // Override cover takes priority over the embedded one.
         if let Some(sig) = lib.get_override_cover_sig(file_path) {
             metadata.cover_art = Some(thumbnails::cover_protocol_url(file_path, &sig));
         }
     }
 
-    // Проверяем кэшированный accent_color
     match lib.get_accent_color(file_path) {
         Some(cached) => {
             metadata.accent_color = Some(cached);
         }
         None => {
-            // Сохраняем accent_color из метаданных, если он есть
             if let Some(ref color) = metadata.accent_color {
                 let _ = lib.set_accent_color(file_path, color);
             }
@@ -400,16 +377,14 @@ fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> 
     Ok(player.get_status())
 }
 
-/// Частотные полосы спектра текущего звука (0..1) для визуализатора.
-/// Опрашивается фронтендом на кадрах rAF (30/60 fps).
+/// Spectrum bars (0..1) for the visualizer; polled by the frontend on rAF frames.
 #[tauri::command]
 fn player_get_spectrum(state: State<PlayerState>, bars: usize) -> Result<Vec<f32>, String> {
     let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
     Ok(player.spectrum_bars(bars))
 }
 
-/// Включить/выключить снятие спектра — фронтенд синхронизирует с видимостью
-/// блока-визуализатора, чтобы при выключенном визуализаторе не было лишней работы.
+/// Frontend toggles this with visualizer visibility to skip unnecessary FFT work when hidden.
 #[tauri::command]
 fn player_set_spectrum_enabled(state: State<PlayerState>, enabled: bool) -> Result<(), String> {
     let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
@@ -417,8 +392,7 @@ fn player_set_spectrum_enabled(state: State<PlayerState>, enabled: bool) -> Resu
     Ok(())
 }
 
-// Тяжёлые команды помечены (async): выполняются в пуле потоков, а не на
-// главном потоке — иначе чтение тегов/обложек блокирует событийный цикл окна.
+// (async): runs on the thread pool so tag/cover reads don't block the window's event loop.
 #[tauri::command(async)]
 fn get_track_metadata(
     library: State<LibraryState>,
@@ -429,9 +403,8 @@ fn get_track_metadata(
     Ok(metadata)
 }
 
-/// Вернуть URL обложки трека (кастомный протокол `lfmusic-cover`, миниатюра)
-/// или `null`, если обложки нет. Дёшево: lookup override в БД + проверка тега;
-/// сама миниатюра генерируется лениво обработчиком протокола при показе.
+/// Cover URL (`lfmusic-cover` protocol) or null; the thumbnail itself is generated
+/// lazily by the protocol handler on display, so this is a cheap DB/tag lookup.
 #[tauri::command(async)]
 fn get_cover_art(
     library: State<LibraryState>,
@@ -441,18 +414,13 @@ fn get_cover_art(
     Ok(thumbnails::cover_url(&lib, &file_path))
 }
 
-/// Прочитать оригинальную обложку из файла, игнорируя пользовательские
-/// переопределения. Нужно для превью в модалке редактирования: при клике
-/// «сбросить обложку» показываем то, что лежит в тегах файла.
+/// Reads the cover straight from file tags, ignoring user overrides (used by the
+/// edit modal's "reset cover" preview).
 #[tauri::command(async)]
 fn get_original_cover_art(file_path: String) -> Result<Option<String>, String> {
     Ok(AudioPlayer::extract_cover_art(&file_path))
 }
 
-/// Прочитать оригинальные метаданные трека (как они лежат в тегах файла),
-/// без применения пользовательских переопределений.
-/// Используется кнопкой «Сбросить» в модалке редактирования: туда подставляются
-/// оригинальные название/исполнитель/обложка для предпросмотра до сохранения.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OriginalTrack {
@@ -481,18 +449,14 @@ fn get_original_track(
     })
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды библиотеки (новые)
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Library commands ─────────────────────────────────────────────────────────
 
-/// Получить список папок с количеством треков в каждой
 #[tauri::command]
 fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_folders())
 }
 
-/// Добавить папку, просканировать
 #[tauri::command]
 async fn library_add_folder(app: tauri::AppHandle, folder_path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -586,7 +550,6 @@ async fn library_add_android_music_folders(app: tauri::AppHandle) -> Result<(), 
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Удалить папку и все её треки из кэша
 #[tauri::command(async)]
 fn library_remove_folder(
     app: tauri::AppHandle,
@@ -606,9 +569,8 @@ fn library_remove_folder(
     )
 }
 
-/// Упорядоченные пути каталога с фильтром по жанру и/или поисковому запросу.
-/// Возвращает только `file_path` (лёгкий список идентичности для виртуального
-/// скролла и источника воспроизведения каталога).
+/// Ordered catalog paths filtered by genre/search; returns just `file_path` for
+/// virtual scroll + playback ordering (lightweight identity list).
 #[tauri::command(async)]
 fn library_get_catalog_paths(
     state: State<LibraryState>,
@@ -619,8 +581,8 @@ fn library_get_catalog_paths(
     Ok(library.get_catalog_paths(genre.as_deref(), search.as_deref()))
 }
 
-/// Пакетная материализация метаданных по списку путей (видимое окно каталога,
-/// дозагрузка промахов кэша). Порядок результата совпадает с порядком `paths`.
+/// Batch-materializes metadata for the given paths (catalog viewport / cache-miss
+/// fetch); result order matches `paths`.
 #[tauri::command(async)]
 fn library_get_tracks_by_paths(
     state: State<LibraryState>,
@@ -630,16 +592,13 @@ fn library_get_tracks_by_paths(
     Ok(library.get_tracks_by_paths(&paths))
 }
 
-/// Список жанров с количеством треков (для фильтр-чипов каталога).
 #[tauri::command(async)]
 fn library_list_genres(state: State<LibraryState>) -> Result<Vec<GenreCount>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.list_genres())
 }
 
-/// Ранжированный поиск треков по каталогу (секция «Треки» страницы поиска).
-/// Сохраняет поведение фронтендового searchRanked (точное → нечёткое →
-/// раскладка → формат).
+/// Ranked catalog search: exact -> fuzzy -> layout-swap -> format keyword.
 #[tauri::command(async)]
 fn library_search(
     state: State<LibraryState>,
@@ -683,21 +642,18 @@ fn library_audio_features_status(
     })
 }
 
-/// Поднять трек на первое место в каталоге (навсегда)
 #[tauri::command]
 fn library_move_track_to_top(file_path: String, state: State<LibraryState>) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.move_track_to_top(&file_path)
 }
 
-/// Удалить из кэша треки, файлы которых больше не существуют на диске
 #[tauri::command(async)]
 fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
     let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.cleanup_missing_tracks()
 }
 
-/// Пересканировать все папки: обновить изменённые файлы, удалить несуществующие
 #[tauri::command]
 async fn library_rescan(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -715,7 +671,7 @@ async fn library_rescan(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Пересобрать плейлисты исполнителей (вызывать после смены разделителей)
+/// Rebuild artist playlists (call after changing artist separators).
 #[tauri::command(async)]
 fn library_rebuild_artists(
     library_state: State<LibraryState>,
@@ -729,18 +685,14 @@ fn library_rebuild_artists(
     library.rebuild_artist_playlists(&separators)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды плейлистов
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Playlist commands ────────────────────────────────────────────────────────
 
-/// Получить все плейлисты
 #[tauri::command]
 fn playlist_get_all(state: State<LibraryState>) -> Result<Vec<PlaylistInfo>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_playlists())
 }
 
-/// Получить треки плейлиста
 #[tauri::command(async)]
 fn playlist_get_tracks(
     state: State<LibraryState>,
@@ -750,14 +702,12 @@ fn playlist_get_tracks(
     Ok(library.get_playlist_tracks(playlist_id))
 }
 
-/// Создать пользовательский плейлист
 #[tauri::command]
 fn playlist_create(state: State<LibraryState>, name: String) -> Result<PlaylistInfo, String> {
     let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.create_playlist(name)
 }
 
-/// Переименовать плейлист
 #[tauri::command]
 fn playlist_rename(
     state: State<LibraryState>,
@@ -768,14 +718,12 @@ fn playlist_rename(
     library.rename_playlist(playlist_id, name)
 }
 
-/// Удалить пользовательский плейлист
 #[tauri::command]
 fn playlist_delete(state: State<LibraryState>, playlist_id: i64) -> Result<(), String> {
     let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.delete_playlist(playlist_id)
 }
 
-/// Добавить трек в плейлист
 #[tauri::command]
 fn playlist_add_track(
     state: State<LibraryState>,
@@ -786,7 +734,6 @@ fn playlist_add_track(
     library.add_track_to_playlist(playlist_id, &file_path)
 }
 
-/// Удалить трек из плейлиста
 #[tauri::command]
 fn playlist_remove_track(
     state: State<LibraryState>,
@@ -797,7 +744,6 @@ fn playlist_remove_track(
     library.remove_track_from_playlist(playlist_id, &file_path)
 }
 
-/// Поднять трек на первое место в плейлисте
 #[tauri::command]
 fn playlist_move_track_to_top(
     state: State<LibraryState>,
@@ -808,7 +754,6 @@ fn playlist_move_track_to_top(
     library.move_playlist_track_to_top(playlist_id, &file_path)
 }
 
-/// Получить id пользовательских плейлистов, в которых уже есть указанный трек
 #[tauri::command]
 fn playlist_get_ids_for_track(
     state: State<LibraryState>,
@@ -818,9 +763,7 @@ fn playlist_get_ids_for_track(
     Ok(library.get_user_playlist_ids_for_track(&file_path))
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Порядок треков в альбоме
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Album track order ────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn album_get_track_order(
@@ -841,16 +784,10 @@ fn album_set_track_order(
     library.set_album_track_order(&album_name, &track_paths)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды внешних источников
-// ──────────────────────────────────────────────────────────────────────────────
+// ── External-source commands ─────────────────────────────────────────────────
 
-/// Получить макет альбома по данным внешних источников: канонический порядок
-/// треков + «фантомные» (отсутствующие в библиотеке) треки. Результат
-/// кэшируется в БД, поэтому повторные открытия не ходят в сеть.
-///
-/// Сетевой запрос выполняется на blocking-пуле (spawn_blocking), чтобы не
-/// занимать tokio-воркеры и не блокировать главный поток UI.
+/// Canonical track order + "phantom" (not-in-library) tracks for an album,
+/// sourced externally and cached in the DB (repeat opens skip the network).
 #[tauri::command]
 async fn external_album_layout(
     app: tauri::AppHandle,
@@ -862,9 +799,8 @@ async fn external_album_layout(
         .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Синхронное ядро [`external_album_layout`] (используется и командой через
-/// spawn_blocking, и батч-проходом подготовки). Блокировку библиотеки НЕ держим
-/// во время сетевого запроса. Кэш в БД бессрочный — повторно в сеть не ходим.
+/// Sync core of [`external_album_layout`], shared with the batch prep pass.
+/// Library lock is NOT held during the network request; DB cache never expires.
 fn run_album_layout(
     app: &tauri::AppHandle,
     album_name: &str,
@@ -880,7 +816,7 @@ fn run_album_layout(
 
     let now = external::unix_secs();
 
-    // Фаза 1 (под блокировкой): читаем локальные треки и кэш, решаем, нужна сеть.
+    // Phase 1 (locked): read local tracks + cache, decide whether the network is needed.
     let (local, query_artist, album_key, decision) = {
         let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
         let local = library.get_album_local_tracks(album_name);
@@ -888,7 +824,7 @@ fn run_album_layout(
             return Ok(none_layout());
         }
 
-        // Самый частый исполнитель среди локальных треков — для запроса.
+        // Most common artist among local tracks is used for the query.
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (_, _, artist) in &local {
             if !artist.is_empty() {
@@ -901,11 +837,11 @@ fn run_album_layout(
             .map(|(a, _)| a)
             .unwrap_or_default();
 
-        // Ключ кэша зависит и от названия, и от артиста — два разных
-        // одноимённых альбома от разных исполнителей не путаются.
+        // Cache key includes the artist too, so same-titled albums by different
+        // artists don't collide.
         let album_key = external::album_cache_key(album_name, &query_artist);
 
-        // 0 = кэш; 1 = сеть; 2 = none из (бессрочного) негативного кэша.
+        // 0 = cache hit; 1 = need network; 2 = negative cache (permanent).
         let decision: (u8, Vec<external::ExternalTrack>, Option<String>) =
             match library.get_external_album(&album_key) {
                 Some((src, status, _, tracks)) if !refresh && status == "ok" => (0, tracks, src),
@@ -935,10 +871,10 @@ fn run_album_layout(
         });
     }
 
-    // Фаза 2 (без блокировки): сеть.
+    // Phase 2 (unlocked): network.
     let fetched = external::fetch_album_tracklist(&query_artist, album_name);
 
-    // Фаза 3 (под блокировкой): сохраняем результат в кэш.
+    // Phase 3 (locked): persist result to cache.
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     match fetched {
         external::FetchOutcome::Found(album) if !album.tracks.is_empty() => {
@@ -956,19 +892,17 @@ fn run_album_layout(
                 entries,
             })
         }
-        // Все источники реально ответили «нет» (или вернули пустой список) —
-        // кэшируем негативный результат, чтобы не ходить в сеть повторно.
+        // All sources genuinely returned nothing — cache negative to avoid retrying.
         external::FetchOutcome::Found(_) | external::FetchOutcome::NotFound => {
             let _ = library.set_external_album(&album_key, None, "none", &[], now);
             Ok(none_layout())
         }
-        // Временная ошибка провайдера (сеть/парсинг/rate-limit) — НЕ кэшируем
-        // «нет», иначе альбом навсегда останется без внешнего порядка.
+        // Transient provider error (network/parse/rate-limit) — don't cache "none",
+        // or the album would be stuck without external ordering forever.
         external::FetchOutcome::TemporaryError => Ok(none_layout()),
     }
 }
 
-/// Получить аватарку исполнителя из внешнего источника (с дисковым кэшем).
 #[tauri::command]
 async fn external_artist_image(
     app: tauri::AppHandle,
@@ -991,7 +925,6 @@ async fn external_artist_image(
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Получить обложку для трека без встроенной обложки (по альбому/названию).
 #[tauri::command]
 async fn external_track_cover(
     app: tauri::AppHandle,
@@ -1014,8 +947,7 @@ async fn external_track_cover(
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Загрузить все уже закэшированные аватарки исполнителей (для быстрой
-/// отрисовки на старте без обращения к сети).
+/// Loads all already-cached artist images for fast render on startup (no network).
 #[tauri::command]
 async fn external_load_cached_artist_images(
     app: tauri::AppHandle,
@@ -1032,23 +964,19 @@ async fn external_load_cached_artist_images(
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Батч-подготовка внешних источников (как анализ: один проход, бессрочный кэш)
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Batch prep of external sources (one pass, permanent cache) ──────────────
 
-/// Поколение воркера подготовки — повторный вызов команды отменяет предыдущий
-/// проход (например, при переключении настроек).
+/// Bumped on every call so a new prep pass cancels any in-flight one (e.g. on
+/// settings toggle).
 static EXTERNAL_PREP_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn external_prep_current(generation: u64) -> bool {
     EXTERNAL_PREP_GENERATION.load(Ordering::SeqCst) == generation
 }
 
-/// Запустить (или перезапустить) фоновую подготовку внешних источников: один
-/// проход по библиотеке заранее тянет и кэширует обложки/аватарки/порядок
-/// альбомов для включённых источников. Прогресс дописывается к прогрессу
-/// анализа треков. Уже обработанное (ok/none) в сеть повторно не ходит.
-/// Безопасно вызывать на старте и при любом переключении внешних настроек.
+/// (Re)start background prep: one pass over the library that pre-fetches and
+/// caches covers/avatars/album order for enabled sources. Already-settled
+/// entries (ok/none) aren't retried. Safe to call on startup or any settings toggle.
 #[tauri::command]
 fn external_prepare(app: tauri::AppHandle) -> Result<(), String> {
     let generation = EXTERNAL_PREP_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1065,8 +993,6 @@ fn external_prepare(app: tauri::AppHandle) -> Result<(), String> {
         )
     };
 
-    // Сбрасываем внешнюю фазу прогресса (актуально при выключении источников —
-    // прогресс-бар спрячется, если анализ тоже завершён).
     report_external_progress(&app, 0, 0);
 
     if !covers_on && !avatars_on && !albums_on {
@@ -1081,7 +1007,7 @@ fn external_prepare(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Группа треков, делящих один ключ кэша обложки (как правило — один альбом).
+/// Tracks sharing one cover cache key (usually one album).
 struct CoverGroup {
     artist: String,
     album: String,
@@ -1089,27 +1015,20 @@ struct CoverGroup {
     paths: Vec<String>,
 }
 
-/// Одно задание фоновой подготовки внешних источников (для пула воркеров).
+/// One unit of work for the prep worker pool.
 enum PrepTask {
-    /// Аватарка исполнителя (по имени).
     Artist(String),
-    /// Внешняя обложка для группы треков (как правило — альбом).
     Cover(CoverGroup),
-    /// Канонический порядок треков альбома + «фантомы» (по названию альбома).
     Album(String),
 }
 
-/// Степень параллелизма фоновой подготовки. Задания бьют по разным хостам
-/// (Deezer/iTunes/MusicBrainz/CAA/Wikipedia), а пер-хост-лимитер
-/// (`external::send_throttled`) сам разводит запросы к одному хосту во времени —
-/// поэтому несколько потоков безопасны для rate-limit и дают кратный выигрыш:
-/// пропускная способность упирается в интервал хоста, а не в сумму сетевых задержек.
-/// Манифесты кэша сериализуются отдельными мьютексами (см. external.rs).
+/// Tasks hit different hosts (Deezer/iTunes/MusicBrainz/CAA/Wikipedia) and each
+/// host is separately rate-limited (`external::send_throttled`), so concurrent
+/// threads are safe and multiply throughput instead of summing latencies.
 const EXTERNAL_PREP_CONCURRENCY: usize = 6;
 
-/// Тело воркера пула подготовки: тянет задания по общему курсору, пока они есть
-/// (или пока проход не отменён сменой поколения). Прогресс — по общему атомарному
-/// счётчику готовых.
+/// Pulls tasks from a shared cursor until exhausted or the pass is cancelled
+/// (generation changed).
 #[allow(clippy::too_many_arguments)]
 fn external_prep_worker(
     app: tauri::AppHandle,
@@ -1135,8 +1054,7 @@ fn external_prep_worker(
                 let _ = external::get_or_fetch_artist_image(&dir, name, false);
             }
             PrepTask::Cover(g) => {
-                // Альбом нуждается во внешней обложке, если хотя бы у одного трека
-                // нет ни override-, ни встроенной обложки.
+                // Needs an external cover if at least one track lacks both override and embedded art.
                 let needs_external = g
                     .paths
                     .iter()
@@ -1145,8 +1063,7 @@ fn external_prep_worker(
                     let _ =
                         external::get_or_fetch_track_cover(&dir, &g.artist, &g.album, &g.title, false);
                 } else {
-                    // Локально покрыт — помечаем «нет внешней» (одним сохранением в
-                    // конце), чтобы при следующем старте не перечитывать теги альбома.
+                    // Fully covered locally — mark "none" (batched) so next startup skips re-reading tags.
                     none_keys
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -1170,7 +1087,7 @@ fn run_external_preparation(
     albums_on: bool,
     generation: u64,
 ) {
-    // ── Сбор заданий (короткие блокировки библиотеки) ──
+    // ── Collect tasks (short library locks) ──
     let artists: Vec<String> = if avatars_on {
         let state = app.state::<LibraryState>();
         let names = match state.0.lock() {
@@ -1228,7 +1145,7 @@ fn run_external_preparation(
         (Vec::new(), HashSet::new())
     };
 
-    // ── Отфильтровываем уже обработанное, считаем общий объём ──
+    // ── Filter out already-settled entries, compute total ──
     let artist_settled = if avatars_on {
         external::artist_settled_keys(&dir)
     } else {
@@ -1261,9 +1178,8 @@ fn run_external_preparation(
 
     report_external_progress(&app, 0, total);
 
-    // Единый список заданий, ЧЕРЕДУЯ типы (аватарка/обложка/альбом): так в каждый
-    // момент пул бьёт по разным хостам (аватарки → Deezer, обложки/альбомы → iTunes…),
-    // а не упирается всеми потоками в один хост.
+    // Interleave task types (artist/cover/album) so the pool hits different hosts
+    // at once instead of piling onto one.
     let mut tasks: Vec<PrepTask> = Vec::with_capacity(total);
     {
         let mut ai = pending_artists.into_iter();
@@ -1296,9 +1212,8 @@ fn run_external_preparation(
     let override_paths = Arc::new(override_paths);
     let dir = Arc::new(dir);
 
-    // Пул воркеров: N−1 фоновых потоков + текущий поток как ещё один воркер (так
-    // прогресс гарантирован, даже если часть spawn не удалась, и поток подготовки
-    // не простаивает). Каждый воркер тянет задания по общему курсору.
+    // N-1 background threads + current thread as one more worker, so progress
+    // continues even if some spawns fail.
     let worker_count = EXTERNAL_PREP_CONCURRENCY.min(tasks.len()).max(1);
     let mut handles = Vec::with_capacity(worker_count.saturating_sub(1));
     for i in 1..worker_count {
@@ -1343,8 +1258,7 @@ fn run_external_preparation(
         let _ = h.join();
     }
 
-    // Локально покрытые обложки помечаем «нет внешней» одним сохранением — после
-    // того как все воркеры закончили собирать их ключи.
+    // Batch-save "no external cover" markers once all workers finished collecting keys.
     if external_prep_current(generation) {
         let keys = none_keys.lock().unwrap_or_else(|e| e.into_inner());
         external::mark_track_covers_none(&dir, &keys);
@@ -1457,11 +1371,8 @@ fn statistics_get_taste_profile(
     Ok(library.taste_profile())
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды эквалайзера
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Equalizer commands ───────────────────────────────────────────────────────
 
-/// Сохранить EQ в общий settings.json
 fn eq_persist(settings_state: &State<SettingsState>, eq: &EqSettings) -> Result<(), String> {
     let mut state = settings_state
         .0
@@ -1522,11 +1433,9 @@ fn eq_get_settings(state: State<PlayerState>) -> Result<EqSettings, String> {
     Ok(player.get_eq_settings())
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды настроек
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Settings commands ────────────────────────────────────────────────────────
 
-/// Фронтенд может хранить опции разных типов (булевые, строковые и т.д.)
+/// Options are freeform (bool/string/etc.), stored as JSON values.
 #[tauri::command]
 fn get_settings(
     state: State<SettingsState>,
@@ -1545,9 +1454,7 @@ fn save_settings(
     settings::save(&state.1, &state.0)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды состояния плеера
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Player state persistence ─────────────────────────────────────────────────
 
 #[tauri::command]
 fn save_player_state(
@@ -1564,9 +1471,7 @@ fn load_player_state(state: State<SettingsState>) -> Result<SavedPlayerState, St
     Ok(player_state::load(&settings.1))
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды закреплений
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Pins commands ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn pins_load(state: State<SettingsState>) -> Result<pins::PinsState, String> {
@@ -1580,16 +1485,13 @@ fn pins_save(state: State<SettingsState>, pins_state: pins::PinsState) -> Result
     pins::save(&settings.1, &pins_state)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды переопределения метаданных трека
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Track metadata override commands ─────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CoverInput {
-    /// Путь к выбранному файлу-изображению на диске пользователя
     source_path: Option<String>,
-    /// Сбросить обложку и accent — вернуть оригинал из тегов файла
+    /// true = reset cover + accent to the original from file tags.
     reset: Option<bool>,
 }
 
@@ -1614,12 +1516,8 @@ fn read_cover_as_data_url(source_path: &str) -> Result<(String, Option<String>),
     Ok((data_url, accent))
 }
 
-/// Сохранить пользовательское переопределение трека (название, исполнитель, обложка).
-/// Параметры:
-///  - title/artist: пустая строка означает «вернуть оригинал»
-///  - cover.source_path: путь к новому изображению. Если задан — обложка обновится.
-///  - cover.reset = true: сбросить обложку (вернуть оригинал из тегов файла).
-///  - если cover не задан — текущая обложка не меняется.
+/// title/artist: empty string means "revert to original". cover: None leaves the
+/// current cover untouched; `reset: true` reverts to the file's tagged cover.
 #[tauri::command]
 fn track_set_override(
     library: State<LibraryState>,
@@ -1649,20 +1547,16 @@ fn track_set_override(
     )?;
     drop(lib);
 
-    // Возвращаем актуальные метаданные трека (с применёнными переопределениями)
     fetch_track_with_override(&library, &file_path)
 }
 
-/// Прочитать локальный файл изображения и вернуть data URL
-/// (нужно фронту, чтобы показать превью выбранной обложки до сохранения).
 #[tauri::command]
 fn read_image_as_data_url(source_path: String) -> Result<String, String> {
     let (data_url, _) = read_cover_as_data_url(&source_path)?;
     Ok(data_url)
 }
 
-/// Полностью сбросить ВСЕ пользовательские переопределения треков сразу.
-/// Используется кнопкой «Сбросить редактирование» в настройках.
+/// Clears all track overrides at once ("Reset edits" button in settings).
 #[tauri::command]
 fn track_clear_all_overrides(library: State<LibraryState>) -> Result<usize, String> {
     let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
@@ -1673,16 +1567,14 @@ fn fetch_track_with_override(
     library: &State<LibraryState>,
     file_path: &str,
 ) -> Result<TrackMetadata, String> {
-    // Сначала пытаемся отдать трек из библиотеки (он содержит COALESCE-применённые
-    // переопределения). Если трека нет в библиотеке (редко — например, играем файл
-    // вне сохранённых папок), фолбэчимся на чтение тегов с диска.
+    // Prefer the library row (overrides already applied); fall back to reading
+    // tags from disk if the track isn't in the library (e.g. playing an unsaved file).
     let from_lib = {
         let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
         lib.get_track(file_path)
     };
     if let Some(mut t) = from_lib {
-        // Маппер вернул URL только для override-обложки; для встроенной — None,
-        // подставляем её миниатюру-URL.
+        // Mapper only fills cover_art for override covers; backfill embedded cover URL.
         if t.cover_art.is_none() && AudioPlayer::has_embedded_cover(file_path) {
             t.cover_art = Some(thumbnails::cover_protocol_url(
                 file_path,
@@ -1703,9 +1595,7 @@ fn fetch_track_with_override(
     Ok(metadata)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Команды кастомных обложек
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Custom cover commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
 fn cover_set_custom(
@@ -1734,9 +1624,7 @@ fn cover_load_all(state: State<SettingsState>) -> Result<Vec<covers::CustomCover
     Ok(covers::load_all(&settings.1))
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Точка входа
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 fn set_windows_priority_class() {
@@ -1772,7 +1660,7 @@ fn taskbar_set_covers(
     taskbar::set_covers(&app, prev, current, next, transition);
 }
 
-// ── Системное медиа-управление (MPRIS, Linux) ────────────────────────────────
+// ── System media integration (MPRIS, Linux) ──────────────────────────────────
 
 #[tauri::command]
 fn mpris_update_metadata(
@@ -1793,7 +1681,7 @@ fn mpris_update_playback(state: String, position_secs: f64) {
 
 // ── Discord Rich Presence ─────────────────────────────────────────────────────
 
-// async — IPC с клиентом Discord (пайп/сокет) не должен блокировать main thread.
+// async — Discord client IPC (pipe/socket) must not block the main thread.
 #[tauri::command(async)]
 fn discord_update_presence(payload: discord_rpc::PresencePayload) -> bool {
     discord_rpc::update_presence(payload)
@@ -1804,18 +1692,15 @@ fn discord_clear_presence() {
     discord_rpc::clear_presence();
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Скачивание треков (страница «Скачивание»)
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Track downloads ("Downloads" page) ───────────────────────────────────────
 
-/// Поиск треков во внешних источниках (кандидаты на скачивание), постранично.
-/// Помечает `in_library` для треков, уже присутствующих в локальной библиотеке.
+/// Paginated search for downloadable tracks; marks `in_library` for tracks already present locally.
 #[tauri::command]
 async fn downloads_search(
     app: tauri::AppHandle,
     query: String,
-    // Точные исполнитель/название (клик по «фантому» в альбоме) — включают точный
-    // поиск по полям Deezer; для обычного поиска из строки отсутствуют.
+    // Exact artist/title (clicking a "phantom" track in an album) enable exact
+    // Deezer field search; absent for a plain string search.
     artist: Option<String>,
     title: Option<String>,
     index: Option<u32>,
@@ -1836,18 +1721,13 @@ async fn downloads_search(
     .map_err(|e| format!("Task error: {}", e))
 }
 
-/// Проставляет `in_library` внешним трекам, у которых в локальной библиотеке есть
-/// совпадающая версия: название совпало (без шума), есть хотя бы один общий артист
-/// (поддержка мультиартистных треков) И альбом совместим. Альбом совместим, когда:
-/// у внешнего трека альбома нет, ИЛИ у локальной версии тег альбома пуст (не с чем
-/// сверять — не блокируем), ИЛИ ключи альбомов совпадают. Так одноимённый трек
-/// того же исполнителя из ДРУГОГО альбома не помечается «скачанным» — только
-/// реально скачанная версия. Общий помощник для поиска/альбома/исполнителя.
+/// Marks `in_library` when title matches, at least one artist overlaps (multi-artist
+/// aware), and album is compatible (either side has no album tag, or album keys match) —
+/// so a same-titled track from a DIFFERENT album by the same artist isn't falsely marked.
 fn mark_tracks_in_library(app: &tauri::AppHandle, tracks: &mut [external::ExternalSearchTrack]) {
     if tracks.is_empty() {
         return;
     }
-    // Индекс локального каталога — краткие блокировки настроек/библиотеки.
     let separators = settings::get_artist_separators(&app.state::<SettingsState>());
     let lib_index = app
         .state::<LibraryState>()
@@ -1856,9 +1736,7 @@ fn mark_tracks_in_library(app: &tauri::AppHandle, tracks: &mut [external::Extern
         .map(|lib| lib.catalog_artist_title_index(&separators))
         .unwrap_or_default();
 
-    // Набор разделителей для нечёткого сопоставления готовим ОДИН раз до цикла:
-    // иначе на каждый трек заново аллоцировался и сортировался их список
-    // (см. external::prepare_artist_separators).
+    // Prepare separators once outside the loop (avoids realloc/sort per track).
     let prepared_seps = external::prepare_artist_separators(&separators);
 
     for t in tracks.iter_mut() {
@@ -1884,8 +1762,6 @@ fn mark_tracks_in_library(app: &tauri::AppHandle, tracks: &mut [external::Extern
     }
 }
 
-/// Детальная карточка альбома (Deezer) для страницы скачивания альбома.
-/// Треки помечаются `in_library`, чтобы кнопки сразу отражали наличие в каталоге.
 #[tauri::command]
 async fn downloads_album(
     app: tauri::AppHandle,
@@ -1902,8 +1778,6 @@ async fn downloads_album(
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Детальная карточка исполнителя (Deezer): его альбомы и популярные треки.
-/// Популярные треки помечаются `in_library`.
 #[tauri::command]
 async fn downloads_artist(
     app: tauri::AppHandle,
@@ -1920,7 +1794,6 @@ async fn downloads_artist(
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Поставить трек в очередь скачивания. Возвращает id элемента очереди.
 #[tauri::command]
 fn downloads_enqueue(
     app: tauri::AppHandle,
@@ -1929,8 +1802,6 @@ fn downloads_enqueue(
     Ok(downloads::enqueue(&app, request))
 }
 
-/// Поставить пачку треков в очередь (кнопка «Скачать все треки» у альбома).
-/// Возвращает id элементов очереди в порядке запросов.
 #[tauri::command]
 fn downloads_enqueue_many(
     app: tauri::AppHandle,
@@ -1939,69 +1810,57 @@ fn downloads_enqueue_many(
     Ok(downloads::enqueue_many(&app, requests))
 }
 
-/// Текущий снимок очереди + статус утилит (для первичной загрузки страницы).
 #[tauri::command]
 fn downloads_snapshot(app: tauri::AppHandle) -> downloads::DownloadSnapshot {
     downloads::snapshot(&app)
 }
 
-/// Убрать (или отменить активный) элемент очереди.
+/// Removes a queued item, cancelling it first if active.
 #[tauri::command(async)]
 fn downloads_remove(app: tauri::AppHandle, id: u64) {
     downloads::remove(&app, id);
 }
 
-/// Повторить скачивание ошибочного элемента очереди.
 #[tauri::command(async)]
 fn downloads_retry(app: tauri::AppHandle, id: u64) {
     downloads::retry(&app, id);
 }
 
-/// Очистить завершённые/ошибочные элементы.
 #[tauri::command]
 fn downloads_clear_finished(app: tauri::AppHandle) {
     downloads::clear_finished(&app);
 }
 
-/// Путь папки скачиваний (фронт по нему определяет, скачан ли трек приложением).
+/// Frontend uses this path to tell whether a track was downloaded by the app.
 #[tauri::command]
 fn downloads_dir_path(app: tauri::AppHandle) -> String {
     downloads::downloads_dir_path(&app)
 }
 
-/// Сменить папку для скачиваемых треков. `folder_path` = None/пусто — сброс на
-/// стандартную папку «LFMusic Downloads» в системной музыкальной директории.
-/// При смене старая папка скачиваний убирается из сканируемых, а новая
-/// добавляется. Если новая папка вложена в уже сканируемую — её не добавляем
-/// отдельно (иначе двойное сканирование; треки и так попадут в накрывающую
-/// папку). При любой ошибке подготовки папки — fallback на стандартную.
-/// Возвращает фактически применённый путь.
+/// `folder_path` = None/empty resets to the default "LFMusic Downloads" folder.
+/// If the new folder is already nested inside a scanned folder, it's not added
+/// separately (avoids double-scanning). Any prep error falls back to the default.
+/// Returns the path actually applied.
 #[tauri::command]
 async fn downloads_set_dir(
     app: tauri::AppHandle,
     folder_path: Option<String>,
 ) -> Result<String, String> {
-    // Сканирование новой папки может быть долгим (если выбрали существующую папку
-    // с музыкой) — уводим всю работу в blocking-пул, как library_add_folder.
+    // Scanning the new folder can be slow, so this runs on the blocking pool like library_add_folder.
     tauri::async_runtime::spawn_blocking(move || {
         let (old_dir, new_dir) = downloads::apply_downloads_dir(&app, folder_path);
 
-        // Папка не изменилась (тот же путь или fallback вернул прежнюю) — библиотеку
-        // не трогаем.
         if !downloads::same_path(&old_dir, &new_dir) {
             let separators = settings::get_artist_separators(&app.state::<SettingsState>());
             let old = old_dir.to_string_lossy().to_string();
             let new = new_dir.to_string_lossy().to_string();
 
-            // Перерегистрацию делаем под одним локом библиотеки (проверка
-            // вложенности + мутации атомарны).
+            // Registration happens under one library lock so the nesting check + mutation are atomic.
             let state = app.state::<LibraryState>();
             let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
-            // 1) Убрать старую папку из сканируемых — ТОЛЬКО если она была отдельной
-            //    записью в БД. Если старая папка была вложена в пользовательскую
-            //    (covering_folder вернул другой путь) — своей записи у неё нет,
-            //    удалять нечего, иначе снесли бы папку пользователя вместе с треками.
+            // Only remove the old folder if it had its own DB entry — if it was
+            // nested inside a user folder, removing it would delete the user's tracks too.
             if library.covering_folder(&old).as_deref() == Some(old.as_str()) {
                 library.remove_folder(
                     old,
@@ -2010,8 +1869,7 @@ async fn downloads_set_dir(
                 )?;
             }
 
-            // 2) Добавить новую папку — если она НЕ вложена в уже сканируемую (иначе
-            //    двойное сканирование; вложенные треки попадут в накрывающую папку).
+            // Skip adding if nested inside an already-scanned folder (avoids double-scanning).
             if library.covering_folder(&new).is_none() {
                 library.add_folder(
                     new,
@@ -2022,7 +1880,6 @@ async fn downloads_set_dir(
             }
             drop(library);
 
-            // Набор папок/каталог изменился — фронт перезагрузит библиотеку и список папок.
             let _ = app.emit("downloads_library_updated", ());
         }
 
@@ -2032,13 +1889,8 @@ async fn downloads_set_dir(
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Открыть папку в системном файловом менеджере (клик по иконке папки в списке
-/// «Локальные папки» настроек).
-///
-/// На Windows открываем через shell-ассоциацию (`ShellExecuteW` с verb `"open"`),
-/// а НЕ прямым вызовом `explorer.exe`: иначе игнорировался бы зарегистрированный
-/// пользователем обработчик открытия папок (сторонний файловый менеджер). macOS
-/// `open` и Linux `xdg-open` и так уважают дефолтное приложение.
+/// Windows: opens via `ShellExecuteW` (verb "open") rather than calling `explorer.exe`
+/// directly, so a user-registered third-party file manager isn't bypassed.
 #[tauri::command]
 fn open_folder_in_explorer(path: String) -> Result<(), String> {
     if !std::path::Path::new(&path).is_dir() {
@@ -2049,7 +1901,7 @@ fn open_folder_in_explorer(path: String) -> Result<(), String> {
         use windows::core::{w, PCWSTR};
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        // Широкая строка с нуль-терминатором; держим её живой на время вызова.
+        // Null-terminated wide string; kept alive for the duration of the call.
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let hinst = unsafe {
             ShellExecuteW(
@@ -2061,7 +1913,7 @@ fn open_folder_in_explorer(path: String) -> Result<(), String> {
                 SW_SHOWNORMAL,
             )
         };
-        // ShellExecute возвращает HINSTANCE > 32 при успехе (легаси-семантика).
+        // ShellExecute returns HINSTANCE > 32 on success (legacy API semantics).
         if hinst.0 as isize <= 32 {
             return Err("Не удалось открыть папку".to_string());
         }
@@ -2080,13 +1932,11 @@ fn open_folder_in_explorer(path: String) -> Result<(), String> {
     }
 }
 
-/// Удалить скачанный приложением трек (из библиотеки и файл с диска).
 #[tauri::command(async)]
 fn downloads_delete_track(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
     downloads::delete_downloaded_track(&app, &file_path)
 }
 
-/// Проверить доступность yt-dlp/ffmpeg/deno (без скачивания).
 #[tauri::command]
 async fn downloads_check_tools(app: tauri::AppHandle) -> Result<downloads::ToolsStatus, String> {
     tauri::async_runtime::spawn_blocking(move || downloads::refresh_tools_status(&app))
@@ -2094,50 +1944,38 @@ async fn downloads_check_tools(app: tauri::AppHandle) -> Result<downloads::Tools
         .map_err(|e| format!("Task error: {}", e))
 }
 
-/// Открыть окно входа в YouTube. После авторизации cookies сохраняются и
-/// автоматически проверяются (статус приходит снапшотом `download_queue`).
+/// Cookies are saved and auto-validated after login; status arrives via `download_queue` snapshot.
 #[tauri::command]
 fn downloads_youtube_login(app: tauri::AppHandle) {
     downloads::open_login(&app);
 }
 
-/// Запустить проверку валидности сохранённых cookies YouTube (фоновый сетевой
-/// тест). Результат приходит снапшотом `download_queue`.
+/// Background network check of saved YouTube cookies; result arrives via `download_queue` snapshot.
 #[tauri::command]
 fn downloads_validate_cookies(app: tauri::AppHandle) {
     downloads::validate_youtube_cookies(&app);
 }
 
-/// Выйти из аккаунта YouTube (удалить сохранённые cookies).
-///
-/// `(async)` — ОБЯЗАТЕЛЬНО: logout чистит webview cookie store
-/// (`cookies_for_url`/`delete_cookie`), а эти вызовы WebView2 синхронно ждут, пока
-/// главный поток прокрутит цикл сообщений. На обычной (синхронной) команде тело
-/// исполняется НА главном потоке — он блокируется сам на себе (дедлок): зависает
-/// шапка/окно, приложение перестаёт закрываться. `(async)` уносит команду в
-/// отдельный поток, главный поток свободен и обслуживает запрос cookies (тот же
-/// приём, что у `login_watch_loop`, который читает cookies из фонового потока).
+/// `(async)` is required: logout clears the webview cookie store, and those
+/// WebView2 calls block waiting for the main thread's message loop. A sync
+/// command would run on the main thread and deadlock on itself.
 #[tauri::command(async)]
 fn downloads_youtube_logout(app: tauri::AppHandle) {
     downloads::logout(&app);
 }
 
-/// Текущая конфигурация прокси для yt-dlp (режим + URL).
 #[tauri::command]
 fn downloads_get_proxy(app: tauri::AppHandle) -> downloads::ProxyConfig {
     downloads::get_proxy(&app)
 }
 
-/// Сохранить конфигурацию прокси для yt-dlp. `mode`: "system" | "none" | "custom";
-/// `url` нужен только для "custom" (напр. socks5://127.0.0.1:1080 для ByeDPI).
+/// `mode`: "system" | "none" | "custom"; `url` only used for "custom" (e.g. socks5://127.0.0.1:1080).
 #[tauri::command]
 fn downloads_set_proxy(app: tauri::AppHandle, mode: String, url: String) {
     downloads::set_proxy(&app, mode, url);
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Управление утилитами (yt-dlp/ffmpeg) — страница настроек «Внешние источники»
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Tool management (yt-dlp/ffmpeg) — Settings "External sources" page ───────
 
 fn tools_app_data_dir(app: &tauri::AppHandle) -> PathBuf {
     app.path()
@@ -2145,7 +1983,6 @@ fn tools_app_data_dir(app: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Прогресс установки/обновления утилиты (событие `tools_progress`).
 #[derive(Clone, serde::Serialize)]
 struct ToolsProgress {
     /// "ytdlp" | "ffmpeg".
@@ -2154,7 +1991,7 @@ struct ToolsProgress {
     active: bool,
 }
 
-/// Локальная информация об утилитах (версии/managed) — без обращения к сети.
+/// Local-only info (versions/managed); no network access.
 #[tauri::command]
 async fn tools_info(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
     tauri::async_runtime::spawn_blocking(move || tools::info(&tools_app_data_dir(&app)))
@@ -2162,8 +1999,7 @@ async fn tools_info(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
         .map_err(|e| format!("Task error: {}", e))
 }
 
-/// Проверка обновлений утилит (обращается к GitHub). Возвращает ту же структуру
-/// с заполненным `update_available`.
+/// Checks GitHub for updates; same shape as [`tools_info`] with `update_available` filled in.
 #[tauri::command]
 async fn tools_check_updates(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
     tauri::async_runtime::spawn_blocking(move || tools::check_updates(&tools_app_data_dir(&app)))
@@ -2171,8 +2007,7 @@ async fn tools_check_updates(app: tauri::AppHandle) -> Result<tools::ToolsInfo, 
         .map_err(|e| format!("Task error: {}", e))
 }
 
-/// (Пере)установить/обновить утилиту (`tool` = "ytdlp" | "ffmpeg"). Прогресс
-/// стримится событием `tools_progress`; по завершении эмитится `tools_changed`.
+/// Progress streams via `tools_progress`; `tools_changed` emits on completion.
 #[tauri::command]
 async fn tools_install(app: tauri::AppHandle, tool: String) -> Result<tools::ToolsInfo, String> {
     let app_for_task = app.clone();
@@ -2191,9 +2026,8 @@ async fn tools_install(app: tauri::AppHandle, tool: String) -> Result<tools::Too
             );
         };
         let result = match tool.as_str() {
-            // Deno (JS-движок для yt-dlp) ставится вместе с yt-dlp. Best-effort:
-            // при ошибке Deno не откатываем yt-dlp (он работает и без Deno, но в
-            // деградированном режиме) — только сообщаем в прогрессе.
+            // Deno installs alongside yt-dlp, best-effort: a Deno failure doesn't roll
+            // back yt-dlp (it still works, degraded) — just reported in progress.
             "ytdlp" => {
                 let r = tools::install_ytdlp(&dir, &report);
                 if r.is_ok() {
@@ -2204,9 +2038,9 @@ async fn tools_install(app: tauri::AppHandle, tool: String) -> Result<tools::Too
                 r
             }
             "ffmpeg" => tools::install_ffmpeg(&dir, &report),
+            "pot" => tools::install_pot(&dir, &report),
             _ => Err("Неизвестная утилита".to_string()),
         };
-        // Снимаем индикатор прогресса независимо от исхода.
         let _ = app_for_task.emit(
             "tools_progress",
             ToolsProgress {
@@ -2219,16 +2053,14 @@ async fn tools_install(app: tauri::AppHandle, tool: String) -> Result<tools::Too
         Ok::<_, String>(tools::info(&dir))
     })
     .await;
-    // Статус обновляем ВСЕГДА — даже если установка вернула ошибку ИЛИ задача
-    // упала (паника): иначе UI остался бы устаревшим. Эмитим ДО разбора исхода,
-    // чтобы ранний выход по ошибке join не пропустил событие (refreshToolsInfo).
+    // Emit tools_changed unconditionally (even on error/panic) and before
+    // inspecting the join result, so the UI never stays stale.
     let _ = app.emit("tools_changed", ());
     info.map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Доустановить Deno (JS-движок для yt-dlp), если он отсутствует. Нужно для
-/// пользователей, поставивших yt-dlp до появления связки с Deno. Прогресс — под
-/// ключом "ytdlp" (Deno показывается в карточке yt-dlp).
+/// Installs Deno if missing, for users who installed yt-dlp before the Deno
+/// pairing existed. Progress reports under the "ytdlp" key.
 #[tauri::command]
 async fn tools_install_deno(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
     let app_for_task = app.clone();
@@ -2258,16 +2090,12 @@ async fn tools_install_deno(app: tauri::AppHandle) -> Result<tools::ToolsInfo, S
         Ok::<_, String>(tools::info(&dir))
     })
     .await;
-    // Статус обновляем ВСЕГДА (даже при ошибке/панике задачи), чтобы UI не остался
-    // устаревшим. Эмитим ДО разбора исхода join.
     let _ = app.emit("tools_changed", ());
     info.map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Установить сразу все утилиты одним действием: yt-dlp (+ Deno) и ffmpeg.
-/// Прогресс по каждой стримится событием `tools_progress` под её ключом. yt-dlp
-/// обязателен — его сбой возвращается ошибкой; ffmpeg опционален (его сбой не
-/// фатален: качество/ремукс ограничены, но скачивание работает).
+/// Installs everything in one go: yt-dlp (+ Deno) is required and fails the
+/// call on error; ffmpeg is optional (its failure isn't fatal — downloads still work).
 #[tauri::command]
 async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
     let app_for_task = app.clone();
@@ -2298,10 +2126,8 @@ async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, St
             );
         };
 
-        // Ставим только ОТСУТСТВУЮЩЕЕ: «Установить необходимое» не должно
-        // перекачивать уже установленные бинари (обновление — отдельная кнопка).
-        // yt-dlp обязателен; Deno докидываем рядом (install_deno сам идемпотентен —
-        // вернёт Ok, если Deno уже есть).
+        // Only install what's missing — updating is a separate button.
+        // install_deno is idempotent (Ok if Deno already present).
         let report_ytdlp = make_report("ytdlp");
         let ytdlp_result: Result<(), String> = if tools::resolve_ytdlp(&dir).is_some() {
             Ok(())
@@ -2315,7 +2141,7 @@ async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, St
         }
         clear_progress("ytdlp");
 
-        // ffmpeg опционален — ставим, только если его ещё нет; сбой не валит всё.
+        // ffmpeg optional: install only if missing; failure doesn't fail the whole call.
         let report_ffmpeg = make_report("ffmpeg");
         if tools::resolve_ffmpeg(&dir).is_none() {
             if let Err(e) = tools::install_ffmpeg(&dir, &report_ffmpeg) {
@@ -2328,19 +2154,14 @@ async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, St
         Ok::<_, String>(tools::info(&dir))
     })
     .await;
-    // Статус обновляем ВСЕГДА: при частичном успехе (ffmpeg встал, а yt-dlp нет)
-    // ИЛИ панике задачи событие триггерит refreshToolsInfo, и UI отразит
-    // фактическое состояние. Эмитим ДО разбора исхода join.
     let _ = app.emit("tools_changed", ());
     info.map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Удалить скачанную приложением утилиту (`tool` = "ytdlp" | "ffmpeg").
 #[tauri::command]
 async fn tools_delete(app: tauri::AppHandle, tool: String) -> Result<tools::ToolsInfo, String> {
-    // Утилитой может пользоваться активный воркер скачивания (yt-dlp/ffmpeg уже
-    // резолвнуты и качают очередь). Удаление выдернуло бы бинарь из-под него —
-    // не даём, пока в очереди есть незавершённые элементы.
+    // Refuse while a download job may be actively using the resolved binary —
+    // deleting it out from under an active worker would break the job.
     if downloads::has_active_jobs(&app) {
         return Err(
             "Нельзя удалить, пока есть треки в очереди скачивания. Дождитесь завершения или очистите очередь."
@@ -2351,12 +2172,13 @@ async fn tools_delete(app: tauri::AppHandle, tool: String) -> Result<tools::Tool
     let info = tauri::async_runtime::spawn_blocking(move || {
         let dir = tools_app_data_dir(&app_for_task);
         match tool.as_str() {
-            // Deno удаляется вместе с yt-dlp (ставились вместе).
+            // Deno is removed together with yt-dlp (installed as a pair).
             "ytdlp" => {
                 tools::delete_ytdlp(&dir)?;
                 tools::delete_deno(&dir)?;
             }
             "ffmpeg" => tools::delete_ffmpeg(&dir)?,
+            "pot" => tools::delete_pot(&dir)?,
             _ => return Err("Неизвестная утилита".to_string()),
         }
         Ok::<_, String>(tools::info(&dir))
@@ -2375,14 +2197,12 @@ pub fn run() {
     let player = AudioPlayer::new().expect("Не удалось инициализировать аудиоплеер");
 
     tauri::Builder::default()
-        // Кастомный протокол обложек: отдаёт уменьшенные WebP-миниатюры по
-        // file_path (генерируются лениво и кэшируются на диск), без base64 в IPC.
+        // Serves lazily-generated, disk-cached WebP thumbnails by file_path, avoiding base64 over IPC.
         .register_asynchronous_uri_scheme_protocol("lfmusic-cover", |ctx, request, responder| {
             thumbnails::protocol_handler(ctx, request, responder);
         })
-        // Кастомный протокол внешних картинок (аватарки/обложки): отдаёт
-        // кэшированные WebP по lfmusic-external://{artist|cover}/<hash>, без
-        // base64 в IPC — по образцу lfmusic-cover.
+        // Same pattern as lfmusic-cover, for cached external artist/cover images
+        // at lfmusic-external://{artist|cover}/<hash>.
         .register_asynchronous_uri_scheme_protocol("lfmusic-external", |ctx, request, responder| {
             external::protocol_handler(ctx, request, responder);
         })
@@ -2394,7 +2214,6 @@ pub fn run() {
 
             window_state::restore_main_window_geometry(app, &app_data_dir);
 
-            // Интеграция с панелью задач Windows (кнопки + обложка-превью).
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(hwnd) = window.hwnd() {
@@ -2402,7 +2221,6 @@ pub fn run() {
                 }
             }
 
-            // Системное медиа-управление Linux (MPRIS): отображение трека и кнопки.
             #[cfg(target_os = "linux")]
             {
                 let cover_dir = app
@@ -2415,12 +2233,12 @@ pub fn run() {
 
             let app_settings = settings::load(&app_data_dir);
 
-            // Загружаем сохранённые настройки эквалайзера из settings.json
             let player_state = app.state::<PlayerState>();
             let player = player_state.0.read().expect("Lock error");
             player.set_eq_settings(app_settings.eq_settings.clone());
             drop(player);
 
+            // Must be managed before code below calls app.state::<SettingsState>().
             app.manage(SettingsState(Mutex::new((
                 app_settings,
                 app_data_dir.clone(),
@@ -2430,8 +2248,7 @@ pub fn run() {
             let mut library =
                 MusicLibrary::new(app_data_dir).expect("Не удалось инициализировать библиотеку");
 
-            // Один раз при запуске пересобираем плейлисты исполнителей,
-            // чтобы существующие библиотеки получили записи без ожидания рескана.
+            // Rebuild once on startup so existing libraries get artist playlists without waiting for a rescan.
             let separators = {
                 let s = app.state::<SettingsState>();
                 settings::get_artist_separators(&s)
@@ -2440,9 +2257,8 @@ pub fn run() {
                 eprintln!("Ошибка инициализации плейлистов исполнителей: {}", e);
             }
 
-            // Одноразовая миграция: сбрасываем негативный кэш внешних альбомов —
-            // старые «нет» могли быть закэшированы из-за временных ошибок (теперь
-            // такие не кэшируются). Гейт — файл-маркер версии.
+            // One-time migration: clear the external-album negative cache, since old
+            // "none" entries could have been cached from transient errors (no longer the case).
             {
                 let marker = external_marker_dir.join("external_album.version");
                 let current = std::fs::read_to_string(&marker)
@@ -2465,7 +2281,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            // Плеер
+            // Player
             player_play,
             player_play_crossfade,
             player_play_paused,
@@ -2481,7 +2297,7 @@ pub fn run() {
             get_track_metadata,
             get_cover_art,
             get_original_cover_art,
-            // Библиотека
+            // Library
             library_get_folders,
             library_add_folder,
             library_add_android_music_folders,
@@ -2496,7 +2312,7 @@ pub fn run() {
             library_cleanup,
             library_rescan,
             library_rebuild_artists,
-            // Плейлисты
+            // Playlists
             playlist_get_all,
             playlist_get_tracks,
             playlist_create,
@@ -2508,13 +2324,13 @@ pub fn run() {
             playlist_get_ids_for_track,
             album_get_track_order,
             album_set_track_order,
-            // Внешние источники
+            // External sources
             external_album_layout,
             external_artist_image,
             external_track_cover,
             external_load_cached_artist_images,
             external_prepare,
-            // Скачивание треков
+            // Downloads
             downloads_search,
             downloads_album,
             downloads_artist,
@@ -2550,38 +2366,38 @@ pub fn run() {
             statistics_get_summary_stats,
             statistics_get_recommendations,
             statistics_get_taste_profile,
-            // Эквалайзер
+            // Equalizer
             eq_set_bands,
             eq_set_gain,
             eq_set_enabled,
             eq_get_settings,
-            // Настройки
+            // Settings
             get_settings,
             save_settings,
-            // Состояние плеера
+            // Player state
             save_player_state,
             load_player_state,
-            // Закрепления
+            // Pins
             pins_load,
             pins_save,
-            // Кастомные обложки
+            // Custom covers
             cover_set_custom,
             cover_remove_custom,
             cover_load_all,
-            // Переопределения метаданных трека
+            // Track metadata overrides
             track_set_override,
             track_clear_all_overrides,
             get_original_track,
             read_image_as_data_url,
-            // Окно
+            // Window
             window_state::toggle_window_fullscreen,
             window_state::toggle_window_maximize,
             open_folder_in_explorer,
-            // Панель задач (Windows)
+            // Taskbar (Windows)
             taskbar_set_playing,
             taskbar_set_modes,
             taskbar_set_covers,
-            // Системное медиа-управление (MPRIS, Linux)
+            // System media integration (MPRIS, Linux)
             mpris_update_metadata,
             mpris_update_playback,
             // Discord Rich Presence
@@ -2592,8 +2408,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                // Сначала добиваем активный yt-dlp — иначе при закрытии во время
-                // скачивания он остался бы процессом-зомби в фоне ОС.
+                // Kill any active yt-dlp first, or it'd linger as a zombie process.
                 downloads::cleanup_on_exit(app_handle);
                 if let Some(state) = app_handle.try_state::<LibraryState>() {
                     if let Ok(library) = state.0.lock() {

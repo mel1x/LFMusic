@@ -67,8 +67,8 @@ async function addFolder() {
     }
 }
 
-/** Перечитать список папок библиотеки (после изменений вне useFolders, напр.
- *  смены папки скачиваний на странице «Внешние источники»). */
+/** Reload library folders after changes made outside useFolders (e.g. the
+ *  download folder change on the External Sources page). */
 async function refreshFolders() {
     folders.value = await invoke<FolderInfo[]>('library_get_folders')
 }

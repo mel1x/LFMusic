@@ -32,8 +32,7 @@ const { settings } = useSettings();
 const { getCustomCover } = useCustomCovers();
 const { avatarFor } = useExternalSources();
 
-// Высота блока плеера = 84px. Когда дополнительный блок плеера выключен,
-// растягиваем aside до самого низа окна, иначе оставляем место под плеер.
+// Player bar is 84px; when its extra block is off, stretch aside to the window bottom.
 const asideBottom = computed(() => settings.value.show_player_extra_block ? '84px' : '0px');
 
 function pinCover(p: ResolvedPin): string {
@@ -86,7 +85,6 @@ function onMovePinToTopFromMenu() {
     movePinToTop(p.kind, p.key);
 }
 
-// Подгрузка обложек для закреплений, у которых обложка ещё не получена.
 function requestPinCovers() {
     const pending = [];
     for (const p of resolvedPins.value) {
@@ -252,13 +250,12 @@ watch(resolvedPins, () => requestPinCovers());
 .navLink.router-link-active svg {
   color: #fff;
 }
-/* Скрытие пункта «Скачивание» настройкой (через display, чтобы не сдвигать
-   nth-child мобильного порядка). */
+/* Hidden via display (not v-if) to keep nth-child mobile ordering stable. */
 .navLink.downloadsHidden {
   display: none;
 }
 
-/* ── Pinned items ───────────────────────────────────────────────────────── */
+/* Pinned items */
 
 .pinsBlock {
   display: flex;
@@ -447,27 +444,27 @@ watch(resolvedPins, () => requestPinCovers());
     display: none;
   }
 
-  /* «Скачивание» — только десктоп. На телефоне скрыто (но остаётся 1-м child). */
+  /* Downloads link is desktop-only, hidden on phone (stays 1st child). */
   .downloadsLink {
     display: none;
   }
 
-  /* Порядок на мобильной версии: Рекомендации, Коллекция, Поиск, Каталог, Настройки.
-     С учётом скрытого 1-го child (Скачивание) индексы nth-child смещены на +1. */
+  /* Mobile order: Home, Collection, Search, Catalog, Settings.
+     nth-child indices are shifted +1 since the hidden 1st child (Downloads) still counts. */
   .navLink:nth-child(3) {
-    order: 1; /* Рекомендации (to="/") */
+    order: 1;
   }
   .navLink:nth-child(4) {
-    order: 2; /* Коллекция (to="/collections") */
+    order: 2;
   }
   .navLink:nth-child(2) {
-    order: 3; /* Поиск (to="/search") */
+    order: 3;
   }
   .navLink:nth-child(5) {
-    order: 4; /* Каталог (to="/catalog") */
+    order: 4;
   }
   .navLink:nth-child(6) {
-    order: 5; /* Настройки (to="/settings") */
+    order: 5;
   }
 
   .navLink:active {

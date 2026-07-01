@@ -23,8 +23,8 @@ import { usePlayer, type TrackMetadata } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
 import { isWebKitRuntime } from '../../composables/usePlatform';
 
-// На WebKitGTK (Linux) вертикальный поп-ап громкости неисправим, поэтому там
-// рендерим отдельный горизонтальный поп-ап (см. шаблон / .volumeSliderPopupLinux).
+// WebKitGTK (Linux) can't render the vertical volume popup, so we render a
+// separate horizontal one there instead (see template / .volumeSliderPopupLinux).
 const isWebKit = isWebKitRuntime();
 
 const {
@@ -64,7 +64,6 @@ const {
     onVolumeInput,
 } = usePlayerUi();
 
-// ── Progress slider ─────────────────────────────────────────────────────────
 const progressSliderValue = computed(() => {
     return isSeeking.value ? seekValue.value : positionSecs.value;
 });
@@ -74,7 +73,6 @@ const progressFillPercent = computed(() => {
     return (progressSliderValue.value / durationSecs.value) * 100;
 });
 
-// ── Player surface ripple / mobile tap → fullscreen ─────────────────────────
 const mobilePlayerQuery = '(max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px)';
 
 function isMobilePlayerLayout() {
@@ -106,7 +104,6 @@ function onPlayerSurfaceClick(e: MouseEvent) {
     if (e.target === e.currentTarget) onPlayerRipple(e);
 }
 
-// ── Track context menu ──────────────────────────────────────────────────────
 const playerTrackMenu = ref<{ x: number; y: number } | null>(null);
 
 function openPlayerTrackMenu(e: MouseEvent) {
@@ -725,9 +722,9 @@ function onMoveToTop(track: TrackMetadata) {
     z-index: 11;
     transition: opacity 0.2s ease, visibility 0.2s ease;
 }
-/* Невидимая зона ~24px вокруг поп-апа: пока мышь в ней — он не исчезает
-   (мост к иконке громкости снизу и буфер по бокам/сверху). Так как поп-ап —
-   потомок .volumeControl, наведение на эту зону держит :hover активным. */
+/* Invisible ~24px zone around the popup keeps it open while the mouse is in it
+   (bridges to the volume icon below, buffers the sides/top). Popup is a
+   descendant of .volumeControl, so hovering this zone keeps :hover active. */
 .volumeSliderPopup::after {
     content: '';
     position: absolute;
@@ -738,11 +735,11 @@ function onMoveToTop(track: TrackMetadata) {
     opacity: 1;
     pointer-events: auto;
 }
-/* Видимый трек — отдельный div позади прозрачного input. Его ширина 5px со
-   скруглением (border-radius), что нельзя сделать с фоном-полоской на самом
-   input. Высота укорочена на размер thumb (11px): центр thumb доходит ровно до
-   верх/низа трека (на крайних значениях thumb чуть выходит за края), а граница
-   заливки совпадает с центром thumb. Заливка через --val (задан на поп-апе). */
+/* Visible track is a separate div behind the transparent input: needs a 5px
+   rounded width the input's own background can't do. Height is shortened by
+   thumb size (11px) so thumb center reaches exactly the track ends, and the
+   fill boundary lines up with the thumb center. Fill driven by --val (set on
+   the popup). */
 .volumeTrack {
     pointer-events: none;
     position: absolute;
@@ -766,8 +763,8 @@ function onMoveToTop(track: TrackMetadata) {
     -webkit-appearance: none;
     writing-mode: vertical-lr;
     direction: rtl;
-    /* input шириной 24px = зона перетаскивания; thumb центрируется по ширине
-       input и совпадает с центрированным .volumeTrack. Фон прозрачный. */
+    /* 24px input width = drag hit area; thumb centers within it and lines up
+       with the centered .volumeTrack. Background is transparent. */
     width: 24px;
     height: 140px;
     cursor: pointer;
@@ -788,9 +785,9 @@ function onMoveToTop(track: TrackMetadata) {
     background: #fff !important;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
 }
-/* Отдельный ГОРИЗОНТАЛЬНЫЙ поп-ап громкости только для Linux/WebKitGTK
-   (рендерится по v-if="isWebKit"). Свои классы, без наследования вертикальной
-   базы .volume-slider — копия рабочего qf-volume-slider. Без transform. */
+/* Separate HORIZONTAL volume popup for Linux/WebKitGTK only (v-if="isWebKit").
+   Own classes, no inheritance from the vertical .volume-slider base — copy of
+   the working qf-volume-slider. No transform. */
 .volumeSliderPopupLinux {
     visibility: hidden;
     opacity: 0;

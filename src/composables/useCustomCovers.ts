@@ -10,8 +10,8 @@ interface BackendEntry {
   data_url: string;
 }
 
-// Реактивный объект — обновления отдельных ключей корректно отслеживаются
-// потребителями (template, computed) без необходимости пересобирать всю карту.
+// Reactive object so per-key updates are tracked by consumers (template, computed)
+// without rebuilding the whole map.
 const customCovers = reactive<Record<string, string>>({});
 let initialized = false;
 let loadingPromise: Promise<void> | null = null;

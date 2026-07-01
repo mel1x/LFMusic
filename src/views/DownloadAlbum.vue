@@ -56,7 +56,7 @@ function openArtist() {
     if (detail.value?.artist_id != null) router.push(`/downloads/artist/${detail.value.artist_id}`)
 }
 
-// ── Скачать все треки ────────────────────────────────────────────────────────
+// Download all tracks
 const busyAll = ref(false)
 const doneAll = ref(false)
 
@@ -80,7 +80,7 @@ async function downloadAll() {
     }
 }
 
-// ── Повторное скачивание (трек уже в библиотеке) ─────────────────────────────
+// Redownload confirmation (track already in library)
 const confirmTrack = ref<ExternalSearchTrack | null>(null)
 const confirmMessage = computed(() =>
     confirmTrack.value ? t('downloads.redownloadText', { title: confirmTrack.value.title }) : '',

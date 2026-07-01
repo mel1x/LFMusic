@@ -90,9 +90,8 @@ async function tryShowTooltip() {
     await nextTick()
     const tt = tooltipEl.value
     if (!tt) return
-    // getBoundingClientRect — визуальные (зумленные) координаты, как и rect выше;
-    // всё считаем в одном пространстве, затем делим на scale (тултип лежит в
-    // зумленном body). Иначе под зумом он уезжает (в т.ч. вниз при placement=top).
+    // getBoundingClientRect returns visual (zoomed) coordinates, same as `rect` above;
+    // compute in that space, then divide by scale since the tooltip lives in the zoomed body.
     const ttRect = tt.getBoundingClientRect()
     const ttW = ttRect.width
     const ttH = ttRect.height
@@ -102,8 +101,8 @@ async function tryShowTooltip() {
     const maxLeft = window.innerWidth - ttW - margin
     if (left > maxLeft) left = Math.max(margin, maxLeft)
 
-    // Для принудительных сторон (плеер) держим тултип ближе к элементу — иначе
-    // на длинных артистах он висит слишком высоко.
+    // Forced placement (player bar) keeps the tooltip closer, otherwise it hangs too
+    // high above long artist names.
     const gap = props.tooltipPlacement === 'auto' ? margin : 3
     const above = rect.top - ttH - gap
     const below = rect.bottom + gap

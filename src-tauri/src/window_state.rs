@@ -141,11 +141,9 @@ fn current_window_geometry(
     let fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
     let maximized = window.is_maximized().map_err(|e| e.to_string())?;
 
-    // В полноэкранном (F11) или развёрнутом режиме физические position/size
-    // отражают размеры на весь экран — их нельзя сохранять как «нормальную»
-    // геометрию, иначе при выходе из режима окну не к чему будет вернуться.
-    // Поэтому сохраняем предыдущую нормальную геометрию, обновляя только флаги
-    // и текущий монитор.
+    // In fullscreen/maximized, physical position/size are screen-filling and
+    // must not overwrite the saved "normal" geometry (or there'd be nothing to
+    // restore to on exit) — keep the previous geometry, only update flags/monitor.
     if fullscreen || maximized {
         if let Some(mut state) = previous {
             state.fullscreen = fullscreen;
@@ -185,14 +183,12 @@ fn save_current_window_geometry(window: &WebviewWindow, app_data_dir: &Path) -> 
     Ok(())
 }
 
-/// Переключить полноэкранный режим главного окна (F11).
+/// Toggle main window fullscreen (F11).
 ///
-/// Прямой переход из развёрнутого (maximized) состояния в fullscreen на Windows
-/// вызывает рассинхрон состояния окна (лаги, «сломанный» fullscreen), поэтому
-/// перед входом снимаем maximized. При этом сохраняем тот же размер и позицию
-/// окна, чтобы оно не «прыгало» к старой свёрнутой геометрии — после выхода из
-/// fullscreen окно останется ровно там же. Делается на стороне Rust одним
-/// вызовом, чтобы избежать нескольких медленных IPC-переходов.
+/// Going straight from maximized to fullscreen on Windows desyncs window state
+/// (laggy/broken fullscreen), so maximized is cleared first, preserving
+/// position/size so the window doesn't jump on exit. Done as one Rust call to
+/// avoid several slow IPC round-trips.
 #[tauri::command]
 pub fn toggle_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
     let is_fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
@@ -216,11 +212,8 @@ pub fn toggle_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
     }
 }
 
-/// Переключить развёрнутое состояние главного окна (клик по «развернуть» в шапке).
-///
-/// Если окно в полноэкранном режиме (F11) — выходим из него и разворачиваем окно
-/// (выключение F11 + maximize). В остальных случаях — обычное переключение
-/// maximized.
+/// Toggle main window maximize. If in fullscreen (F11), exits it and maximizes
+/// instead of just toggling maximized.
 #[tauri::command]
 pub fn toggle_window_maximize(window: WebviewWindow) -> Result<(), String> {
     if window.is_fullscreen().map_err(|e| e.to_string())? {
@@ -258,8 +251,7 @@ pub fn restore_main_window_geometry(app: &tauri::App, app_data_dir: &Path) {
             geometry.x, geometry.y,
         )));
     }
-    // Режимы взаимоисключающие: fullscreen имеет приоритет. Одновременная
-    // установка maximized + fullscreen на Windows ломает состояние окна.
+    // Mutually exclusive, fullscreen wins: setting both on Windows breaks window state.
     if saved_state.as_ref().is_some_and(|state| state.fullscreen) {
         let _ = window.set_fullscreen(true);
     } else if saved_state.as_ref().is_some_and(|state| state.maximized) {
@@ -398,8 +390,7 @@ mod tests {
 
     #[test]
     fn monitors_match_falls_back_to_position_when_name_present_only_on_one_side() {
-        // (Some, None)/(None, Some) не попадает в ветку сравнения по имени
-        // (нужны Some с обеих сторон) — должен сработать фолбэк по позиции.
+        // Name comparison requires Some on both sides; falls back to position.
         let saved = MonitorSnapshot {
             name: None,
             ..monitor("IGNORED", 0, 0, 1920, 1080)
@@ -410,8 +401,7 @@ mod tests {
 
     #[test]
     fn monitors_match_by_name_ignores_position_drift() {
-        // С обеих сторон есть имя — сравнение идёт по имени, даже если позиция
-        // монитора изменилась (например, пользователь переставил мониторы местами).
+        // Both sides have a name, so matching is by name even if the monitor moved.
         let saved = monitor("DISPLAY2", 1920, 0, 2560, 1440);
         let current = monitor("DISPLAY2", 0, 0, 2560, 1440);
         assert!(monitors_match(&saved, &current));
@@ -452,7 +442,7 @@ mod tests {
         };
         let monitors = [monitor("DISPLAY1", 0, 0, 1920, 1080)];
         let resolved = resolve_window_geometry(Some(&saved), &monitors, 1460, 860).unwrap();
-        // 299 невалидно -> должно откатиться на центрирование дефолтного размера.
+        // 299 is invalid -> falls back to centering the default size.
         assert_eq!(resolved.width, 1460);
     }
 

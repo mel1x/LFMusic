@@ -1,20 +1,13 @@
-// Порт ранжирования каталога из фронтенда (src/composables/useSearch.ts) в Rust.
+// Ported from src/composables/useSearch.ts to keep search behavior identical
+// on the backend. Five ranked tiers: exact substring, fuzzy (Levenshtein),
+// exact with RU/EN layout swap, fuzzy with layout swap, audio format keyword.
 //
-// Цель — один-в-один сохранить поведение поиска при переносе на бэкенд:
-//   1) точное вхождение подстроки;
-//   2) нечёткое совпадение (Левенштейн, порог 0.2 / минимум 4 символа);
-//   3) точное вхождение в перевёрнутой раскладке (ru/en);
-//   4) нечёткое в перевёрнутой раскладке;
-//   5) совпадение по аудиоформату (lossless / lossy / расширение).
-//
-// Поиск идёт по in-memory индексу (см. library.rs), который строится из БД в том
-// же каноническом порядке, что и `get_all_tracks`, поэтому порядок результатов
-// внутри каждого тира совпадает с прежним фронтендовым.
+// Operates on the in-memory index (see library.rs), built in the same order
+// as `get_all_tracks`, so per-tier result order matches the old frontend.
 
-/// Lossless-форматы для спец-фильтра по расширению (как в useSearch.ts).
+/// Lossless formats for the format-keyword filter (mirrors useSearch.ts).
 pub const LOSSLESS_FORMATS: &[&str] =
     &["flac", "wav", "alac", "ape", "dsd", "dsf", "aiff", "aif", "wv", "tak"];
-/// Lossy-форматы.
 pub const LOSSY_FORMATS: &[&str] = &["mp3", "aac", "ogg", "m4a", "wma", "opus"];
 
 fn is_known_format(ext: &str) -> bool {
@@ -24,13 +17,11 @@ fn is_known_format(ext: &str) -> bool {
 const FUZZY_MIN_LEN: usize = 4;
 const FUZZY_THRESHOLD: f64 = 0.2;
 
-/// Одна запись индекса: путь + уже приведённые к нижнему регистру поля + жанр + расширение.
 pub struct SearchEntry {
     pub path: String,
     pub genre: Option<String>,
-    /// [title, artist, album, basename] в нижнем регистре.
+    /// [title, artist, album, basename], lowercased.
     fields: [String; 4],
-    /// Расширение файла в нижнем регистре (для фильтра по формату).
     ext: String,
 }
 
@@ -61,10 +52,9 @@ impl SearchEntry {
     }
 }
 
-/// Имя файла без расширения — аналог `fileName.replace(/\.[^/.]+$/, '')`.
+/// Mirrors `fileName.replace(/\.[^/.]+$/, '')`.
 fn strip_ext(file: &str) -> &str {
     if let Some(idx) = file.rfind('.') {
-        // Расширение (часть после последней точки) должно быть непустым.
         if idx + 1 < file.len() {
             return &file[..idx];
         }
@@ -72,7 +62,6 @@ fn strip_ext(file: &str) -> &str {
     file
 }
 
-/// Расширение пути в нижнем регистре — аналог getExtension (`/\.([^.\\/]+)$/`).
 fn extension(path: &str) -> String {
     if let Some(idx) = path.rfind('.') {
         let ext = &path[idx + 1..];
@@ -82,8 +71,6 @@ fn extension(path: &str) -> String {
     }
     String::new()
 }
-
-// ── Раскладка клавиатуры (en ↔ ru), как карты EN_TO_RU / RU_TO_EN ──────────────
 
 fn en_to_ru(c: char) -> Option<char> {
     Some(match c {
@@ -111,7 +98,6 @@ fn ru_to_en(c: char) -> Option<char> {
     })
 }
 
-/// Перевод между раскладками — аналог switchLayout.
 pub fn switch_layout(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -127,13 +113,11 @@ pub fn switch_layout(input: &str) -> String {
     out
 }
 
-/// Запрос является ключевым словом формата (lossless/lossy/расширение).
 pub fn is_format_query(query: &str) -> bool {
     let q = query.trim().to_lowercase();
     q == "lossless" || q == "lossy" || is_known_format(&q)
 }
 
-/// Совпадение расширения с форматным запросом — аналог matchesFormat.
 fn matches_format(ext: &str, query: &str) -> bool {
     let q = query.trim().to_lowercase();
     if q == "lossless" {
@@ -147,8 +131,6 @@ fn matches_format(ext: &str, query: &str) -> bool {
     }
     false
 }
-
-// ── Расстояние Левенштейна / нечёткое совпадение (по символам Unicode) ─────────
 
 fn levenshtein(a: &[char], b: &[char]) -> usize {
     if a == b {
@@ -175,8 +157,7 @@ fn levenshtein(a: &[char], b: &[char]) -> usize {
     prev[n]
 }
 
-/// Минимальное расстояние от query до любой подстроки target (approximate
-/// substring matching) — аналог approxSubstringDistance.
+/// Minimum edit distance from query to any substring of target.
 fn approx_substring_distance(query: &[char], target: &[char]) -> usize {
     let m = query.len();
     let n = target.len();
@@ -200,7 +181,6 @@ fn approx_substring_distance(query: &[char], target: &[char]) -> usize {
     *prev.iter().min().unwrap_or(&m)
 }
 
-/// Нечёткое совпадение query внутри target — аналог fuzzyMatch.
 fn fuzzy_match(target: &str, query_chars: &[char]) -> bool {
     let qn = query_chars.len();
     if qn < FUZZY_MIN_LEN {
@@ -213,7 +193,7 @@ fn fuzzy_match(target: &str, query_chars: &[char]) -> bool {
     if max_edits == 0 {
         return false;
     }
-    // Быстрый путь: по словам.
+    // Fast path: per-word.
     for w in target.split_whitespace() {
         let wchars: Vec<char> = w.chars().collect();
         let wl = wchars.len();
@@ -225,7 +205,6 @@ fn fuzzy_match(target: &str, query_chars: &[char]) -> bool {
             return true;
         }
     }
-    // Общий подстрочный поиск.
     let tchars: Vec<char> = target.chars().collect();
     approx_substring_distance(query_chars, &tchars) <= max_edits
 }
@@ -237,9 +216,8 @@ fn genre_matches(entry: &SearchEntry, filter: Option<&str>) -> bool {
     }
 }
 
-/// Ранжированный поиск по индексу. Возвращает ссылки на записи в порядке тиров,
-/// сохраняя внутри тира исходный (канонический) порядок индекса.
-/// `genre_filter` — необязательный точный фильтр по жанру (как на странице каталога).
+/// Ranked search over the index; results ordered by tier, index order within
+/// each tier. `genre_filter` is an optional exact genre match.
 pub fn rank<'a>(
     entries: &'a [SearchEntry],
     query: &str,
@@ -339,9 +317,8 @@ mod tests {
 
     #[test]
     fn fuzzy_typo_matches() {
-        // "boheman" — опечатка в 1 правку (пропущена 'i'); порог 0.2 при 7 символах
-        // допускает 1 правку → нечёткое совпадение. (Транспозиция = 2 правки и
-        // НЕ матчится — это совпадает с поведением фронтенда.)
+        // "boheman" is 1 edit off "bohemian"; threshold 0.2 at 7 chars allows 1 edit.
+        // A transposition (2 edits) would NOT match, matching frontend behavior.
         let entries = vec![entry("/m/1.mp3", "Bohemian Rhapsody", "Queen", "A", None)];
         let res = paths(rank(&entries, "boheman", None));
         assert_eq!(res, vec!["/m/1.mp3"]);
@@ -349,8 +326,7 @@ mod tests {
 
     #[test]
     fn layout_switch_match() {
-        // Набрано в англ. раскладке вместо русской: "Ц運" не нужен — берём простой случай.
-        // "queen" в русской раскладке = "йгуут"; обратный перевод даёт "queen".
+        // "queen" typed on a Russian layout = "йгуут"; switching back gives "queen".
         let entries = vec![entry("/m/1.mp3", "Song", "Queen", "A", None)];
         let res = paths(rank(&entries, "йгуут", None));
         assert_eq!(res, vec!["/m/1.mp3"]);
@@ -380,15 +356,12 @@ mod tests {
     #[test]
     fn tier_ordering_exact_before_fuzzy() {
         let entries = vec![
-            entry("/m/1.mp3", "Imagine", "John", "Al", None),   // fuzzy для "imagin" тоже подходит, но exact-вхождение есть
-            entry("/m/2.mp3", "Imagne Dragons", "X", "Al", None), // содержит "imag" → exact-вхождение для "imagine"? нет
+            entry("/m/1.mp3", "Imagine", "John", "Al", None),
+            entry("/m/2.mp3", "Imagne Dragons", "X", "Al", None),
         ];
-        // Запрос с точным вхождением должен идти раньше нечёткого.
         let res = paths(rank(&entries, "imagine", None));
         assert_eq!(res.first(), Some(&"/m/1.mp3"));
     }
-
-    // ── Доп. покрытие ────────────────────────────────────────────────────────
 
     #[test]
     fn empty_query_returns_all_entries_in_index_order() {
@@ -396,7 +369,7 @@ mod tests {
             entry("/m/1.mp3", "B", "X", "Al", None),
             entry("/m/2.mp3", "A", "X", "Al", None),
         ];
-        // Пустой запрос не сортирует по алфавиту — отдаёт канонический порядок индекса.
+        // Empty query returns index order, not alphabetical.
         assert_eq!(paths(rank(&entries, "", None)), vec!["/m/1.mp3", "/m/2.mp3"]);
         assert_eq!(paths(rank(&entries, "   ", None)), vec!["/m/1.mp3", "/m/2.mp3"]);
     }
@@ -419,16 +392,14 @@ mod tests {
 
     #[test]
     fn fuzzy_requires_minimum_length() {
-        // 3-символьный запрос короче FUZZY_MIN_LEN (4) — нечёткое совпадение не
-        // должно срабатывать даже при опечатке в один символ.
-        let entries = vec![entry("/m/1.mp3", "Cat", "X", "Al", None)]; // "Cwt" -> "Cat", 1 правка, но длина 3
+        // 3-char query is below FUZZY_MIN_LEN (4): no fuzzy match even for a 1-edit typo.
+        let entries = vec![entry("/m/1.mp3", "Cat", "X", "Al", None)];
         assert!(rank(&entries, "Cwt", None).is_empty());
     }
 
     #[test]
     fn fuzzy_rejects_too_many_edits() {
-        // 4 символа, порог 0.2 -> floor(4*0.2)=0 правок допустимо => полностью
-        // отличающаяся строка той же длины не должна совпадать.
+        // 4 chars, threshold 0.2 -> floor(4*0.2)=0 edits allowed.
         let entries = vec![entry("/m/1.mp3", "Wxyz", "X", "Al", None)];
         assert!(rank(&entries, "Abcd", None).is_empty());
     }
@@ -444,7 +415,6 @@ mod tests {
         )];
         let res = rank(&entries, "great song", None);
         assert_eq!(res.len(), 1);
-        // Без тегов остаются только запись и поиск по basename.
         entries.clear();
         assert!(entries.is_empty());
     }
@@ -473,13 +443,12 @@ mod tests {
 
     #[test]
     fn format_query_skips_fuzzy_text_matching() {
-        // is_format_query("flac") == true => allow_fuzzy == false, поэтому трек,
-        // чьё название лишь НЕЧЁТКО похоже на "flac", не должен попасть в выдачу
-        // через текстовый тир — только через точное вхождение или формат файла.
+        // is_format_query("flac") disables fuzzy matching, so a title only
+        // fuzzily resembling "flac" must not match via the text tier.
         let entries = vec![
-            entry("/m/1.mp3", "Flac", "X", "Al", None), // точное вхождение "flac" в title
-            entry("/m/2.flac", "Unrelated", "Y", "Bl", None), // реальный .flac файл
-            entry("/m/3.mp3", "Flak", "Z", "Cl", None), // нечёткое совпадение с "flac" (1 правка) — НЕ должно попасть
+            entry("/m/1.mp3", "Flac", "X", "Al", None),
+            entry("/m/2.flac", "Unrelated", "Y", "Bl", None),
+            entry("/m/3.mp3", "Flak", "Z", "Cl", None),
         ];
         let res = paths(rank(&entries, "flac", None));
         assert_eq!(res, vec!["/m/1.mp3", "/m/2.flac"]);
@@ -487,8 +456,6 @@ mod tests {
 
     #[test]
     fn switch_layout_is_involutive_for_mapped_chars() {
-        // Перевод раскладки туда-обратно должен возвращать исходную строку для
-        // символов, присутствующих в обеих картах.
         let original = "hello world";
         let switched = switch_layout(original);
         let back = switch_layout(&switched);
@@ -497,7 +464,6 @@ mod tests {
 
     #[test]
     fn switch_layout_passes_through_unmapped_chars() {
-        // Цифры и большинство пунктуации не размечены ни в одной карте.
         assert_eq!(switch_layout("12345"), "12345");
     }
 
@@ -506,13 +472,12 @@ mod tests {
         assert_eq!(strip_ext("track"), "track");
         assert_eq!(strip_ext("track.mp3"), "track");
         assert_eq!(strip_ext("a.b.c.mp3"), "a.b.c");
-        // Точка в самом конце не считается валидным разделителем расширения.
+        // Trailing dot is not a valid extension separator.
         assert_eq!(strip_ext("track."), "track.");
     }
 
     #[test]
     fn extension_ignores_dots_in_directory_components() {
-        // Точка встречается в имени папки, а не в имени файла — расширения нет.
         assert_eq!(extension("C:/My.Folder/track"), "");
         assert_eq!(extension("/music/Artist.Name/track.flac"), "flac");
     }

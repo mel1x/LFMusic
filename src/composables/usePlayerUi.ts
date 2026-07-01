@@ -7,15 +7,13 @@ import { useAlbumTrackOrder } from "./useAlbumTrackOrder";
 import { useI18n } from "./useI18n";
 import { isCoverResolved } from "./useCoverLoader";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Общее UI-состояние плеера, разделяемое между мини-баром (PlaybackControls) и
-// полноэкранным оверлеем (PlayerFullscreenOverlay): режим оверлея, кроссфейд
-// обложек, очередь, подписи источника, перенос трека «в начало», громкость.
+// Shared player UI state between the mini-bar (PlaybackControls) and the
+// fullscreen overlay (PlayerFullscreenOverlay): overlay mode, cover crossfade,
+// queue, source labels, move-to-top, volume.
 //
-// Раньше всё это жило локальными ref внутри монолитного Player.vue. После
-// разбиения на под-компоненты состояние должно быть общим, поэтому вынесено в
-// composable-синглтон (тот же паттерн effectScope, что и usePlayer/usePins).
-// ──────────────────────────────────────────────────────────────────────────────
+// Used to live as local refs inside monolithic Player.vue; after splitting into
+// sub-components the state must be shared, hence this composable singleton
+// (same effectScope pattern as usePlayer/usePins).
 
 type FsMode = null | "player" | "queue";
 
@@ -51,7 +49,7 @@ function createPlayerUi() {
     const { playlists, loadPlaylists } = usePlaylists();
     const { t } = useI18n();
 
-    // ── Подписи источника очереди ───────────────────────────────────────────
+    // Queue source labels
     const queueSourcePrefix = computed(() => {
         const src = activePlaylistSource.value;
         if (!src) return "Сейчас играет из";
@@ -86,8 +84,8 @@ function createPlayerUi() {
         return "Моей каталог";
     });
 
-    // Подпись источника для Discord — как queueSourceName, но в именительном
-    // падеже (queueSourceName согласован с префиксом «Сейчас играет из…»).
+    // Discord source label: like queueSourceName but in nominative case
+    // (queueSourceName is grammatically matched to the "playing from..." prefix).
     const discordSourceLabel = computed(() => {
         const src = activePlaylistSource.value;
         if (src?.startsWith("search:")) return "Поиск по каталогу";
@@ -104,7 +102,7 @@ function createPlayerUi() {
         { immediate: true },
     );
 
-    // ── Fullscreen mode ─────────────────────────────────────────────────────
+    // Fullscreen mode
     const fsMode = ref<FsMode>(null);
     const showOverlay = computed(() => fsMode.value !== null);
     const isQueueMode = computed(() => fsMode.value === "queue");
@@ -126,14 +124,13 @@ function createPlayerUi() {
         fsMode.value = fsMode.value === "queue" ? "player" : "queue";
     }
 
-    // ── Fullscreen cover crossfade ──────────────────────────────────────────
+    // Fullscreen cover crossfade
     const fsCoverA = ref<string | null>(null);
     const fsCoverB = ref<string | null>(null);
     const fsActiveBuffer = ref<"a" | "b">("a");
 
-    // Размытый фон полноэкранного плеера декодирует обложку на весь вьюпорт — для
-    // него берём миниатюру низкого разрешения (size=blur ≈ 96px) вместо 512px:
-    // картинка всё равно размывается на 80px, а декод и память кратно меньше.
+    // Blurred fullscreen background uses a low-res thumbnail (size=blur ~96px)
+    // instead of 512px: it's blurred by 80px anyway, so decode/memory cost drops a lot.
     function toBlurCover(url: string | null): string {
         if (!url) return "";
         return url.replace(/size=\d+/, "size=blur");
@@ -163,31 +160,30 @@ function createPlayerUi() {
         }
     });
 
-    // ── Источник очереди / перенос «в начало» ───────────────────────────────
+    // Queue source / move-to-top
     const isMixSource = computed(() => activePlaylistSource.value === "mix");
     const isCatalogSource = computed(() => (activePlaylistSource.value ?? "").startsWith("catalog"));
     const isAlbumSource = computed(() => (activePlaylistSource.value ?? "").startsWith("album:"));
     const isPlaylistSource = computed(() => (activePlaylistSource.value ?? "").startsWith("playlist:"));
     const canMoveToTop = computed(() => isCatalogSource.value || isAlbumSource.value || isPlaylistSource.value);
 
-    // Пути предстоящих треков (playbackOrder теперь хранит file_path).
     const queueUpcomingPaths = computed<string[]>(() => {
         const order = playbackOrder.value;
         const idx = currentTrackIndex.value;
         if (idx < 0 || order.length === 0) return [];
 
         if (isMixSource.value) {
-            // «Мой микс» (Моя волна): показываем только следующий трек.
+            // Mix ("wave"): only show the next track.
             return order.slice(idx + 1, idx + 2);
         }
 
         if (shuffled.value) {
-            // Шаффл: хвост playbackOrder уже содержит заранее сгенерированные
-            // решафл-проходы (ensureLookahead держит минимум QUEUE_DISPLAY_COUNT треков).
+            // Shuffle: playbackOrder's tail already has pre-generated reshuffle
+            // passes (ensureLookahead keeps at least QUEUE_DISPLAY_COUNT tracks).
             return order.slice(idx + 1, idx + 1 + QUEUE_DISPLAY_COUNT);
         }
 
-        // Без шаффла: зацикливаем очередь
+        // No shuffle: loop the queue
         const result: string[] = [];
         for (let i = 1; i <= QUEUE_DISPLAY_COUNT; i++) {
             result.push(order[(idx + i) % order.length]);
@@ -195,15 +191,15 @@ function createPlayerUi() {
         return result;
     });
 
-    // Резолв путей очереди в объекты через кэш (промахи дозагружаются фоном,
-    // computed пересчитается, когда метаданные приедут).
+    // Resolve queue paths to objects via cache (misses are fetched in the
+    // background; computed recalculates once metadata arrives).
     const queueUpcoming = computed<TrackMetadata[]>(() =>
         queueUpcomingPaths.value
             .map(p => getTrackByPath(p))
             .filter((t): t is TrackMetadata => !!t),
     );
 
-    // Префетч метаданных всех предстоящих путей (чтобы очередь не была неполной).
+    // Prefetch metadata for all upcoming paths so the queue isn't incomplete.
     watch(queueUpcomingPaths, (paths) => {
         if (paths.length) void fetchTracksByPaths(paths);
     }, { immediate: true });
@@ -216,11 +212,10 @@ function createPlayerUi() {
         return track.title || track.file_path.split(/[/\\]/).pop()?.replace(/\.[^/.]+$/, "") || t("player.untitled");
     });
 
-    // ── Отложенная замена очереди (прогрузка обложек перед показом) ──────────
-    // Чтобы при включении shuffle очередь не моргала чёрными обложками, сначала
-    // прогружаем обложки новых треков и только потом визуально заменяем список.
-    // `displayQueue` — то, что реально рендерится; оно отстаёт от `queueUpcoming`,
-    // пока обложки не будут готовы (с предохранительным таймаутом).
+    // Deferred queue swap: preload covers before showing the new list, so
+    // enabling shuffle doesn't flash blank covers. `displayQueue` is what's
+    // actually rendered; it lags `queueUpcoming` until covers are ready
+    // (with a safety timeout).
     const displayQueue = ref<TrackMetadata[]>([]);
     const pendingQueue = ref<TrackMetadata[] | null>(null);
     let queueSwapTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -246,8 +241,8 @@ function createPlayerUi() {
 
         loadCoversForTracks(tracks);
 
-        // Если обложки уже известны (загружены или подтверждённо отсутствуют) —
-        // меняем очередь мгновенно. Иначе откладываем замену до прогрузки.
+        // If covers are already resolved (loaded or confirmed absent), swap the
+        // queue instantly. Otherwise defer the swap until they're ready.
         if (tracks.every(isCoverResolved)) {
             commitQueue(tracks);
             return;
@@ -260,7 +255,7 @@ function createPlayerUi() {
         }, 700);
     }, { immediate: true });
 
-    // Как только обложки отложенной очереди прогрузились — заменяем список.
+    // Once the pending queue's covers are ready, swap the list in.
     watchEffect(() => {
         const pending = pendingQueue.value;
         if (pending && pending.every(isCoverResolved)) {
@@ -268,8 +263,8 @@ function createPlayerUi() {
         }
     });
 
-    // Источник воспроизведения хранит порядок в sourcePaths; синхронизируем его
-    // с обновлённым списком объектов источника.
+    // Playback source keeps its order in sourcePaths; sync it whenever the
+    // source track list is updated.
     function applySourceTracks(tracks: TrackMetadata[]) {
         sourceTrackList.value = tracks;
         sourcePaths.value = tracks.map(t => t.file_path);
@@ -280,7 +275,6 @@ function createPlayerUi() {
             const albumName = (activePlaylistSource.value ?? "").slice("album:".length);
             const { loadOrder, applyOrder, setOrder } = useAlbumTrackOrder();
             await loadOrder(albumName);
-            // Треки альбома уже загружены как активный источник.
             const allAlbumTracks = sourceTrackList.value;
             const paths = applyOrder(albumName, allAlbumTracks).map(t => t.file_path);
             const idx = paths.indexOf(track.file_path);
@@ -307,11 +301,11 @@ function createPlayerUi() {
             syncPlaybackOrder();
             return;
         }
-        // Каталог: путь переходит в начало канонического порядка (общий помощник).
+        // Catalog: move path to the front of the canonical order (shared helper).
         await moveCatalogTrackToTop(track.file_path);
     }
 
-    // ── Громкость (общая для мини-бара и оверлея) ───────────────────────────
+    // Volume (shared between mini-bar and overlay)
     const prevVolume = ref(volume.value || 0.66);
 
     function toggleMute() {
@@ -337,11 +331,11 @@ function createPlayerUi() {
 
     return {
         QUEUE_DISPLAY_COUNT,
-        // подписи источника
+        // source labels
         queueSourcePrefix,
         queueSourceName,
         discordSourceLabel,
-        // режим оверлея
+        // overlay mode
         fsMode,
         showOverlay,
         isQueueMode,
@@ -349,12 +343,12 @@ function createPlayerUi() {
         closeFullscreen,
         openQueueFullscreen,
         toggleFsMode,
-        // кроссфейд обложек
+        // cover crossfade
         fsCoverA,
         fsCoverB,
         fsActiveBuffer,
         toBlurCover,
-        // очередь
+        // queue
         isMixSource,
         isCatalogSource,
         isAlbumSource,
@@ -365,7 +359,7 @@ function createPlayerUi() {
         nextTrackTitle,
         displayQueue,
         moveTrackToTop,
-        // громкость
+        // volume
         prevVolume,
         toggleMute,
         onVolumeScroll,

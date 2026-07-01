@@ -71,8 +71,6 @@ function artistCoverFor(artist: ArtistEntry): string {
     return artist.cover || defaultTrackCover;
 }
 
-// ── Reusable horizontal-scroll helper ─────────────────────────────────────────
-
 function useScrollLine(baseItemWidth = 240, gap = 16) {
     const el = ref<HTMLElement | null>(null);
     const scrollLeft = ref(0);
@@ -147,8 +145,6 @@ function refreshAllCovers() {
     }
 }
 
-// ── Albums / Artists (data from backend playlists) ───────────────────────────
-
 interface AlbumEntry {
     id: number;
     name: string;
@@ -197,7 +193,6 @@ const artists = computed<ArtistEntry[]>(() => {
         .sort((a, b) => b.trackCount - a.trackCount || a.name.localeCompare(b.name));
 });
 
-// ── Incremental rendering for the horizontal scrollers ─────────────────────
 const VISIBLE_INITIAL = 18;
 const VISIBLE_STEP = 12;
 const visibleAlbumsCount = ref(VISIBLE_INITIAL);
@@ -240,9 +235,9 @@ function requestCoversForCards() {
     if (pending.length) loadCoversForTracks(pending);
 }
 
-// Источник данных готов (плейлисты/альбомы/исполнители загружены). До этого гейт
-// обложек не должен открываться — иначе он откроется на пустом списке, контент
-// мелькнёт, а лоадер появится уже поверх подгрузки (обратный порядок).
+// Data source ready (playlists/albums/artists loaded). Before this the cover
+// gate must not open, or it'd open on an empty list, content would flash, and
+// the loader would appear after loading (backwards order).
 const dataReady = ref(false);
 
 onMounted(async () => {
@@ -328,8 +323,6 @@ function openAlbum(album: AlbumEntry) {
     router.push(`/album/${encodeURIComponent(album.name)}`);
 }
 
-// ── Hover overlay actions (playlists) ───────────────────────────────────────
-
 const { isPinned: isPinnedFn, togglePin, unpin } = usePins();
 
 function isPinned(id: number) {
@@ -401,8 +394,6 @@ function onMoveToTopFromMenu(pl: PlaylistInfo) {
     movePlaylistToTop(pl.id);
 }
 
-// ── Albums: hover actions ───────────────────────────────────────────────────
-
 function isAlbumPinned(name: string) {
     return isPinnedFn('album', name);
 }
@@ -465,11 +456,11 @@ const visibleArtists = computed(() => sortedArtists.value.slice(0, visibleArtist
 
 watch([visibleSortedAlbums, visibleArtists], () => requestCoversForCards());
 
-// Гейт «вооружён» только когда данные загружены И трек-кэш начал отдавать
-// объекты. На первом запуске плейлисты успевают загрузиться раньше каталога
-// (usePlayer ещё наполняет trackCache), поэтому getTrackByPath возвращает
-// undefined → цели гейта пустые → он бы открылся вхолостую (контент мелькает,
-// и лоадер появляется уже после подгрузки). Ждём, пока первый трек резолвится.
+// Gate "arms" only once data is loaded AND the track cache starts returning
+// objects. On first launch playlists can load before the catalog (usePlayer
+// is still filling trackCache), so getTrackByPath returns undefined -> gate
+// targets are empty -> it would open prematurely (content flashes, loader
+// shows only after loading). Wait until the first track resolves.
 const gateArmed = computed(() => {
     if (!dataReady.value) return false;
     const firstPath =
@@ -477,7 +468,7 @@ const gateArmed = computed(() => {
         sortedArtists.value[0]?.firstPath ||
         userPlaylists.value[0]?.first_file_path ||
         null;
-    if (!firstPath) return true; // коллекция пуста — ждать нечего
+    if (!firstPath) return true; // collection is empty, nothing to wait for
     return !!getTrackByPath(firstPath);
 });
 
@@ -521,8 +512,6 @@ function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {
 function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
     moveAlbumToTop(album.name);
 }
-
-// ── Artists: hover actions ──────────────────────────────────────────────────
 
 function isArtistPinned(name: string) {
     return isPinnedFn('artist', name);
@@ -581,8 +570,6 @@ function onMoveArtistToTopFromMenu(artist: ArtistEntry) {
 function openArtistPage(artist: ArtistEntry) {
     router.push(`/artist/${encodeURIComponent(artist.name)}`);
 }
-
-// ── Sticky header ───────────────────────────────────────────────────────────
 
 const pageRootEl = ref<HTMLElement | null>(null);
 const scrollY = ref(0);

@@ -49,9 +49,9 @@ async function load(id: number) {
     } finally {
         loading.value = false
     }
-    // observe() ТОЛЬКО после loading=false — иначе секция альбомов ещё не в DOM
-    // (показан спиннер), ряд не измеряется (measured=false) и карточки остаются
-    // с visibility:hidden — получается «пустой блок альбомов».
+    // observe() must run only after loading=false, otherwise the albums section
+    // isn't in the DOM yet (spinner shown), the row never measures, and cards
+    // stay visibility:hidden, looking like an empty albums block.
     await nextTick()
     albumsLine.observe()
 }
@@ -62,9 +62,9 @@ onUnmounted(() => { albumsLine.unobserve() })
 
 function goBack() { router.back() }
 
-// ── Скачать популярное: 3 самых популярных трека ─────────────────────────────
-// Качаем недостающие из топ-3 (что не в библиотеке и не в очереди). Если все три
-// уже скачаны — спрашиваем подтверждение и качаем их заново (force).
+// Download popular: top-3 most popular tracks. Downloads whichever of the top-3
+// aren't already in the library or queued; if all three are already downloaded,
+// asks for confirmation and force-redownloads them.
 const POPULAR_COUNT = 3
 const busyPopular = ref(false)
 const donePopular = ref(false)
@@ -95,8 +95,8 @@ async function downloadPopular() {
         }
         return
     }
-    // Недостающих нет. Если все три реально в библиотеке — спрашиваем про повтор;
-    // иначе оставшиеся уже качаются (в очереди) — ничего не делаем.
+    // Nothing missing. If all three are actually in the library, ask about a
+    // redownload; otherwise the rest are already queued, so do nothing.
     if (tracks.every(tr => tr.in_library)) {
         popularRedownloadOpen.value = true
     } else {
@@ -119,7 +119,7 @@ async function confirmPopularRedownload() {
     }
 }
 
-// ── Повторное скачивание (трек уже в библиотеке) ─────────────────────────────
+// Redownload confirmation (track already in library)
 const confirmTrack = ref<ExternalSearchTrack | null>(null)
 const confirmMessage = computed(() =>
     confirmTrack.value ? t('downloads.redownloadText', { title: confirmTrack.value.title }) : '',
@@ -178,7 +178,7 @@ async function confirmRedownload() {
                 </div>
             </div>
 
-            <!-- Популярные треки -->
+            <!-- Popular tracks -->
             <div v-if="detail.top_tracks.length" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">{{ t('downloads.popularTracks') }}</div>
@@ -193,7 +193,7 @@ async function confirmRedownload() {
                 </div>
             </div>
 
-            <!-- Альбомы (скрываем секцию, если их нет) -->
+            <!-- Albums (section hidden if none) -->
             <div v-if="detail.albums.length" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">{{ t('downloads.albumsTitle') }}</div>

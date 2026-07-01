@@ -2,10 +2,6 @@ import { ref, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Типы
-// ──────────────────────────────────────────────────────────────────────────────
-
 export type PlaylistKind = "Album" | "Artist" | "User";
 
 export interface PlaylistInfo {
@@ -16,17 +12,12 @@ export interface PlaylistInfo {
   first_file_path: string | null;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Singleton state
-// ──────────────────────────────────────────────────────────────────────────────
-
 const playlists = ref<PlaylistInfo[]>([]);
 const loading = ref(false);
 const topOrder = ref<number[]>([]);
 const albumTopOrder = ref<string[]>([]);
 const artistTopOrder = ref<string[]>([]);
 
-// ── Persistence (localStorage) ────────────────────────────────────────────
 const TOP_ORDER_STORAGE_KEY = "lfmusic.topOrder.v1";
 
 try {
@@ -66,12 +57,7 @@ watch(
   { deep: true },
 );
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Composable
-// ──────────────────────────────────────────────────────────────────────────────
-
-// Единственный экземпляр: computed-фильтры создаются один раз на приложение,
-// а не по копии на каждый вызвавший компонент.
+// Singleton: computed filters are created once per app, not per calling component.
 let playlistsInstance: ReturnType<typeof createPlaylists> | null = null;
 
 export function usePlaylists() {
@@ -157,8 +143,7 @@ function createPlaylists() {
 
   async function deletePlaylist(playlistId: number) {
     try {
-      // playlist_add_count откатывается на бэкенде (delete_playlist снимает -1
-      // с каждого трека удаляемого плейлиста — симметрично remove_track).
+      // Backend's delete_playlist decrements playlist_add_count for each track, symmetric to remove_track.
       await invoke("playlist_delete", { playlistId });
       playlists.value = playlists.value.filter((p) => p.id !== playlistId);
       const idx = topOrder.value.indexOf(playlistId);

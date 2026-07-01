@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Одно закрепление: тип + ключ + отображаемое имя.
 /// kind: "catalog" | "playlist" | "album" | "artist"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PinEntry {

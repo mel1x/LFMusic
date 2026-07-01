@@ -10,7 +10,7 @@ function onTracksReadyBackdrop(e: MouseEvent) {
     if (e.target === e.currentTarget) dismissTracksReadyModal();
 }
 
-// Закрытие по Escape (раньше обрабатывалось централизованно в App.vue).
+// Escape-to-close (previously handled centrally in App.vue).
 function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && showTracksReadyModal.value) {
         e.preventDefault();
@@ -42,9 +42,8 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
     </Teleport>
 </template>
 
-<!-- Стили НЕ scoped: в App.vue остаются глобальные мобильные оверрайды
-     (.scanReadyModal { padding } и т.п.) без !important, поэтому база должна
-     сохранять прежнюю (глобальную) специфичность. -->
+<!-- Not scoped: App.vue has global mobile overrides (.scanReadyModal padding etc.)
+     without !important, so specificity here must stay global to not outrank them. -->
 <style>
 .scanReadyBackdrop {
     position: fixed;

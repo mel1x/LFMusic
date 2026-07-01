@@ -1,16 +1,13 @@
-//! Менеджер очереди скачивания треков (страница «Скачивание»).
+//! Download queue manager (the "Download" page).
 //!
-//! Пользователь ищет треки во внешних источниках ([`crate::external::search_tracks`])
-//! и ставит их в очередь. Один фоновый воркер последовательно скачивает их через
-//! **yt-dlp** в папку «LFMusic Downloads» (в системной музыкальной директории),
-//! проставляет теги через `lofty`, после чего папка регистрируется как папка
-//! библиотеки и пересканируется — треки появляются в каталоге.
+//! One background worker sequentially downloads tracks via **yt-dlp** into
+//! "LFMusic Downloads", tags them with `lofty`, then the folder is registered
+//! as a library folder and rescanned so tracks show up in the catalog.
 //!
-//! Состояние очереди стримится на фронт событием `download_queue`
-//! ([`DownloadSnapshot`]). Грубый прогресс очереди (готово/всего) дополнительно
-//! уходит в общий «блок статуса обработки» в шапке как фаза `download` (через
-//! [`crate::report_download_progress`]) — последней после анализа и внешних
-//! источников.
+//! Queue state streams to the frontend via the `download_queue` event
+//! ([`DownloadSnapshot`]); rough progress also feeds the titlebar's shared
+//! status bar as the `download` phase (via [`crate::report_download_progress`]),
+//! last after analysis and external sources.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read};
@@ -24,25 +21,23 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::tools;
 
-/// Запрос на скачивание трека (с фронтенда).
 #[derive(Debug, Clone, Deserialize)]
 pub struct DownloadRequest {
     pub title: String,
     pub artist: String,
     #[serde(default)]
     pub album: Option<String>,
-    /// Явный поисковый запрос для yt-dlp; по умолчанию «исполнитель название».
+    /// Explicit yt-dlp search query; defaults to "artist title".
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
     pub cover_url: Option<String>,
-    /// Принудительно скачать, даже если такой трек уже в очереди/скачан
-    /// (повторное скачивание из модалки «уже в библиотеке»).
+    /// Force re-download even if already queued/downloaded (used by the
+    /// "already in library" modal).
     #[serde(default)]
     pub force: Option<bool>,
 }
 
-/// Элемент очереди скачивания (отдаётся на фронт).
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadItem {
     pub id: u64,
@@ -53,41 +48,34 @@ pub struct DownloadItem {
     pub cover_url: Option<String>,
     /// "queued" | "downloading" | "done" | "error".
     pub status: String,
-    /// Прогресс текущего элемента, 0..100.
     pub progress: f64,
-    /// Человекочитаемое сообщение об ошибке (для показа в очереди).
     pub error: Option<String>,
-    /// Тип ошибки — чтобы UI различал причины НЕ по тексту (см. [`DownloadErrorKind`]).
     pub error_kind: Option<DownloadErrorKind>,
     pub file_path: Option<String>,
 }
 
-/// Тип ошибки скачивания — для UI (разные подсказки/иконки и честная диагностика),
-/// а не парсинг текста сообщения. Прежде один текстовый маркер «YouTube требует
-/// вход» обслуживал и IP/VPN-бот-стену, и реальное протухание cookies — UI
-/// психологически врал. Теперь причина передаётся типом.
+/// Error classification for the UI (distinct hints/icons), not text parsing.
+/// A single "YouTube requires login" marker used to conflate the IP/VPN
+/// bot-wall with actual cookie expiry; now the cause is carried as a type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadErrorKind {
-    /// Бот-стена YouTube — почти всегда про репутацию IP/сети (VPN/дата-центр), а
-    /// НЕ про cookies. Лечится сменой сети/прокси/повтором (или входом — как одна
-    /// из мер обхода).
+    /// YouTube bot-wall — almost always IP/network reputation (VPN/datacenter),
+    /// not cookies. Fixed by network/proxy change or retry (login is one workaround).
     BotWallNetwork,
-    /// yt-dlp явно отверг сами cookies (просрочены/ротированы) — нужен перелогин.
+    /// yt-dlp explicitly rejected the cookies themselves (expired/rotated) — needs re-login.
     CookiesExpired,
-    /// Сетевой таймаут/обрыв/сбой резолва — транзиентная сетевая ошибка.
+    /// Network timeout/drop/resolve failure — transient.
     NetworkTimeout,
-    /// Не нашлось подходящего аудиоформата (нет ffmpeg / трека/формата нет).
+    /// No suitable audio format found (missing ffmpeg / no matching format).
     NoFormat,
-    /// Отсутствует/не запускается обязательная утилита (yt-dlp).
+    /// Required tool missing/won't launch (yt-dlp).
     ToolMissing,
-    /// Отмена пользователем.
     Cancelled,
-    /// Прочее (нераспознанная ошибка yt-dlp, ошибка импорта в библиотеку).
+    /// Unrecognized yt-dlp error or library import failure.
     Unknown,
 }
 
-/// Ошибка скачивания: тип (для UI) + человекочитаемое сообщение (для показа).
 #[derive(Debug, Clone)]
 pub struct DownloadError {
     pub kind: DownloadErrorKind,
@@ -103,41 +91,36 @@ impl DownloadError {
     }
 }
 
-/// Доступность внешних утилит (для статуса и блокировки кнопок на странице).
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolsStatus {
     pub ytdlp: bool,
     pub ffmpeg: bool,
-    /// JS-движок Deno доступен (ставится/удаляется вместе с yt-dlp).
+    /// Deno JS engine available (installed/removed alongside yt-dlp).
     pub deno: bool,
-    /// Идёт автоскачивание/проверка утилит.
+    /// PO-token provider for YouTube's bot-wall — optional, installed separately.
+    pub pot: bool,
     pub preparing: bool,
     pub message: Option<String>,
-    /// Есть сохранённые cookies (пользователь авторизовался в YouTube).
     pub cookies_authorized: bool,
-    /// Cookies прошли проверку — скачивание разблокировано.
+    /// Cookies passed validation — downloading is unlocked.
     pub cookies_valid: bool,
-    /// Идёт проверка cookies (сетевой тест извлечения).
     pub cookies_checking: bool,
-    /// Открыто окно входа в YouTube (идёт авторизация).
     pub cookies_login_open: bool,
-    /// Сообщение об ошибке проверки/авторизации cookies.
     pub cookies_message: Option<String>,
 }
 
-/// Полный снимок состояния для фронта (событие `download_queue`).
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadSnapshot {
     pub items: Vec<DownloadItem>,
     pub tools: ToolsStatus,
 }
 
-/// Менеджер очереди — за глобальным мьютексом ([`DownloadsState`]).
+/// Queue manager, behind a global mutex ([`DownloadsState`]).
 pub struct DownloadManager {
     items: Vec<DownloadItem>,
     next_id: u64,
     worker_running: bool,
-    /// Счётчики текущего «прогона» для фазы прогресса в шапке.
+    /// Counters for the current "run", for the titlebar progress phase.
     run_total: usize,
     run_done: usize,
     tools_preparing: bool,
@@ -145,16 +128,16 @@ pub struct DownloadManager {
     ytdlp_ready: bool,
     ffmpeg_ready: bool,
     deno_ready: bool,
-    /// Авторизация в YouTube (см. [`open_login`], [`validate_youtube_cookies`]).
+    pot_ready: bool,
     cookies_authorized: bool,
     cookies_valid: bool,
     cookies_checking: bool,
     cookies_login_open: bool,
     cookies_message: Option<String>,
-    /// Состояние cookies уже подтянуто с диска (один раз за запуск). До этого
-    /// поля cookies_* нулевые и не отражают реальный сохранённый вход.
+    /// Whether cookie state was loaded from disk yet this run; until then the
+    /// cookies_* fields are zeroed and don't reflect a saved login.
     cookies_seeded: bool,
-    /// Дочерний процесс активного скачивания (для отмены).
+    /// Active download's child process (for cancellation).
     current_child: Arc<Mutex<Option<Child>>>,
 }
 
@@ -171,6 +154,7 @@ impl Default for DownloadManager {
             ytdlp_ready: false,
             ffmpeg_ready: false,
             deno_ready: false,
+            pot_ready: false,
             cookies_authorized: false,
             cookies_valid: false,
             cookies_checking: false,
@@ -190,6 +174,7 @@ impl DownloadManager {
                 ytdlp: self.ytdlp_ready,
                 ffmpeg: self.ffmpeg_ready,
                 deno: self.deno_ready,
+                pot: self.pot_ready,
                 preparing: self.tools_preparing,
                 message: self.tools_message.clone(),
                 cookies_authorized: self.cookies_authorized,
@@ -201,8 +186,8 @@ impl DownloadManager {
         }
     }
 
-    /// Взять следующий элемент очереди в работу: queued -> downloading. Чистая
-    /// часть очереди воркера (без AppHandle/subprocess) — юнит-тестируема напрямую.
+    /// Pop the next queued item into "downloading". Pure (no AppHandle/subprocess),
+    /// so unit-testable directly.
     fn take_next_queued(&mut self) -> Option<DownloadItem> {
         let pos = self.items.iter().position(|i| i.status == "queued")?;
         self.items[pos].status = "downloading".into();
@@ -210,8 +195,8 @@ impl DownloadManager {
         Some(self.items[pos].clone())
     }
 
-    /// Применить исход скачивания (успех/импорт-ошибка/ошибка) к элементу очереди
-    /// и засчитать прогресс прогона. Чистая часть очереди воркера.
+    /// Apply a download outcome (success/import-error/error) to the item and
+    /// count it toward run progress.
     fn apply_download_result(
         &mut self,
         job_id: u64,
@@ -245,10 +230,10 @@ impl DownloadManager {
         }
     }
 
-    /// Снять элемент из очереди: queued — просто убрать (и сдвинуть run_total);
-    /// downloading — убрать и вернуть активный дочерний процесс для отмены (если
-    /// он ещё не был взят воркером); done/error — убрать из истории. Чистая часть
-    /// (без убийства процесса/эмиссии — это делает вызывающий [`remove`]).
+    /// Remove an item: queued just drops it (and shrinks run_total); downloading
+    /// drops it and returns the active child process for cancellation (if the
+    /// worker hasn't already taken it); done/error just drops it from history.
+    /// Killing the process/emitting is left to the caller ([`remove`]).
     fn remove_item(&mut self, id: u64) -> Option<Child> {
         let pos = self.items.iter().position(|i| i.id == id)?;
         let status = self.items[pos].status.clone();
@@ -259,7 +244,7 @@ impl DownloadManager {
                 None
             }
             "downloading" => {
-                // Удаляем из списка; воркер увидит пропажу и зачтёт run_done.
+                // Worker will notice it's gone and count it toward run_done.
                 self.items.remove(pos);
                 self.current_child
                     .lock()
@@ -267,16 +252,14 @@ impl DownloadManager {
                     .take()
             }
             _ => {
-                // done / error — просто убрать из истории.
                 self.items.remove(pos);
                 None
             }
         }
     }
 
-    /// Вернуть ошибочный элемент в очередь (error -> queued), сбросив прогресс/
-    /// ошибку, и засчитать его в текущий прогон. `true`, если элемент найден и
-    /// был в статусе error.
+    /// Requeue an errored item (error -> queued), resetting progress/error, and
+    /// count it toward the current run. `true` if found and was in error status.
     fn retry_item(&mut self, id: u64) -> bool {
         let Some(item) = self.items.iter_mut().find(|i| i.id == id && i.status == "error") else {
             return false;
@@ -290,14 +273,13 @@ impl DownloadManager {
         true
     }
 
-    /// Убрать завершённые/ошибочные элементы, оставив queued/downloading.
     fn clear_finished_items(&mut self) {
         self.items
             .retain(|i| i.status == "queued" || i.status == "downloading");
     }
 
-    /// Завершить прогон: сбросить счётчики/флаг воркера, вернуть (done, total)
-    /// до сброса — для финального толчка прогресс-бара в шапке.
+    /// End the run: reset counters/worker flag, return (done, total) as they
+    /// were before reset, for the final titlebar progress push.
     fn take_run_counts(&mut self) -> (usize, usize) {
         let r = (self.run_done, self.run_total);
         self.run_done = 0;
@@ -307,7 +289,6 @@ impl DownloadManager {
     }
 }
 
-/// Обёртка для [`tauri::Manager::manage`].
 pub struct DownloadsState(pub Mutex<DownloadManager>);
 
 impl Default for DownloadsState {
@@ -315,10 +296,6 @@ impl Default for DownloadsState {
         Self(Mutex::new(DownloadManager::default()))
     }
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Доступ к состоянию + эмиссия событий
-// ──────────────────────────────────────────────────────────────────────────────
 
 fn with_manager<R>(app: &AppHandle, f: impl FnOnce(&mut DownloadManager) -> R) -> R {
     let state = app.state::<DownloadsState>();
@@ -331,32 +308,26 @@ fn emit_snapshot(app: &AppHandle) {
     let _ = app.emit("download_queue", snap);
 }
 
-/// Сообщить общему прогресс-бару в шапке текущее состояние фазы скачивания.
 fn report_titlebar(app: &AppHandle) {
     let (done, total) = with_manager(app, |m| (m.run_done, m.run_total));
     crate::report_download_progress(app, done, total);
 }
 
-/// То же, но с долей прогресса текущего скачиваемого трека — для плавного
-/// процента в шапке (бар не прыгает «потреково» с 0 на 100).
+/// Same, but with a fractional progress of the current track, so the titlebar
+/// percentage moves smoothly instead of jumping 0->100 per track.
 fn report_titlebar_frac(app: &AppHandle, frac: f64) {
     let (done, total) = with_manager(app, |m| (m.run_done, m.run_total));
     crate::report_download_progress_frac(app, done, total, frac);
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Публичный API (вызывается из команд lib.rs)
-// ──────────────────────────────────────────────────────────────────────────────
 
 pub fn snapshot(app: &AppHandle) -> DownloadSnapshot {
     ensure_cookie_seed(app);
     with_manager(app, |m| m.snapshot())
 }
 
-/// Завершить активный дочерний процесс скачивания (yt-dlp) при выходе из
-/// приложения. Без этого закрытие окна во время скачивания оставило бы yt-dlp
-/// висеть фоновым процессом-зомби: Rust не убивает запущенные `Child` при
-/// завершении родителя. Подписан на `RunEvent::Exit` в lib.rs.
+/// Kill the active yt-dlp child process on app exit. Rust doesn't kill running
+/// `Child`s when the parent exits, so without this yt-dlp would linger as a
+/// zombie background process. Hooked to `RunEvent::Exit` in lib.rs.
 pub fn cleanup_on_exit(app: &AppHandle) {
     let child = with_manager(app, |m| {
         m.current_child
@@ -369,10 +340,10 @@ pub fn cleanup_on_exit(app: &AppHandle) {
     }
 }
 
-/// Прибить всё дерево процессов скачивания (yt-dlp + порождённые им ffmpeg/deno).
-/// Один `child.kill()` убил бы только yt-dlp, а потомки могли бы остаться держать
-/// файл/пайпы. Windows — `taskkill /T` (по дереву PID); Unix — сигнал всей группе
-/// процессов (yt-dlp — её лидер, см. `process_group(0)` при запуске).
+/// Kill the whole download process tree (yt-dlp + its ffmpeg/deno children).
+/// A plain `child.kill()` would only kill yt-dlp, leaving children holding the
+/// file/pipes. Windows: `taskkill /T` (by PID tree); Unix: signal the whole
+/// process group (yt-dlp is the group leader, see `process_group(0)` on spawn).
 fn kill_child_tree(child: &mut Child) {
     let pid = child.id();
     #[cfg(windows)]
@@ -386,7 +357,7 @@ fn kill_child_tree(child: &mut Child) {
     }
     #[cfg(unix)]
     {
-        // Негативный PID = вся группа процессов.
+        // Negative PID = whole process group.
         let _ = std::process::Command::new("kill")
             .arg("-KILL")
             .arg(format!("-{}", pid))
@@ -396,9 +367,9 @@ fn kill_child_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Есть ли элементы очереди в работе (queued/downloading). Используется как
-/// backend-guard для удаления утилит: воркер мог уже резолвнуть yt-dlp/ffmpeg и
-/// качать очередь — удаление выдернуло бы бинарь из-под него.
+/// Whether any queue items are active (queued/downloading). Used as a guard
+/// against removing tools while the worker might have them resolved and be
+/// actively downloading — removal would yank the binary out from under it.
 pub fn has_active_jobs(app: &AppHandle) -> bool {
     with_manager(app, |m| {
         m.items
@@ -407,28 +378,27 @@ pub fn has_active_jobs(app: &AppHandle) -> bool {
     })
 }
 
-/// Абсолютный путь папки скачиваний (фронт определяет по нему, скачан ли трек
-/// приложением — для пункта «Удалить трек» в контекстном меню).
+/// Absolute downloads folder path; frontend uses it to tell whether a track
+/// was downloaded by the app (for the "Delete track" context menu item).
 pub fn downloads_dir_path(app: &AppHandle) -> String {
     downloads_dir(app).to_string_lossy().to_string()
 }
 
-/// Лежит ли `file` внутри папки скачиваний `dir` — проверка контейнмента
-/// безопасно (по компонентам пути). Наивный строковый `starts_with` пропустил бы
-/// соседнюю папку с тем же префиксом (`…/LFMusic Downloads-old/x.mp3` прошёл бы
-/// проверку против `…/LFMusic Downloads`), поэтому каноникализируем оба пути и
-/// сравниваем компонентно (заодно гасит `..` и симлинки). Если файла уже нет на
-/// диске (каноникализация падает) — лексический фолбэк с обязательной границей-
-/// разделителем: этого достаточно, чтобы решить, можно ли вычистить осиротевшую
-/// запись из БД.
+/// Whether `file` is inside `dir`, checked by path components rather than a
+/// naive string `starts_with` (which would let a sibling folder with the same
+/// prefix through, e.g. `.../LFMusic Downloads-old/x.mp3`). Canonicalizes both
+/// paths (also defeats `..` and symlinks). If the file no longer exists
+/// (canonicalize fails), falls back to a lexical comparison with a mandatory
+/// separator boundary — enough to decide whether an orphaned DB entry can be
+/// cleaned up.
 fn is_within_downloads(dir: &Path, file: &Path) -> bool {
     if let (Ok(dir_c), Ok(file_c)) = (dir.canonicalize(), file.canonicalize()) {
         return file_c.starts_with(&dir_c);
     }
-    // Фолбэк (файла уже нет на диске → canonicalize падает): ОБЯЗАТЕЛЬНО лексически
-    // резолвим `.`/`..` без обращения к диску — иначе путь вида
-    // `…/LFMusic Downloads/../../Desktop/x` прошёл бы строковую проверку префикса
-    // и позволил удалить файл вне папки скачиваний (path traversal).
+    // Fallback (file gone -> canonicalize fails): must resolve `.`/`..`
+    // lexically without touching disk, otherwise
+    // `.../LFMusic Downloads/../../Desktop/x` would pass a string-prefix check
+    // and allow deleting a file outside the downloads folder (path traversal).
     let norm = |p: &Path| {
         lexical_normalize(p)
             .to_string_lossy()
@@ -442,9 +412,9 @@ fn is_within_downloads(dir: &Path, file: &Path) -> bool {
     norm(file).starts_with(&d)
 }
 
-/// Лексически нормализует путь: схлопывает `.` и резолвит `..` БЕЗ обращения к
-/// файловой системе (в отличие от `canonicalize`, который требует существования
-/// пути). Используется для безопасной проверки контейнмента, когда файла уже нет.
+/// Lexically normalizes a path: collapses `.` and resolves `..` without
+/// touching the filesystem (unlike `canonicalize`, which requires the path to
+/// exist). Used for safe containment checks when the file is already gone.
 fn lexical_normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -460,28 +430,27 @@ fn lexical_normalize(p: &Path) -> PathBuf {
     out
 }
 
-/// Удалить скачанный приложением трек: удалить файл с диска и убрать из библиотеки.
-/// Из соображений безопасности удаляет только файлы ВНУТРИ папки скачиваний
-/// (произвольные файлы библиотеки этим путём не трогаются).
+/// Deletes an app-downloaded track: removes the file from disk and the
+/// library. Only deletes files INSIDE the downloads folder, as a safety check.
 pub fn delete_downloaded_track(app: &AppHandle, file_path: &str) -> Result<(), String> {
     let dir = downloads_dir(app);
     if !is_within_downloads(&dir, Path::new(file_path)) {
         return Err("Можно удалять только треки, скачанные приложением".to_string());
     }
 
-    // Если этот трек сейчас играет — останавливаем плеер: декодер (symphonia)
-    // держит хэндл файла, иначе удаление на Windows упрётся в «файл занят».
+    // If this track is currently playing, stop first: the decoder (symphonia)
+    // holds the file handle, and deletion would hit "file in use" on Windows.
     if let Ok(mut player) = app.state::<crate::PlayerState>().0.write() {
         if player.current_file_path().as_deref() == Some(file_path) {
             player.stop();
         }
     }
 
-    // Карантин: сначала ПЕРЕМЕЩАЕМ файл во временное имя (rename в той же папке —
-    // атомарен). Так удаление обратимо: если убрать запись из БД не выйдет, файл
-    // вернём на место. Если перемещение не удалось (файл занят/нет прав) — БД не
-    // трогаем, состояние согласовано. Ретраи перекрывают асинхронное освобождение
-    // хэндла аудио-потоком после stop().
+    // Quarantine: rename to a temp name first (same-folder rename is atomic),
+    // making deletion reversible — if the DB removal fails, the file is moved
+    // back. If the rename itself fails (file busy/no perms), the DB is left
+    // untouched. Retries cover the audio thread asynchronously releasing its
+    // handle after stop().
     let path = PathBuf::from(file_path);
     let quarantine: Option<PathBuf> = if path.exists() {
         let q = quarantine_path(&path);
@@ -491,8 +460,8 @@ pub fn delete_downloaded_track(app: &AppHandle, file_path: &str) -> Result<(), S
         None
     };
 
-    // Убираем из библиотеки. При ошибке БД — ВОЗВРАЩАЕМ файл из карантина, чтобы
-    // не потерять его при сохранившейся записи (никакого рассинхрона).
+    // Remove from library; on DB error, restore the file from quarantine so
+    // it isn't lost while the record still exists (no desync).
     let separators = crate::settings::get_artist_separators(&app.state::<crate::SettingsState>());
     let remove_result = {
         let state = app.state::<crate::LibraryState>();
@@ -504,25 +473,24 @@ pub fn delete_downloaded_track(app: &AppHandle, file_path: &str) -> Result<(), S
     };
     if let Err(e) = remove_result {
         if let Some(q) = &quarantine {
-            let _ = std::fs::rename(q, &path); // откат
+            let _ = std::fs::rename(q, &path); // rollback
         }
         return Err(e);
     }
 
-    // БД обновлена — физически удаляем файл из карантина. Best-effort: даже если не
-    // выйдет, состояние согласовано (записи в библиотеке уже нет), а хвост подчистит
-    // `cleanup_orphan_temp_files` при следующем запуске воркера.
+    // DB updated — physically remove the quarantined file. Best-effort: even
+    // if it fails, state stays consistent (library record is gone already),
+    // and `cleanup_orphan_temp_files` sweeps leftovers on the next worker run.
     if let Some(q) = quarantine {
         let _ = remove_file_with_retries(&q);
     }
-    // Сопутствующий `.lrc`-сайдкар удаляем вместе с треком (best-effort).
     let _ = std::fs::remove_file(path.with_extension("lrc"));
     let _ = app.emit("downloads_library_updated", ());
     Ok(())
 }
 
-/// Имя файла-карантина рядом с оригиналом (та же папка → rename атомарен и быстр).
-/// Префикс `.lfm-trash-` распознаётся как временный и чистится при старте воркера.
+/// Quarantine filename next to the original (same-folder rename is atomic).
+/// The `.lfm-trash-` prefix is recognized as temp and swept on worker startup.
 fn quarantine_path(path: &Path) -> PathBuf {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -532,8 +500,8 @@ fn quarantine_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".lfm-trash-{}-{}", ts, name))
 }
 
-/// Переименование с повторами: только что игравший файл может быть занят доли
-/// секунды, пока аудио-поток освобождает хэндл после stop() (Windows).
+/// Rename with retries: a just-played file may briefly stay locked while the
+/// audio thread releases its handle after stop() (Windows).
 fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut last: Option<std::io::Error> = None;
     for _ in 0..15 {
@@ -548,8 +516,7 @@ fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(last.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "rename failed")))
 }
 
-/// Удаление файла с повторами: только что игравший файл может быть занят ещё
-/// доли секунды, пока плеер его освобождает после остановки.
+/// Same rationale as [`rename_with_retries`], for deletion.
 fn remove_file_with_retries(path: &Path) -> std::io::Result<()> {
     let mut last: Option<std::io::Error> = None;
     for _ in 0..15 {
@@ -565,11 +532,9 @@ fn remove_file_with_retries(path: &Path) -> std::io::Result<()> {
     Err(last.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "remove failed")))
 }
 
-/// Поставить трек в очередь и (при необходимости) запустить воркер. Дубликаты
-/// (тот же нормализованный «исполнитель + название + альбом», ещё не ошибочные)
-/// не добавляются повторно — защита от двойного клика/повторного invoke/
-/// устаревшего UI; возвращается id уже существующего элемента. Одноимённый трек
-/// того же исполнителя из ДРУГОГО альбома дублем не считается — качается отдельно.
+/// Queues a track and starts the worker if needed. Non-error duplicates
+/// (same normalized artist+title+album) aren't re-added, guarding against
+/// double-clicks/repeated invokes; returns the existing item's id instead.
 pub fn enqueue(app: &AppHandle, req: DownloadRequest) -> u64 {
     let (id, is_new) = with_manager(app, |m| insert_request(m, req));
     if is_new {
@@ -580,9 +545,8 @@ pub fn enqueue(app: &AppHandle, req: DownloadRequest) -> u64 {
     id
 }
 
-/// Поставить пачку треков в очередь одним проходом (кнопка «Скачать все треки» у
-/// альбома). Дедуп идентичен [`enqueue`]; снапшот/воркер дёргаются один раз на
-/// всю пачку. Возвращает id элементов (новых или уже существовавших) по порядку.
+/// Batch version of [`enqueue`] (used by "Download all tracks" on an album):
+/// same dedup, but snapshot/worker are triggered once for the whole batch.
 pub fn enqueue_many(app: &AppHandle, reqs: Vec<DownloadRequest>) -> Vec<u64> {
     if reqs.is_empty() {
         return Vec::new();
@@ -605,9 +569,9 @@ pub fn enqueue_many(app: &AppHandle, reqs: Vec<DownloadRequest>) -> Vec<u64> {
     ids
 }
 
-/// Вставляет один запрос в очередь менеджера (без побочных эффектов — снапшот/
-/// воркер дёргает вызывающий). Возвращает `(id, is_new)`: `is_new == false`, если
-/// такой трек уже в очереди/качается/скачан (дубль не добавляем; force обходит).
+/// Inserts one request into the queue (side-effect free; caller triggers the
+/// snapshot/worker). `is_new == false` if the track is already queued/
+/// downloading/downloaded (force bypasses this).
 fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) {
     let query = req
         .query
@@ -616,8 +580,6 @@ fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) 
     let key = crate::external::track_identity_key(&req.artist, &req.title, req.album.as_deref());
     let force = req.force.unwrap_or(false);
 
-    // Уже в очереди/качается/скачан — не дублируем (ошибочные можно повторить).
-    // force обходит проверку (осознанное повторное скачивание из модалки).
     if !force {
         if let Some(existing) = m.items.iter().find(|i| {
             i.status != "error"
@@ -627,10 +589,10 @@ fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) 
             return (existing.id, false);
         }
     }
-    // Добавляем новый элемент → прежнюю ОШИБОЧНУЮ версию того же трека убираем
-    // из очереди: её заменяет новый queued-элемент (а не висит рядом дублем).
-    // Счётчики run_total/run_done трогать не нужно: ошибочный элемент уже зачёл
-    // свой +1 в run_done при провале, так что остаток (total−done) не меняется.
+    // Adding a new item: drop any previous ERRORED version of the same track
+    // so it's replaced rather than left as a stale duplicate. run_total/
+    // run_done are untouched: the errored item already counted its +1 in
+    // run_done on failure, so the remainder (total-done) is unaffected.
     m.items.retain(|i| {
         !(i.status == "error"
             && crate::external::track_identity_key(&i.artist, &i.title, i.album.as_deref()) == key)
@@ -654,7 +616,7 @@ fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) 
     (id, true)
 }
 
-/// Убрать элемент из очереди. Активный (скачивающийся) — отменяется (kill).
+/// Removes an item from the queue; an active download is cancelled (killed).
 pub fn remove(app: &AppHandle, id: u64) {
     let child_to_kill = with_manager(app, |m| m.remove_item(id));
 
@@ -666,9 +628,8 @@ pub fn remove(app: &AppHandle, id: u64) {
     report_titlebar(app);
 }
 
-/// Повторить скачивание ошибочного элемента: вернуть его статус из «error»
-/// обратно в очередь (queued), очистить ошибку/прогресс и поднять воркер.
-/// Метаданные и поисковый запрос сохраняются — повторно ничего вводить не нужно.
+/// Retries an errored item: moves it back to queued, clears error/progress,
+/// and starts the worker. Metadata/query are kept, so nothing needs re-entering.
 pub fn retry(app: &AppHandle, id: u64) {
     let restarted = with_manager(app, |m| m.retry_item(id));
     if restarted {
@@ -678,83 +639,76 @@ pub fn retry(app: &AppHandle, id: u64) {
     }
 }
 
-/// Очистить завершённые/ошибочные элементы из списка.
 pub fn clear_finished(app: &AppHandle) {
     with_manager(app, DownloadManager::clear_finished_items);
     emit_snapshot(app);
 }
 
-/// Проверить доступность утилит (без скачивания), закэшировать и вернуть статус.
 pub fn refresh_tools_status(app: &AppHandle) -> ToolsStatus {
     let app_data_dir = app_data_dir(app);
     let (ytdlp, ffmpeg) = tools::check(&app_data_dir);
     let deno = tools::resolve_deno(&app_data_dir).is_some();
+    let pot = tools::resolve_pot(&app_data_dir).is_some();
     let authorized = is_authorized(app);
     let invalid = cookies_invalid_marker(app).exists();
     with_manager(app, |m| {
         m.ytdlp_ready = ytdlp;
         m.ffmpeg_ready = ffmpeg;
         m.deno_ready = deno;
+        m.pot_ready = pot;
         m.cookies_authorized = authorized;
-        // Валиден = есть cookies И не помечены протухшими (вход помнится с диска).
+        // Valid = cookies exist AND aren't marked stale (login remembered from disk).
         m.cookies_valid = authorized && !invalid;
         m.cookies_seeded = true;
         m.snapshot().tools
     })
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Авторизация в YouTube (вход в собственном webview-окне → cookies.txt)
-//
-// `--cookies-from-browser` сломан на Windows (Chrome/Edge с 2024 шифруют cookies
-// App-Bound Encryption, yt-dlp падает на DPAPI). Поэтому открываем своё окно с
-// формой входа Google, после авторизации читаем cookies сессии (включая
-// HttpOnly-авторизационные — их даёт webview cookie store Tauri, недоступный из
-// document.cookie) и пишем их в Netscape-файл `cookies.txt`, который yt-dlp
-// принимает через `--cookies`. Окно делит хранилище cookies с основным webview,
-// поэтому сессия переживает перезапуск приложения.
-// ──────────────────────────────────────────────────────────────────────────────
+// YouTube login: signs in via our own webview window, then saves session
+// cookies to cookies.txt. `--cookies-from-browser` is broken on Windows
+// (Chrome/Edge encrypt cookies with App-Bound Encryption since 2024, yt-dlp
+// fails on DPAPI). Reading the webview's own cookie store gets HttpOnly auth
+// cookies unavailable via document.cookie. The login window shares the cookie
+// store with the main webview, so the session survives app restarts.
 
 const LOGIN_LABEL: &str = "youtube-login";
 const LOGIN_URL: &str =
     "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F";
-/// UA обычного десктоп-Chrome. Google отказывается отображать форму входа во
-/// «встроенных» webview (по умолчанию WebView2 шлёт UA с `Edg/...` + признаки
-/// embedded) — отдаёт пустую/заблокированную страницу. Под видом обычного Chrome
-/// страница входа открывается нормально.
+/// Regular desktop Chrome UA: Google refuses to show the login form to
+/// "embedded" webviews (WebView2's default UA has `Edg/...` + embedded
+/// markers) and serves a blank/blocked page instead.
 const LOGIN_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
-/// Стабильное видео для проверки cookies (популярный, не удаляемый ролик).
+/// Stable video for a cookie validity check (popular, unlikely to be removed).
 const COOKIE_CHECK_URL: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 
-/// Путь к файлу cookies (Netscape-формат) для yt-dlp.
 fn cookies_file(app: &AppHandle) -> PathBuf {
     app_data_dir(app).join("youtube_cookies.txt")
 }
 
-/// Изолированная папка данных WebView2 для окна входа в YouTube (Windows). Окно
-/// входа держит собственную сессию Google в этой папке, а НЕ в общем профиле
-/// приложения. Это ключ к корректному «Выйти»: точечное удаление cookies не
-/// выкидывало сессию (Google мгновенно переавторизовывался из сохранённого профиля
-/// — окно входа закрывалось «уже вошедшим»). Свою папку можно снести целиком, не
-/// трогая localStorage/куки самого приложения.
+/// Isolated WebView2 data folder for the login window (Windows). Keeps its
+/// own Google session separate from the app's main profile — key for a
+/// correct "Log out": deleting cookies alone didn't drop the session (Google
+/// silently re-authed from the saved profile, so the login window reopened
+/// "already signed in"). This folder can be wiped entirely without touching
+/// the app's own localStorage/cookies.
 #[cfg(windows)]
 fn youtube_webview_dir(app: &AppHandle) -> PathBuf {
     app_data_dir(app).join("youtube_webview")
 }
 
-/// Маркер «снести профиль webview при следующем входе». Ставится в [`logout`], если
-/// снести папку прямо там не удалось (WebView2 ещё держал её после недавнего окна).
-/// [`build_login_window`] снесёт её перед открытием — к тому моменту прошлый процесс
-/// webview уже завершён и папка свободна. Гарантирует РЕАЛЬНЫЙ вход после «Выйти».
+/// Marker: "wipe the webview profile on next login". Set by [`logout`] when
+/// the folder couldn't be wiped immediately (WebView2 still held it after a
+/// recent window). [`build_login_window`] wipes it before opening, by which
+/// point the prior webview process has exited and the folder is free.
 #[cfg(windows)]
 fn youtube_webview_reset_marker(app: &AppHandle) -> PathBuf {
     app_data_dir(app).join("youtube_webview.reset")
 }
 
-/// Снести изолированный профиль webview окна входа (с повторами — WebView2 может
-/// держать папку ещё доли секунды после закрытия окна). `true`, если папки больше нет.
+/// Wipes the login window's isolated WebView2 profile, retrying since WebView2
+/// may hold the folder briefly after the window closes.
 #[cfg(windows)]
 fn purge_youtube_webview_dir(app: &AppHandle) -> bool {
     let dir = youtube_webview_dir(app);
@@ -771,21 +725,19 @@ fn purge_youtube_webview_dir(app: &AppHandle) -> bool {
     !dir.exists()
 }
 
-/// Авторизованы ли мы (есть сохранённый файл cookies).
 pub fn is_authorized(app: &AppHandle) -> bool {
     cookies_file(app).exists()
 }
 
-/// Маркер «cookies протухли». Его НАЛИЧИЕ означает, что вход больше не валиден
-/// (проверка провалилась или скачивание упёрлось в бот-стену при наличии cookies).
-/// Отсутствие при наличии cookies-файла = вход считаем валидным. Так успешный
-/// вход «помнится» между запусками: статус показывается сразу, без повторной
-/// сетевой проверки, и сбрасывается только когда cookies реально перестали работать.
+/// Marker file: its PRESENCE means the login is no longer valid (a check
+/// failed or a download hit the bot-wall despite having cookies). Its absence
+/// (with a cookies file present) means the login is considered valid — so a
+/// successful login is remembered across restarts without a network re-check,
+/// and only clears once cookies actually stop working.
 fn cookies_invalid_marker(app: &AppHandle) -> PathBuf {
     app_data_dir(app).join("youtube_cookies_invalid")
 }
 
-/// Пометить cookies как протухшие (создать маркер) + сбросить флаг валидности.
 fn mark_cookies_invalid(app: &AppHandle) {
     let _ = std::fs::write(cookies_invalid_marker(app), b"1");
     with_manager(app, |m| {
@@ -794,16 +746,15 @@ fn mark_cookies_invalid(app: &AppHandle) {
     });
 }
 
-/// Снять пометку «протухли» (после успешного входа/проверки).
 fn clear_cookies_invalid(app: &AppHandle) {
     let _ = std::fs::remove_file(cookies_invalid_marker(app));
 }
 
-/// Успешная загрузка с cookies доказала, что вход рабочий → снять маркер «протухли»,
-/// если он был. Нужно, потому что прежде маркер выставлялся по транзиентной бот-стене
-/// (по IP) и ЗАЛИПАЛ: успешные загрузки его не снимали, и пользователь оставался в
-/// «войдите заново» до ручного перелогина даже после смены сети. Снапшот эмитим
-/// только при реальном изменении — не дёргаем UI на каждой удачной загрузке.
+/// A successful cookie-backed download proves the login still works, so clear
+/// the "stale" marker if set. Needed because the marker used to be set by a
+/// transient IP-based bot-wall and never got cleared by later successes,
+/// leaving users stuck on "log in again" even after changing networks.
+/// Snapshot is emitted only on an actual change.
 fn mark_cookies_valid_after_success(app: &AppHandle) {
     if !cookies_invalid_marker(app).exists() {
         return;
@@ -818,9 +769,8 @@ fn mark_cookies_valid_after_success(app: &AppHandle) {
     emit_snapshot(app);
 }
 
-/// Подтянуть сохранённое состояние входа с диска один раз за запуск. Валиден =
-/// есть cookies-файл И нет маркера «протухли». До первого вызова поля cookies_*
-/// в менеджере нулевые (Default) и не отражают реальный сохранённый вход.
+/// Loads saved login state from disk once per run (fields default to zero
+/// until then, not reflecting an actual saved login).
 fn ensure_cookie_seed(app: &AppHandle) {
     if with_manager(app, |m| m.cookies_seeded) {
         return;
@@ -837,8 +787,8 @@ fn ensure_cookie_seed(app: &AppHandle) {
     });
 }
 
-/// Открыть окно входа в YouTube и запустить ожидание авторизации. Идемпотентно:
-/// если окно уже открыто — просто фокусируем его.
+/// Opens the YouTube login window and starts watching for auth. Idempotent:
+/// if already open, just focuses it.
 pub fn open_login(app: &AppHandle) {
     eprintln!("[youtube-login] open_login: запрошен вход");
     if let Some(win) = app.get_webview_window(LOGIN_LABEL) {
@@ -851,11 +801,10 @@ pub fn open_login(app: &AppHandle) {
     });
     emit_snapshot(app);
 
-    // ВАЖНО: окно создаём в фоновом потоке, а НЕ через run_on_main_thread.
-    // `WebviewWindowBuilder::build()` сам диспетчеризует создание в event loop и
-    // блокирует вызывающий поток до готовности окна. Если вызвать его на главном
-    // потоке — event loop не может допумпить создание webview → дедлок (белое
-    // окно + зависшее приложение). Из фонового потока всё работает штатно.
+    // Must create the window on a background thread, not via run_on_main_thread:
+    // `WebviewWindowBuilder::build()` dispatches into the event loop and blocks
+    // the caller until ready. Calling it from the main thread would deadlock
+    // the event loop (blank window + frozen app).
     let app2 = app.clone();
     if std::thread::Builder::new()
         .name("youtube-login".into())
@@ -872,8 +821,8 @@ pub fn open_login(app: &AppHandle) {
         })
         .is_err()
     {
-        // Поток не создался — снимаем флаг «окно входа открыто», иначе UI завис
-        // бы в состоянии ожидания входа навсегда.
+        // Thread failed to spawn — clear the flag, or the UI would be stuck
+        // waiting for login forever.
         with_manager(app, |m| {
             m.cookies_login_open = false;
             m.cookies_message = Some("Не удалось запустить вход".to_string());
@@ -885,9 +834,9 @@ pub fn open_login(app: &AppHandle) {
 fn build_login_window(app: &AppHandle) -> Result<(), String> {
     let url = tauri::Url::parse(LOGIN_URL).map_err(|e| e.to_string())?;
 
-    // Если «Выйти» запросил сброс, но папка тогда была занята — сносим профиль
-    // сейчас, перед открытием окна (прошлое окно входа уже закрыто → папка свободна).
-    // Маркер снимаем только при успехе: иначе оставляем — повторим при следующем входе.
+    // If a previous "Log out" requested a reset but the folder was busy then,
+    // wipe it now (the last login window is closed, so it's free). Only clear
+    // the marker on success; otherwise leave it for the next attempt.
     #[cfg(windows)]
     if youtube_webview_reset_marker(app).exists() && purge_youtube_webview_dir(app) {
         let _ = std::fs::remove_file(youtube_webview_reset_marker(app));
@@ -901,7 +850,6 @@ fn build_login_window(app: &AppHandle) -> Result<(), String> {
             .center()
             .focused(true)
             .user_agent(LOGIN_UA)
-            // Логи в stderr (виден в терминале `tauri dev`) — диагностика пустого окна.
             .on_navigation(|url| {
                 eprintln!("[youtube-login] navigate → {}", url);
                 true
@@ -910,9 +858,9 @@ fn build_login_window(app: &AppHandle) -> Result<(), String> {
                 eprintln!("[youtube-login] page_load → {}", payload.url());
             });
 
-    // Изолированный профиль WebView2 (Windows) — отдельная сессия Google, которую
-    // «Выйти» сносит целиком (см. youtube_webview_dir). На прочих платформах окно
-    // делит общий профиль приложения (там «Выйти» чистит cookies точечно).
+    // Isolated WebView2 profile (Windows): a separate Google session that
+    // "Log out" wipes entirely (see youtube_webview_dir). Other platforms
+    // share the app's main profile, where logout clears cookies selectively.
     #[cfg(windows)]
     let builder = {
         let dir = youtube_webview_dir(app);
@@ -925,17 +873,17 @@ fn build_login_window(app: &AppHandle) -> Result<(), String> {
         e.to_string()
     })?;
     eprintln!("[youtube-login] окно создано, грузим {}", LOGIN_URL);
-    // Иногда созданное в рантайме окно WebView2 остаётся белым до первого события
-    // фокуса/ресайза — подталкиваем его.
+    // A freshly-created WebView2 window can stay blank until its first
+    // focus/resize event.
     let _ = win.set_focus();
     Ok(())
 }
 
-/// Имена авторизационных cookies YouTube (их появление = пользователь вошёл).
+/// YouTube auth cookie names; their presence means the user is signed in.
 const AUTH_COOKIE_NAMES: &[&str] = &["__Secure-3PSID", "__Secure-1PSID", "LOGIN_INFO", "SID"];
 
-/// Прочитать cookies Google/YouTube из webview cookie store (общий для окон).
-/// Берём из окна входа (пока открыто) либо из основного окна — хранилище одно.
+/// Reads Google/YouTube cookies from the shared webview cookie store (login
+/// window while open, else the main window).
 fn read_youtube_cookies(app: &AppHandle) -> Vec<tauri::webview::cookie::Cookie<'static>> {
     let Some(win) = app
         .get_webview_window(LOGIN_LABEL)
@@ -943,8 +891,8 @@ fn read_youtube_cookies(app: &AppHandle) -> Vec<tauri::webview::cookie::Cookie<'
     else {
         return Vec::new();
     };
-    // `cookies_for_url` надёжнее, чем `cookies()` (полный дамп) на всех бэкендах;
-    // собираем по ключевым доменам и дедупим по (имя, домен).
+    // `cookies_for_url` is more reliable than a full `cookies()` dump across
+    // backends; collect per key domain and dedup by (name, domain).
     let urls = [
         "https://www.youtube.com/",
         "https://accounts.google.com/",
@@ -968,7 +916,6 @@ fn read_youtube_cookies(app: &AppHandle) -> Vec<tauri::webview::cookie::Cookie<'
     out
 }
 
-/// Есть ли в текущей сессии авторизационные cookies YouTube.
 fn has_youtube_auth(app: &AppHandle) -> bool {
     read_youtube_cookies(app).iter().any(|c| {
         let domain = c.domain().unwrap_or("").to_ascii_lowercase();
@@ -976,13 +923,11 @@ fn has_youtube_auth(app: &AppHandle) -> bool {
     })
 }
 
-/// Удалить cookies YouTube/Google из webview-хранилища (общего для всех окон).
-/// Нужно при «Выйти»: сам файл cookies.txt мы удаляем, но без очистки webview
-/// старая сессия осталась бы — следующий вход тут же её подхватил бы (watcher
-/// видит авторизационные cookies и сразу фиксирует тот же аккаунт), и сменить
-/// аккаунт стало бы невозможно. Удаляем точечно только cookies наших доменов
-/// (не трогая localStorage/прочие данные основного окна — `clear_all_browsing_data`
-/// был бы слишком грубым и снёс бы состояние приложения).
+/// Removes YouTube/Google cookies from the shared webview store, needed on
+/// logout: deleting cookies.txt alone would leave the old session in the
+/// webview, so the next login would silently reuse the same account. Only
+/// our domains' cookies are cleared (not the whole store, which would also
+/// wipe the main window's app state).
 fn clear_webview_youtube_cookies(app: &AppHandle) {
     let Some(win) = app
         .get_webview_window(LOGIN_LABEL)
@@ -995,7 +940,7 @@ fn clear_webview_youtube_cookies(app: &AppHandle) {
     }
 }
 
-/// Записать cookies в Netscape-файл для yt-dlp. Возвращает число записанных строк.
+/// Writes cookies to a Netscape-format file for yt-dlp. Returns the row count.
 fn write_cookies_file(
     app: &AppHandle,
     cookies: &[tauri::webview::cookie::Cookie<'static>],
@@ -1014,7 +959,7 @@ fn write_cookies_file(
         {
             continue;
         }
-        // HttpOnly помечается префиксом домена `#HttpOnly_` (его понимает yt-dlp).
+        // HttpOnly is marked with a `#HttpOnly_` domain prefix (yt-dlp understands it).
         let http_only = c.http_only().unwrap_or(false);
         let domain_field = if http_only {
             format!("#HttpOnly_{}", domain)
@@ -1032,7 +977,7 @@ fn write_cookies_file(
         } else {
             "FALSE"
         };
-        // Session-cookies (без даты) → 0.
+        // Session cookies (no expiry date) -> 0.
         let expiry = c
             .expires_datetime()
             .map(|d| d.unix_timestamp())
@@ -1057,10 +1002,10 @@ fn write_cookies_file(
     Ok(count)
 }
 
-/// Атомарно и приватно записать файл. Cookies содержат активную сессию, поэтому:
-/// (1) пишем во временный сосед и атомарно переименовываем — не оставляем
-/// частично записанный файл при сбое; (2) ставим права 0600 на Unix (иначе umask
-/// мог бы оставить файл доступным для чтения другим пользователям системы).
+/// Writes a file atomically and privately. Cookies carry an active session, so:
+/// (1) write to a temp sibling and atomically rename, avoiding a partial file
+/// on failure; (2) set 0600 perms on Unix (umask might otherwise leave it
+/// readable by other users).
 fn write_private_atomic(target: &Path, data: &[u8]) -> Result<(), String> {
     let tmp = target.with_extension("tmp");
     std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
@@ -1069,11 +1014,9 @@ fn write_private_atomic(target: &Path, data: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    // rename атомарно заменяет существующий target на обеих платформах. Но target
-    // может быть КРАТКО занят: параллельный yt-dlp читает cookies во время проверки
-    // авторизации/скачивания, и тогда замена временно падает (sharing violation на
-    // Windows). Это и приводило к «вход актуальный, а cookies не обновились» —
-    // повторяем несколько раз, прежде чем сдаться.
+    // rename atomically replaces target, but it can be briefly locked by a
+    // concurrent yt-dlp reading cookies (sharing violation on Windows) —
+    // retry a few times before giving up.
     let mut last: Option<std::io::Error> = None;
     for _ in 0..10 {
         match std::fs::rename(&tmp, target) {
@@ -1091,19 +1034,14 @@ fn write_private_atomic(target: &Path, data: &[u8]) -> Result<(), String> {
     ))
 }
 
-/// Зафиксировать вход: записать cookies.txt и сразу считать вход валидным.
-/// Сетевую проверку НЕ запускаем автоматически (раньше она давала мелькание
-/// «вход → проверка» при каждом входе) — вход помнится с диска, а реальную
-/// негодность cookies выявит либо ручная «Проверить», либо бот-стена при
-/// скачивании (тогда выставится маркер «протухли»).
+/// Saves cookies.txt and immediately treats login as valid. No automatic
+/// network re-check (used to cause a "login -> checking" flicker each time);
+/// real cookie failure is surfaced by manual "Check" or a bot-wall on download.
 fn finalize_login(app: &AppHandle) {
-    // Без авторизационных cookies вход НЕ фиксируем. Простое открытие формы входа
-    // Google (и последующее закрытие окна или нажатие «Отмена» БЕЗ входа) оставляет
-    // в общем cookie-хранилище неавторизационные google-cookies (CONSENT/NID/SOCS).
-    // write_cookies_file ниже записал бы и их (count > 0) — и приложение ошибочно
-    // считало бы вход выполненным. Проверяем то же условие, по которому
-    // login_watch_loop распознаёт реальный вход: «вход выполнен» выставляется ТОЛЬКО
-    // при настоящей авторизации, а закрытие/отмена окна больше ничего не ломают.
+    // Don't finalize without auth cookies: merely opening/closing the Google
+    // login form leaves non-auth cookies (CONSENT/NID/SOCS) in the shared
+    // store, which write_cookies_file would otherwise happily write out,
+    // falsely marking login as done.
     if !has_youtube_auth(app) {
         return;
     }
@@ -1132,9 +1070,9 @@ fn finalize_login(app: &AppHandle) {
     }
 }
 
-/// Фоновое ожидание авторизации в окне входа. Опрашивает cookie store; при
-/// появлении авторизационных cookies фиксирует вход и закрывает окно. Сдаётся,
-/// если пользователь закрыл окно сам или прошло 5 минут.
+/// Background poll waiting for login. Watches the cookie store; finalizes and
+/// closes the window once auth cookies appear. Gives up if the user closes
+/// the window or 5 minutes pass.
 fn login_watch_loop(app: AppHandle) {
     let start = Instant::now();
     let mut window_seen = false;
@@ -1144,11 +1082,8 @@ fn login_watch_loop(app: AppHandle) {
         if app.get_webview_window(LOGIN_LABEL).is_some() {
             window_seen = true;
         } else {
-            // Окно закрылось. Если успели его увидеть — пробуем зафиксировать вход.
-            // finalize_login сам проверит наличие авторизационных cookies: если
-            // пользователь вошёл и закрыл окно — вход зафиксируется (cookies в общем
-            // хранилище переживают закрытие); если просто закрыл/нажал «Отмена» не
-            // войдя — ничего не произойдёт (вход «выполненным» не считается).
+            // Window closed; finalize_login re-checks for auth cookies itself,
+            // so a plain close/cancel without logging in is a no-op.
             if window_seen {
                 finalize_login(&app);
             }
@@ -1167,7 +1102,7 @@ fn login_watch_loop(app: AppHandle) {
         }
 
         if has_youtube_auth(&app) {
-            // Сначала фиксируем (окно ещё открыто), затем закрываем.
+            // Finalize while the window is still open, then close it.
             finalize_login(&app);
             if let Some(w) = app.get_webview_window(LOGIN_LABEL) {
                 let _ = w.close();
@@ -1179,22 +1114,20 @@ fn login_watch_loop(app: AppHandle) {
     }
 }
 
-/// Выйти из аккаунта: удалить cookies.txt, снести webview-сессию YouTube/Google
-/// и сбросить статус. Без сноса сессии следующий вход тут же переавторизовывался бы
-/// из сохранённого профиля (окно входа закрывалось бы «уже вошедшим») — точечного
-/// удаления cookies для этого недостаточно (Google переавторизуется).
+/// Logs out: removes cookies.txt, wipes the YouTube/Google webview session,
+/// and resets status. Without wiping the session, the next login would
+/// silently reauth from the saved profile (deleting cookies alone isn't enough).
 pub fn logout(app: &AppHandle) {
     let _ = std::fs::remove_file(cookies_file(app));
-    // Windows: сносим изолированный профиль окна входа целиком. Если он ещё занят
-    // (WebView2 не успел освободить папку) — ставим маркер, и build_login_window
-    // снесёт его перед следующим входом (тогда папка точно свободна).
+    // Windows: wipe the isolated login profile. If still busy (WebView2 hasn't
+    // released the folder), set a marker so build_login_window retries it later.
     #[cfg(windows)]
     if !purge_youtube_webview_dir(app) {
         let _ = std::fs::write(youtube_webview_reset_marker(app), b"1");
     }
-    // Точечная очистка cookies наших доменов из общего профиля: на прочих платформах
-    // это основной путь, а на Windows — подчистка возможной легаси-сессии из старого
-    // общего профиля (до перехода на изолированный профиль окна входа).
+    // Selective cookie cleanup on the shared profile: the main path on
+    // non-Windows, and a legacy-session cleanup on Windows (from before the
+    // isolated login profile existed).
     clear_webview_youtube_cookies(app);
     clear_cookies_invalid(app);
     with_manager(app, |m| {
@@ -1207,9 +1140,8 @@ pub fn logout(app: &AppHandle) {
     emit_snapshot(app);
 }
 
-/// Проверить валидность сохранённых cookies (фоновый сетевой тест: пробное
-/// `--simulate`-извлечение стабильного ролика). Результат кэшируется в менеджере
-/// и стримится снапшотом; обязательная фаза разблокировки скачивания.
+/// Validates saved cookies via a background `--simulate` extraction of a
+/// stable video. Result is cached and streamed via snapshot.
 pub fn validate_youtube_cookies(app: &AppHandle) {
     if !is_authorized(app) {
         with_manager(app, |m| {
@@ -1231,10 +1163,9 @@ pub fn validate_youtube_cookies(app: &AppHandle) {
         .name("youtube-cookies-validate".into())
         .spawn(move || {
             let (valid, message) = run_youtube_cookie_check(&app2);
-            // Успех снимает маркер «протухли» и запоминается между запусками.
-            // Провал НЕ пишем на диск: он мог быть из-за отсутствия Deno или
-            // временной сети — не делаем вход «невалидным» навсегда. Реальную
-            // негодность фиксирует только бот-стена при скачивании.
+            // Success clears the stale marker persistently. Failure is NOT
+            // written to disk: it could be a missing Deno or transient
+            // network issue, not proof cookies are actually bad.
             if valid {
                 clear_cookies_invalid(&app2);
             }
@@ -1249,8 +1180,8 @@ pub fn validate_youtube_cookies(app: &AppHandle) {
         .ok();
 }
 
-/// Запускает yt-dlp в режиме `--simulate` с сохранёнными cookies и определяет,
-/// годятся ли они для скачивания. Возвращает `(валидны, сообщение_об_ошибке)`.
+/// Runs yt-dlp in `--simulate` mode with saved cookies to check they're
+/// still good for downloading. Returns `(valid, error_message)`.
 fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
     let app_data_dir = app_data_dir(app);
     let Some(ytdlp) = tools::resolve_ytdlp(&app_data_dir) else {
@@ -1267,9 +1198,9 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
         );
     }
 
-    // Без JS-движка YouTube не отдаёт аудиоформаты (signature/n-challenge не
-    // решаются) — скачивание всё равно не сработает. Сообщаем явно, а не отдаём
-    // загадочное «Requested format is not available».
+    // Without the JS engine, YouTube won't serve audio formats (signature/n
+    // challenge unsolved) — report this explicitly instead of a cryptic
+    // "Requested format is not available".
     let Some(deno_rt) = tools::deno_js_runtime_arg(&app_data_dir) else {
         return (
             false,
@@ -1292,13 +1223,13 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
         .arg("bestaudio/best")
         .arg("--js-runtimes")
         .arg(deno_rt)
-        // Тот же клиент и UA, что и при реальной загрузке (см. download_one_with_stem),
-        // иначе проверка и скачивание расходятся: одно проходит, другое падает.
+        // Same client/UA as a real download (download_one_with_stem), so the
+        // check and the actual download don't diverge.
         .arg("--extractor-args")
         .arg(format!("youtube:player_client={}", YT_PLAYER_CLIENTS[0]))
         .arg("--user-agent")
         .arg(LOGIN_UA);
-    // Тот же прокси, что и при загрузке (иначе проверка ходит другим маршрутом).
+    // Same proxy as a real download, for the same reason.
     if let Some(proxy) = proxy_arg(app) {
         cmd.arg("--proxy").arg(proxy);
     }
@@ -1319,22 +1250,16 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
     (false, Some(extract_ytdlp_error(&stderr)))
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Прокси (для yt-dlp) — режим из настроек
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Конфигурация прокси для фронта: режим + URL (для режима «указать»).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
-    /// "system" (системный/окружения) | "none" (прямое) | "custom" (заданный URL).
+    /// "system" | "none" (direct) | "custom" (explicit URL).
     pub mode: String,
     pub url: String,
 }
 
-/// Значение для `--proxy` yt-dlp по текущим настройкам (см. [`ResolvedTools::proxy`]):
-/// `None` — флаг не передаём (системный прокси/окружение); `Some("")` — прямое
-/// соединение (режим «нет»); `Some(url)` — заданный прокси (режим «указать»;
-/// пустой URL сводится к системному).
+/// Value for yt-dlp's `--proxy` from current settings (see [`ResolvedTools::proxy`]):
+/// `None` = flag omitted (system/env proxy); `Some("")` = direct connection;
+/// `Some(url)` = explicit proxy (empty URL falls back to system).
 fn proxy_arg(app: &AppHandle) -> Option<String> {
     let state = app.state::<crate::SettingsState>();
     let guard = state.0.lock().ok()?;
@@ -1346,15 +1271,14 @@ fn proxy_arg(app: &AppHandle) -> Option<String> {
             .as_ref()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        _ => None, // "system" и любое неизвестное значение
+        _ => None, // "system" and any unknown value
     }
 }
 
-/// Текущая конфигурация прокси (для страницы настроек).
 pub fn get_proxy(app: &AppHandle) -> ProxyConfig {
     let state = app.state::<crate::SettingsState>();
-    // Привязываем guard к локалу (а не матчим временный `lock()` в хвосте блока):
-    // иначе его деструктор отработал бы ПОСЛЕ дропа `state` (E0597).
+    // Bind guard to a local (rather than matching on the temporary `lock()`
+    // directly): otherwise its destructor would run after `state` is dropped (E0597).
     let guard = state.0.lock();
     match guard {
         Ok(g) => ProxyConfig {
@@ -1372,9 +1296,8 @@ pub fn get_proxy(app: &AppHandle) -> ProxyConfig {
     }
 }
 
-/// Сохранить конфигурацию прокси в настройки. Неизвестный режим → "system".
-/// Пустой URL не сохраняем (None), чтобы режим «custom» с пустым полем вёл себя
-/// как системный, а не как битый прокси.
+/// Saves proxy config; unknown mode falls back to "system". An empty URL is
+/// saved as None so "custom" with a blank field behaves like system, not a broken proxy.
 pub fn set_proxy(app: &AppHandle, mode: String, url: String) {
     let mode = match mode.as_str() {
         "none" | "system" | "custom" => mode,
@@ -1392,14 +1315,9 @@ pub fn set_proxy(app: &AppHandle, mode: String, url: String) {
     } else {
         Some(trimmed)
     };
-    // Запись на диск под локом (как persist_download_dir) — короткая операция.
     let path = guard.1.clone();
     let _ = crate::settings::save(&path, &guard.0);
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Воркер
-// ──────────────────────────────────────────────────────────────────────────────
 
 fn ensure_worker(app: &AppHandle) {
     let start = with_manager(app, |m| {
@@ -1423,9 +1341,8 @@ fn ensure_worker(app: &AppHandle) {
         .spawn(move || worker_loop(app2))
         .is_err()
     {
-        // Поток не создался — иначе worker_running остался бы навсегда true и
-        // очередь зависла бы без воркера. Сбрасываем флаг, чтобы следующий
-        // enqueue смог поднять воркер заново.
+        // Thread failed to spawn — reset the flag, or worker_running would
+        // stay true forever and the queue would be stuck.
         with_manager(app, |m| m.worker_running = false);
     }
 }
@@ -1434,15 +1351,13 @@ fn worker_loop(app: AppHandle) {
     let app_data_dir = app_data_dir(&app);
     let dl_dir = downloads_dir(&app);
 
-    // Подчищаем недокачанные хвосты от прошлой сессии (краш/обрыв/перезагрузка во
-    // время загрузки): `.part`, `.ytdl`, фрагменты. Делаем ДО цикла — активных
-    // загрузок ещё нет, так что свой `.part` мы не заденем.
+    // Sweep leftover temp files from a prior crashed/interrupted session
+    // before the loop starts (no active download yet, so nothing of ours gets hit).
     cleanup_orphan_temp_files(&dl_dir);
 
-    // ── Резолв утилит без автоскачивания (supply-chain): используем только уже
-    // установленные бинари. Установка — только явная, со страницы настроек
-    // (с фиксированной версией и проверкой контрольной суммы). yt-dlp обязателен;
-    // ffmpeg опционален (без него выбор форматов ограничен). ──
+    // Resolve tools without auto-downloading (supply-chain): only already
+    // installed binaries are used; installation is explicit, from settings.
+    // yt-dlp is required; ffmpeg is optional (limits format choice without it).
     let ytdlp = match tools::resolve_ytdlp(&app_data_dir) {
         Some(p) => p,
         None => {
@@ -1469,6 +1384,7 @@ fn worker_loop(app: AppHandle) {
     };
     let ffmpeg = tools::resolve_ffmpeg(&app_data_dir);
     let deno = tools::resolve_deno(&app_data_dir);
+    let pot = tools::resolve_pot(&app_data_dir);
     let cookies_path = cookies_file(&app);
     let cookies_file_opt = cookies_path.exists().then_some(cookies_path);
     with_manager(&app, |m| {
@@ -1477,6 +1393,7 @@ fn worker_loop(app: AppHandle) {
         m.ytdlp_ready = true;
         m.ffmpeg_ready = ffmpeg.is_some();
         m.deno_ready = deno.is_some();
+        m.pot_ready = pot.is_some();
     });
     emit_snapshot(&app);
     let resolved = tools::ResolvedTools {
@@ -1485,12 +1402,12 @@ fn worker_loop(app: AppHandle) {
         deno,
         cookies_file: cookies_file_opt,
         proxy: proxy_arg(&app),
+        pot,
     };
 
     let child_slot = with_manager(&app, |m| m.current_child.clone());
 
     loop {
-        // Берём следующий элемент в очереди.
         let job = with_manager(&app, DownloadManager::take_next_queued);
         let Some(job) = job else {
             break;
@@ -1499,10 +1416,9 @@ fn worker_loop(app: AppHandle) {
 
         let result = download_one(&app, &resolved, &dl_dir, &job, &child_slot);
 
-        // Импорт в библиотеку выполняем СРАЗУ после успешного скачивания и до
-        // выставления финального статуса: иначе при провале сканирования UI
-        // показал бы «готово», хотя трека в каталоге нет. Ошибку импорта
-        // показываем отдельно (файл скачан, но не добавлен).
+        // Import happens right after a successful download, before the final
+        // status is set: otherwise the UI would show "done" even if the scan
+        // failed to actually add the track. Import errors are surfaced separately.
         let import_err: Option<String> = match &result {
             Ok(path) => import_track(&app, &dl_dir, path).err(),
             Err(_) => None,
@@ -1513,43 +1429,37 @@ fn worker_loop(app: AppHandle) {
         report_titlebar(&app);
     }
 
-    // Анализ «настроения» новых треков запускаем ОДИН раз по завершении пачки, а
-    // не на каждый трек: иначе очередь из N треков N раз отменяла бы и
-    // перезапускала фоновый воркер, мешая ему досчитывать.
+    // Run mood analysis once per batch (not per track), or an N-track queue
+    // would restart the background analyzer N times, hindering its progress.
     restart_audio_feature_analysis(&app);
 
     finish_run(&app);
 }
 
-/// Перезапустить фоновый анализ аудио-фич, чтобы он подхватил только что
-/// добавленные треки (их job-лист фиксируется при старте воркера). Best-effort:
-/// если библиотека занята — пропускаем (досчитает при следующем запуске).
+/// Restarts the background audio-feature analyzer so it picks up newly added
+/// tracks. Best-effort: skipped if the library is busy (will catch up next run).
 fn restart_audio_feature_analysis(app: &AppHandle) {
     if let Ok(lib) = app.state::<crate::LibraryState>().0.lock() {
         let _ = lib.resume_pending_audio_feature_analysis(None);
     }
 }
 
-/// Завершить прогон: сбросить счётчики, снять флаг воркера, дотолкнуть прогресс
-/// шапки до «готово» и запустить воркер заново, если что-то добавили в гонке.
+/// Ends the run: resets counters/worker flag, pushes titlebar progress to
+/// "done", and restarts the worker if items were added mid-run.
 fn finish_run(app: &AppHandle) {
     let (done, total) = with_manager(app, DownloadManager::take_run_counts);
-    // Равные done/total → прогресс-бар отметит фазу завершённой и спрячется.
     crate::report_download_progress(app, total.max(done), total.max(done));
     emit_snapshot(app);
-
-    // Если за время прогона добавили новые элементы — поднимаем воркер снова.
     ensure_worker(app);
 }
 
-/// Клиенты YouTube-плеера для ротации между попытками при бот-стене. Дефолтный
-/// `web` — самый «бот-стенный» и сейчас требует PO-токен, поэтому используем менее
-/// задушенные клиенты и МЕНЯЕМ их по попыткам: часть отказов клиент-специфична, и
-/// другой клиент нередко проходит там, где предыдущий упёрся в стену. Порядок — от
-/// самого устойчивого (`tv` работает и с cookies) к запасным.
+/// YouTube player clients to rotate through on bot-wall retries. The default
+/// `web` client is the most bot-walled and now needs a PO token, so we use
+/// less-restricted clients and rotate: a failure is often client-specific, and
+/// another client passes where the previous one hit a wall. Ordered from most
+/// robust (`tv` also works with cookies) to fallbacks.
 const YT_PLAYER_CLIENTS: &[&str] = &["tv", "web_safari", "mweb"];
 
-/// Признаки «бот-стены» в stderr yt-dlp (требуется авторизация для обхода).
 fn is_bot_wall(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("confirm you")
@@ -1559,11 +1469,10 @@ fn is_bot_wall(stderr: &str) -> bool {
         || (s.contains("cookies") && s.contains("authentication") && s.contains("required"))
 }
 
-/// Явный признак, что yt-dlp отверг сами cookies (а не показал generic бот-стену):
-/// аккаунт-cookies просрочены/ротированы. ТОЛЬКО в этом случае имеет смысл просить
-/// перелогиниться — обычная бот-стена «sign in to confirm you're not a bot» это про
-/// IP/сеть, и инвалидировать рабочий вход по ней нельзя (иначе «вход устарел» при
-/// актуальном входе — типичная картина под VPN/дата-центровым IP).
+/// Explicit signal that yt-dlp rejected the cookies themselves (not a generic
+/// bot-wall) — expired/rotated. Only here does asking to re-login make sense;
+/// a plain "sign in to confirm you're not a bot" is IP/network-related and
+/// must not invalidate a working login (common under VPN/datacenter IPs).
 fn is_cookies_expired(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("cookies are no longer valid")
@@ -1572,8 +1481,6 @@ fn is_cookies_expired(stderr: &str) -> bool {
         || (s.contains("cookies") && s.contains("no longer valid"))
 }
 
-/// Признаки сетевого таймаута/обрыва/сбоя резолва в stderr yt-dlp — транзиентная
-/// сетевая ошибка (особенно вероятна под VPN/DPI-обходом с медленным коннектом).
 fn is_network_timeout(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("timed out")
@@ -1589,8 +1496,6 @@ fn is_network_timeout(stderr: &str) -> bool {
         || s.contains("urlopen error")
 }
 
-/// Признаки «нет подходящего формата» в stderr yt-dlp (нужен ffmpeg / у трека нет
-/// аудиоформата / видео недоступно как аудио).
 fn is_no_format(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("requested format is not available")
@@ -1599,9 +1504,9 @@ fn is_no_format(stderr: &str) -> bool {
         || s.contains("only images are available")
 }
 
-/// Классифицирует ошибку yt-dlp по stderr в [`DownloadErrorKind`]. Порядок важен:
-/// сначала точные причины (отвергнутые cookies, бот-стена), затем сеть/формат,
-/// иначе общий сетевой текст перехватил бы более специфичную причину.
+/// Classifies a yt-dlp stderr into a [`DownloadErrorKind`]. Order matters:
+/// specific causes (rejected cookies, bot-wall) are checked before generic
+/// network/format text, so the latter can't shadow a more specific match.
 fn classify_ytdlp_error(stderr: &str) -> DownloadErrorKind {
     if is_cookies_expired(stderr) {
         DownloadErrorKind::CookiesExpired
@@ -1616,9 +1521,8 @@ fn classify_ytdlp_error(stderr: &str) -> DownloadErrorKind {
     }
 }
 
-/// Поисковые цели для yt-dlp по порядку надёжности. Сначала — YouTube Music
-/// (чистые аудиорелизы без видео-заставок), затем обычный `ytsearch1`
-/// (устойчивый встроенный экстрактор-фолбэк, когда music-страница не отдалась).
+/// Search targets in order of reliability: YouTube Music first (clean audio
+/// releases without video filler), then `ytsearch1` as a robust fallback.
 fn search_targets(query: &str) -> Vec<String> {
     vec![
         format!(
@@ -1629,20 +1533,16 @@ fn search_targets(query: &str) -> Vec<String> {
     ]
 }
 
-/// Один "сырой" вызов скачивания (попытка под конкретные `stem`/цель/клиент) плюс
-/// сопутствующие побочные эффекты (уборка хвостов, статус входа в YouTube).
-/// Абстракция нужна, чтобы протестировать ротацию клиентов/обработку бот-стены и
-/// протухших cookies в [`download_one_core`] без реального subprocess yt-dlp и без
-/// `AppHandle` — в проде эти методы дёргают [`download_one_with_stem`]/
-/// `mark_cookies_*`/`emit_snapshot`, в тесте просто пишут в `Vec` фейковые ответы.
+/// One raw download attempt (specific stem/target/client) plus its side
+/// effects (temp cleanup, YouTube login status). Exists so [`download_one_core`]'s
+/// client-rotation/bot-wall/cookie-expiry logic can be unit-tested without a
+/// real yt-dlp subprocess or `AppHandle`: production uses
+/// [`download_one_with_stem`]/`mark_cookies_*`/`emit_snapshot`, tests just
+/// push fake responses to a `Vec`.
 trait DownloadAttempt {
     fn try_download(&self, stem: &str, target: &str, client: &str) -> Result<PathBuf, DownloadError>;
     fn cleanup_stem(&self, stem: &str, keep: Option<&Path>);
-    /// Успешное скачивание с cookies → снять возможный залипший маркер «вход
-    /// устарел» (мог остаться от прошлой транзиентной бот-стены по IP).
     fn mark_login_still_valid(&self);
-    /// yt-dlp явно отверг сами cookies → пометить вход устаревшим (статус
-    /// переживёт перезапуск) и попросить перелогиниться.
     fn mark_login_expired(&self);
 }
 
@@ -1682,9 +1582,9 @@ impl DownloadAttempt for RealDownloadAttempt<'_> {
     }
 }
 
-/// Скачать один трек через yt-dlp, проставить теги. Возвращает путь к файлу.
-/// Пробует поисковые цели по очереди (см. [`search_targets`]) — это страхует от
-/// нестабильного music-экстрактора. На отмене/«бот-стене» дальше не пробуем.
+/// Downloads one track via yt-dlp and tags it, returning the file path. Tries
+/// search targets in order ([`search_targets`]) as a hedge against an
+/// unstable music extractor.
 fn download_one(
     app: &AppHandle,
     resolved: &tools::ResolvedTools,
@@ -1710,9 +1610,9 @@ fn download_one(
     )
 }
 
-/// Оркестрация ротации клиентов/целей вокруг [`DownloadAttempt::try_download`] —
-/// без AppHandle/subprocess, поэтому юнит-тестируема напрямую с фейковой реализацией.
-/// `has_cookies` — `resolved.cookies_file.is_some()` на момент вызова.
+/// Orchestrates client/target rotation around [`DownloadAttempt::try_download`],
+/// independent of AppHandle/subprocess so it's directly unit-testable with a
+/// fake implementation. `has_cookies` is `resolved.cookies_file.is_some()`.
 fn download_one_core(
     has_cookies: bool,
     stem: &str,
@@ -1720,13 +1620,12 @@ fn download_one_core(
     retry_delay: Duration,
     attempt: &impl DownloadAttempt,
 ) -> Result<PathBuf, DownloadError> {
-    // Бот-стена YouTube почти всегда транзиентна и привязана к IP (а не к cookies):
-    // те же cookies проходят со 2–3 попытки. Поэтому при бот-стене не сдаёмся сразу,
-    // а ПОВТОРЯЕМ, МЕНЯЯ player_client (см. [`YT_PLAYER_CLIENTS`]) — часть отказов
-    // клиент-специфична, и другой клиент нередко проходит. Вход помечаем устаревшим
-    // ТОЛЬКО если yt-dlp явно отверг сами cookies (kind == CookiesExpired): generic
-    // бот-стена этого не делает — иначе «вход устарел» при актуальном входе.
-    // Обычные (не бот-стена) ошибки ретраем не лечатся — выходим сразу.
+    // YouTube's bot-wall is almost always transient and IP-bound (not
+    // cookie-bound): the same cookies pass on the 2nd-3rd attempt. So on a
+    // bot-wall we retry while rotating player_client ([`YT_PLAYER_CLIENTS`]) —
+    // failures are often client-specific. Login is marked expired ONLY when
+    // yt-dlp explicitly rejects the cookies (kind == CookiesExpired); a
+    // generic bot-wall must not do that. Non-bot-wall errors aren't retried.
     let mut last_err =
         DownloadError::new(DownloadErrorKind::Unknown, "yt-dlp завершился с ошибкой");
     let mut bot_wall_seen = false;
@@ -1736,9 +1635,9 @@ fn download_one_core(
         let mut should_retry = false;
         for target in targets {
             let result = attempt.try_download(stem, target, client);
-            // Уборка хвостов yt-dlp (фрагменты, `.part`, `.ytdl`) при любом исходе.
-            // `stem` уникален для задания: при ошибке безопасно удалить все `stem.*`,
-            // при успехе — всё, кроме итогового файла.
+            // Clean up yt-dlp's temp tails regardless of outcome: `stem` is
+            // unique per job, so on error all `stem.*` can be removed safely,
+            // and on success everything except the final file.
             match result {
                 Ok(final_path) => {
                     attempt.cleanup_stem(stem, Some(&final_path));
@@ -1750,11 +1649,10 @@ fn download_one_core(
                 Err(e) => {
                     attempt.cleanup_stem(stem, None);
                     match e.kind {
-                        // Отмена пользователем — прекращаем немедленно.
                         DownloadErrorKind::Cancelled => return Err(e),
-                        // Сами cookies отвергнуты. Продолжаем ротацию (клиент без
-                        // cookies мог бы пройти), но запоминаем — пометим вход
-                        // устаревшим, если так и не скачали.
+                        // Cookies themselves rejected: keep rotating (a
+                        // cookie-less client might pass), but remember it in
+                        // case nothing ends up succeeding.
                         DownloadErrorKind::CookiesExpired => {
                             cookies_expired_seen = true;
                             should_retry = true;
@@ -1763,14 +1661,13 @@ fn download_one_core(
                             bot_wall_seen = true;
                             should_retry = true;
                         }
-                        // Прочее (нет формата, сеть, неизвестное) ротацией не лечится.
                         _ => {}
                     }
                     last_err = e;
                 }
             }
         }
-        // Повторяем только транзиентную бот-стену/отказ cookies; иначе выходим сразу.
+        // Only retry a transient bot-wall/cookie rejection; otherwise bail.
         if !should_retry {
             break;
         }
@@ -1786,8 +1683,8 @@ fn download_one_core(
             "Вход в YouTube устарел — войдите заново в «Внешние источники»",
         ));
     }
-    // Generic бот-стена пережила все клиенты. Это про IP/сеть, а НЕ про cookies —
-    // вход НЕ инвалидируем. Подсказка зависит от того, входил ли пользователь.
+    // Generic bot-wall survived every client — IP/network issue, not cookies,
+    // so the login isn't invalidated. Hint depends on whether the user is logged in.
     if bot_wall_seen {
         let message = if has_cookies {
             "YouTube запросил подтверждение (IP/сеть) — попробуйте позже, смените сеть/VPN или прокси"
@@ -1814,12 +1711,12 @@ fn download_one_with_stem(
 ) -> Result<PathBuf, DownloadError> {
     let out_template = dir.join(format!("{}.%(ext)s", stem));
 
-    // Библиотека сканирует только определённые контейнеры (m4a/opus/ogg/mp3/…),
-    // а YouTube обычно отдаёт лучшее аудио в .webm, который НЕ поддерживается.
-    // Поэтому с ffmpeg берём абсолютно лучшее аудио и извлекаем его в .m4a (см.
-    // `-x --audio-format m4a` ниже). Без ffmpeg жёстко ограничиваем выбор
-    // поддерживаемыми контейнерами — без запасного `best`, чтобы при отсутствии
-    // подходящего потока yt-dlp вернул ошибку, а не скачал .webm.
+    // The library only scans specific containers (m4a/opus/ogg/mp3/...), but
+    // YouTube's best audio is usually .webm, which isn't supported. With
+    // ffmpeg, grab the absolute best audio and extract to .m4a (`-x
+    // --audio-format m4a` below); without it, hard-restrict to supported
+    // containers with no `best` fallback, so yt-dlp errors instead of
+    // downloading an unsupported .webm.
     let ffmpeg_available = resolved.ffmpeg.is_some();
     let format = if ffmpeg_available {
         "bestaudio/best"
@@ -1833,8 +1730,8 @@ fn download_one_with_stem(
         .arg("1")
         .arg("--no-warnings")
         .arg("--newline")
-        // Сетевые подстраховки: больше повторов и таймаут сокета, чтобы единичный
-        // обрыв/таймаут не валил весь трек (главная причина «нестабильности»).
+        // More retries + socket timeout so a single drop/timeout doesn't fail
+        // the whole track (the main source of "instability").
         .arg("--retries")
         .arg("10")
         .arg("--fragment-retries")
@@ -1843,71 +1740,74 @@ fn download_one_with_stem(
         .arg("3")
         .arg("--socket-timeout")
         .arg("30")
-        // Качаем последовательно (без --concurrent-fragments): параллельная
-        // загрузка фрагментов пишет в выходной файл через seek/предвыделение, и
-        // на Windows для части YouTube-потоков (SABR/фрагментированный DASH) это
-        // даёт `OSError: [Errno 22] Invalid argument` в downloader. Для одиночных
-        // аудиопотоков (обычные треки) параллелизм всё равно не даёт выигрыша.
+        // No --concurrent-fragments: parallel fragment writes use seek/
+        // preallocation, which throws `OSError: [Errno 22]` on Windows for
+        // some YouTube streams (SABR/fragmented DASH). Single audio streams
+        // don't benefit from parallelism anyway.
         .arg("-f")
         .arg(format)
         .arg("-o")
         .arg(&out_template)
         .arg(search_target);
     if let Some(ff) = &resolved.ffmpeg {
-        // -x/--audio-format m4a вместо простого --remux-video: YouTube's bestaudio
-        // часто отдаёт настоящий Opus (itag 251/250/249, в WebM), а наш плеер
-        // (symphonia 0.5 — см. Cargo.lock) не содержит Opus-декодера вообще.
-        // Голый remux контейнера (webm→opus, без транскода) давал файл с верным
-        // контейнером, но НЕЧЕМ было декодировать поток — воспроизведение молча
-        // падало (см. AudioPlayer::supported_formats). -x с явным --audio-format
-        // m4a переводит источник в AAC/M4A, который symphonia декодирует; если
-        // исходный кодек уже AAC (обычный случай для части YouTube-форматов) —
-        // yt-dlp просто копирует поток без перекодирования, потеря качества
-        // возникает только там, где раньше был полностью нерабочий файл. Заодно
-        // -x всегда отбрасывает видеодорожку (-vn) — некоторые ролики несут
-        // встроенную обложку как отдельный mjpeg-поток внутри bestaudio, и
-        // голый remux эту видеодорожку раньше сохранял.
+        // -x/--audio-format m4a instead of a plain remux: YouTube's bestaudio
+        // is often real Opus in WebM, and our player (symphonia 0.5) has no
+        // Opus decoder at all — a bare remux produced a file with the right
+        // container but nothing could decode the stream (playback silently
+        // failed, see AudioPlayer::supported_formats). Forcing m4a transcodes
+        // to AAC, which symphonia decodes; if the source is already AAC,
+        // yt-dlp just copies the stream without re-encoding. -x also always
+        // drops the video track (-vn) — some videos carry an embedded cover
+        // as an mjpeg stream inside bestaudio, which a bare remux used to keep.
         cmd.arg("-x").arg("--audio-format").arg("m4a");
-        // --ffmpeg-location указываем только для нашего скачанного бинаря
-        // (абсолютный путь). Для ffmpeg из PATH (голое имя) parent() == "" —
-        // флаг сломал бы вызов, поэтому полагаемся на PATH.
+        // --ffmpeg-location only makes sense for our own downloaded binary
+        // (absolute path); for a bare name from PATH, parent() == "" would
+        // break the call, so rely on PATH instead.
         if ff.is_absolute() {
             if let Some(ff_dir) = ff.parent() {
                 cmd.arg("--ffmpeg-location").arg(ff_dir);
             }
         }
     }
-    // Cookies авторизованной сессии YouTube — обход бот-стены («Sign in to confirm
-    // you're not a bot»). Авторизация необязательна: если cookies есть — передаём
-    // их, если нет — пробуем без (большинство треков качаются и так).
+    // Login is optional: pass cookies if present to work around the bot-wall,
+    // otherwise try without (most tracks download fine either way).
     if let Some(cookies) = &resolved.cookies_file {
         cmd.arg("--cookies").arg(cookies);
     }
-    // JS-движок Deno — корректное извлечение форматов YouTube (расшифровка nsig);
-    // уводит от деградированных SABR-потоков, дающих `[Errno 22]` на Windows.
+    // Deno JS engine: needed for correct YouTube format extraction (nsig
+    // decryption); avoids degraded SABR streams that cause `[Errno 22]` on Windows.
     if let Some(deno) = &resolved.deno {
         cmd.arg("--js-runtimes")
             .arg(tools::deno_runtime_value(deno));
     }
-    // Клиент YouTube-плеера (ротация по попыткам, см. [`download_one`]): уводит от
-    // самого «бот-стенного» дефолтного `web`, который сейчас требует PO-токен.
+    // PO-token provider (bgutil-pot, script/CLI mode): mitigates YouTube's
+    // "Sign in to confirm you're not a bot" wall even when cookies are valid
+    // (that wall is IP/client-attestation based, not account-based — see
+    // is_bot_wall/is_cookies_expired below). `--plugin-dirs` points yt-dlp at
+    // our app-managed plugin copy; the extractor-arg tells that plugin where
+    // the bundled executable lives (it's not on PATH).
+    if let Some(pot) = &resolved.pot {
+        cmd.arg("--plugin-dirs")
+            .arg(tools::normalize_path_arg(&pot.plugin_dir));
+        cmd.arg("--extractor-args").arg(format!(
+            "youtubepot-bgutilcli:cli_path={}",
+            tools::normalize_path_arg(&pot.cli_path)
+        ));
+    }
     cmd.arg("--extractor-args")
         .arg(format!("youtube:player_client={}", player_client));
-    // UA как у окна входа в YouTube ([`LOGIN_UA`]): cookies снимались в вебвью под
-    // этим UA, и совпадение фингерпринта браузера делает запрос с теми же cookies
-    // консистентнее (меньше повод для бот-челленджа).
+    // Same UA as the login window ([`LOGIN_UA`]): cookies were captured under
+    // this UA, and a matching browser fingerprint is less likely to trigger a
+    // bot challenge.
     cmd.arg("--user-agent").arg(LOGIN_UA);
-    // Прокси по настройкам: Some("") — прямое соединение (режим «нет»), Some(url) —
-    // заданный прокси (напр. ByeDPI socks5://127.0.0.1:1080), None — флаг не
-    // передаём (системный прокси/окружение).
     if let Some(proxy) = &resolved.proxy {
         cmd.arg("--proxy").arg(proxy);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // На Unix кладём yt-dlp в собственную группу процессов, чтобы при отмене
-    // прибить всё дерево (yt-dlp + порождённые им ffmpeg/deno) сигналом группе.
+    // Unix: put yt-dlp in its own process group so cancellation can kill the
+    // whole tree (yt-dlp + its ffmpeg/deno children) via a group signal.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1924,16 +1824,15 @@ fn download_one_with_stem(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // Сохраняем процесс для возможной отмены.
     {
         let mut slot = child_slot.lock().unwrap_or_else(|e| e.into_inner());
         *slot = Some(child);
     }
 
-    // Стдерр сливаем в отдельном потоке (иначе буфер может заблокировать). Читаем
-    // байтами + потерьное декодирование: локальная кодировка yt-dlp не должна
-    // ломать сбор stderr (read_to_string упал бы на невалидном UTF-8 и потерял
-    // бы весь вывод, включая текст ошибки).
+    // Drain stderr on its own thread (its buffer could otherwise block).
+    // Reads raw bytes + lossy decode: yt-dlp's local encoding must not break
+    // stderr collection (read_to_string would fail on invalid UTF-8 and lose
+    // the whole output, including the error text).
     let stderr_handle = stderr.map(|err| {
         std::thread::spawn(move || {
             let mut bytes: Vec<u8> = Vec::new();
@@ -1942,12 +1841,12 @@ fn download_one_with_stem(
         })
     });
 
-    // Парсим прогресс из stdout (yt-dlp с --newline пишет проценты построчно).
-    // ВАЖНО: читаем сырые байты и декодируем потерьно (from_utf8_lossy), а НЕ
-    // через BufRead::lines() (строгий UTF-8). yt-dlp может писать stdout в
-    // локальной кодировке (cp1251 на Windows): строка с кириллицей —
-    // невалидный UTF-8, lines() оборвал бы чтение, пайп бы закрылся, и yt-dlp
-    // упал бы с `OSError: [Errno 22]` при следующей записи в stdout.
+    // Parses progress from stdout (yt-dlp with --newline writes percentages
+    // per line). Reads raw bytes + lossy decode rather than BufRead::lines()
+    // (strict UTF-8): yt-dlp can write stdout in a local encoding (cp1251 on
+    // Windows), and a Cyrillic line would be invalid UTF-8 — lines() would
+    // stop reading, closing the pipe and crashing yt-dlp with `[Errno 22]`
+    // on its next stdout write.
     if let Some(out) = stdout {
         let mut reader = BufReader::new(out);
         let mut last_emit = Instant::now() - Duration::from_millis(500);
@@ -1970,21 +1869,20 @@ fn download_one_with_stem(
                         }
                     });
                     emit_snapshot(app);
-                    // Плавный общий процент в шапке: доля текущего трека.
                     report_titlebar_frac(app, pct / 100.0);
                 }
             }
         }
     }
 
-    // Забираем процесс назад и ждём завершения.
+    // Take the process back and wait for it to finish.
     let status = {
         let taken = child_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         match taken {
             Some(mut c) => c
                 .wait()
                 .map_err(|e| DownloadError::new(DownloadErrorKind::Unknown, e.to_string()))?,
-            // Процесс уже забрали (отмена) — считаем отменённым.
+            // Process already taken (cancellation) -> treat as cancelled.
             None => {
                 return Err(DownloadError::new(
                     DownloadErrorKind::Cancelled,
@@ -1999,17 +1897,14 @@ fn download_one_with_stem(
         .unwrap_or_default();
 
     if !status.success() {
-        // Полный stderr — в лог приложения: пользовательское сообщение сжато до
-        // осмысленной строки, но для диагностики «загадочных» ошибок yt-dlp
-        // (например, `[Errno 22]`) нужен весь вывод с контекстом.
+        // Full stderr goes to the app log: the user-facing message is
+        // trimmed, but diagnosing cryptic yt-dlp errors (e.g. `[Errno 22]`)
+        // needs the full output with context.
         eprintln!(
             "[downloads] yt-dlp ошибка (запрос «{}»):\n{}",
             job.query,
             stderr_text.trim()
         );
-        // Классифицируем по stderr (cookies-отказ / бот-стена / сеть / формат).
-        // Решение о повторах и об устаревании cookies принимает download_one — по
-        // типу ошибки (kind), а НЕ по тексту: бот-стена ≠ протухшие cookies.
         let kind = classify_ytdlp_error(&stderr_text);
         return Err(DownloadError::new(kind, extract_ytdlp_error(&stderr_text)));
     }
@@ -2021,8 +1916,8 @@ fn download_one_with_stem(
         )
     })?;
 
-    // Страховка: если итоговый контейнер библиотека не сканирует (например, без
-    // ffmpeg прорвался .webm), не выдаём ложное «готово» — удаляем и сообщаем.
+    // Safety net: if the final container isn't scanned by the library (e.g.
+    // .webm slipped through without ffmpeg), don't report false success — delete and error.
     let ext = file
         .extension()
         .and_then(|s| s.to_str())
@@ -2039,7 +1934,8 @@ fn download_one_with_stem(
         ));
     }
 
-    // Теги — best-effort: даже если не записались, файл уже скачан и играбелен.
+    // Tagging is best-effort: the file is already downloaded and playable
+    // even if tags fail to write.
     write_tags(
         &file,
         &job.title,
@@ -2051,11 +1947,7 @@ fn download_one_with_stem(
     Ok(file)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Утилиты файловой системы / парсинга
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Расширения, которые сканирует библиотека (см. `AudioPlayer::supported_formats`).
+/// Extensions the library scans (see `AudioPlayer::supported_formats`).
 const SUPPORTED_AUDIO_EXTS: &[&str] = &[
     "m4a", "opus", "ogg", "mp3", "flac", "wav", "aac", "mp4", "aiff", "aif",
 ];
@@ -2064,8 +1956,7 @@ fn is_supported_audio_ext(ext: &str) -> bool {
     SUPPORTED_AUDIO_EXTS.contains(&ext)
 }
 
-/// Percent-encode значения query-параметра URL (UTF-8 байты → %XX). Достаточно
-/// для построения адреса поиска music.youtube.com из произвольного запроса.
+/// Percent-encodes a URL query value (UTF-8 bytes -> %XX).
 fn percent_encode_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
@@ -2080,8 +1971,8 @@ fn percent_encode_query(s: &str) -> String {
     out
 }
 
-/// Зарезервированные в Windows имена устройств: файл `CON.ogg`, `NUL` и т.п.
-/// создать нельзя. Проверяем по базовому имени без учёта регистра.
+/// Windows reserved device names (`CON.ogg`, `NUL`, etc. can't be created).
+/// Checked against the base name, case-insensitively.
 fn is_reserved_windows_name(name: &str) -> bool {
     let upper = name.trim().to_ascii_uppercase();
     matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
@@ -2097,13 +1988,11 @@ fn app_data_dir(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Папка для скачанных треков. По умолчанию — «LFMusic Downloads» в системной
-/// музыкальной директории, но пользователь может задать свою в настройках
-/// «Внешние источники». При ЛЮБОЙ ошибке подготовки заданной папки (нет прав,
-/// невалидный путь, недоступный диск) — fallback на стандартную папку Music.
+/// Downloads folder: "LFMusic Downloads" under the system music directory by
+/// default, or a user-configured path. Any failure preparing the configured
+/// path (no perms, invalid, unreachable disk) falls back to the default Music folder.
 fn downloads_dir(app: &AppHandle) -> PathBuf {
     let dir = configured_downloads_dir(app).unwrap_or_else(|| default_downloads_dir(app));
-    // Папку нужно гарантированно создать; при сбое — fallback на стандартную.
     if std::fs::create_dir_all(&dir).is_ok() {
         return dir;
     }
@@ -2112,8 +2001,6 @@ fn downloads_dir(app: &AppHandle) -> PathBuf {
     fallback
 }
 
-/// Стандартная папка скачиваний: «LFMusic Downloads» в системной музыкальной
-/// директории (фолбэк — папка данных приложения, если её не определить).
 fn default_downloads_dir(app: &AppHandle) -> PathBuf {
     let base = app
         .path()
@@ -2123,8 +2010,8 @@ fn default_downloads_dir(app: &AppHandle) -> PathBuf {
     base.join("LFMusic Downloads")
 }
 
-/// Заданная пользователем папка скачиваний из настроек (если непустая). Сама
-/// папка НЕ создаётся здесь — это делает `downloads_dir` (с fallback при сбое).
+/// User-configured downloads path from settings, if non-empty. Not created
+/// here — `downloads_dir` handles that (with fallback on failure).
 fn configured_downloads_dir(app: &AppHandle) -> Option<PathBuf> {
     let state = app.state::<crate::SettingsState>();
     let guard = state.0.lock().ok()?;
@@ -2137,16 +2024,16 @@ fn configured_downloads_dir(app: &AppHandle) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Сменить папку скачиваний: подготовить новую (создать; при любой ошибке —
-/// fallback на стандартную папку Music), сохранить путь в настройки и вернуть
-/// фактические `(старая, новая)` папки. Перерегистрацию папок в библиотеке
-/// (убрать старую / добавить новую) выполняет вызывающий в lib.rs, где доступны
-/// эмиттеры прогресса. `requested` = None/пусто → сброс на стандартную папку.
+/// Changes the downloads folder: prepares the new one (falls back to the
+/// default Music folder on any failure), saves it, and returns the actual
+/// `(old, new)` paths. Re-registering library folders is left to the caller
+/// in lib.rs, which has access to progress emitters. `requested` = None/empty
+/// resets to the default folder.
 pub fn apply_downloads_dir(app: &AppHandle, requested: Option<String>) -> (PathBuf, PathBuf) {
     let old_dir = downloads_dir(app);
 
-    // Готовим заданную папку заранее: создаём её. Не удалось (нет прав/невалидна) —
-    // сохраняем None, что означает стандартную папку (реализует fallback).
+    // Prepare the requested path eagerly; on failure (no perms/invalid), save
+    // None instead, which means the default folder (the fallback).
     let prepared: Option<String> = requested
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -2164,7 +2051,7 @@ pub fn apply_downloads_dir(app: &AppHandle, requested: Option<String>) -> (PathB
     (old_dir, new_dir)
 }
 
-/// Записать путь папки скачиваний в настройки (отдельным полем, не в `options`).
+/// Persists the download dir path to settings as its own field, not inside `options`.
 fn persist_download_dir(app: &AppHandle, value: Option<String>) {
     let state = app.state::<crate::SettingsState>();
     let mut guard = match state.0.lock() {
@@ -2172,13 +2059,13 @@ fn persist_download_dir(app: &AppHandle, value: Option<String>) {
         Err(_) => return,
     };
     guard.0.download_dir = value;
-    // Запись на диск под локом (как в eq_persist) — короткая операция, гонок нет.
     let path = guard.1.clone();
     let _ = crate::settings::save(&path, &guard.0);
 }
 
-/// Совпадают ли два пути. Канонизируем оба (устойчиво к регистру/разделителям/
-/// `..` на Windows); если файла ещё нет на диске — лексическое сравнение.
+/// Whether two paths refer to the same location. Canonicalizes both (handles
+/// case/separator/`..` differences on Windows); falls back to a lexical
+/// comparison if the file doesn't exist yet.
 pub fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(ca), Ok(cb)) => ca == cb,
@@ -2186,7 +2073,7 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Убирает недопустимые в имени файла символы (Windows-набор) и схлопывает пробелы.
+/// Strips Windows-forbidden filename characters and collapses whitespace.
 fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -2201,14 +2088,14 @@ fn sanitize(s: &str) -> String {
     trimmed.chars().take(120).collect()
 }
 
-/// Обрезает базовое имя так, чтобы полный путь уложился в лимит Windows
-/// (`MAX_PATH` = 260). yt-dlp создаёт рядом с итоговым файлом временные
-/// (`{stem}.f251.webm.part`, `{stem}.<ext>.ytdl`, фрагменты), поэтому даже
-/// валидное по символам, но длинное «Исполнитель - Название» приводит к
-/// `OSError: [Errno 22] Invalid argument` в `sanitize_open` (см. yt-dlp #11251).
-/// Режем базу с запасом под разделитель, худший временной суффикс и « (NN)».
+/// Truncates the base name so the full path fits Windows `MAX_PATH` (260).
+/// yt-dlp creates temp files next to the output (`{stem}.f251.webm.part`,
+/// `{stem}.<ext>.ytdl`, fragments), so even a character-valid but long
+/// "Artist - Title" can trigger `OSError: [Errno 22]` in `sanitize_open`
+/// (yt-dlp #11251). Trims with headroom for the separator, worst-case temp
+/// suffix, and " (NN)".
 fn clamp_stem_for_path(dir: &Path, base: String) -> String {
-    // Держимся ниже 260 с запасом; SUFFIX_RESERVE ≈ ".f251.webm.part" + " (12)".
+    // Stay well under 260; SUFFIX_RESERVE ~ ".f251.webm.part" + " (12)".
     const SAFE_MAX_PATH: usize = 250;
     const SUFFIX_RESERVE: usize = 24;
     let dir_len = dir.to_string_lossy().chars().count();
@@ -2219,7 +2106,7 @@ fn clamp_stem_for_path(dir: &Path, base: String) -> String {
         return base;
     }
     let truncated: String = base.chars().take(budget).collect();
-    // После обрезки не оставляем хвостовых пробелов/точек (Windows их не любит).
+    // No trailing spaces/dots after truncation (Windows dislikes them).
     let trimmed = truncated.trim_matches(|c| c == '.' || c == ' ').to_string();
     if trimmed.is_empty() {
         "track".to_string()
@@ -2228,28 +2115,25 @@ fn clamp_stem_for_path(dir: &Path, base: String) -> String {
     }
 }
 
-/// Имя файла без расширения: «Исполнитель - Название», уникализированное суффиксом.
-/// Содержимое папки читается один раз в `HashSet`, коллизии проверяются в памяти
-/// за O(1) (а не повторным `read_dir` на каждой итерации).
+/// Extension-less filename ("Artist - Title"), made unique with a suffix.
+/// Directory contents are read once into a `HashSet` so collisions are
+/// checked in-memory (not a repeated `read_dir` per iteration).
 fn unique_stem(dir: &Path, artist: &str, title: &str) -> String {
     let a = sanitize(artist);
     let t = sanitize(title);
-    // Любая из частей может полностью стереться при санитарии (название из одних
-    // спецсимволов) — тогда не оставляем висящих « - » и не получаем пустой stem.
+    // Either part can be sanitized away entirely (title made only of special
+    // chars) — avoid a dangling " - " or an empty stem in that case.
     let base = match (a.is_empty(), t.is_empty()) {
         (false, false) => format!("{} - {}", a, t),
         (false, true) => a,
         (true, false) => t,
         (true, true) => "track".to_string(),
     };
-    // Ограничиваем длину под лимит пути Windows ещё до уникализации.
     let mut base = clamp_stem_for_path(dir, base);
-    // Зарезервированные имена Windows (CON, NUL, COM1…) — добавляем подчёркивание.
     if is_reserved_windows_name(&base) {
         base.push('_');
     }
 
-    // Существующие имена файлов (без расширения) — один проход по директории.
     let existing: HashSet<String> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .flatten()
@@ -2276,8 +2160,8 @@ fn unique_stem(dir: &Path, artist: &str, title: &str) -> String {
     }
 }
 
-/// Удаляет файлы `stem.*` в папке (хвосты yt-dlp: фрагменты, `.part`, `.ytdl`).
-/// `keep` — итоговый файл, который нужно сохранить (при успешном скачивании).
+/// Removes `stem.*` files in a folder (yt-dlp tails: fragments, `.part`, `.ytdl`).
+/// `keep` is the final file to preserve, on success.
 fn remove_stem_files(dir: &Path, stem: &str, keep: Option<&Path>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -2289,15 +2173,13 @@ fn remove_stem_files(dir: &Path, stem: &str, keep: Option<&Path>) {
                 continue;
             }
         }
-        // Файлы этого задания: «stem» либо «stem.<что-то>» (включая stem.f140.m4a).
         let name = match p.file_name().and_then(|s| s.to_str()) {
             Some(n) => n,
             None => continue,
         };
         if name == stem || name.starts_with(&format!("{}.", stem)) {
-            // `.lrc`-сайдкар — намеренный результат скачивания, а не временный хвост
-            // yt-dlp: его НЕ удаляем (иначе текст исчезал бы сразу после записи на
-            // финальной уборке `stem.*`).
+            // `.lrc` sidecar is a deliberate output, not a yt-dlp temp tail —
+            // don't remove it here, or lyrics would vanish right after being written.
             let is_lrc = p
                 .extension()
                 .and_then(|s| s.to_str())
@@ -2311,15 +2193,15 @@ fn remove_stem_files(dir: &Path, stem: &str, keep: Option<&Path>) {
     }
 }
 
-/// Удаляет осиротевшие временные файлы yt-dlp в папке скачиваний (верхний уровень):
-/// `.part`/`.ytdl`/фрагменты, оставшиеся после краша или обрыва загрузки. Готовые
-/// аудиофайлы (`.opus`/`.mp3`/`.m4a`/…) не трогает — фильтр строго по temp-маркерам.
+/// Removes orphaned yt-dlp temp files (top-level of the downloads folder)
+/// left behind by a crash or interrupted download. Finished audio files are
+/// never touched — the filter is strictly on temp markers.
 fn cleanup_orphan_temp_files(dir: &Path) {
-    // Трогаем только ДАВНО не изменявшиеся файлы. Параллельная сессия (вторая копия
-    // приложения или внешний загрузчик в ту же папку) могла бы прямо сейчас писать
-    // свой `.part` — а удаление оборвало бы её загрузку. Активный `.part` постоянно
-    // обновляет mtime, поэтому «не трогали сутки» = почти наверняка хвост от краша,
-    // а не живая загрузка. При любой неопределённости с возрастом — НЕ удаляем.
+    // Only touch files untouched for a long time: a concurrent session (a
+    // second app instance or external downloader in the same folder) could
+    // be actively writing its own `.part` right now, and an active `.part`
+    // constantly updates its mtime. "Untouched for a day" is almost certainly
+    // a crash leftover, not a live download. Any uncertainty about age -> don't delete.
     const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -2333,9 +2215,8 @@ fn cleanup_orphan_temp_files(dir: &Path) {
             continue;
         };
         let lower = name.to_lowercase();
-        // `.part` (частичный файл), `.ytdl` (состояние загрузки), `.part-Frag…`
-        // и прочие `.part-*` (фрагменты DASH/HLS), а также брошенные файлы-карантины
-        // удаления (`.lfm-trash-…`).
+        // `.part`/`.ytdl`/`.part-*` (DASH/HLS fragments), plus abandoned
+        // deletion quarantine files (`.lfm-trash-...`).
         let is_temp = lower.ends_with(".part")
             || lower.ends_with(".ytdl")
             || lower.contains(".part-")
@@ -2343,8 +2224,8 @@ fn cleanup_orphan_temp_files(dir: &Path) {
         if !is_temp {
             continue;
         }
-        // Свежие (возможно, активные) файлы пропускаем. Любая ошибка чтения времени
-        // → считаем файл свежим и НЕ удаляем (перестраховка против гонок).
+        // Skip recent (possibly active) files; any error reading mtime is
+        // treated as "fresh" and left alone (race-safety).
         let old_enough = entry
             .metadata()
             .and_then(|m| m.modified())
@@ -2373,8 +2254,8 @@ fn find_output(dir: &Path, stem: &str) -> Option<PathBuf> {
             candidates.push(p);
         }
     }
-    // Предпочитаем поддерживаемое аудио-расширение (на случай, если рядом остался
-    // промежуточный файл ремукса), иначе — первый подходящий.
+    // Prefer a supported audio extension (in case a remux intermediate file
+    // is left behind), otherwise the first match.
     candidates
         .iter()
         .find(|p| {
@@ -2389,11 +2270,10 @@ fn find_output(dir: &Path, stem: &str) -> Option<PathBuf> {
         .or_else(|| candidates.into_iter().next())
 }
 
-/// Извлекает осмысленное сообщение об ошибке из stderr yt-dlp. Предпочитает
-/// собственную ошибку yt-dlp (последняя строка `ERROR: …`); для «голого» Python-
-/// трейсбэка (например `OSError: [Errno 22] Invalid argument`) возвращает
-/// последние непустые строки — с контекстом, где именно упало, — а не одну
-/// загадочную строку исключения без указания операции/файла.
+/// Extracts a meaningful error message from yt-dlp's stderr: prefers yt-dlp's
+/// own error (last `ERROR: …` line); for a bare Python traceback (e.g.
+/// `OSError: [Errno 22] Invalid argument`) returns the last few non-empty
+/// lines for context instead of one cryptic exception line.
 fn extract_ytdlp_error(stderr: &str) -> String {
     let lines: Vec<&str> = stderr
         .lines()
@@ -2414,7 +2294,7 @@ fn extract_ytdlp_error(stderr: &str) -> String {
     lines[start..].join(" | ")
 }
 
-/// Извлекает процент из строки прогресса yt-dlp вида `[download]  12.3% of ...`.
+/// Extracts the percentage from a yt-dlp progress line like `[download]  12.3% of ...`.
 fn parse_download_percent(line: &str) -> Option<f64> {
     if !line.contains("[download]") {
         return None;
@@ -2427,18 +2307,14 @@ fn parse_download_percent(line: &str) -> Option<f64> {
     line[start..idx].trim().parse::<f64>().ok()
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Теги (lofty) + регистрация в библиотеке
-// ──────────────────────────────────────────────────────────────────────────────
+// Tagging (lofty) + library registration
 
-/// Общий HTTP-клиент для обложек (инициализация пула/сертификатов дорогая —
-/// держим один экземпляр на процесс).
+/// Shared HTTP client for covers (pool/cert init is expensive — one instance per process).
 fn cover_client() -> &'static reqwest::blocking::Client {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
-            // Без User-Agent часть CDN (в т.ч. Apple/iTunes) отвечает 403 — тогда
-            // обложки скачанных треков периодически не подгружались бы.
+            // Without a User-Agent some CDNs (Apple/iTunes included) return 403.
             .user_agent("LFMusic/0.1.0 (+https://github.com/mel1x/LFMusic)")
             .timeout(Duration::from_secs(15))
             .build()
@@ -2454,14 +2330,14 @@ fn fetch_cover_bytes(url: &str) -> Option<Vec<u8>> {
         .ok()?
         .error_for_status()
         .ok()?;
-    // Отсекаем заведомо большие картинки по Content-Length, не загружая их целиком.
+    // Reject obviously oversized images by Content-Length before downloading fully.
     if let Some(len) = resp.content_length() {
         if len > MAX as u64 {
             return None;
         }
     }
-    // Читаем не более MAX+1 байт — страховка от слишком большого/битого ответа без
-    // корректного Content-Length (chunked): держим в памяти только верхнюю границу.
+    // Read at most MAX+1 bytes — guards against an oversized/malformed chunked
+    // response with no Content-Length, capping memory use.
     let mut bytes: Vec<u8> = Vec::new();
     resp.take((MAX + 1) as u64).read_to_end(&mut bytes).ok()?;
     if bytes.len() < 1000 || bytes.len() > MAX {
@@ -2470,8 +2346,8 @@ fn fetch_cover_bytes(url: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Определяет MIME обложки по сигнатуре (jpeg/png/webp/gif/bmp). lofty не должен
-/// помечать PNG/WebP как Jpeg — иначе обложка может не отобразиться.
+/// Detects cover MIME by magic bytes (jpeg/png/webp/gif/bmp) — lofty must not
+/// mislabel PNG/WebP as Jpeg or the cover may fail to render.
 fn detect_image_mime(bytes: &[u8]) -> lofty::picture::MimeType {
     use lofty::picture::MimeType;
     if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
@@ -2489,11 +2365,9 @@ fn detect_image_mime(bytes: &[u8]) -> lofty::picture::MimeType {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Текст песни (.lrc) — LRCLIB (lrclib.net): бесплатный источник без API-ключа
-// ──────────────────────────────────────────────────────────────────────────────
+// Lyrics (.lrc) — LRCLIB (lrclib.net): a free, keyless source
 
-/// Ответ LRCLIB (ключи camelCase). `instrumental` — у инструментала текста нет.
+/// LRCLIB response (camelCase keys). `instrumental` tracks have no lyrics.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LrclibLyrics {
@@ -2505,27 +2379,27 @@ struct LrclibLyrics {
     instrumental: bool,
 }
 
-/// Найденный текст песни: синхронизированный (LRC с таймкодами) и/или простой.
+/// Fetched lyrics: synced (LRC timecodes) and/or plain.
 struct FetchedLyrics {
-    /// Синхронизированный текст в формате LRC (`[mm:ss.xx] строка`).
+    /// Synced lyrics in LRC format (`[mm:ss.xx] line`).
     synced: Option<String>,
-    /// Простой текст без таймкодов.
+    /// Plain lyrics with no timecodes.
     plain: Option<String>,
 }
 
 impl FetchedLyrics {
-    /// Содержимое для `.lrc`-файла: предпочитаем синхро-версию.
+    /// Content for the `.lrc` file: prefers the synced version.
     fn lrc_body(&self) -> Option<&str> {
         self.synced.as_deref().or(self.plain.as_deref())
     }
-    /// Текст для встраивания в тег (USLT/`LYRICS`): предпочитаем простой.
+    /// Text to embed in the tag (USLT/`LYRICS`): prefers plain.
     fn tag_body(&self) -> Option<&str> {
         self.plain.as_deref().or(self.synced.as_deref())
     }
 }
 
-/// Преобразует ответ LRCLIB в [`FetchedLyrics`], отсеивая инструментал и пустые
-/// поля. `None` — пригодного текста нет.
+/// Converts an LRCLIB response into [`FetchedLyrics`], filtering out
+/// instrumentals and empty fields. `None` means nothing usable.
 fn usable_lyrics(l: LrclibLyrics) -> Option<FetchedLyrics> {
     if l.instrumental {
         return None;
@@ -2539,10 +2413,10 @@ fn usable_lyrics(l: LrclibLyrics) -> Option<FetchedLyrics> {
     Some(FetchedLyrics { synced, plain })
 }
 
-/// Запросить текст песни в LRCLIB. Сначала точный `/api/get` (требует длительность,
-/// совпадение в пределах ±2 c), при промахе — `/api/search` (берём первый результат
-/// с синхро-текстом, иначе с простым). Любой провал — `None` (трек скачается без
-/// текста). Источник открытый и без API-ключа — в духе [`crate::external`].
+/// Fetches lyrics from LRCLIB. Tries the exact `/api/get` first (requires
+/// duration, matched within ±2s); on a miss, falls back to `/api/search`
+/// (first result with synced lyrics, else plain). Any failure returns `None`
+/// (the track downloads without lyrics). Open/keyless source, like [`crate::external`].
 fn fetch_lyrics(
     artist: &str,
     title: &str,
@@ -2554,7 +2428,7 @@ fn fetch_lyrics(
     }
     let client = cover_client();
 
-    // Точный запрос: исполнитель + название (+ альбом) + длительность.
+    // Exact query: artist + title (+ album) + duration.
     if let Some(dur) = duration_secs {
         let url = format!(
             "https://lrclib.net/api/get?artist_name={}&track_name={}&album_name={}&duration={}",
@@ -2575,7 +2449,7 @@ fn fetch_lyrics(
         }
     }
 
-    // Фолбэк: поиск без жёсткой привязки к длительности.
+    // Fallback: search without a hard duration constraint.
     let url = format!(
         "https://lrclib.net/api/search?artist_name={}&track_name={}",
         percent_encode_query(artist),
@@ -2593,7 +2467,7 @@ fn fetch_lyrics(
     for l in results {
         if let Some(f) = usable_lyrics(l) {
             if f.synced.is_some() {
-                return Some(f); // синхро-версия — лучший вариант
+                return Some(f); // synced version is the best option
             }
             first_plain.get_or_insert(f);
         }
@@ -2601,8 +2475,8 @@ fn fetch_lyrics(
     first_plain
 }
 
-/// Пишет `.lrc`-файл рядом с треком (то же имя, расширение `.lrc`). Предпочитает
-/// синхро-текст. Best-effort: нет текста — ничего не делает.
+/// Writes a `.lrc` file next to the track (same name, `.lrc` extension),
+/// preferring synced lyrics. Best-effort: no lyrics means no-op.
 fn write_lyrics_sidecar(audio_path: &Path, lyrics: Option<FetchedLyrics>) {
     let Some(body) = lyrics.as_ref().and_then(|l| l.lrc_body()) else {
         return;
@@ -2613,9 +2487,9 @@ fn write_lyrics_sidecar(audio_path: &Path, lyrics: Option<FetchedLyrics>) {
     }
 }
 
-/// Проставляет теги (название/исполнитель/альбом + обложку + текст песни) в
-/// скачанный файл и пишет рядом `.lrc`-сайдкар ([`write_lyrics_sidecar`]).
-/// Best-effort: ошибки лишь логируются (контейнер вроде webm может не писаться).
+/// Writes tags (title/artist/album + cover + lyrics) to the downloaded file
+/// and a `.lrc` sidecar ([`write_lyrics_sidecar`]). Best-effort: errors are
+/// only logged (some containers like webm may not be taggable).
 fn write_tags(
     path: &Path,
     title: &str,
@@ -2628,10 +2502,10 @@ fn write_tags(
     use lofty::prelude::*;
     use lofty::tag::{ItemKey, Tag};
 
-    // ВАЖНО: тип файла определяем по содержимому (см. `read_tagged_file`), а не по
-    // расширению. yt-dlp ремуксит Opus-аудио в контейнер, у которого lofty по
-    // расширению ждёт Vorbis; без определения по магическим байтам открытие
-    // падает с «File missing magic signature», и теги/обложка не записываются.
+    // IMPORTANT: file type is detected by content (see `read_tagged_file`), not
+    // extension. yt-dlp remuxes Opus audio into a container where lofty's
+    // extension-based guess expects Vorbis; without magic-byte detection, opening
+    // fails with "File missing magic signature" and tags/cover never get written.
     let mut tagged = match crate::audio_player::AudioPlayer::read_tagged_file(path) {
         Some(t) => t,
         None => {
@@ -2639,14 +2513,14 @@ fn write_tags(
                 "[downloads] не удалось открыть для тегирования: {}",
                 path.display()
             );
-            // Контейнер не тегируется, но текст рядом сохранить можно (длительность
-            // для точного запроса неизвестна — полагаемся на поиск по названию).
+            // Container isn't taggable, but lyrics can still be saved alongside
+            // (duration for an exact query is unknown — falls back to title search).
             write_lyrics_sidecar(path, fetch_lyrics(artist, title, album, None));
             return;
         }
     };
 
-    // Длительность нужна LRCLIB для точного совпадения (±2 c) — читаем из файла.
+    // LRCLIB needs duration for exact matching (±2s) — read it from the file.
     let duration_secs = {
         let secs = tagged.properties().duration().as_secs();
         (secs > 0).then_some(secs)
@@ -2658,7 +2532,7 @@ fn write_tags(
         tagged.insert_tag(Tag::new(tag_type));
     }
     let Some(tag) = tagged.primary_tag_mut() else {
-        // В тег встроить не вышло — текст всё равно сохраняем рядом.
+        // Couldn't embed the tag — still save lyrics alongside.
         write_lyrics_sidecar(path, lyrics);
         return;
     };
@@ -2670,15 +2544,15 @@ fn write_tags(
             tag.set_album(al.to_string());
         }
     }
-    // Обложка: сначала прямой URL из результата поиска (Deezer/iTunes CDN), а если
-    // его нет или скачать не вышло — добираем через внешние провайдеры по
-    // исполнителю/альбому/названию (тот же механизм, что и для локальных треков).
+    // Cover: try the direct URL from search results (Deezer/iTunes CDN) first;
+    // if missing or the download fails, fall back to external providers by
+    // artist/album/title (same mechanism used for local tracks).
     if let Some(bytes) = resolve_cover_bytes(cover_url, artist, album.unwrap_or(""), title) {
         let mime = detect_image_mime(&bytes);
         let pic = Picture::new_unchecked(PictureType::CoverFront, Some(mime), None, bytes);
         tag.push_picture(pic);
     }
-    // Текст песни встраиваем в тег (USLT/`LYRICS`) — предпочтительно простой.
+    // Embed lyrics in the tag (USLT/`LYRICS`) — plain text preferred.
     if let Some(body) = lyrics.as_ref().and_then(|l| l.tag_body()) {
         tag.insert_text(ItemKey::Lyrics, body.to_string());
     }
@@ -2687,14 +2561,14 @@ fn write_tags(
         eprintln!("[downloads] не удалось записать теги: {}", e);
     }
 
-    // `.lrc`-сайдкар пишем после сохранения тегов; финальная уборка `stem.*` его не
-    // тронет (см. [`remove_stem_files`]).
+    // Write the `.lrc` sidecar after saving tags; the final `stem.*` cleanup
+    // won't touch it (see [`remove_stem_files`]).
     write_lyrics_sidecar(path, lyrics);
 }
 
-/// Достаёт байты обложки: пробует прямой `cover_url`, при неудаче — внешние
-/// источники (iTunes/Deezer/Cover Art Archive) по метаданным трека. Любой провал
-/// — `None` (тегирование без обложки).
+/// Gets cover bytes: tries the direct `cover_url` first, then falls back to
+/// external sources (iTunes/Deezer/Cover Art Archive) by track metadata.
+/// Any failure returns `None` (tagging proceeds without a cover).
 fn resolve_cover_bytes(
     cover_url: Option<&str>,
     artist: &str,
@@ -2716,13 +2590,12 @@ fn resolve_cover_bytes(
     None
 }
 
-/// Регистрирует папку скачиваний как библиотечную и пересканирует её, чтобы
-/// новые треки появились в каталоге.
-/// Точечно добавляет ОДИН только что скачанный файл в библиотеку (без обхода
-/// всей папки — путь известен) и возвращает исход. На успехе эмитит
-/// `downloads_library_updated` (фронт обновит каталог); при ошибке НЕ эмитит —
-/// воркер покажет её как ошибку импорта трека. `dir` — папка скачиваний (нужна
-/// для определения `folder_path` и дедупа с уже добавленными папками).
+/// Adds a single just-downloaded file to the library (no full-folder walk —
+/// the path is already known) and returns the outcome. On success emits
+/// `downloads_library_updated` (frontend refreshes the catalog); on error it
+/// does NOT emit — the worker surfaces it as a track-import error. `dir` is
+/// the download folder (needed to derive `folder_path` and dedupe against
+/// already-added folders).
 fn import_track(app: &AppHandle, dir: &Path, file_path: &Path) -> Result<(), String> {
     let separators = crate::settings::get_artist_separators(&app.state::<crate::SettingsState>());
     let state = app.state::<crate::LibraryState>();
@@ -2785,8 +2658,6 @@ mod tests {
         }
     }
 
-    // ── DownloadManager: очередь (queued/downloading/done/error/cancelled) ──
-
     #[test]
     fn take_next_queued_marks_downloading_and_clones_it() {
         let mut m = DownloadManager::default();
@@ -2848,9 +2719,9 @@ mod tests {
 
     #[test]
     fn apply_download_result_still_counts_run_done_if_item_was_removed_meanwhile() {
-        // Пользователь мог убрать элемент из очереди (см. remove_item) пока он
-        // качался — воркер об этом не знает и всё равно должен зачесть его в
-        // run_done, иначе прогресс-бар прогона зависнет не на 100%.
+        // The user could remove the item from the queue (see remove_item) while
+        // it was downloading — the worker doesn't know and must still count it
+        // toward run_done, or the run's progress bar would stall short of 100%.
         let mut m = DownloadManager::default();
         m.run_total = 1;
         m.apply_download_result(999, &Ok(PathBuf::from("/music/a.mp3")), None);
@@ -2958,8 +2829,6 @@ mod tests {
         assert!(!m.worker_running);
     }
 
-    // ── insert_request: дедупликация/force ───────────────────────────────────
-
     fn request(artist: &str, title: &str) -> DownloadRequest {
         DownloadRequest {
             title: title.into(),
@@ -3017,8 +2886,6 @@ mod tests {
         assert_eq!(m.items.len(), 1, "the stale errored duplicate must be dropped");
         assert_eq!(m.items[0].status, "queued");
     }
-
-    // ── download_one_core: ротация клиентов, bot-wall, cookies ──────────────
 
     #[derive(Default)]
     struct FakeAttempt {
@@ -3221,8 +3088,6 @@ mod tests {
         assert_eq!(*fake.login_expired_calls.borrow(), 0);
     }
 
-    // ── Уборка временных хвостов yt-dlp (.part/.ytdl/фрагменты) ─────────────
-
     #[test]
     fn cleanup_orphan_temp_files_removes_only_old_temp_markers() {
         let dir = temp_downloads_dir("cleanup_orphans");
@@ -3237,7 +3102,7 @@ mod tests {
         for f in [&old_part, &old_ytdl, &old_frag, &old_trash, &fresh_part, &finished_audio] {
             std::fs::write(f, b"x").unwrap();
         }
-        // "Давно не трогали" эмулируем явной установкой mtime на 2 суток назад.
+        // Emulate "untouched for a while" by explicitly setting mtime 2 days back.
         let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
         for f in [&old_part, &old_ytdl, &old_frag, &old_trash] {
             let file = std::fs::OpenOptions::new().write(true).open(f).unwrap();
@@ -3312,8 +3177,8 @@ mod tests {
         let dir = Path::new("C:\\Users\\melix\\Music\\LFMusic Downloads");
         let stem = clamp_stem_for_path(dir, "x".repeat(400));
         assert!(!stem.is_empty());
-        // Даже с уникализацией и худшим временным суффиксом yt-dlp путь обязан
-        // уложиться в Windows MAX_PATH (260) — иначе sanitize_open даёт [Errno 22].
+        // Even with uniquification and yt-dlp's worst-case temp suffix, the path
+        // must stay under Windows MAX_PATH (260) or sanitize_open gives [Errno 22].
         let worst = format!("{}\\{} (12).f251.webm.part", dir.display(), stem);
         assert!(
             worst.chars().count() < 260,
@@ -3354,12 +3219,10 @@ mod tests {
         assert_eq!(extract_ytdlp_error("  \n\n"), "yt-dlp завершился с ошибкой");
     }
 
-    // ── Классификация ошибок yt-dlp ─────────────────────────────────────────
-
     #[test]
     fn classify_detects_cookies_expired_before_generic_bot_wall() {
-        // Сообщение содержит оба маркера — "cookies"+"no longer valid" должно
-        // победить, т.к. это специфичнее и порядок проверки это гарантирует.
+        // Message contains both markers — "cookies"+"no longer valid" must win
+        // since it's more specific and check order guarantees that.
         let stderr = "ERROR: [youtube] Sign in to confirm you're not a bot. \
                        Your account cookies are no longer valid.";
         assert_eq!(classify_ytdlp_error(stderr), DownloadErrorKind::CookiesExpired);
@@ -3423,12 +3286,10 @@ mod tests {
 
     #[test]
     fn is_bot_wall_does_not_misfire_on_unrelated_cookie_mentions() {
-        // Просто упоминание "cookies" без "authentication"+"required" вместе не
-        // должно классифицироваться как бот-стена.
+        // A plain "cookies" mention without "authentication"+"required" together
+        // must not classify as a bot wall.
         assert!(!is_bot_wall("Loaded 12 cookies from file"));
     }
-
-    // ── parse_download_percent ──────────────────────────────────────────────
 
     #[test]
     fn parse_download_percent_extracts_value_from_progress_line() {
@@ -3450,8 +3311,6 @@ mod tests {
         assert_eq!(parse_download_percent("[download]  abc% of 1MiB"), None);
     }
 
-    // ── Имена файлов / пути ──────────────────────────────────────────────────
-
     #[test]
     fn is_supported_audio_ext_matches_known_extensions_only() {
         assert!(is_supported_audio_ext("mp3"));
@@ -3469,7 +3328,7 @@ mod tests {
 
     #[test]
     fn percent_encode_query_encodes_non_ascii_as_utf8_bytes() {
-        // "ё" в UTF-8 — два байта 0xD1 0x91.
+        // "ё" in UTF-8 is two bytes: 0xD1 0x91.
         let encoded = percent_encode_query("ё");
         assert_eq!(encoded, "%D1%91");
     }
@@ -3485,8 +3344,8 @@ mod tests {
     fn is_reserved_windows_name_rejects_normal_and_lookalike_names() {
         assert!(!is_reserved_windows_name("Console"));
         assert!(!is_reserved_windows_name("COM"));
-        assert!(!is_reserved_windows_name("COM0")); // COM0 не зарезервировано (цифра должна быть 1-9)
-        assert!(!is_reserved_windows_name("COM10")); // длиннее 4 символов
+        assert!(!is_reserved_windows_name("COM0")); // COM0 isn't reserved (digit must be 1-9)
+        assert!(!is_reserved_windows_name("COM10")); // longer than 4 chars
         assert!(!is_reserved_windows_name("Imagine Dragons - Believer"));
     }
 
@@ -3516,7 +3375,7 @@ mod tests {
         let stem = unique_stem(&dir, "Queen", "Bohemian Rhapsody");
         assert_eq!(stem, "Queen - Bohemian Rhapsody");
 
-        // Создаём файл с этим именем — повторный вызов должен уникализировать.
+        // Create a file with this name — the repeat call must uniquify.
         std::fs::write(dir.join(format!("{stem}.mp3")), b"x").unwrap();
         let stem2 = unique_stem(&dir, "Queen", "Bohemian Rhapsody");
         assert_eq!(stem2, "Queen - Bohemian Rhapsody (2)");
@@ -3535,8 +3394,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Артист и название состоят только из запрещённых символов — после
-        // sanitize обе части становятся пустыми.
+        // Artist and title consist only of forbidden characters — both become
+        // empty after sanitize.
         let stem = unique_stem(&dir, "///", ":::");
         assert_eq!(stem, "track");
 
@@ -3554,7 +3413,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Только artist задан, а title пуст после санитайза -> base = "CON".
+        // Only artist is set and title is empty after sanitize -> base = "CON".
         let stem = unique_stem(&dir, "CON", ":::");
         assert_eq!(stem, "CON_");
 
@@ -3569,9 +3428,9 @@ mod tests {
 
     #[test]
     fn is_within_downloads_blocks_parent_dir_traversal_for_nonexistent_file() {
-        // Файла не существует -> canonicalize падает -> используется лексический
-        // фолбэк. Путь с `..`, выходящий за пределы папки скачиваний, должен
-        // блокироваться — это защита от path traversal при удалении треков.
+        // File doesn't exist -> canonicalize fails -> falls back to lexical
+        // normalization. A path with `..` escaping the downloads folder must be
+        // blocked — this guards against path traversal when deleting tracks.
         let downloads_dir = Path::new("C:/Users/test/Music/LFMusic Downloads");
         let traversal = Path::new("C:/Users/test/Music/LFMusic Downloads/../../Desktop/x.flac");
         assert!(!is_within_downloads(downloads_dir, traversal));

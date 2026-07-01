@@ -21,15 +21,14 @@ interface OriginalTrack {
 
 const titleInput = ref('')
 const artistInput = ref('')
-// Локальный preview обложки: либо data URL текущей, либо src нового выбранного файла,
-// либо null если обложку решили сбросить.
+// Local cover preview: current cover's data URL, the newly picked file's src,
+// or null if the cover was reset.
 const coverPreview = ref<string | null>(null)
 const coverSourcePath = ref<string | null>(null)
 const coverReset = ref(false)
 
-// Оригинальные значения трека (как они в тегах файла, без переопределений).
-// Используется кнопкой «Сбросить» в шапке модалки и для определения,
-// является ли текущая обложка пользовательской.
+// Track's original tag values (no overrides applied); used by the "Reset"
+// button and to detect whether the current cover is user-set.
 const original = ref<OriginalTrack | null>(null)
 const loadingOriginal = ref(false)
 
@@ -37,8 +36,7 @@ const saving = ref(false)
 const errorText = ref('')
 const modalCardEl = ref<HTMLElement | null>(null)
 
-// Поля «Название»/«Исполнитель» — это textarea, плавно растущие до 2 строк
-// при переполнении (вместо горизонтального скролла).
+// Title/Artist fields are textareas that grow up to 2 lines instead of scrolling horizontally.
 const MAX_FIELD_LINES = 2
 function autoGrowField(el: HTMLTextAreaElement) {
     el.style.height = 'auto'
@@ -54,8 +52,8 @@ const vAutogrow = {
     mounted(el: HTMLTextAreaElement) { autoGrowField(el) },
     updated(el: HTMLTextAreaElement) { autoGrowField(el) },
 }
-// Поля одно-строчные по смыслу — Enter не вставляет перенос (но Ctrl/⌘+Enter
-// всплывает в document-обработчик и сохраняет трек).
+// Fields are single-line by intent: Enter doesn't insert a line break (Ctrl/Cmd+Enter
+// still bubbles to the document handler and saves).
 function onFieldEnter(e: KeyboardEvent) {
     if (e.ctrlKey || e.metaKey) return
     e.preventDefault()
@@ -80,16 +78,15 @@ const hasChanges = computed(() => {
     )
 })
 
-// Превью обложки совпадает с оригиналом из тегов файла → нет смысла
-// показывать «крестик сброса». Считаем сравнением data URL (для override
-// и оригинала это либо одинаковая base64-строка, либо обе пусты).
+// Cover preview matches the file tag's original, so the reset button is hidden.
+// Compared as data URLs (either the same base64 string, or both empty).
 const previewIsOriginal = computed(() => {
     if (coverSourcePath.value) return false
     if (!original.value) return false
     return (coverPreview.value || null) === (original.value.coverArt || null)
 })
 
-// Есть ли что сбрасывать в принципе — переопределения по любому из полей.
+// Whether any field has an override to reset.
 const canResetAll = computed(() => {
     if (!original.value || !currentTrack.value) return false
     const origTitle = (original.value.title || '').trim()
@@ -112,8 +109,7 @@ watch(isOpen, async (open) => {
         coverReset.value = false
         errorText.value = ''
         original.value = null
-        // Загружаем оригинал параллельно — нужен и для кнопки «Сбросить»,
-        // и чтобы решить, показывать ли крестик на обложке.
+        // Needed both for the "Reset" button and to decide whether to show the cover reset icon.
         await loadOriginal()
     }
 })
@@ -138,9 +134,8 @@ function resetAllToOriginal() {
     if (!original.value) return
     titleInput.value = original.value.title || ''
     artistInput.value = original.value.artist || ''
-    // «Сбросить» в модалке не сохраняет — только обновляет форму.
-    // Чтобы при последующем Save обложка тоже вернулась к оригинальной,
-    // помечаем coverReset = true (если у трека есть override-обложка).
+    // "Reset" only updates the form, it doesn't save. Mark coverReset so a
+    // subsequent Save also reverts the cover, if it has an override.
     coverSourcePath.value = null
     coverReset.value = original.value.hasOverrideCover
     coverPreview.value = original.value.coverArt || null
@@ -174,8 +169,7 @@ async function resetCover() {
     if (!currentTrack.value) return
     coverSourcePath.value = null
     coverReset.value = true
-    // Показываем оригинальную обложку из тегов файла; если её нет —
-    // только тогда превью становится «без обложки».
+    // Show the original cover from file tags; only falls back to "no cover" if absent.
     try {
         const original = await invoke<string | null>('get_original_cover_art', {
             filePath: currentTrack.value.file_path,
@@ -205,20 +199,16 @@ async function onSave() {
         }
         const updated = await invoke<TrackMetadata>('track_set_override', args)
 
-        // Обновляем запись в кэше, чтобы UI среагировал моментально.
-        // `updated` — авторитетный снимок (override уже применён, cover_art = URL
-        // override/встроенной обложки или null при сбросе). Если трек уже в кэше —
-        // перезаписываем поля на месте (Object.assign корректно применяет и сброс
-        // обложки в null, в отличие от merge-логики cacheTrack). Если в кэше нет
-        // (вытеснен LRU / не открывался) — кладём свежую запись.
+        // Update the cache entry so the UI reacts immediately. `updated` is the
+        // authoritative snapshot; use Object.assign (not cacheTrack's merge logic)
+        // so a cover reset to null is actually applied in place.
         const cached = getTrackByPath(filePath)
         if (cached) Object.assign(cached, updated)
         else cacheTracks([updated])
         if (playerCurrentTrack.value?.file_path === filePath) {
             playerCurrentTrack.value = { ...playerCurrentTrack.value, ...updated }
         }
-        // Полная перезагрузка — чтобы плейлисты исполнителей подхватили
-        // переименованного артиста и т.п.
+        // Full reload so artist playlists pick up the renamed artist, etc.
         await refreshLibrary()
         closeTrackEdit()
     } catch (e: any) {
@@ -640,8 +630,7 @@ onUnmounted(() => {
     font-weight: 500;
     line-height: 1.35;
     border: 1px solid hsla(0, 0%, 100%, 0.04);
-    /* textarea, растущая до 2 строк: без ручного ресайза, с переносом по словам
-       и плавной анимацией высоты. */
+    /* Textarea that grows to 2 lines: no manual resize, wraps words, animates height. */
     resize: none;
     overflow-y: hidden;
     white-space: pre-wrap;

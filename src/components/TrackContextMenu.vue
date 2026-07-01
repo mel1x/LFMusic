@@ -51,11 +51,10 @@ const { openTrackEdit } = useTrackEditModal()
 const { isDownloadedTrack, deleteDownloadedTrack } = useDownloads()
 const { t } = useI18n()
 
-// Трек скачан приложением — тогда показываем «Удалить трек» (файл + библиотека).
+// Only downloaded tracks get the "Delete track" action (removes file + library entry).
 const isDownloaded = computed(() => isDownloadedTrack(props.track.file_path))
 const showDeleteConfirm = ref(false)
-// Ошибка удаления (файл занят/нет прав) — показываем пользователю, а не глотаем:
-// иначе непонятно, удалился трек или нет.
+// Surface delete errors (file locked/no permission) instead of swallowing them.
 const deleteError = ref<string | null>(null)
 const deleteMessage = computed(() =>
     t('trackMenu.deleteConfirmMessage', { title: props.track.title || t('trackMenu.noTitle') }),
@@ -71,7 +70,6 @@ async function confirmDeleteTrack() {
         emit('close')
     } catch (e) {
         console.error('Не удалось удалить трек:', e)
-        // Сообщение из бэкенда приходит строкой; показываем его в диалоге ошибки.
         deleteError.value = e instanceof Error ? e.message : String(e)
     }
 }
@@ -84,9 +82,8 @@ function dismissDeleteError() {
     emit('close')
 }
 
-// "Перейти к альбому" имеет смысл только если у трека есть альбом и в нём
-// больше одного трека. Бэкенд создаёт album-плейлист только при count > 1,
-// поэтому достаточно проверить наличие соответствующей записи.
+// "Go to album" only makes sense if the backend created an album playlist for it,
+// which only happens when the album has more than one track.
 const trackAlbumName = computed(() => (props.track.album || '').trim())
 const hasAlbum = computed(() => {
     const name = trackAlbumName.value
@@ -566,7 +563,7 @@ function onAbout() {
 .ctx-item:hover svg {
     color: hsla(0, 0%, 100%, 0.8);
 }
-/* Деструктивное действие (удаление файла) — красноватый акцент. */
+/* Destructive action (file deletion) gets a red accent. */
 .ctx-item-danger {
     color: hsla(2, 60%, 72%, 0.9);
 }

@@ -82,13 +82,12 @@ const {
     onVolumeInput,
 } = usePlayerUi();
 
-// Закрываем оверлей при навигации между страницами.
+// Close overlay on page navigation.
 const route = useRoute();
 watch(() => route.fullPath, () => {
     if (showOverlay.value) closeFullscreen();
 });
 
-// ── Progress slider ─────────────────────────────────────────────────────────
 const progressSliderValue = computed(() => {
     return isSeeking.value ? seekValue.value : positionSecs.value;
 });
@@ -98,17 +97,15 @@ const fsProgressPercent = computed(() => {
     return ((progressSliderValue.value / durationSecs.value) * 100) + '%';
 });
 
-// ── Window controls (for fullscreen titlebar) ───────────────────────────────
 const minimizeWindow = () => win.minimize();
-// Через backend: в полноэкранном режиме (F11) клик выходит из него и
-// разворачивает окно, иначе — обычное переключение maximized.
+// Backend handles this: if in OS fullscreen (F11), click exits it and maximizes;
+// otherwise it's a normal maximize toggle.
 const maximizeWindow = () => invoke('toggle_window_maximize');
 const closeWindow = async () => {
     await saveState();
     win.close();
 };
 
-// ── Queue fullscreen track interactions ──────────────────────────────────────
 const qfTrackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null);
 
 function onQfTrackClick(e: MouseEvent, track: TrackMetadata) {
@@ -137,7 +134,6 @@ function openQfTrackMenu(e: MouseEvent, track: TrackMetadata) {
     qfTrackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track };
 }
 
-// ── Queue fullscreen cover overlay actions ───────────────────────────────────
 const qfCoverMenu = ref<{ x: number; y: number } | null>(null);
 
 function openQfCoverMenu(e: MouseEvent) {
@@ -154,7 +150,6 @@ function openQfCoverMenu(e: MouseEvent) {
 </script>
 
 <template>
-    <!-- Unified fullscreen overlay (player + queue) -->
     <Teleport to="body">
         <Transition name="fs">
             <div
@@ -210,7 +205,6 @@ function openQfCoverMenu(e: MouseEvent) {
                             </div>
                             <div class="qf-cover-dim"></div>
 
-                            <!-- DESKTOP PLAYBACK CONTROLS -->
                             <div class="qf-player-controls desktop-only" :class="{ 'menu-open': qfCoverMenu }">
                                 <button
                                     class="qf-corner-btn qf-corner-tr"
@@ -279,7 +273,6 @@ function openQfCoverMenu(e: MouseEvent) {
                             </div>
                         </div>
 
-                        <!-- DESKTOP METADATA AND PROGRESS BAR -->
                         <div class="fs-info desktop-only">
                             <div v-truncate class="fs-title">{{ trackTitle }}</div>
                             <div class="fs-artist"><TrackArtists :artist="currentTrack?.artist" /></div>
@@ -310,7 +303,6 @@ function openQfCoverMenu(e: MouseEvent) {
                             </div>
                         </div>
 
-                        <!-- MOBILE FULLSCREEN PLAYER CONTROLS (WITHOUT VOLUME CONTROL, ENLARGED COVER, TRANSPARENT SIDE BUTTONS) -->
                         <div class="qf-mobile-layout mobile-only">
                             <div class="qf-mobile-meta-row">
                                 <div class="fs-info">
@@ -487,8 +479,6 @@ function openQfCoverMenu(e: MouseEvent) {
 </template>
 
 <style scoped>
-/* ── Fullscreen overlay ───────────────────────────────────────────────────── */
-
 .fullscreen-overlay {
     position: fixed;
     top: 0;
@@ -737,8 +727,6 @@ function openQfCoverMenu(e: MouseEvent) {
     user-select: none;
 }
 
-/* ── Unified fullscreen overlay ──────────────────────────────────────── */
-
 .qf-content {
     position: relative;
     z-index: 1;
@@ -756,7 +744,6 @@ function openQfCoverMenu(e: MouseEvent) {
     display: none !important;
 }
 .desktop-only {
-    /* visible on desktop */
 }
 .qf-left {
     display: flex;
@@ -1105,7 +1092,7 @@ function openQfCoverMenu(e: MouseEvent) {
 .qf-hover-icon {
     position: absolute;
     top: 50%;
-    /* центр обложки: padding-left 6px + 44/2 = 28px */
+    /* cover center: padding-left 6px + 44/2 = 28px */
     left: 28px;
     transform: translate(-50%, -50%);
     display: flex;
@@ -1260,7 +1247,6 @@ function openQfCoverMenu(e: MouseEvent) {
         display: none !important;
     }
 
-    /* Refined Mobile Layout */
     .qf-mobile-layout {
         display: flex !important;
         flex-direction: column !important;
@@ -1269,7 +1255,6 @@ function openQfCoverMenu(e: MouseEvent) {
         align-items: stretch !important;
     }
 
-    /* 1. Metadata row */
     .qf-mobile-meta-row {
         display: flex !important;
         flex-direction: row !important;
@@ -1326,7 +1311,6 @@ function openQfCoverMenu(e: MouseEvent) {
         height: 20px !important;
     }
 
-    /* 2. Progress Bar */
     .qf-mobile-layout .fs-progress {
         width: 100% !important;
         max-width: none !important;
@@ -1342,7 +1326,6 @@ function openQfCoverMenu(e: MouseEvent) {
         color: hsla(0, 0%, 100%, 0.5) !important;
     }
 
-    /* 3. Playback Controls Row */
     .qf-mobile-playback-row {
         display: flex !important;
         flex-direction: row !important;
@@ -1400,7 +1383,6 @@ function openQfCoverMenu(e: MouseEvent) {
         height: 22px !important;
     }
 
-    /* Outermost buttons (Shuffle, Repeat): No background, only icons */
     .qf-mobile-side-btn {
         width: 40px !important;
         height: 40px !important;
@@ -1424,7 +1406,6 @@ function openQfCoverMenu(e: MouseEvent) {
         height: 20px !important;
     }
 
-    /* 4. Wide bottom Queue Button */
     .qf-mobile-queue-toggle-btn {
         width: 100% !important;
         height: 48px !important;

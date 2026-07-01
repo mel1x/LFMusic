@@ -2,12 +2,8 @@ import { watchEffect } from "vue";
 import { useSettings } from "./useSettings";
 import { usePlayer } from "./usePlayer";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Динамическое темирование: из акцентного цвета текущего трека (или статической
-// настройки) выставляет CSS-переменные --accent-* на :root, из которых строятся
-// все цвета компонентов. Также задаёт цвет системных панелей (Android/mobile).
-// Вынесено из App.vue без изменения поведения; вызывается один раз в корне.
-// ──────────────────────────────────────────────────────────────────────────────
+// Dynamic theming: derives --accent-* CSS vars on :root from the current track's
+// accent color (or the static setting); also sets the Android/mobile system bar color.
 
 function hexToHSL(hex: string) {
     const r = parseInt(hex.slice(1, 3), 16) / 255;
@@ -79,7 +75,7 @@ function hslToHex(h: number, s: number, l: number) {
 type Rgb = { r: number; g: number; b: number };
 
 const ACCENT_TRANSITION_MS = 350;
-// Блок плеера ведёт смену цвета — анимируется по своему, более короткому таймингу.
+// Player bar leads the color change with its own shorter timing.
 const PLAYER_TRANSITION_MS = 150;
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -89,17 +85,14 @@ export function useAccentTheme() {
     const { settings } = useSettings();
     const { currentAccentColor } = usePlayer();
 
-    // Анимируем смену акцента в RGB-пространстве через requestAnimationFrame, а не
-    // интерполяцией CSS-переменных по отдельности. Причина: --accent-h (тон) при
-    // линейной интерполяции проходит по дуге цветового круга, поэтому синий→бежевый
-    // шёл бы через насыщенный зелёный/пурпурный. RGB-интерполяция идёт через
-    // приглушённый промежуточный тон и выглядит как естественное «перетекание».
-    // Каждый кадр промежуточный RGB пересчитывается обратно в HSL для --accent-*,
-    // из которых строятся все цвета компонентов и фоны (--dark-bg/--light-bg).
+    // Animate in RGB space via requestAnimationFrame rather than lerping HSL directly:
+    // interpolating hue (--accent-h) linearly arcs through the color wheel, so
+    // blue->beige would pass through saturated green/purple. RGB lerp avoids that.
+    // Each frame the intermediate RGB is converted back to HSL for --accent-*.
     const root = document.documentElement.style;
 
-    // Текущие отображаемые цвета: база (→ --accent-h/s/l), accent (→ --accent-color)
-    // и player (→ --player-accent-h/s/l, тот же целевой цвет, но быстрее).
+    // Displayed colors: base (-> --accent-h/s/l), accent (-> --accent-color),
+    // and player (-> --player-accent-h/s/l, same target but faster).
     let curBase: Rgb | null = null;
     let curAccent: Rgb | null = null;
     let curPlayer: Rgb | null = null;
@@ -130,7 +123,7 @@ export function useAccentTheme() {
     const animateTo = (targetBase: Rgb, targetAccent: Rgb) => {
         if (rafId !== null) cancelAnimationFrame(rafId);
 
-        // Первый запуск — выставляем мгновенно, без анимации от чёрного.
+        // First run: apply instantly instead of animating from black.
         if (!curBase || !curAccent || !curPlayer) {
             curBase = targetBase;
             curAccent = targetAccent;
@@ -154,7 +147,7 @@ export function useAccentTheme() {
 
         const step = (now: number) => {
             const elapsed = now - start;
-            // Два таймлайна с общим стартом: плеер короче → доезжает первым.
+            // Two timelines sharing a start time; player finishes first (shorter).
             const eBase = easeInOut(Math.min(elapsed / ACCENT_TRANSITION_MS, 1));
             const ePlayer = easeInOut(Math.min(elapsed / PLAYER_TRANSITION_MS, 1));
 
@@ -179,8 +172,7 @@ export function useAccentTheme() {
             ? (currentAccentColor.value ?? "#1a1a1a")
             : settings.value.static_accent_color;
         const { h, s } = hexToHSL(hex);
-        // --accent-color: для почти-чёрного серого фолбэка осветляем до #353535
-        // (как раньше), иначе совпадает с базовым цветом.
+        // Near-black gray fallback: lighten to #353535 so it doesn't match the base color.
         const accentHex = h === 0 && s === 0 ? "#353535" : hex;
         animateTo(hexToRgb(hex), hexToRgb(accentHex));
     });

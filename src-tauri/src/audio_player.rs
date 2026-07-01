@@ -20,9 +20,6 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-// ── Публичные типы ──────────────────────────────────────────────────────────
-
-/// Метаданные трека
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackMetadata {
     pub title: Option<String>,
@@ -37,9 +34,9 @@ pub struct TrackMetadata {
     pub bitrate: Option<u32>,
     pub is_lossless: bool,
     pub file_path: String,
-    /// Обложка трека в виде data URL (data:image/jpeg;base64,...)
+    /// Data URL (data:image/jpeg;base64,...)
     pub cover_art: Option<String>,
-    /// Акцентный цвет обложки в формате hex (#RRGGBB)
+    /// Hex (#RRGGBB)
     pub accent_color: Option<String>,
     pub bpm: Option<f32>,
     pub loudness: Option<f32>,
@@ -50,7 +47,6 @@ pub struct TrackMetadata {
     pub audio_fingerprint: Option<String>,
 }
 
-/// Состояние воспроизведения
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum PlaybackState {
     Stopped,
@@ -58,29 +54,25 @@ pub enum PlaybackState {
     Paused,
 }
 
-/// Лёгкий статус для частого поллинга (без полных метаданных трека)
+/// Lightweight status for frequent polling (no full track metadata)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerStatus {
     pub state: PlaybackState,
     pub volume: f32,
     pub position_secs: f64,
-    /// Путь текущего трека — для определения смены трека на фронте
     pub current_file_path: Option<String>,
 }
 
-// ── Эквалайзер ─────────────────────────────────────────────────────────────
-
-/// Центральные частоты 10-полосного эквалайзера (Гц)
+/// 10-band EQ center frequencies (Hz)
 pub const EQ_BANDS: [f32; 10] = [60.0, 170.0, 310.0, 600.0, 1000.0, 3000.0, 6000.0, 12000.0, 14000.0, 16000.0];
 
-/// Настройки эквалайзера, разделяемые между AudioPlayer и EqSource
+/// Shared between AudioPlayer and EqSource
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EqSettings {
-    /// Включён ли эквалайзер
     pub enabled: bool,
-    /// Усиление каждой полосы в dB (от -12 до +12)
+    /// Per-band gain in dB (-12..+12)
     pub bands: Vec<f32>,
-    /// Общий уровень (preamp) в dB (от -12 до +12)
+    /// Preamp in dB (-12..+12)
     pub gain: f32,
 }
 
@@ -94,7 +86,7 @@ impl Default for EqSettings {
     }
 }
 
-/// Коэффициенты биквадратного фильтра (Direct Form I)
+/// Biquad coefficients (Direct Form I)
 #[derive(Debug, Clone, Copy)]
 struct BiquadCoeffs {
     b0: f32, b1: f32, b2: f32,
@@ -102,10 +94,9 @@ struct BiquadCoeffs {
 }
 
 impl BiquadCoeffs {
-    /// Рассчитать коэффициенты peaking EQ фильтра
     fn peaking_eq(sample_rate: f32, center_freq: f32, gain_db: f32, q: f32) -> Self {
         if gain_db.abs() < 0.01 {
-            // Нейтральный фильтр — пропускает без изменений
+            // Passthrough
             return Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
         }
 
@@ -126,23 +117,17 @@ impl BiquadCoeffs {
     }
 }
 
-/// Состояние одного канала биквадратного фильтра
 #[derive(Debug, Clone, Copy, Default)]
 struct BiquadState {
     x1: f32, x2: f32,
     y1: f32, y2: f32,
 }
 
-/// Мягкий лимитер: линейный при |x| <= T, ниже — плавное насыщение через tanh.
-/// При |x| <= 0.97 эффекта нет; выше — плавно сжимается к потолку CEILING.
-///
-/// KNEE (ширина "колена" по входу) намеренно отвязана от зазора (CEILING - T):
-/// раньше `over` делился на (1.0 - T) = 0.03, и tanh насыщался до ровно 1.0
-/// уже при x≈1.2 — для большей части громкого диапазона лимитер был фактически
-/// жёстким, а не мягким. CEILING выбран строго меньше 1.0, чтобы сэмпл никогда
-/// не возвращал ровно ±1.0 — это задел на случай будущей конвертации в
-/// целочисленный формат, где сэмпл == 1.0 при пересчёте даёт значение на
-/// единицу больше максимума (переполнение).
+/// Soft limiter: passthrough below T=0.97, tanh saturation above it toward CEILING.
+/// KNEE is deliberately decoupled from (CEILING - T): dividing `over` by that gap
+/// directly used to saturate tanh to exactly 1.0 already at x≈1.2, making the
+/// limiter effectively hard-clip for most of the loud range. CEILING < 1.0 so a
+/// sample never hits exactly ±1.0 (guards against overflow if ever converted to int).
 #[inline(always)]
 fn soft_clip(x: f32) -> f32 {
     const T: f32 = 0.97;
@@ -170,25 +155,22 @@ impl BiquadState {
     }
 }
 
-/// Source-обёртка, применяющая 10-полосный параметрический EQ в реальном времени.
-/// Читает настройки из разделяемого Arc<RwLock<EqSettings>>.
+/// Applies the 10-band parametric EQ in real time, reading settings from a shared lock.
 struct EqSource<S: Source<Item = f32>> {
     source: S,
     eq_settings: Arc<RwLock<EqSettings>>,
-    /// Текущие коэффициенты — пересчитываются при изменении настроек
     coeffs: Vec<BiquadCoeffs>,
-    /// Состояние фильтров: [band][channel]
+    /// [band][channel]
     states: Vec<Vec<BiquadState>>,
-    /// Кэш последних значений bands для детекции изменений
+    /// Cached to detect settings changes
     cached_bands: Vec<f32>,
     cached_enabled: bool,
-    /// Кэш общего уровня в dB
     cached_gain_db: f32,
-    /// Общий уровень (линейный множитель)
+    /// Linear multiplier
     cached_gain_linear: f32,
-    /// Счётчик сэмплов для периодической проверки настроек
+    /// Counts down to the next settings-change check
     samples_since_check: usize,
-    /// Счётчик текущего канала (interleaved: 0, 1, 0, 1, ...)
+    /// Interleaved channel counter: 0, 1, 0, 1, ...
     current_channel: usize,
     channels: u16,
     sample_rate: u32,
@@ -229,7 +211,6 @@ impl<S: Source<Item = f32>> EqSource<S> {
         }
     }
 
-    /// Проверить и обновить коэффициенты при изменении настроек
     fn maybe_update_coeffs(&mut self) {
         let settings = match self.eq_settings.try_read() {
             Ok(s) => s,
@@ -246,7 +227,6 @@ impl<S: Source<Item = f32>> EqSource<S> {
         self.cached_gain_linear = 10.0_f32.powf(settings.gain / 20.0);
         drop(settings);
 
-        // Пересчитать коэффициенты
         for (i, &freq) in EQ_BANDS.iter().enumerate() {
             let gain = self.cached_bands.get(i).copied().unwrap_or(0.0);
             self.coeffs[i] = BiquadCoeffs::peaking_eq(self.sample_rate as f32, freq, gain, 1.4);
@@ -266,7 +246,7 @@ impl<S: Source<Item = f32>> Iterator for EqSource<S> {
             self.current_channel = 0;
         }
 
-        // Проверяем настройки каждые ~1024 сэмпла
+        // Check settings every ~1024 samples
         self.samples_since_check += 1;
         if self.samples_since_check >= 1024 {
             self.samples_since_check = 0;
@@ -292,8 +272,6 @@ impl<S: Source<Item = f32>> Source for EqSource<S> {
     fn sample_rate(&self) -> u32 { self.sample_rate }
     fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
 }
-
-// ── Команды аудио-потока ────────────────────────────────────────────────────
 
 type Resp = mpsc::SyncSender<Result<(), String>>;
 
@@ -333,8 +311,6 @@ enum AudioCmd {
     },
 }
 
-// ── SymphoniaSource ─────────────────────────────────────────────────────────
-
 struct SymphoniaSource {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     format_reader: Box<dyn symphonia::core::formats::FormatReader>,
@@ -370,15 +346,12 @@ impl SymphoniaSource {
             .map(|t| (t.id, t.codec_params.clone()))
             .collect();
 
-        // Контейнер может нести больше одного ненулевого потока — например,
-        // некоторые инструменты встраивают обложку в OGG/Opus как отдельный
-        // MJPEG-"видео"-поток (легаси-механизм OGM), а не через
-        // METADATA_BLOCK_PICTURE. CodecParameters не различает аудио/видео, и
-        // такой поток может оказаться первым в списке треков — декодер под
-        // него не соберётся (в реестре symphonia нет видео-декодеров), и
-        // раньше это валило воспроизведение всего файла. Поэтому пробуем
-        // собрать декодер по очереди для каждого ненулевого трека и берём
-        // первый, для которого это удалось.
+        // A container can hold more than one non-null stream — e.g. some tools embed
+        // cover art in OGG/Opus as a legacy MJPEG "video" stream (OGM-style) instead of
+        // METADATA_BLOCK_PICTURE. CodecParameters doesn't distinguish audio/video, and
+        // that stream can be listed first with no matching symphonia decoder, which used
+        // to break playback of the whole file. Try each non-null track in turn and use
+        // the first one that actually builds a decoder.
         let mut last_err = "Не найден аудио трек".to_string();
         let mut resolved = None;
         for (id, params) in candidates {
@@ -484,25 +457,18 @@ impl Source for SymphoniaSource {
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
-// ── BufferedSymphoniaSource ─────────────────────────────────────────────────
-
-/// Сколько декодированных пакетов-блоков удерживается в кольцевом буфере.
-/// Блок — сэмплы одного пакета (FLAC ~4096 кадров, MP3 ~1152, Opus ~960).
-/// 64 блока дают ~1–3 с упреждающего декодирования и поглощают рывки чтения с
-/// диска (флешка, сетевой диск), оставаясь скромными по памяти (< ~2 МБ).
+/// Ring-buffer depth in decoded packet-blocks (FLAC ~4096 frames, MP3 ~1152, Opus ~960
+/// per block). 64 blocks give ~1-3s of read-ahead to absorb slow disk I/O (USB/network
+/// drives) while staying under ~2MB.
 const DECODE_QUEUE_BLOCKS: usize = 64;
 
-/// Конвейерный источник: декодирование пакетов вынесено в фоновый поток
-/// `audio-decode`, который наполняет ограниченную SPSC-очередь готовыми
-/// сэмплами. Аудио-поток (`next()`) лишь забирает готовые блоки из памяти,
-/// поэтому медленное чтение или декодирование высокобитрейтного FLAC/WAV больше
-/// не вызывает заиканий и щелчков: при насыщенном буфере `next()` никогда не
-/// упирается в диск.
+/// Pipelined source: packet decoding runs on a background `audio-decode` thread that
+/// fills a bounded SPSC queue; `next()` only pulls ready blocks, so slow disk reads or
+/// decoding high-bitrate FLAC/WAV no longer cause audio glitches.
 ///
-/// Время жизни источника = один отрезок воспроизведения. При смене трека,
-/// seek'е или остановке rodio роняет источник → `rx` закрывается → блокирующий
-/// `send()` в фоновом потоке возвращает ошибку, поток завершается и освобождает
-/// файл. Отдельный стоп-флаг и `join` не нужны.
+/// Lifetime = one playback span. On track change/seek/stop, rodio drops the source,
+/// closing `rx`; the background thread's blocking `send()` then errors out and the
+/// thread exits on its own — no separate stop flag or `join` needed.
 struct BufferedSymphoniaSource {
     sample_rate: u32,
     channels: u16,
@@ -513,34 +479,32 @@ struct BufferedSymphoniaSource {
 
 impl BufferedSymphoniaSource {
     fn new_with_seek(file_path: &str, seek_secs: f64) -> Result<Self, String> {
-        // Открываем файл и создаём декодер синхронно: так сразу узнаём частоту
-        // дискретизации и число каналов (нужны rodio до старта потока), а ошибки
-        // открытия/seek возвращаем вызывающему как и раньше.
+        // Open/decode synchronously so sample rate and channel count are known
+        // immediately (rodio needs them before the thread starts), and open/seek
+        // errors still surface to the caller directly.
         let mut inner = SymphoniaSource::new_with_seek(file_path, seek_secs)?;
         let sample_rate = inner.sample_rate;
         let channels = inner.channels;
 
-        // Ограниченная очередь = backpressure: при полном буфере декодер засыпает
-        // на `send()`, при опустевшем — consumer ждёт на `recv()`.
+        // Bounded queue = backpressure: decoder blocks on `send()` when full,
+        // consumer blocks on `recv()` when empty.
         let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(DECODE_QUEUE_BLOCKS);
 
         std::thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
                 while inner.decode_next_packet() {
-                    // Забираем готовый блок без копирования; следующий декод
-                    // переиспользует уже пустой `current_samples`.
+                    // Take without copying; next decode reuses the emptied buffer.
                     let block = std::mem::take(&mut inner.current_samples);
                     if block.is_empty() {
                         continue;
                     }
                     if tx.send(block).is_err() {
-                        // Consumer уничтожен (смена трека/seek/stop) — выходим.
-                        return;
+                        return; // consumer gone (track change/seek/stop)
                     }
                 }
-                // EOF/фатальная ошибка декодера: `tx` роняется здесь, и consumer
-                // получит `Err` из `recv()` после вычерпывания остатка очереди.
+                // EOF/fatal decode error: dropping `tx` here lets the consumer see
+                // `Err` from `recv()` once it drains the rest of the queue.
             })
             .map_err(|e| format!("Не удалось запустить поток декодирования: {}", e))?;
 
@@ -559,10 +523,7 @@ impl Iterator for BufferedSymphoniaSource {
 
     fn next(&mut self) -> Option<f32> {
         if self.pos >= self.current.len() {
-            // Ждём готовый блок. На штатной нагрузке буфер почти всегда непуст,
-            // поэтому реального ожидания диска тут нет; блокировка случается лишь
-            // при недогрузке и эквивалентна прежнему синхронному декодированию,
-            // но без щелчков при нормальной работе.
+            // Blocks only happen under starvation; normally the buffer stays non-empty.
             match self.rx.recv() {
                 Ok(block) => {
                     self.current = block;
@@ -586,8 +547,6 @@ impl Source for BufferedSymphoniaSource {
     fn sample_rate(&self) -> u32 { self.sample_rate }
     fn total_duration(&self) -> Option<Duration> { None }
 }
-
-// ── FadeOut ─────────────────────────────────────────────────────────────────
 
 struct FadeOut<S: Source<Item = f32>> {
     source: S,
@@ -623,18 +582,14 @@ impl<S: Source<Item = f32>> Source for FadeOut<S> {
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
-// ── AnalyzerSource ────────────────────────────────────────────────────────────
-
-/// Прозрачная обёртка-«отвод»: пропускает сэмплы без изменений, попутно сводя
-/// кадры в моно и подавая блоки в общий `SpectrumAnalyzer` для БПФ-визуализации.
-/// Ставится поверх EQ (и fade-in), чтобы спектр отражал реально слышимый сигнал.
+/// Transparent tap: passes samples through unchanged while mixing frames to mono and
+/// feeding blocks to the shared `SpectrumAnalyzer` for FFT visualization. Placed above
+/// EQ (and fade-in) so the spectrum reflects what's actually audible.
 struct AnalyzerSource<S: Source<Item = f32>> {
     source: S,
     analyzer: Arc<SpectrumAnalyzer>,
-    /// Флаг «трек доиграл»: выставляется в `true`, когда обёрнутый источник
-    /// исчерпан (EOF). Живёт в `AudioPlayer` как `sink_empty` — главный поток
-    /// читает его одной атомарной загрузкой вместо блокирующего опроса sink'а
-    /// через канал аудио-потока.
+    /// Set to `true` on EOF; mirrored in `AudioPlayer::sink_empty` so the main thread
+    /// can poll via a plain atomic load instead of round-tripping the command channel.
     finished: Arc<AtomicBool>,
     channels: u16,
     sample_rate: u32,
@@ -644,8 +599,8 @@ struct AnalyzerSource<S: Source<Item = f32>> {
 }
 
 impl<S: Source<Item = f32>> AnalyzerSource<S> {
-    /// Размер блока моно-сэмплов между подачами в анализатор: реже берём
-    /// мьютекс (~раз в 256 кадров), не теряя плавности на 60 fps.
+    /// Mono samples per analyzer push — batches the mutex lock (~once per 256 frames)
+    /// while staying smooth at 60fps.
     const BLOCK: usize = 256;
 
     fn new(source: S, analyzer: Arc<SpectrumAnalyzer>, finished: Arc<AtomicBool>) -> Self {
@@ -671,14 +626,12 @@ impl<S: Source<Item = f32>> Iterator for AnalyzerSource<S> {
         let sample = match self.source.next() {
             Some(s) => s,
             None => {
-                // EOF: помечаем sink опустевшим. Флаг сбрасывается в `false`
-                // при создании нового sink'а в аудио-потоке.
+                // Reset to `false` when a new sink is created in the audio thread.
                 self.finished.store(true, Ordering::Relaxed);
                 return None;
             }
         };
 
-        // Визуализатор выключен — пропускаем звук как есть, без снятия спектра.
         if !self.analyzer.is_enabled() {
             return Some(sample);
         }
@@ -707,9 +660,6 @@ impl<S: Source<Item = f32>> Source for AnalyzerSource<S> {
     fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
 }
 
-// ── Вспомогательные функции ─────────────────────────────────────────────────
-
-/// Извлечь обложку из lofty тега (CoverFront или первая доступная)
 fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
     let picture = tag
         .pictures()
@@ -726,11 +676,9 @@ fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
     Some(format!("data:{};base64,{}", mime, b64))
 }
 
-/// Извлечь акцентный цвет из сырых байтов изображения.
-/// Строит взвешенную по насыщенности гистограмму оттенков: побеждает оттенок,
-/// который занимает наибольшую «видимую» цветовую массу обложки (площадь ×
-/// насыщенность), а не редкие сочные пиксели. Жёлтые и кислотные тона
-/// исключаются или приглушаются — они плохо работают как цвет UI.
+/// Builds a saturation-weighted hue histogram: the winning hue is the one with the
+/// largest "visible" color mass (area x saturation), not just the most vivid pixel.
+/// Yellow/acid tones are excluded or muted since they make poor UI accent colors.
 pub fn extract_accent_color(image_data: &[u8]) -> Option<String> {
     let img = image::load_from_memory(image_data).ok()?;
     let thumb = img.thumbnail(96, 96);
@@ -740,7 +688,7 @@ pub fn extract_accent_color(image_data: &[u8]) -> Option<String> {
 const HUE_BINS: usize = 36;
 const HUE_BIN_WIDTH: f64 = 360.0 / HUE_BINS as f64;
 
-/// Зона жёлтого, запрещённая для UI-акцента.
+/// Yellow zone, disallowed as a UI accent.
 const YELLOW_FROM: f64 = 45.0;
 const YELLOW_TO: f64 = 78.0;
 
@@ -757,7 +705,7 @@ struct HueBin {
     light: f64,
 }
 
-/// Сглаженное окно из трёх соседних бинов: масса и средневзвешенный цвет.
+/// Smoothed window over 3 neighboring bins: mass and weighted-average color.
 #[derive(Clone, Copy, Default)]
 struct HueWindow {
     weight: f64,
@@ -780,12 +728,11 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
     for px in rgb.pixels() {
         let (h, s, l) = rgb_to_hsl(px[0], px[1], px[2]);
         light_sum += l;
-        // Почти серые и экстремально тёмные/светлые пиксели оттенка не несут
+        // Near-gray and extreme dark/light pixels carry no meaningful hue
         if s < 0.12 || !(0.06..=0.94).contains(&l) {
             continue;
         }
-        // Видимая цветовая масса пикселя: чем насыщеннее и ближе к средней
-        // светлоте, тем заметнее его оттенок на обложке.
+        // Visible color mass: more saturated + closer to mid-lightness = more noticeable
         let w = s * (1.0 - (2.0 * l - 1.0).abs()).sqrt();
         let bin = &mut bins[((h / HUE_BIN_WIDTH) as usize).min(HUE_BINS - 1)];
         let rad = h.to_radians();
@@ -797,8 +744,8 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         chroma_weight += w;
     }
 
-    // Почти монохромная обложка: нейтральный серый по её средней светлоте,
-    // чтобы случайный цветной пиксель-шум не красил весь интерфейс.
+    // Near-monochrome cover: fall back to neutral gray so stray color noise
+    // doesn't tint the whole UI.
     if chroma_weight < total_px * 0.015 {
         let l = (light_sum / total_px).clamp(0.30, 0.46);
         let (r, g, b) = hsl_to_rgb(0.0, 0.0, l);
@@ -828,8 +775,7 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         return None;
     }
 
-    // Кандидаты — только реально заметные оттенки (≥6% цветовой массы):
-    // мелкое сочное пятно не должно красить интерфейс.
+    // Only keep hues with >= 6% of the color mass: a tiny vivid spot shouldn't win.
     let mut pool: Vec<usize> = (0..HUE_BINS)
         .filter(|&i| windows[i].weight >= chroma_weight * 0.06)
         .collect();
@@ -837,8 +783,8 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         pool = (0..HUE_BINS).filter(|&i| windows[i].weight > 0.0).collect();
     }
 
-    // Жёлтые оттенки выкидываем, если есть хоть одна заметная альтернатива.
-    // Если вся обложка жёлтая — оставляем, normalize_accent_hsl уведёт оттенок.
+    // Drop yellow if a non-yellow alternative exists; if the whole cover is yellow,
+    // keep it — normalize_accent_hsl() will shift the hue out of the zone later.
     let non_yellow: Vec<usize> = pool
         .iter()
         .copied()
@@ -848,8 +794,8 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         pool = non_yellow;
     }
 
-    // Доминантность решает в первую очередь, качество цвета — во вторую:
-    // редкий, но сочный цвет не должен обгонять основной тон обложки.
+    // Dominance is weighted first, color quality second: a rare vivid hue
+    // shouldn't outrank the cover's main tone.
     let score = |w: &HueWindow| -> f64 {
         let pop = w.weight / max_weight;
         let sat_fit = (w.sat / 0.55).min(1.0);
@@ -868,7 +814,6 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
     Some(format!("#{:02X}{:02X}{:02X}", r, g, b))
 }
 
-/// Конвертировать RGB -> HSL
 fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
     let rf = r as f64 / 255.0;
     let gf = g as f64 / 255.0;
@@ -899,7 +844,6 @@ fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
     (hue, sat, lightness)
 }
 
-/// Конвертировать HSL -> RGB
 fn hsl_to_rgb(hue: f64, sat: f64, lightness: f64) -> (u8, u8, u8) {
     let c = (1.0 - (2.0 * lightness - 1.0).abs()) * sat.min(1.0);
     let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
@@ -921,24 +865,24 @@ fn hsl_to_rgb(hue: f64, sat: f64, lightness: f64) -> (u8, u8, u8) {
     )
 }
 
-/// Кусочно-линейный потолок насыщенности по оттенку: «токсичные» зоны
-/// (лайм, неоновая зелень, фуксия) приглушаются сильнее спокойных синих.
+/// Piecewise-linear saturation ceiling by hue: "toxic" zones (lime, neon green,
+/// fuchsia) get clamped harder than calm blues.
 fn saturation_ceiling(hue: f64) -> f64 {
-    // Контрольные точки каждые 30°: 0° красный → 360° красный.
+    // Control points every 30°, starting at red (0°/360°).
     const POINTS: [f64; 13] = [
-        0.60, // 0°   красный
-        0.58, // 30°  оранжевый
-        0.45, // 60°  жёлтый (после сдвига сюда почти не попадаем)
-        0.42, // 90°  лайм/олива
-        0.45, // 120° зелёный
-        0.48, // 150° изумруд
-        0.52, // 180° циан
-        0.58, // 210° голубой
-        0.62, // 240° синий
-        0.60, // 270° фиолетовый
-        0.52, // 300° маджента
-        0.56, // 330° розовый
-        0.60, // 360° = 0°
+        0.60, // 0    red
+        0.58, // 30   orange
+        0.45, // 60   yellow (rarely hit after the hue shift)
+        0.42, // 90   lime/olive
+        0.45, // 120  green
+        0.48, // 150  emerald
+        0.52, // 180  cyan
+        0.58, // 210  azure
+        0.62, // 240  blue
+        0.60, // 270  violet
+        0.52, // 300  magenta
+        0.56, // 330  pink
+        0.60, // 360 = 0
     ];
     let h = hue.rem_euclid(360.0);
     let seg = ((h / 30.0) as usize).min(11);
@@ -946,27 +890,26 @@ fn saturation_ceiling(hue: f64) -> f64 {
     POINTS[seg] + (POINTS[seg + 1] - POINTS[seg]) * t
 }
 
-/// Подогнать цвет под фон UI: исключить жёлтый, зажать светлоту в узкий
-/// диапазон и ограничить насыщенность с учётом «токсичности» оттенка,
-/// сохранив характер цвета обложки.
+/// Fits a color to the UI background: excludes yellow, clamps lightness to a narrow
+/// range, and caps saturation by hue "toxicity" while keeping the cover's character.
 fn normalize_accent_hsl(hue: f64, sat: f64, light: f64) -> (u8, u8, u8) {
     let mut hue = hue.rem_euclid(360.0);
     let mut sat = sat.clamp(0.0, 1.0);
 
-    // Жёлтый как цвет UI не используем: тёплую половину зоны уводим
-    // в янтарь, холодную (лаймовую) — в приглушённую оливу.
+    // No yellow as a UI color: shift the warm half toward amber, the cool
+    // (lime) half toward muted olive.
     if (YELLOW_FROM..62.0).contains(&hue) {
         hue = 36.0 + (hue - YELLOW_FROM) * (6.0 / (62.0 - YELLOW_FROM));
     } else if (62.0..YELLOW_TO).contains(&hue) {
         hue = 88.0 + (hue - 62.0) * (7.0 / (YELLOW_TO - 62.0));
     }
 
-    // Единый узкий диапазон светлоты — чтобы акцент и производные фоны
-    // (--dark-bg/--light-bg) выглядели одинаково плотно на любой обложке.
+    // Narrow lightness range so the accent and derived backgrounds
+    // (--dark-bg/--light-bg) look equally dense across any cover.
     let light = light.clamp(0.32, 0.48);
 
-    // Мягкое сжатие насыщенности к потолку оттенка: убирает кислотность,
-    // сохраняя различие между умеренными и сочными обложками.
+    // Soft-compress saturation toward the hue ceiling: removes acidity while
+    // still distinguishing muted vs. vivid covers.
     let ceiling = saturation_ceiling(hue);
     let knee = ceiling * 0.8;
     if sat > knee {
@@ -977,11 +920,9 @@ fn normalize_accent_hsl(hue: f64, sat: f64, light: f64) -> (u8, u8, u8) {
     hsl_to_rgb(hue, sat, light)
 }
 
-/// Извлечь обложку и акцентный цвет из lofty тега
-/// Из тега: есть ли встроенная обложка + акцентный цвет (вычисляется по её
-/// байтам, нужен один раз и кэшируется в БД). Полную обложку в base64 больше
-/// не формируем — для показа используется уменьшенная WebP-миниатюра через
-/// протокол `lfmusic-cover` (см. модуль `thumbnails`).
+/// Whether a cover is embedded + its accent color (computed once, cached in the DB).
+/// The full base64 cover is no longer produced here — display uses a WebP thumbnail
+/// served via the `lfmusic-cover` protocol (see `thumbnails`).
 fn cover_meta_from_tag(tag: &lofty::tag::Tag) -> (bool, Option<String>) {
     let picture = tag
         .pictures()
@@ -997,7 +938,6 @@ fn cover_meta_from_tag(tag: &lofty::tag::Tag) -> (bool, Option<String>) {
     (true, accent)
 }
 
-/// Извлечь сэмплы из AudioBufferRef в вектор f32
 fn extract_samples_into(buf: &AudioBufferRef, samples: &mut Vec<f32>) {
     macro_rules! extract {
         ($b:expr, $conv:expr) => {{
@@ -1019,10 +959,9 @@ fn extract_samples_into(buf: &AudioBufferRef, samples: &mut Vec<f32>) {
     }
 }
 
-/// Кэш результата probe_actual_codec по (path, mtime).
-/// M4A/MP4 — единственный формат, где нужен второй открытый файл для определения
-/// кодека (AAC vs ALAC). play() вызывается на один и тот же файл многократно,
-/// поэтому кэш убирает повторный парсинг контейнера.
+/// Caches probe_actual_codec by (path, mtime). M4A/MP4 is the only format needing a
+/// second file open to disambiguate the codec (AAC vs ALAC); play() re-probes the
+/// same file often, so this avoids re-parsing the container each time.
 fn probe_cache() -> &'static Mutex<HashMap<(String, u64), CodecType>> {
     static CACHE: OnceLock<Mutex<HashMap<(String, u64), CodecType>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1039,7 +978,7 @@ fn file_mtime_secs(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Определить кодек через symphonia (нужно только для M4A/MP4 контейнеров)
+/// Only needed for M4A/MP4 containers
 fn probe_actual_codec(file_path: &str, extension: &str) -> Option<CodecType> {
     let mtime = file_mtime_secs(std::path::Path::new(file_path));
     let key = (file_path.to_string(), mtime);
@@ -1103,21 +1042,19 @@ fn format_name_from_ext(ext: &str) -> String {
     .to_string()
 }
 
-// ── Аудио-поток ─────────────────────────────────────────────────────────────
-
-/// Главный цикл выделенного аудио-потока.
-/// Владеет OutputStream (и COM-контекстом на Windows), OutputStreamHandle и текущим Sink.
+/// Main loop of the dedicated audio thread; owns OutputStream (and the Windows COM
+/// context), OutputStreamHandle, and the current Sink.
 fn audio_thread_loop(
     rx: mpsc::Receiver<AudioCmd>,
-    _stream: OutputStream, // должен жить пока работает поток
+    _stream: OutputStream, // must stay alive for the thread's lifetime
     stream_handle: OutputStreamHandle,
     eq_settings: Arc<RwLock<EqSettings>>,
     spectrum: Arc<SpectrumAnalyzer>,
     sink_empty: Arc<AtomicBool>,
 ) {
     let mut sink: Option<Sink> = None;
-    // Предыдущий fade-out sink — при новом crossfade старый немедленно останавливается,
-    // что ограничивает количество одновременных fade-потоков до одного.
+    // A new crossfade immediately stops the previous fade-out sink, capping
+    // concurrent fade streams at one.
     let mut fadeout_sink: Option<Sink> = None;
 
     while let Ok(cmd) = rx.recv() {
@@ -1192,10 +1129,8 @@ fn audio_thread_loop(
                 let result = (|| -> Result<(), String> {
                     let dur = Duration::from_secs_f64(crossfade_secs);
 
-                    // Останавливаем предыдущий fade-out, если есть
                     if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
 
-                    // Fade-out на отдельном sink
                     let fade_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка fade-out sink: {}", e))?;
                     fade_sink.set_volume(volume);
@@ -1206,10 +1141,9 @@ fn audio_thread_loop(
                     ));
 
                     if let Some(ref old) = sink { old.stop(); }
-                    // Сохраняем fade-out sink вместо создания потока — rodio проигрывает его в фоне
+                    // rodio keeps playing this sink in the background
                     fadeout_sink = Some(fade_sink);
 
-                    // Новый sink с fade-in
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
@@ -1233,14 +1167,11 @@ fn audio_thread_loop(
                 let result = (|| -> Result<(), String> {
                     let dur = Duration::from_secs_f64(crossfade_secs);
 
-                    // Останавливаем предыдущий fade-out, если есть
                     if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
 
-                    // Останавливаем старый sink — fade-in на новом треке
-                    // обеспечивает плавный переход
+                    // fade-in on the new track carries the transition
                     if let Some(old_sink) = sink.take() { old_sink.stop(); }
 
-                    // Новый sink с fade-in
                     let new_sink = Sink::try_new(&stream_handle)
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
@@ -1260,12 +1191,9 @@ fn audio_thread_loop(
     }
 }
 
-// ── AudioPlayer ─────────────────────────────────────────────────────────────
-
-/// Основная структура аудиоплеера.
-///
-/// `OutputStream` (cpal, COM на Windows) живёт на выделенном потоке `audio-output`.
-/// Все операции с Sink проксируются через `mpsc` канал — `unsafe impl Send/Sync` не нужен.
+/// `OutputStream` (cpal, COM on Windows) lives on a dedicated `audio-output` thread.
+/// All Sink operations proxy through an `mpsc` channel, avoiding the need for
+/// `unsafe impl Send/Sync`.
 pub struct AudioPlayer {
     cmd_tx: mpsc::Sender<AudioCmd>,
     current_track: Option<TrackMetadata>,
@@ -1275,14 +1203,14 @@ pub struct AudioPlayer {
     accumulated_position: f64,
     eq_settings: Arc<RwLock<EqSettings>>,
     spectrum: Arc<SpectrumAnalyzer>,
-    /// Опустел ли текущий sink (трек доиграл/остановлен). Обновляется
-    /// аудио-потоком асинхронно: главный поток читает статус без блокирующего
-    /// round-trip'а через канал.
+    /// Whether the current sink is empty (track finished/stopped). Updated
+    /// asynchronously by the audio thread so the main thread can poll status
+    /// without a blocking channel round-trip.
     sink_empty: Arc<AtomicBool>,
 }
 
 impl AudioPlayer {
-    /// Создать новый экземпляр плеера (запускает аудио-поток)
+    /// Spawns the audio thread.
     pub fn new() -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(0);
@@ -1290,7 +1218,7 @@ impl AudioPlayer {
         let eq_for_thread = eq_settings.clone();
         let spectrum = Arc::new(SpectrumAnalyzer::new());
         let spectrum_for_thread = spectrum.clone();
-        // true = ничего не играет; выставляется в false при старте трека.
+        // true = nothing playing; set false when a track starts.
         let sink_empty = Arc::new(AtomicBool::new(true));
         let sink_empty_for_thread = sink_empty.clone();
 
@@ -1336,19 +1264,14 @@ impl AudioPlayer {
         })
     }
 
-    /// Текущие частотные полосы спектра (0..1), посчитанные по реальному звуку.
     pub fn spectrum_bars(&self, bars: usize) -> Vec<f32> {
         self.spectrum.compute_bars(bars)
     }
 
-    /// Включить/выключить снятие спектра (по состоянию блока-визуализатора).
     pub fn set_spectrum_enabled(&self, enabled: bool) {
         self.spectrum.set_enabled(enabled);
     }
 
-    // ── Внутренние хелперы ──────────────────────────────────────────────────
-
-    /// Отправить команду с ожиданием ответа
     fn send(&self, make: impl FnOnce(Resp) -> AudioCmd) -> Result<(), String> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.cmd_tx
@@ -1358,35 +1281,29 @@ impl AudioPlayer {
             .map_err(|_| "Аудио поток недоступен".to_string())?
     }
 
-    /// Отправить команду без ожидания ответа
+    /// Fire-and-forget, no response wait
     fn fire(&self, cmd: AudioCmd) {
         let _ = self.cmd_tx.send(cmd);
     }
 
-    /// Опустел ли текущий sink. Неблокирующая атомарная загрузка флага,
-    /// обновляемого аудио-потоком (см. `AnalyzerSource` / `audio_thread_loop`).
     fn is_sink_empty(&self) -> bool {
         self.sink_empty.load(Ordering::Relaxed)
     }
 
-    // ── Статические методы (метаданные) ─────────────────────────────────────
-
-    /// Открыть файл для чтения тегов/свойств с определением типа по содержимому.
+    /// Opens a file for tag/property reading, detecting type by content.
     ///
-    /// ВАЖНО: используем `guess_file_type` (читает магические байты), а не голый
-    /// `Probe::open(...).read()` (определяет формат по расширению). Иначе файлы с
-    /// несоответствием «расширение ↔ кодек» не читаются: yt-dlp ремуксит Opus в
-    /// контейнер с расширением `.ogg`, lofty по расширению ждёт Vorbis, не находит
-    /// его сигнатуру и падает (`FileDecoding(Vorbis: "File missing magic signature")`)
-    /// — теги/обложка таких треков терялись. Определение по содержимому это чинит,
-    /// а для совпадающих расширений работает как раньше (расширение — фолбэк).
+    /// Uses `guess_file_type` (magic bytes) instead of extension-based
+    /// `Probe::open(...).read()`: yt-dlp remuxes Opus into a `.ogg`-named container,
+    /// so extension-based probing expects Vorbis, fails to find its signature, and
+    /// errors with `FileDecoding(Vorbis: "File missing magic signature")` — losing
+    /// tags/cover for those tracks. Content-based detection fixes this while still
+    /// working normally when the extension matches (used as a fallback).
     pub(crate) fn read_tagged_file(path: &std::path::Path) -> Option<lofty::file::TaggedFile> {
         Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()
     }
 
-    /// Извлечь обложку трека как data URL (полного размера).
-    /// Используется только для превью «сбросить обложку» в модалке редактирования
-    /// (нужен оригинал из тегов в обход пользовательского переопределения).
+    /// Full-size cover as a data URL. Only used for the "reset cover" preview in the
+    /// edit modal (needs the tag original, bypassing any user override).
     pub fn extract_cover_art(file_path: &str) -> Option<String> {
         let tagged_file = Self::read_tagged_file(&PathBuf::from(file_path))?;
         let tag = tagged_file
@@ -1395,7 +1312,7 @@ impl AudioPlayer {
         cover_art_from_tag(tag)
     }
 
-    /// Проверить наличие встроенной обложки (дёшево — без извлечения байтов).
+    /// Cheap check — doesn't extract picture bytes.
     pub fn has_embedded_cover(file_path: &str) -> bool {
         let Some(tagged_file) = Self::read_tagged_file(&PathBuf::from(file_path)) else {
             return false;
@@ -1406,7 +1323,7 @@ impl AudioPlayer {
         }
     }
 
-    /// Сырые байты встроенной обложки (для генерации WebP-миниатюры).
+    /// Raw embedded cover bytes, for generating a WebP thumbnail.
     pub fn extract_cover_bytes(file_path: &str) -> Option<Vec<u8>> {
         let tagged_file = Self::read_tagged_file(&PathBuf::from(file_path))?;
         let tag = tagged_file
@@ -1420,15 +1337,13 @@ impl AudioPlayer {
         Some(picture.data().to_vec())
     }
 
-    /// Извлечь метаданные без обложки и акцентного цвета (для сканирования библиотеки)
+    /// No cover/accent color — used for library scanning.
     pub fn get_metadata_light(file_path: &str) -> Result<TrackMetadata, String> {
         Self::get_metadata_inner(file_path, false)
     }
 
-    /// Извлечь метаданные из аудиофайла.
-    ///
-    /// Для однозначных форматов (FLAC, MP3, WAV, OGG, ...) открывает файл один раз (lofty).
-    /// Symphonia-проба используется только для контейнеров M4A/MP4, где кодек неоднозначен
+    /// For unambiguous formats (FLAC, MP3, WAV, OGG, ...) opens the file once via lofty.
+    /// Symphonia probing only kicks in for M4A/MP4, where the codec is ambiguous
     /// (AAC vs ALAC).
     pub fn get_metadata(file_path: &str) -> Result<TrackMetadata, String> {
         Self::get_metadata_inner(file_path, true)
@@ -1446,7 +1361,6 @@ impl AudioPlayer {
             .unwrap_or("")
             .to_lowercase();
 
-        // Для M4A/MP4 нужно пробировать кодек через symphonia
         let needs_probe = matches!(extension.as_str(), "m4a" | "mp4");
 
         let (is_lossless, format) = if needs_probe {
@@ -1474,7 +1388,6 @@ impl AudioPlayer {
             (lossless, format_name_from_ext(&extension))
         };
 
-        // Теги и свойства через lofty (единственное открытие файла для не-MP4)
         let mut title = None;
         let mut artist = None;
         let mut album = None;
@@ -1501,7 +1414,6 @@ impl AudioPlayer {
                         let (has_cover, accent) = cover_meta_from_tag(tag);
                         accent_color = accent;
                         if has_cover {
-                            // Обложка отдаётся миниатюрой через протокол, без base64.
                             cover_art = Some(crate::thumbnails::cover_protocol_url(
                                 file_path,
                                 &crate::thumbnails::embedded_sig(file_path),
@@ -1544,19 +1456,15 @@ impl AudioPlayer {
         })
     }
 
-    /// Получить список поддерживаемых форматов (статический срез)
     pub fn supported_formats() -> &'static [&'static str] {
         &["flac", "wav", "mp3", "ogg", "aac", "m4a", "mp4", "aiff", "aif", "opus"]
     }
 
-    // ── Управление воспроизведением ─────────────────────────────────────────
-
-    /// Загрузить и воспроизвести файл
     pub fn play(&mut self, file_path: &str) -> Result<TrackMetadata, String> {
         self.play_from(file_path, 0.0)
     }
 
-    /// Загрузить файл, перемотать на позицию и сразу поставить на паузу (для восстановления сессии)
+    /// Loads, seeks, and immediately pauses — used to restore a saved session.
     pub fn play_paused(&mut self, file_path: &str, position_secs: f64) -> Result<TrackMetadata, String> {
         let metadata = self.play_from(file_path, position_secs)?;
         self.pause();
@@ -1604,7 +1512,6 @@ impl AudioPlayer {
         Ok(metadata)
     }
 
-    /// Поставить на паузу
     pub fn pause(&mut self) {
         if self.state == PlaybackState::Playing {
             self.fire(AudioCmd::Pause);
@@ -1615,7 +1522,6 @@ impl AudioPlayer {
         }
     }
 
-    /// Продолжить воспроизведение
     pub fn resume(&mut self) {
         if self.state == PlaybackState::Paused {
             self.fire(AudioCmd::Resume);
@@ -1624,7 +1530,6 @@ impl AudioPlayer {
         }
     }
 
-    /// Остановить воспроизведение
     pub fn stop(&mut self) {
         self.fire(AudioCmd::Stop);
         self.sink_stopped();
@@ -1637,14 +1542,12 @@ impl AudioPlayer {
         self.accumulated_position = 0.0;
     }
 
-    /// Установить громкость (0.0 – 1.0)
     pub fn set_volume(&mut self, volume: f32) {
         let vol = volume.clamp(0.0, 1.0);
         self.fire(AudioCmd::SetVolume(vol));
         self.volume = vol;
     }
 
-    /// Перемотка на указанную позицию (в секундах)
     pub fn seek(&mut self, position_secs: f64) -> Result<(), String> {
         let file_path = self.current_track
             .as_ref()
@@ -1669,7 +1572,6 @@ impl AudioPlayer {
         Ok(())
     }
 
-    /// Перемотка с кроссфейдом
     pub fn seek_crossfade(&mut self, position_secs: f64, crossfade_secs: f64) -> Result<(), String> {
         if crossfade_secs <= 0.0 {
             return self.seek(position_secs);
@@ -1701,7 +1603,6 @@ impl AudioPlayer {
         Ok(())
     }
 
-    /// Получить текущую позицию воспроизведения в секундах
     pub fn get_position(&self) -> f64 {
         let elapsed = match self.playback_started_at {
             Some(started) if self.state == PlaybackState::Playing => {
@@ -1718,16 +1619,13 @@ impl AudioPlayer {
         pos
     }
 
-    /// Путь файла текущего трека (если что-то загружено). Нужен, например, чтобы
-    /// перед удалением скачанного файла остановить плеер, если играет именно он
-    /// (декодер держит хэндл файла — иначе удаление упрётся в «файл занят»).
+    /// Used e.g. to stop playback before deleting a downloaded file if it's the one
+    /// currently playing — the decoder holds a file handle otherwise blocking deletion.
     pub fn current_file_path(&self) -> Option<String> {
         self.current_track.as_ref().map(|t| t.file_path.clone())
     }
 
-    /// Лёгкий статус для частого поллинга
     pub fn get_status(&mut self) -> PlayerStatus {
-        // Проверяем, не закончился ли трек
         if self.state == PlaybackState::Playing && self.is_sink_empty() {
             self.sink_stopped();
         }
@@ -1740,35 +1638,28 @@ impl AudioPlayer {
         }
     }
 
-    // ── Управление эквалайзером ────────────────────────────────────────────
-
-    /// Установить усиление полос эквалайзера (в dB, от -12 до +12)
     pub fn set_eq_bands(&self, bands: Vec<f32>) {
         if let Ok(mut settings) = self.eq_settings.write() {
             settings.bands = bands.into_iter().map(|b| b.clamp(-12.0, 12.0)).collect();
         }
     }
 
-    /// Установить общий уровень эквалайзера (в dB, от -12 до +12)
     pub fn set_eq_gain(&self, gain: f32) {
         if let Ok(mut settings) = self.eq_settings.write() {
             settings.gain = gain.clamp(-12.0, 12.0);
         }
     }
 
-    /// Включить/выключить эквалайзер
     pub fn set_eq_enabled(&self, enabled: bool) {
         if let Ok(mut settings) = self.eq_settings.write() {
             settings.enabled = enabled;
         }
     }
 
-    /// Получить полные настройки эквалайзера
     pub fn get_eq_settings(&self) -> EqSettings {
         self.eq_settings.read().map(|s| s.clone()).unwrap_or_default()
     }
 
-    /// Установить полные настройки эквалайзера
     pub fn set_eq_settings(&self, settings: EqSettings) {
         if let Ok(mut current) = self.eq_settings.write() {
             *current = settings;
@@ -1798,8 +1689,7 @@ mod accent_color_tests {
 
     #[test]
     fn dominant_muted_color_beats_small_vivid_spot() {
-        // 90% приглушённого синего фона + узкая неоново-красная полоса:
-        // акцентом должен стать синий, а не заметный лишь вблизи красный.
+        // 90% muted blue background + a thin neon-red stripe: blue should win.
         let blue = hsl_to_rgb(220.0, 0.35, 0.40);
         let red = hsl_to_rgb(0.0, 1.0, 0.50);
         let img = img_from_fn(|x, _| if x < 86 { blue } else { red });
@@ -1809,8 +1699,7 @@ mod accent_color_tests {
 
     #[test]
     fn yellow_skipped_when_alternative_exists() {
-        // Жёлтый занимает больше площади, но при наличии заметного синего
-        // он не должен попадать в UI.
+        // Yellow covers more area, but a noticeable blue alternative should win.
         let yellow = hsl_to_rgb(55.0, 0.80, 0.50);
         let blue = hsl_to_rgb(230.0, 0.60, 0.45);
         let img = img_from_fn(|x, _| if x < 58 { yellow } else { blue });
@@ -1820,8 +1709,7 @@ mod accent_color_tests {
 
     #[test]
     fn fully_yellow_cover_shifts_out_of_yellow_zone() {
-        // Полностью жёлтая обложка: оттенок уводится в янтарь,
-        // жёлтым акцент быть не должен.
+        // All-yellow cover: hue shifts to amber, accent must not stay yellow.
         let yellow = hsl_to_rgb(55.0, 0.90, 0.50);
         let img = img_from_fn(|_, _| yellow);
         let (h, _, _) = accent_hsl(&img);
@@ -1833,8 +1721,7 @@ mod accent_color_tests {
 
     #[test]
     fn neon_green_is_tamed() {
-        // Кислотно-зелёная обложка: оттенок сохраняется, но насыщенность
-        // зажимается потолком зоны, светлота — общим диапазоном.
+        // Hue is preserved, but saturation gets clamped by the zone ceiling.
         let neon = hsl_to_rgb(120.0, 1.0, 0.50);
         let img = img_from_fn(|_, _| neon);
         let (h, s, l) = accent_hsl(&img);
@@ -1852,7 +1739,7 @@ mod accent_color_tests {
 
     #[test]
     fn saturation_ceiling_is_continuous() {
-        // Интерполяция между контрольными точками без разрывов на стыках.
+        // No jumps at control-point boundaries.
         for i in 0..=12 {
             let h = i as f64 * 30.0;
             let before = saturation_ceiling(h - 0.01);
@@ -1902,8 +1789,8 @@ mod eq_math_tests {
         }
     }
 
-    /// Установившийся (steady-state) RMS отклик биквадратного фильтра на синус
-    /// заданной частоты — после периода прогрева (затухание переходного процесса).
+    /// Steady-state RMS response of the biquad filter to a sine at `freq`,
+    /// measured after a warmup period to let the transient settle.
     fn steady_state_rms(coeffs: &BiquadCoeffs, freq: f32, sample_rate: f32, cycles: usize) -> f32 {
         let mut state = BiquadState::default();
         let samples_per_cycle = (sample_rate / freq).round() as usize;
@@ -1933,7 +1820,7 @@ mod eq_math_tests {
         let flat_rms = steady_state_rms(&flat, freq, sample_rate, 40);
         let boosted_rms = steady_state_rms(&boosted, freq, sample_rate, 40);
 
-        // +6dB ~ x1.995 в амплитуде на самой резонансной частоте.
+        // +6dB ~ x1.995 amplitude at the resonant frequency.
         let ratio = boosted_rms / flat_rms;
         assert!(
             (1.7..2.3).contains(&ratio),
@@ -1956,7 +1843,7 @@ mod eq_math_tests {
 
     #[test]
     fn peaking_eq_barely_affects_far_off_center_frequency() {
-        // Полоса на 60Гц с большим усилением почти не должна задевать 12кГц.
+        // A boosted 60Hz band shouldn't noticeably affect 12kHz.
         let sample_rate = 44_100.0;
         let coeffs = BiquadCoeffs::peaking_eq(sample_rate, 60.0, 12.0, 1.4);
         let flat = BiquadCoeffs::peaking_eq(sample_rate, 60.0, 0.0, 1.4);
@@ -1980,9 +1867,8 @@ mod eq_math_tests {
 
     #[test]
     fn soft_clip_never_reaches_unity() {
-        // Контракт после фикса находки ниже: CEILING < 1.0, поэтому выход остаётся
-        // СТРОГО внутри (-1.0, 1.0), даже когда tanh насыщается до 1.0 в f32 —
-        // это и есть защита от переполнения при будущей конвертации в int.
+        // CEILING < 1.0 keeps output strictly inside (-1.0, 1.0) even when tanh
+        // saturates to 1.0 in f32 — this is the overflow guard for int conversion.
         for x in [0.98f32, 1.0, 2.0, 10.0, 1000.0] {
             let y = soft_clip(x);
             assert!(y < 1.0, "soft_clip({x}) = {y} должен быть строго меньше 1.0");
@@ -1995,18 +1881,14 @@ mod eq_math_tests {
 
     #[test]
     fn soft_clip_is_smooth_just_above_threshold() {
-        // У самого порога (T=0.97) насыщение ещё мягкое — значение строго между
-        // T и 1.0, не прыгает сразу в 1.0.
         let y = soft_clip(0.98);
         assert!(y > 0.97 && y < 1.0, "y={y}");
     }
 
-    /// РЕГРЕССИЯ на исправленную находку: раньше `over = (a - T) / (1.0 - T)`
-    /// делил на узкий запас (0.03), из-за чего tanh насыщался до РОВНО 1.0 в f32
-    /// уже при x≈1.2 — лимитер был фактически жёстким для большей части
-    /// «громкого» диапазона, хотя формальный контракт («никогда не превышая»)
-    /// не нарушался. Теперь ширина колена (KNEE) отвязана от зазора до потолка,
-    /// поэтому при умеренной перегрузке (x=1.2) выход заметно ниже потолка.
+    /// Regression test: `over = (a - T) / (1.0 - T)` used to divide by a narrow gap
+    /// (0.03), saturating tanh to exactly 1.0 in f32 already at x≈1.2 — the limiter
+    /// was effectively hard-clipping most of the loud range. KNEE is now decoupled
+    /// from the ceiling gap, so moderate overdrive stays well below the ceiling.
     #[test]
     fn soft_clip_is_gradual_over_wide_overdrive_range() {
         let moderate_overdrive = soft_clip(1.2);
@@ -2058,8 +1940,6 @@ mod eq_math_tests {
         assert_eq!(format_name_from_ext("flac"), "FLAC");
         assert_eq!(format_name_from_ext("mp3"), "MP3");
         assert_eq!(format_name_from_ext("opus"), "Opus");
-        // Неизвестное расширение возвращается как есть (используется для m4a/mp4
-        // отдельной веткой в get_metadata_inner, но как фолбэк для прочих).
         assert_eq!(format_name_from_ext("xyz"), "xyz");
     }
 
@@ -2086,8 +1966,8 @@ mod metadata_tests {
         std::env::temp_dir().join(format!("lfmusic_audio_player_{unique}_{name}"))
     }
 
-    /// Пишет минимальный валидный 16-бит PCM WAV (без тегов) — достаточно, чтобы
-    /// lofty/symphonia прочли формат/свойства без внешних аудио-фикстур.
+    /// Minimal valid 16-bit PCM WAV (no tags) — enough for lofty/symphonia to read
+    /// format/properties without external audio fixtures.
     fn write_test_wav(path: &std::path::Path, sample_rate: u32, channels: u16, num_frames: u32) {
         let bits_per_sample: u16 = 16;
         let block_align: u16 = channels * (bits_per_sample / 8);
@@ -2125,7 +2005,7 @@ mod metadata_tests {
     #[test]
     fn get_metadata_light_reads_wav_properties_without_real_audio_fixture() {
         let path = temp_path("clip.wav");
-        write_test_wav(&path, 8_000, 1, 8_000 * 2); // 2 секунды, моно, 8кГц
+        write_test_wav(&path, 8_000, 1, 8_000 * 2); // 2s mono @ 8kHz
 
         let m = AudioPlayer::get_metadata_light(path.to_str().unwrap()).expect("metadata read");
         assert_eq!(m.format, "WAV");
@@ -2142,7 +2022,7 @@ mod metadata_tests {
     #[test]
     fn get_metadata_for_untagged_wav_has_no_cover_or_accent() {
         let path = temp_path("untagged.wav");
-        write_test_wav(&path, 44_100, 2, 44_100); // 1 секунда, стерео
+        write_test_wav(&path, 44_100, 2, 44_100); // 1s stereo
 
         let m = AudioPlayer::get_metadata(path.to_str().unwrap()).expect("metadata read");
         assert_eq!(m.channels, Some(2));
@@ -2160,11 +2040,9 @@ mod metadata_tests {
 mod player_instance_tests {
     use super::*;
 
-    // ВАЖНО: эти тесты создают реальный `AudioPlayer` (реальный аудио-вывод
-    // устройства), но НИКОГДА не вызывают play()/play_paused()/play_crossfade()
-    // на существующем файле — это реально воспроизвело бы звук через колонки
-    // во время `cargo test`. Проверяется только состояние/управление до старта
-    // воспроизведения.
+    // These tests spin up a real `AudioPlayer` (real audio device) but must never call
+    // play()/play_paused()/play_crossfade() on an existing file — that would actually
+    // play audio out loud during `cargo test`. Only pre-playback state/control is tested.
 
     #[test]
     fn new_player_starts_stopped_with_full_volume() {

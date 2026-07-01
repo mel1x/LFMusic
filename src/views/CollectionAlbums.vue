@@ -41,9 +41,8 @@ interface AlbumEntry {
     firstPath: string | null;
 }
 
-// Note: we deliberately DON'T read track fields here — looking them up at
-// render time means a single cover load only re-renders the matching card,
-// not the whole list.
+// Deliberately not reading track fields here: looking them up at render
+// time means a cover load only re-renders the matching card, not the whole list.
 const albums = computed<AlbumEntry[]>(() => {
     return albumPlaylists.value
         .map(pl => ({
@@ -72,9 +71,8 @@ function artistFor(path: string | null): string {
     return getTrackByPath(path)?.artist || 'Неизвестный исполнитель';
 }
 
-// Источник данных готов (альбомы загружены). До этого гейт обложек не должен
-// открываться — иначе он откроется на пустом списке, контент мелькнёт, а лоадер
-// появится уже поверх подгрузки обложек (обратный порядок).
+// Gate must stay closed until albums load, or it opens on an empty list
+// (content flashes in, then the loader reappears over cover loading).
 const dataReady = ref(false);
 
 onMounted(async () => {
@@ -94,8 +92,6 @@ watch(() => route.query.q, (q) => {
     rawSearch.value = next;
     debouncedSearch.value = next;
 });
-
-// ── Search ──────────────────────────────────────────────────────────────────
 
 import { useTypeToSearch } from '../composables/useTypeToSearch';
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -123,8 +119,6 @@ function clearSearch() {
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     searchInput.value?.focus();
 }
-
-// ── Pinned / top order ─────────────────────────────────────────────────────
 
 const { isPinned: isPinnedFn, togglePin } = usePins();
 
@@ -172,12 +166,9 @@ const { ready: coversReady } = useCoverGate(() =>
     { armed: () => dataReady.value },
 );
 
-// ── Lazy cover loading ─────────────────────────────────────────────────────
-// All cards are rendered up-front so the document height (and scrollbar) is
-// stable. Off-screen cards are skipped from paint/layout via CSS
-// `content-visibility: auto`. Covers are requested per card by a single
-// IntersectionObserver whose `root` is the actual scroll container
-// (.pageRoot) and whose bottom rootMargin equals exactly 2 card rows.
+// All cards render up-front to keep document height/scrollbar stable;
+// off-screen ones skip paint via CSS `content-visibility: auto`. Covers load
+// per-card via one IntersectionObserver rooted at .pageRoot, bottom margin = 2 rows.
 const gridEl = ref<HTMLElement | null>(null);
 let coverObs: IntersectionObserver | null = null;
 let resizeObs: ResizeObserver | null = null;
@@ -221,9 +212,8 @@ function ensureObserver() {
     if (!coverObs) buildObserver();
 }
 
-// bindCard runs as a v-for function ref *during render*, before onMounted —
-// so the observer must be created lazily here, not in onMounted, otherwise
-// most cards never get registered.
+// Runs as a v-for function ref during render, before onMounted — observer
+// must be created lazily here or most cards never get registered.
 function bindCard(el: any, album: AlbumEntry) {
     if (!el) return;
     if (!album.firstPath) return;
@@ -262,8 +252,8 @@ onMounted(() => {
     if (gridEl.value) {
         scrollRoot = findScrollAncestor(gridEl.value);
     }
-    // Recreate the observer now that we know the real scroll root —
-    // any observer made earlier in bindCard used a null (window) root.
+    // Recreate now that the real scroll root is known — earlier bindCard
+    // calls may have built the observer with a null (window) root.
     buildObserver();
     requestAnimationFrame(refreshMargin);
     if (gridEl.value) {
@@ -281,8 +271,8 @@ onUnmounted(() => {
     observedEls.clear();
 });
 
-// When the library populates after this page mounted, re-observe so the
-// observer fires again for cards still in view — they now have track data.
+// Re-observe when the library populates after mount, so cards still in
+// view fire again now that they have track data.
 watch(catalogCount, () => {
     if (!gridEl.value) return;
     ensureObserver();
@@ -295,8 +285,6 @@ watch(catalogCount, () => {
         observedEls.add(el);
     }
 });
-
-// ── Actions ─────────────────────────────────────────────────────────────────
 
 function isAlbumActive(album: AlbumEntry) {
     return activePlaylistSource.value === `album:${album.name}`;
@@ -346,8 +334,6 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
 function goBack() {
     router.back();
 }
-
-// ── Sticky header ───────────────────────────────────────────────────────────
 
 const pageRootEl = ref<HTMLElement | null>(null);
 const scrollY = ref(0);

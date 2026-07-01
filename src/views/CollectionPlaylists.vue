@@ -47,17 +47,14 @@ function playlistCoverFor(pl: PlaylistInfo): string {
     return coverFor(pl.first_file_path) || defaultCover;
 }
 
-// Источник данных готов (плейлисты загружены). До этого гейт обложек не должен
-// открываться — иначе он откроется на пустом списке, контент мелькнёт, а лоадер
-// появится уже поверх подгрузки обложек (обратный порядок).
+// Gate must stay closed until playlists load, or it opens on an empty list
+// (content flashes in, then the loader reappears over cover loading).
 const dataReady = ref(false);
 
 onMounted(async () => {
     await loadPlaylists();
     dataReady.value = true;
 });
-
-// ── Search ──────────────────────────────────────────────────────────────────
 
 import { useTypeToSearch } from '../composables/useTypeToSearch';
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -101,9 +98,7 @@ const { ready: coversReady } = useCoverGate(() =>
     { armed: () => dataReady.value },
 );
 
-// ── Lazy cover loading ─────────────────────────────────────────────────────
-// Single IntersectionObserver whose `root` is the actual scroll container
-// (.pageRoot) and whose bottom rootMargin equals exactly 2 card rows.
+// Single IntersectionObserver rooted at .pageRoot; bottom rootMargin = 2 card rows.
 const gridEl = ref<HTMLElement | null>(null);
 let coverObs: IntersectionObserver | null = null;
 let resizeObs: ResizeObserver | null = null;
@@ -147,9 +142,8 @@ function ensureObserver() {
     if (!coverObs) buildObserver();
 }
 
-// bindCard runs as a v-for function ref *during render*, before onMounted —
-// so the observer must be created lazily here, not in onMounted, otherwise
-// most cards never get registered.
+// Runs as a v-for function ref during render, before onMounted — observer
+// must be created lazily here or most cards never get registered.
 function bindCard(el: any, pl: PlaylistInfo) {
     if (!el) return;
     if (!pl.first_file_path) return;
@@ -218,8 +212,6 @@ watch(catalogCount, () => {
     }
 });
 
-// ── Create ──────────────────────────────────────────────────────────────────
-
 function nextPlaylistName(): string {
     const re = /^Новый плейлист\s+(\d+)$/;
     let maxN = 0;
@@ -251,8 +243,6 @@ async function onConfirmCreate() {
 function openPlaylist(pl: PlaylistInfo) {
     router.push(`/playlist/${pl.id}`);
 }
-
-// ── Hover overlay actions ───────────────────────────────────────────────────
 
 const { isPinned: isPinnedFn, togglePin, unpin } = usePins();
 
@@ -328,8 +318,6 @@ function onMoveToTopFromMenu(pl: PlaylistInfo) {
 function goBack() {
     router.back();
 }
-
-// ── Sticky header ───────────────────────────────────────────────────────────
 
 const pageRootEl = ref<HTMLElement | null>(null);
 const scrollY = ref(0);

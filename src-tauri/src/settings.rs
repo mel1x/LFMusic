@@ -6,37 +6,33 @@ use tauri::State;
 use crate::audio_player::EqSettings;
 use crate::SettingsState;
 
-/// Разделители исполнителей по умолчанию
 pub const DEFAULT_ARTIST_SEPARATORS: &[&str] = &["; ", ", "];
 
-/// Настройки приложения: произвольные опции + эквалайзер в одном файле
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct AppSettings {
-    /// Опции фронтенда произвольного типа (bool/string/...):
-    /// crossfade_on_seek, show_github_badge, static_accent_color и т.д.
+    /// Free-form frontend options (bool/string/...): crossfade_on_seek,
+    /// show_github_badge, static_accent_color, etc.
     #[serde(flatten)]
     pub options: HashMap<String, serde_json::Value>,
 
-    /// Настройки эквалайзера
     #[serde(default)]
     pub eq_settings: EqSettings,
 
-    /// Папка для скачиваемых треков (внешние источники). Пусто/None — стандартная
-    /// папка «LFMusic Downloads» в системной музыкальной директории. Храним
-    /// ОТДЕЛЬНЫМ полем (а не в `options`), чтобы `save_settings` с фронта, который
-    /// целиком заменяет `options`, не затирал её (как и `eq_settings`).
+    /// Download folder for external sources; empty/None uses the default
+    /// "LFMusic Downloads" under the system music dir. Kept as its own field
+    /// (not inside `options`) so `save_settings`, which replaces `options`
+    /// wholesale from the frontend, doesn't wipe it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<String>,
 
-    /// Режим прокси для yt-dlp: `"system"` (по умолчанию/None — системный прокси
-    /// или из окружения), `"none"` (прямое соединение, `--proxy ""`), `"custom"`
-    /// (заданный `proxy_url`). Отдельное поле — по той же причине, что и
-    /// `download_dir` (не часть flatten-`options`).
+    /// yt-dlp proxy mode: "system" (default/None), "none" (`--proxy ""`),
+    /// "custom" (uses `proxy_url`). Separate field for the same reason as
+    /// `download_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_mode: Option<String>,
 
-    /// URL прокси для режима `"custom"` (напр. `socks5://127.0.0.1:1080` для
-    /// ByeDPI/ByeByeDPI). Пусто/None — режим `custom` сводится к системному.
+    /// Proxy URL for `"custom"` mode (e.g. `socks5://127.0.0.1:1080` for
+    /// ByeDPI/ByeByeDPI). Empty/None makes `custom` behave like `system`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
 }
@@ -55,7 +51,6 @@ pub fn save(app_data_dir: &PathBuf, settings: &AppSettings) -> Result<(), String
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
-/// Прочитать булеву опцию из настроек (или `default`, если её нет/иной тип).
 pub fn option_bool(settings: &AppSettings, key: &str, default: bool) -> bool {
     settings
         .options
@@ -64,8 +59,8 @@ pub fn option_bool(settings: &AppSettings, key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Прочитать список разделителей исполнителей из текущих настроек.
-/// Если в options нет artist_separators или значение некорректно — возвращает дефолт.
+/// Reads artist separators from settings, falling back to the default if
+/// missing or malformed.
 pub fn get_artist_separators(state: &State<SettingsState>) -> Vec<String> {
     let guard = match state.0.lock() {
         Ok(g) => g,
@@ -96,10 +91,8 @@ pub fn get_artist_separators(state: &State<SettingsState>) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// `download_dir` — отдельное поле, а НЕ часть flatten-`options`: оно не должно
-    /// просачиваться в `options` при десериализации (иначе `save_settings` с фронта,
-    /// заменяющий `options` целиком, затирал бы его). И обратно: значение из
-    /// options-ключей не должно попадать в это поле.
+    /// `download_dir` must not leak into `options` on deserialization, or
+    /// the frontend's full-`options` replacement in `save_settings` would wipe it.
     #[test]
     fn download_dir_is_separate_from_options() {
         let json = r##"{
@@ -117,8 +110,6 @@ mod tests {
         assert!(s.options.contains_key("static_accent_color"));
     }
 
-    /// Старые настройки без `download_dir` грузятся (serde default → None), и при
-    /// сериализации None не пишется на диск (skip_serializing_if).
     #[test]
     fn download_dir_defaults_to_none_and_skips_when_empty() {
         let s: AppSettings = serde_json::from_str(r#"{"show_github_badge": false}"#).unwrap();
@@ -169,8 +160,7 @@ mod tests {
         assert!(!option_bool(&s, "missing_key", false));
         assert!(option_bool(&s, "missing_key", true));
 
-        // Значение неверного типа (строка вместо bool) не должно паниковать и
-        // должно трактоваться как «значения нет» -> дефолт.
+        // Wrong type (string instead of bool) treated as absent -> default.
         s.options.insert(
             "static_accent_color".to_string(),
             serde_json::Value::String("#3D3D3D".to_string()),
@@ -188,7 +178,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // Папка намеренно не создаётся — файла settings.json там нет и быть не может.
+        // Directory intentionally not created — settings.json can't exist there.
         let s = load(&dir);
         assert!(s.options.is_empty());
         assert_eq!(s.download_dir, None);

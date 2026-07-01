@@ -13,11 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Публичные типы
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Информация о папке для отображения во Vue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderInfo {
     pub path: String,
@@ -25,14 +20,13 @@ pub struct FolderInfo {
     pub exists: bool,
 }
 
-/// Жанр + количество треков (для фильтр-чипов каталога).
+/// Genre + track count, for catalog filter chips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenreCount {
     pub name: String,
     pub count: u32,
 }
 
-/// Тип плейлиста
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PlaylistKind {
     Album,
@@ -40,18 +34,16 @@ pub enum PlaylistKind {
     User,
 }
 
-/// Информация о плейлисте для фронтенда
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistInfo {
     pub id: i64,
     pub name: String,
     pub kind: PlaylistKind,
     pub track_count: usize,
-    /// Путь до первого трека (для подбора обложки на фронтенде)
+    /// First track's path, used by the frontend to pick a cover.
     pub first_file_path: Option<String>,
 }
 
-/// Информация о популярном артисте
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopArtist {
     pub name: String,
@@ -60,7 +52,6 @@ pub struct TopArtist {
     pub track_count: usize,
 }
 
-/// Информация о популярном альбоме
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopAlbum {
     pub name: String,
@@ -70,7 +61,6 @@ pub struct TopAlbum {
     pub first_file_path: Option<String>,
 }
 
-/// Сводная статистика библиотеки
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SummaryStats {
     pub total_tracks: usize,
@@ -83,8 +73,7 @@ pub struct SummaryStats {
     pub night_listens: i64,
 }
 
-/// Разделить строку с исполнителями по списку разделителей.
-/// Применяет каждый разделитель последовательно, обрезает пробелы и убирает пустые элементы.
+/// Split an artist string by a list of separators, applied in sequence; trims and drops empty pieces.
 pub fn split_artists(artist: &str, separators: &[String]) -> Vec<String> {
     let mut parts: Vec<String> = vec![artist.to_string()];
     for sep in separators {
@@ -103,40 +92,27 @@ pub fn split_artists(artist: &str, separators: &[String]) -> Vec<String> {
         .collect()
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// MusicLibrary
-// ──────────────────────────────────────────────────────────────────────────────
-
 pub struct MusicLibrary {
     conn: Connection,
     db_path: PathBuf,
-    /// Кэш накопителей центроида вкусов («Мой микс»). Считается лениво один раз
-    /// (O(N) скан истории) и далее обновляется инкрементально при завершении
-    /// прослушивания трека — см. [`MusicLibrary::update_centroid_for_listen`].
+    /// Taste-centroid accumulator cache ("my mix"): lazy O(N) build once, then
+    /// updated incrementally per listen (see `update_centroid_for_listen`).
     centroid_cache: RefCell<Option<CentroidAccumulators>>,
-    /// In-memory индекс поиска по каталогу (приведённые к нижнему регистру поля).
-    /// Строится лениво из БД, сбрасывается по флагу [`SEARCH_INDEX_DIRTY`].
+    /// In-memory catalog search index (lowercased fields), lazily rebuilt when `SEARCH_INDEX_DIRTY`.
     search_index: RefCell<Option<Vec<crate::catalog_search::SearchEntry>>>,
-    /// Кэш индекса «нормализованное название → локальные версии» для страницы
-    /// «Скачивание» (см. [`MusicLibrary::catalog_artist_title_index`]). Хранит
-    /// разделители, под которые построен, и сам индекс за `Arc` (debounce-поиск
-    /// дёргает его на каждый ввод). Сбрасывается по флагу [`DOWNLOADS_INDEX_DIRTY`]
-    /// и при смене разделителей.
+    /// "Already downloaded" index cache for the Downloads page (title -> local matches).
+    /// Keyed by the separators it was built with since debounced search re-queries it per keystroke.
     catalog_index_cache:
         RefCell<Option<(Vec<String>, Arc<HashMap<String, Vec<LibraryTrackMatch>>>)>>,
 }
 
-/// Локальная версия трека для album-aware сопоставления «есть ли такой трек в
-/// библиотеке» (страница «Скачивание»). Один локальный файл = набор его
-/// нормализованных артистов + нормализованный ключ альбома (пустой, если тега
-/// нет). Несколько файлов с одинаковым названием дают несколько таких записей под
-/// одним ключом названия — это и позволяет отличить одноимённые треки из РАЗНЫХ
-/// альбомов. См. [`MusicLibrary::catalog_artist_title_index`].
+/// One local file's identity for album-aware "already downloaded" matching on the
+/// Downloads page: normalized artists + normalized album key (empty if untagged).
+/// Multiple entries can share a title key to distinguish same-named tracks from
+/// different albums.
 #[derive(Debug, Clone)]
 pub struct LibraryTrackMatch {
-    /// Нормализованные артисты этого локального файла (мультиартист → несколько).
     pub artists: HashSet<String>,
-    /// Нормализованный альбом (пустая строка, если тега альбома нет).
     pub album_key: String,
 }
 
@@ -144,33 +120,23 @@ pub type AudioFeatureProgressEmitter = Arc<dyn Fn(usize, usize) + Send + Sync + 
 
 static AUDIO_FEATURE_WORKER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_FEATURE_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Помечается из фоновых/межпоточных операций (анализ фич, ре-скан), которые
-/// меняют состав истории. Кэш центроида сбрасывается при следующем чтении.
+/// Set by background/cross-thread ops (feature analysis, rescan) that change listen history.
 static CENTROID_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
-/// Помечается при изменении состава треков или их полей (название/исполнитель/
-/// альбом/жанр/путь). In-memory индекс поиска по каталогу пересобирается при
-/// следующем чтении. Стартовое значение `true` — индекс строится лениво.
+/// Set when track composition or fields change; starts `true` since the index is lazily built.
 static SEARCH_INDEX_DIRTY: AtomicBool = AtomicBool::new(true);
-/// Помечается вместе с [`SEARCH_INDEX_DIRTY`] (см. [`mark_track_indexes_dirty`]):
-/// кэш индекса «уже скачано» для страницы «Скачивание» зависит от тех же
-/// title/artist треков. Отдельный флаг — чтобы у каждого кэша был свой потребитель
-/// `swap(false)` и они не «съедали» инвалидацию друг друга.
+/// Separate from SEARCH_INDEX_DIRTY so each cache's consumer can `swap(false)`
+/// independently without one invalidation being silently consumed by the other.
 static DOWNLOADS_INDEX_DIRTY: AtomicBool = AtomicBool::new(true);
 
-/// Помечает зависящие от состава/полей треков in-memory индексы устаревшими:
-/// поиск по каталогу ([`SEARCH_INDEX_DIRTY`]) и индекс «уже скачано» для страницы
-/// «Скачивание» ([`DOWNLOADS_INDEX_DIRTY`]). Оба пересобираются лениво при чтении.
 fn mark_track_indexes_dirty() {
     for flag in [&SEARCH_INDEX_DIRTY, &DOWNLOADS_INDEX_DIRTY] {
         flag.store(true, Ordering::SeqCst);
     }
 }
 
-/// Помечает устаревшим ТОЛЬКО индекс поиска по каталогу (он упорядочен по
-/// `sort_order` — см. `CATALOG_ORDER_BY`). Индекс «уже скачано» зависит лишь от
-/// полей title/artist/album (не от порядка), поэтому изменения порядка его НЕ
-/// инвалидируют (иначе на странице «Скачивание» он зря пересобирался бы при
-/// каждом move-to-top/перестановке).
+/// Only invalidates the catalog search index (ordered by `sort_order`). The
+/// "already downloaded" index depends only on title/artist/album, not order,
+/// so reordering (move-to-top etc.) must not force it to rebuild.
 fn mark_search_index_dirty() {
     SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
 }
@@ -317,9 +283,8 @@ fn spawn_audio_feature_analysis(
 
                 let _ = tx.commit();
 
-                // Появились новые аудио-фичи — центроид мог измениться. Индексы
-                // поиска/«скачано» НЕ трогаем: они зависят от title/artist/album/
-                // genre/порядка, а аудио-фичи ничего из этого не меняют.
+                // New audio features may change the centroid; search/downloaded indexes
+                // depend on title/artist/album/genre/order, none of which features touch.
                 CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
 
                 if !is_audio_feature_generation_current(generation) {
@@ -543,9 +508,8 @@ impl MusicLibrary {
         ).map_err(|e| format!("Ошибка подсчёта прогресса audio features: {}", e))
     }
 
-    /// Корректное закрытие БД перед выходом: делаем лёгкую оптимизацию и
-    /// неблокирующий checkpoint. WAL оставляем включённым, потому что фоновые
-    /// DSP-потоки могут ещё держать своё SQLite-соединение при закрытии окна.
+    /// WAL stays enabled here (not disabled on shutdown): background DSP threads
+    /// may still hold their own SQLite connection while the window closes.
     pub fn shutdown(&self) -> Result<(), String> {
         let _ = self.conn.execute_batch("PRAGMA optimize;");
         match self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
@@ -560,8 +524,6 @@ impl MusicLibrary {
         }
     }
 
-    // ── Вспомогательные ────────────────────────────────────────────────────
-
     fn get_mtime(path: &std::path::Path) -> u64 {
         fs::metadata(path)
             .and_then(|m| m.modified())
@@ -573,7 +535,7 @@ impl MusicLibrary {
             .unwrap_or(0)
     }
 
-    /// Быстрый первый проход: собирает пути всех аудиофайлов без чтения метаданных
+    /// Fast first pass: collects audio file paths without reading metadata.
     fn collect_audio_files(
         dir: &std::path::Path,
         supported: &HashSet<&str>,
@@ -625,7 +587,7 @@ impl MusicLibrary {
         }
     }
 
-    /// Сканирует папку. `progress(current, total)` вызывается для каждого обработанного файла.
+    /// Scans a folder; `progress(current, total)` is called per processed file.
     fn scan_folder_internal<F>(
         &mut self,
         folder: &str,
@@ -655,13 +617,11 @@ impl MusicLibrary {
         )
     }
 
-    // ── Публичный API ───────────────────────────────────────────────────────
-
     pub fn get_folders(&self) -> Vec<FolderInfo> {
         self.get_folders_inner(true)
     }
 
-    /// Быстрый вариант без проверки файловой системы (для частых вызовов)
+    /// Skips filesystem existence checks, for frequent calls.
     pub fn get_folders_fast(&self) -> Vec<FolderInfo> {
         self.get_folders_inner(false)
     }
@@ -719,20 +679,15 @@ impl MusicLibrary {
         let _ = self.scan_folder_internal(&folder, true, audio_feature_progress, progress)?;
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
-        // Состав треков изменился — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         mark_track_indexes_dirty();
         Ok(self.get_all_tracks_light())
     }
 
-    /// Зарегистрированная папка библиотеки, которая совпадает с `dir` или
-    /// содержит его (т.е. `dir` — её поддиректория). Сравнение по канонизированным
-    /// путям (устойчиво к регистру/разделителям на Windows). Возвращает исходный
-    /// (хранимый в БД) путь накрывающей папки.
-    ///
-    /// Нужно, чтобы папку скачиваний не регистрировать повторно, когда она вложена
-    /// в уже добавленную пользователем папку (иначе одни и те же файлы попали бы
-    /// в `folders` дважды и сканировались бы под двумя путями).
+    /// Registered library folder that equals or contains `dir`, compared via
+    /// canonicalized paths (case/separator-safe on Windows). Returns the stored
+    /// path of the covering folder, so a downloads folder nested inside an
+    /// already-added folder isn't registered (and scanned) twice.
     pub fn covering_folder(&self, dir: &str) -> Option<String> {
         let target = std::fs::canonicalize(dir).ok()?;
         let folders: Vec<String> = {
@@ -744,9 +699,6 @@ impl MusicLibrary {
         };
         for f in folders {
             if let Ok(fp) = std::fs::canonicalize(&f) {
-                // `starts_with` сравнивает по компонентам пути, поэтому совпадение
-                // и «вложенность» обрабатываются корректно (без ложных
-                // «C:\Music2» ⊂ «C:\Music»).
                 if target.starts_with(&fp) {
                     return Some(f);
                 }
@@ -755,16 +707,8 @@ impl MusicLibrary {
         None
     }
 
-    /// Точечно добавить ОДИН скачанный файл в библиотеку — без обхода всей папки
-    /// (как при полном сканировании). Путь известен заранее, поэтому читаем
-    /// метаданные только этого файла и делаем UPSERT, затем перестраиваем
-    /// плейлисты и запускаем фоновый анализ аудио-фич. Так трек появляется в
-    /// каталоге сразу по мере скачивания, а стоимость не растёт с размером
-    /// библиотеки (нет рекурсивного обхода и диффа mtime всех файлов).
-    ///
-    /// `downloads_dir` — папка скачиваний: определяет `folder_path` трека.
-    /// Если она накрыта уже добавленной папкой — берём её (без дубля в `folders`);
-    /// иначе регистрируем саму папку скачиваний (один раз).
+    /// Adds a single downloaded file without a full folder scan: reads only
+    /// this file's metadata and UPSERTs it, so cost doesn't grow with library size.
     pub fn insert_downloaded_track(
         &mut self,
         file_path: &str,
@@ -786,9 +730,8 @@ impl MusicLibrary {
 
         let m = AudioPlayer::get_metadata_light(file_path)?;
         let mtime = Self::get_mtime(&PathBuf::from(file_path));
-        // Скачанный трек встаёт в начало каталога (сортировка по sort_order DESC):
-        // даём значение выше текущего максимума. При повторном скачивании (ветка
-        // DO UPDATE) тоже поднимаем — это явное действие пользователя «добавить трек».
+        // Catalog sorts by sort_order DESC, so a downloaded track goes to the top;
+        // re-downloads (DO UPDATE branch) also bump it, as an explicit user action.
         let new_sort_order: i64 = self
             .conn
             .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
@@ -836,31 +779,27 @@ impl MusicLibrary {
             )
             .map_err(|e| format!("Ошибка вставки трека: {}", e))?;
 
-        // Группировки альбома/артиста — чтобы трек попал в свои плейлисты.
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
-        // Анализ «настроения» (bpm/energy/…) здесь НЕ перезапускаем: при пакетном
-        // скачивании это отменяло+перезапускало бы фоновый воркер на каждый трек.
-        // Вызывающий (download-воркер) запускает анализ ОДИН раз по завершении
-        // пачки через `resume_pending_audio_feature_analysis`.
+        // Feature analysis is intentionally NOT restarted here: during batch downloads
+        // that would cancel+restart the background worker per track. The caller
+        // (download worker) triggers it once after the batch via resume_pending_audio_feature_analysis.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         mark_track_indexes_dirty();
         Ok(())
     }
 
-    /// Удалить один трек из библиотеки (запись в БД и зависимые данные) и
-    /// перестроить плейлисты. Сам файл на диске НЕ трогает — это делает
-    /// вызывающий (см. `downloads::delete_downloaded_track`). Каскадные FK
-    /// (`PRAGMA foreign_keys=ON`) убирают строки в playlist_tracks и
-    /// track_audio_features; track_overrides/track_statistics чистим явно.
+    /// Removes one track (DB row + dependent data) and rebuilds playlists. Does NOT
+    /// touch the file on disk (caller's job, see `downloads::delete_downloaded_track`).
+    /// FK cascade handles playlist_tracks/track_audio_features; track_overrides/
+    /// track_statistics are cleaned explicitly since they have no FK.
     pub fn remove_track(
         &mut self,
         file_path: &str,
         artist_separators: &[String],
     ) -> Result<(), String> {
-        // Сигнатуру кастомной обложки берём ДО удаления переопределения — после
-        // коммита подчистим осиротевший файл в track_covers/, если на него больше
-        // никто не ссылается (иначе файл обложки остался бы висеть на диске).
+        // Grab the cover signature before deleting the override row, so the
+        // orphaned track_covers/ file (if any) can be cleaned up after commit.
         let cover_sig = self.get_override_cover_sig(file_path);
         {
             let tx = self
@@ -872,7 +811,6 @@ impl MusicLibrary {
                 params![file_path],
             )
             .map_err(|e| format!("Ошибка удаления переопределений: {}", e))?;
-            // Статистика прослушиваний — best-effort (таблица из модуля statistics).
             let _ = tx.execute(
                 "DELETE FROM track_statistics WHERE file_path = ?1",
                 params![file_path],
@@ -886,11 +824,10 @@ impl MusicLibrary {
             self.remove_orphan_cover_file(&sig, file_path);
         }
 
-        // Перестройка плейлистов/индексов — производное от уже ЗАКОММИЧЕННОГО
-        // удаления (источник истины — таблица tracks). Делаем best-effort и НЕ
-        // пробрасываем ошибку: иначе вызывающий счёл бы удаление неудачным и вернул
-        // файл из карантина — а записи в БД уже нет (рассинхрон: файл есть, трека
-        // нет). Стейл плейлистов восстановится при следующей перестройке.
+        // Best-effort, errors not propagated: the tracks row is already committed
+        // deleted, so failing here shouldn't make the caller think removal failed
+        // (that could un-quarantine a file whose DB row is gone). Stale playlists
+        // self-heal on the next rebuild.
         if let Err(e) = self.rebuild_album_playlists() {
             eprintln!("[library] remove_track: не удалось перестроить альбомы: {}", e);
         }
@@ -915,8 +852,7 @@ impl MusicLibrary {
             .transaction()
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-        // Сбрасываем все пользовательские правки только при удалении папки
-        // из скоупа приложения — переопределения треков в этой папке исчезают.
+        // Overrides are only reset when a folder leaves the app's scope entirely.
         tx.execute(
             "DELETE FROM track_overrides
              WHERE file_path IN (SELECT file_path FROM tracks WHERE folder_path = ?1)",
@@ -939,18 +875,15 @@ impl MusicLibrary {
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
         let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
-        // Состав треков изменился — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         mark_track_indexes_dirty();
         Ok(())
     }
 
-    /// Удаляет из кэша треки, файлы которых больше не существуют на диске
     pub fn cleanup_missing_tracks(&mut self) -> Result<usize, String> {
         self.delete_missing_tracks()
     }
 
-    /// Внутренний метод: удаляет треки с несуществующими файлами, возвращает количество удалённых
     fn delete_missing_tracks(&mut self) -> Result<usize, String> {
         let all_paths: Vec<String> = {
             let mut stmt = self
@@ -965,8 +898,8 @@ impl MusicLibrary {
             rows.filter_map(|r| r.ok()).collect()
         };
 
-        // Проверки существования файлов — IO-bound, параллелим
-        // (на больших библиотеках и сетевых дисках серийный обход очень медленный)
+        // Existence checks are IO-bound; parallelized since a serial walk is
+        // very slow for large libraries / network drives.
         let dead: Vec<String> = all_paths
             .into_par_iter()
             .filter(|p| !PathBuf::from(p).exists())
@@ -974,10 +907,9 @@ impl MusicLibrary {
 
         let count = dead.len();
         if !dead.is_empty() {
-            // track_overrides — единственная таблица без FK на tracks (в отличие от
-            // track_audio_features/playlist_tracks/track_statistics, которые чистит
-            // ON DELETE CASCADE), поэтому без явного DELETE здесь она осиротела бы —
-            // та же таблица, что вручную чистит remove_track() для одиночного удаления.
+            // track_overrides has no FK to tracks (unlike track_audio_features/
+            // playlist_tracks/track_statistics, cleaned by ON DELETE CASCADE), so it
+            // must be deleted explicitly here too, same as remove_track() does.
             let cover_sigs: Vec<String> = dead
                 .iter()
                 .filter_map(|p| self.get_override_cover_sig(p))
@@ -988,7 +920,6 @@ impl MusicLibrary {
                 .transaction()
                 .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-            // Пакетный DELETE батчами по N — один prepared statement, N плейсхолдеров
             const BATCH: usize = 256;
             for chunk in dead.chunks(BATCH) {
                 let placeholders = (0..chunk.len())
@@ -1011,7 +942,6 @@ impl MusicLibrary {
                 self.remove_orphan_cover_file(sig, "");
             }
 
-            // Удалены треки (вместе с их статистикой) — центроид мог измениться.
             CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         mark_track_indexes_dirty();
         }
@@ -1023,25 +953,21 @@ impl MusicLibrary {
         self.get_all_tracks_inner(false)
     }
 
-    /// Получить все треки без обложек (для экономии памяти при больших библиотеках)
+    /// Skips covers, to save memory on large libraries.
     pub fn get_all_tracks_light(&self) -> Vec<TrackMetadata> {
         self.get_all_tracks_inner(true)
     }
 
-    /// Индекс каталога «нормализованное название → локальные версии трека»
-    /// ([`LibraryTrackMatch`]: артисты + альбом, с учётом переопределений). Для
-    /// страницы «Скачивание»: трек из интернета считается уже скачанным, если
-    /// совпало название (со снятым шумом вроде `(prod. by …)`), пересеклись наборы
-    /// артистов (хотя бы один общий — поддержка мультиартистных треков) И альбом
-    /// совместим (см. логику в `downloads_search`) — чтобы одноимённый трек из
-    /// другого альбома не помечался «скачанным». Лёгкий запрос по title/artist/album.
+    /// Title -> local matches ([`LibraryTrackMatch`]) index for the Downloads page:
+    /// a remote track counts as "already downloaded" if the title matches (noise
+    /// like `(prod. by ...)` stripped), artist sets intersect, and the album is
+    /// compatible (see `downloads_search`) — so a same-named track from a
+    /// different album isn't marked as owned.
     pub fn catalog_artist_title_index(
         &self,
         separators: &[String],
     ) -> Arc<HashMap<String, Vec<LibraryTrackMatch>>> {
-        // Кэшируем: debounce-поиск на странице «Скачивание» дёргает индекс на
-        // каждый ввод, а пересборка — это SQL-скан всех треков + нормализация.
-        // Инвалидация по составу/полям треков (флаг) и при смене разделителей.
+        // Cached: debounced search on the Downloads page re-queries this per keystroke.
         if DOWNLOADS_INDEX_DIRTY.swap(false, Ordering::SeqCst) {
             self.catalog_index_cache.borrow_mut().take();
         }
@@ -1056,10 +982,7 @@ impl MusicLibrary {
         built
     }
 
-    /// Строит индекс «нормализованное название → локальные версии (артисты +
-    /// альбом)» из БД (без кэша). Альбом нужен, чтобы отличать одноимённые треки
-    /// одного исполнителя из РАЗНЫХ альбомов: только реально скачанная версия
-    /// помечается «в библиотеке».
+    /// Builds the title -> local matches index from the DB (uncached).
     fn build_catalog_artist_title_index(
         &self,
         separators: &[String],
@@ -1072,8 +995,7 @@ impl MusicLibrary {
         ) else {
             return index;
         };
-        // Готовим разделители ОДИН раз — иначе на каждый трек заново аллоцировался
-        // и сортировался бы их список (тысячи лишних аллокаций на большой медиатеке).
+        // Prepared once, not per track, to avoid thousands of reallocations on large libraries.
         let prepared_seps = crate::external::prepare_artist_separators(separators);
         let rows = stmt.query_map([], |row| {
             let title: Option<String> = row.get(0)?;
@@ -1163,11 +1085,9 @@ impl MusicLibrary {
 
     fn row_to_metadata_with_override(row: &rusqlite::Row) -> rusqlite::Result<TrackMetadata> {
         let file_path: String = row.get(0)?;
-        // Пользовательская (override) обложка отдаётся уменьшенной WebP-миниатюрой
-        // через протокол `lfmusic-cover` (без base64 в списке). Встроенная обложка
-        // догружается лениво через cover loader, поэтому здесь None.
-        // Колонка 13 — уже готовая сигнатура override-обложки (cover_sig), а не
-        // её сырые данные: URL миниатюры строится без чтения байтов и хеширования.
+        // Override cover is served as a WebP thumbnail via the `lfmusic-cover` protocol
+        // (no base64 in the list); embedded cover loads lazily elsewhere, so None here.
+        // Column 13 is the cover_sig, not raw bytes: URL is built without hashing.
         let cover_art = row
             .get::<_, Option<String>>(13)?
             .map(|sig| crate::thumbnails::cover_protocol_url(&file_path, &sig));
@@ -1196,9 +1116,7 @@ impl MusicLibrary {
         })
     }
 
-    // ── Серверная пагинация каталога + поиск (in-memory индекс) ────────────────
-
-    /// ORDER BY канонического порядка каталога (совпадает с get_all_tracks_inner).
+    /// Matches the ORDER BY in get_all_tracks_inner (canonical catalog order).
     const CATALOG_ORDER_BY: &'static str = " ORDER BY
                  t.sort_order DESC,
                  CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
@@ -1206,7 +1124,6 @@ impl MusicLibrary {
                  LOWER(COALESCE(t.album, '')),
                  LOWER(COALESCE(o.title, t.title, t.file_path))";
 
-    /// Построить in-memory индекс поиска из БД в каноническом порядке.
     fn build_search_index(&self) -> Vec<crate::catalog_search::SearchEntry> {
         let sql = format!(
             "SELECT t.file_path,
@@ -1237,7 +1154,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Гарантирует актуальность индекса (пересборка по dirty-флагу / при отсутствии).
     fn ensure_search_index(&self) {
         if SEARCH_INDEX_DIRTY.swap(false, Ordering::SeqCst) {
             self.search_index.borrow_mut().take();
@@ -1248,7 +1164,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Ранжированные пути по запросу (+ опциональный фильтр по жанру).
     fn ranked_paths(&self, genre: Option<&str>, search: &str, limit: Option<usize>) -> Vec<String> {
         self.ensure_search_index();
         let guard = self.search_index.borrow();
@@ -1264,8 +1179,7 @@ impl MusicLibrary {
         }
     }
 
-    /// Прямой SQL-запрос путей каталога в каноническом порядке (без поиска),
-    /// с опциональным точным фильтром по жанру (индекс idx_tracks_genre).
+    /// Direct SQL query for catalog paths in canonical order, no search.
     fn catalog_paths_sql(&self, genre: Option<&str>) -> Vec<String> {
         let base = "SELECT t.file_path
                     FROM tracks t
@@ -1278,8 +1192,7 @@ impl MusicLibrary {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        // Замыкания query_map с разными аргументами имеют разные типы, поэтому
-        // собираем результат в Vec прямо внутри каждой ветки.
+        // query_map closures differ by arity/type per branch, so each collects separately.
         match genre {
             Some(g) => match stmt.query_map(params![g], |row| row.get::<_, String>(0)) {
                 Ok(rows) => rows.filter_map(|x| x.ok()).collect(),
@@ -1292,8 +1205,7 @@ impl MusicLibrary {
         }
     }
 
-    /// Упорядоченные пути каталога с учётом фильтра по жанру и поисковому запросу.
-    /// Поиск (если непустой) использует in-memory ранжирование; иначе — прямой SQL.
+    /// Non-empty search uses the in-memory ranked index; otherwise direct SQL.
     pub fn get_catalog_paths(&self, genre: Option<&str>, search: Option<&str>) -> Vec<String> {
         let search_q = search.map(|s| s.trim()).filter(|s| !s.is_empty());
         match search_q {
@@ -1302,8 +1214,7 @@ impl MusicLibrary {
         }
     }
 
-    /// Пакетная материализация метаданных по списку путей (с overrides + audio-features).
-    /// Порядок результата совпадает с порядком входных путей; отсутствующие пропускаются.
+    /// Result order matches input path order; missing paths are skipped.
     pub fn get_tracks_by_paths(&self, paths: &[String]) -> Vec<TrackMetadata> {
         if paths.is_empty() {
             return Vec::new();
@@ -1336,7 +1247,6 @@ impl MusicLibrary {
             };
             let params_vec: Vec<&dyn rusqlite::ToSql> =
                 chunk.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
-            // Собираем строки в пределах жизни `stmt`, чтобы заём не «утёк» из блока.
             let metas: Vec<TrackMetadata> =
                 match stmt.query_map(params_vec.as_slice(), |row| {
                     Self::row_to_metadata_with_override(row)
@@ -1351,13 +1261,11 @@ impl MusicLibrary {
         paths.iter().filter_map(|p| by_path.remove(p)).collect()
     }
 
-    /// Ранжированные треки по запросу (для секции «Треки» страницы поиска).
     pub fn search_tracks(&self, query: &str, limit: Option<usize>) -> Vec<TrackMetadata> {
         let paths = self.ranked_paths(None, query, limit);
         self.get_tracks_by_paths(&paths)
     }
 
-    /// Список жанров с количеством треков (count > 1, по убыванию) — как в Catalog.vue.
     pub fn list_genres(&self) -> Vec<GenreCount> {
         let sql = "SELECT genre, COUNT(*) AS cnt
                    FROM tracks
@@ -1381,7 +1289,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Получить один трек по пути с применением переопределений
     pub fn get_track(&self, file_path: &str) -> Option<TrackMetadata> {
         let mut stmt = self
             .conn
@@ -1405,9 +1312,7 @@ impl MusicLibrary {
             .ok()
     }
 
-    /// Поднимает трек на первое место в каталоге
     pub fn move_track_to_top(&self, file_path: &str) -> Result<(), String> {
-        // Находим максимальный sort_order и ставим +1
         let max_order: i64 = self
             .conn
             .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
@@ -1421,9 +1326,7 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка обновления sort_order: {}", e))?;
 
         if changed > 0 {
-            // Изменился sort_order → канонический порядок каталога устарел (этот
-            // порядок зашит в индекс поиска). Индекс «скачано» зависит только от
-            // title/artist — его не трогаем.
+            // sort_order changed, which the search index bakes in; the "downloaded" index doesn't depend on order.
             mark_search_index_dirty();
             self.add_track_statistics_delta(TrackStatisticsDelta {
                 file_path: file_path.to_string(),
@@ -1459,7 +1362,6 @@ impl MusicLibrary {
 
         let supported: HashSet<&str> = AudioPlayer::supported_formats().iter().copied().collect();
 
-        // Считаем общее количество файлов по всем папкам
         let mut folder_file_lists: Vec<(String, Vec<PathBuf>)> = Vec::new();
         for folder in &folders {
             if PathBuf::from(folder).is_dir() {
@@ -1471,7 +1373,6 @@ impl MusicLibrary {
         let grand_total: usize = folder_file_lists.iter().map(|(_, f)| f.len()).sum();
         let mut global_current: usize = 0;
 
-        // Сканируем каждую папку с учётом общего прогресса
         let mut scanned_count = 0usize;
         for (folder, files) in &folder_file_lists {
             let folder_total = files.len();
@@ -1484,7 +1385,6 @@ impl MusicLibrary {
             global_current += folder_total;
         }
 
-        // Удаляем треки, файлы которых больше не существуют
         let deleted_count = self.delete_missing_tracks()?;
 
         self.rebuild_album_playlists()?;
@@ -1494,13 +1394,11 @@ impl MusicLibrary {
             let _ = self.restart_pending_audio_feature_analysis(audio_feature_progress);
         }
 
-        // Состав треков мог измениться — кэш центроида вкусов больше не актуален.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         mark_track_indexes_dirty();
         Ok(self.get_all_tracks())
     }
 
-    /// Внутренний метод: обрабатывает уже собранный список файлов с прогрессом
     fn scan_folder_files<F>(
         &mut self,
         folder: &str,
@@ -1517,7 +1415,6 @@ impl MusicLibrary {
             return Ok(0);
         }
 
-        // 1. Загружаем все cached mtimes одним запросом
         let cached_mtimes: HashMap<String, u64> = {
             let mut stmt = self
                 .conn
@@ -1535,8 +1432,7 @@ impl MusicLibrary {
             rows.filter_map(|r| r.ok()).collect()
         };
 
-        // 2. Фильтруем файлы, которые нужно (пере)сканировать.
-        // Чтение mtime — IO-bound, параллелим; par_iter сохраняет порядок файлов.
+        // mtime reads are IO-bound, parallelized; par_iter preserves file order.
         let to_scan: Vec<(String, u64)> = files
             .par_iter()
             .filter_map(|file_path| {
@@ -1553,7 +1449,6 @@ impl MusicLibrary {
             })
             .collect();
 
-        // Прогресс: кэшированные файлы считаются уже обработанными
         let cached_count = total - to_scan.len();
         if cached_count > 0 {
             progress(cached_count, total);
@@ -1564,7 +1459,6 @@ impl MusicLibrary {
             return Ok(0);
         }
 
-        // 3. Параллельное чтение метаданных (без обложек)
         let counter = AtomicUsize::new(cached_count);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(Self::scan_thread_count())
@@ -1577,7 +1471,6 @@ impl MusicLibrary {
                 .filter_map(|(path_str, mtime)| {
                     let result = AudioPlayer::get_metadata_light(path_str).ok()?;
                     let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    // Обновляем прогресс каждые 10 файлов или при завершении
                     if done % 10 == 0 || done == total {
                         progress(done, total);
                     }
@@ -1588,19 +1481,16 @@ impl MusicLibrary {
 
         progress(total, total);
 
-        // 4. Пакетная вставка в одной транзакции, подготовленный statement
         if !batch.is_empty() {
             let tx = self
                 .conn
                 .transaction()
                 .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-            // Новые (впервые встреченные) файлы встают в начало каталога: каталог
-            // сортируется по sort_order DESC, поэтому свежим трекам выдаём значение
-            // выше текущего максимума. Все новинки этого скана делят одно значение
-            // (group at top; внутри группы — по артисту/альбому/названию). У уже
-            // существующих треков (ветка DO UPDATE) sort_order не трогаем, поэтому
-            // изменение mtime само по себе наверх их не поднимает.
+            // Catalog sorts by sort_order DESC; newly-seen files this scan share one
+            // value above the current max (grouped at top). Already-known tracks hit
+            // the DO UPDATE branch and keep their sort_order, so a bare mtime change
+            // doesn't bump them to the top.
             let new_sort_order: i64 = tx
                 .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
                 .unwrap_or(0)
@@ -1662,9 +1552,6 @@ impl MusicLibrary {
         Ok(batch.len())
     }
 
-    // ── Плейлисты ─────────────────────────────────────────────────────────────
-
-    /// Получить все плейлисты с количеством треков и путём первого трека
     pub fn get_playlists(&self) -> Vec<PlaylistInfo> {
         let mut stmt = match self.conn.prepare(
             "SELECT p.id, p.name, p.kind, COUNT(pt.file_path) as cnt,
@@ -1702,12 +1589,11 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// Получить треки плейлиста
     pub fn get_playlist_tracks(&self, playlist_id: i64) -> Vec<TrackMetadata> {
         self.get_playlist_tracks_inner(playlist_id, false)
     }
 
-    /// Получить треки плейлиста без обложек (для экономии памяти)
+    /// Skips covers, to save memory.
     pub fn get_playlist_tracks_light(&self, playlist_id: i64) -> Vec<TrackMetadata> {
         self.get_playlist_tracks_inner(playlist_id, true)
     }
@@ -1762,7 +1648,6 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// Создать пользовательский плейлист
     pub fn create_playlist(&mut self, name: String) -> Result<PlaylistInfo, String> {
         self.conn
             .execute(
@@ -1781,7 +1666,6 @@ impl MusicLibrary {
         })
     }
 
-    /// Переименовать плейлист
     pub fn rename_playlist(&self, playlist_id: i64, name: String) -> Result<(), String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
@@ -1800,7 +1684,6 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Удалить пользовательский плейлист
     pub fn delete_playlist(&mut self, playlist_id: i64) -> Result<(), String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
@@ -1810,8 +1693,7 @@ impl MusicLibrary {
             return Err("Нельзя удалять системные плейлисты".into());
         }
 
-        // Снимаем -1 с playlist_add_count для каждого трека удаляемого плейлиста,
-        // симметрично remove_track_from_playlist.
+        // Mirrors remove_track_from_playlist: -1 playlist_add_count per track.
         let removed_paths: Vec<String> = {
             let mut stmt = self.conn
                 .prepare("SELECT file_path FROM playlist_tracks WHERE playlist_id = ?1")
@@ -1844,7 +1726,6 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Добавить трек в пользовательский плейлист
     pub fn add_track_to_playlist(&self, playlist_id: i64, file_path: &str) -> Result<(), String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
@@ -1878,7 +1759,6 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Удалить трек из пользовательского плейлиста
     pub fn remove_track_from_playlist(&self, playlist_id: i64, file_path: &str) -> Result<(), String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
@@ -1904,7 +1784,6 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Вернуть id пользовательских плейлистов, содержащих указанный трек
     pub fn get_user_playlist_ids_for_track(&self, file_path: &str) -> Vec<i64> {
         let mut stmt = match self.conn.prepare(
             "SELECT pt.playlist_id
@@ -1925,8 +1804,8 @@ impl MusicLibrary {
     }
 
     pub fn add_track_statistics_delta(&self, delta: TrackStatisticsDelta) -> Result<(), String> {
-        // Прослушивание трека меняет центроид вкусов — обновляем его кэш
-        // инкрементально (вместо O(N) пересчёта всей истории при выдаче «Микса»).
+        // A listen changes the taste centroid; update its cache incrementally
+        // instead of an O(N) history rescan on every "mix" request.
         let listen_changed = delta.listen_count_delta != 0 && !delta.file_path.trim().is_empty();
         let old_count = if listen_changed {
             statistics::get_track_statistics(&self.conn, &delta.file_path)
@@ -1965,7 +1844,6 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка записи статистики подборки: {}", e))
     }
 
-    /// Поднять трек на первое место в плейлисте
     pub fn move_playlist_track_to_top(&self, playlist_id: i64, file_path: &str) -> Result<(), String> {
         let min_order: i64 = self.conn
             .query_row(
@@ -1991,11 +1869,10 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Инкрементальное обновление альбомных плейлистов.
-    /// Для каждого существующего альбома вычисляет diff (added/removed)
-    /// и применяет только его — неизменившиеся альбомы не трогаются вообще.
+    /// Incremental update: diffs each album against its existing playlist and
+    /// applies only the delta; unchanged albums aren't touched.
     pub fn rebuild_album_playlists(&mut self) -> Result<(), String> {
-        // Собираем актуальные альбомы из tracks (с >1 треком)
+        // Current albums from tracks, with >1 track.
         let actual_albums: HashMap<String, HashSet<String>> = {
             let mut stmt = self.conn.prepare(
                 "SELECT album, file_path FROM tracks
@@ -2015,7 +1892,7 @@ impl MusicLibrary {
             map
         };
 
-        // Существующие альбомные плейлисты: name -> (id, Set<file_path>)
+        // Existing album playlists: name -> (id, Set<file_path>)
         let existing_albums: HashMap<String, (i64, HashSet<String>)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT p.id, p.name, pt.file_path
@@ -2044,7 +1921,6 @@ impl MusicLibrary {
             .transaction()
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-        // Удаляем плейлисты альбомов, которых больше нет
         for (name, (id, _)) in &existing_albums {
             if !actual_albums.contains_key(name) {
                 tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![id]).ok();
@@ -2052,14 +1928,11 @@ impl MusicLibrary {
             }
         }
 
-        // Для каждого актуального альбома применяем только diff
         for (album_name, new_set) in &actual_albums {
             let playlist_id = if let Some((id, current_set)) = existing_albums.get(album_name) {
-                // Пропускаем неизменившиеся альбомы целиком
                 if current_set == new_set {
                     continue;
                 }
-                // Удаляем треки, которых больше нет
                 let to_remove: Vec<&String> = current_set.difference(new_set).collect();
                 if !to_remove.is_empty() {
                     const BATCH: usize = 256;
@@ -2088,7 +1961,6 @@ impl MusicLibrary {
                 tx.last_insert_rowid()
             };
 
-            // Добавляем только новые треки
             let current_set = existing_albums
                 .get(album_name)
                 .map(|(_, s)| s)
@@ -2110,16 +1982,10 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Инкрементальное обновление плейлистов исполнителей.
-    /// Каждый трек разбивается по списку разделителей, и для каждого имени
-    /// создаётся/обновляется плейлист с kind='artist'.
+    /// Splits each track's artist by `separators`; one playlist (kind='artist') per name.
+    /// Names are grouped case-insensitively (so "MZLFF"/"mzlff" merge); per key we keep a
+    /// spelling-variant counter (to pick a canonical name for new playlists) plus the track set.
     pub fn rebuild_artist_playlists(&mut self, separators: &[String]) -> Result<(), String> {
-        // Собираем актуальные плейлисты исполнителей из tracks с учётом
-        // переопределений (track_overrides.artist имеет приоритет).
-        // Исполнители группируются регистронезависимо (ключ = имя в нижнем
-        // регистре), чтобы «MZLFF» и «mzlff» считались одним артистом. Для каждого
-        // ключа храним счётчик вариантов написания (для выбора каноничного имени
-        // у новых плейлистов) и объединённый набор треков.
         let actual_artists: HashMap<String, (HashMap<String, usize>, HashSet<String>)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT COALESCE(o.artist, t.artist) AS effective_artist, t.file_path
@@ -2146,9 +2012,8 @@ impl MusicLibrary {
             map
         };
 
-        // Существующие плейлисты исполнителей, сгруппированные по ключу (нижний
-        // регистр имени). В одном ключе может оказаться несколько плейлистов —
-        // legacy-дубликаты разного регистра, которые нужно слить в один.
+        // Grouped by lowercased name; a key can hold multiple legacy case-variant
+        // playlists that need merging into one.
         let existing_by_key: HashMap<String, Vec<(i64, String, HashSet<String>)>> = {
             let mut stmt = self.conn.prepare(
                 "SELECT p.id, p.name, pt.file_path
@@ -2182,7 +2047,6 @@ impl MusicLibrary {
             .transaction()
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-        // Удаляем плейлисты исполнителей, которых больше нет
         for (key, playlists) in &existing_by_key {
             if !actual_artists.contains_key(key) {
                 for (id, _, _) in playlists {
@@ -2193,12 +2057,10 @@ impl MusicLibrary {
         }
 
         for (key, (variants, new_set)) in &actual_artists {
-            // Определяем основной плейлист для ключа. Если их несколько (legacy
-            // дубликаты), оставляем самый «крупный» (по числу треков, при равенстве
-            // — самый старый id) и сливаем в него остальные. Имя существующего
-            // плейлиста сохраняем как есть, чтобы не оборвать закрепления, обложки
-            // и порядок «сверху». Каноничное имя (по самому частому написанию)
-            // выбираем только при создании нового плейлиста.
+            // If a key has multiple legacy duplicates, keep the largest (by track
+            // count, ties by oldest id) and merge the rest into it, preserving its
+            // existing name so pins/covers/top-order aren't broken. A canonical name
+            // (most common spelling) is only chosen when creating a brand-new playlist.
             let (playlist_id, current_set) = match existing_by_key.get(key) {
                 Some(playlists) if !playlists.is_empty() => {
                     let mut sorted: Vec<&(i64, String, HashSet<String>)> = playlists.iter().collect();
@@ -2262,16 +2124,13 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Папка данных приложения (родитель файла БД) — где лежат файлы обложек.
     fn app_data_dir(&self) -> &Path {
         self.db_path.parent().unwrap_or_else(|| Path::new("."))
     }
 
-    /// Сохранить пользовательское переопределение метаданных трека.
-    /// Переопределения переживают пересканирование и сбрасываются только
-    /// при удалении папки трека из скоупа приложения.
-    /// `keep_existing_cover = true` означает «не трогать обложку и accent»,
-    /// иначе оба поля заменяются переданными значениями (None → очистка).
+    /// Overrides survive rescans and reset only when the track's folder leaves the
+    /// app's scope. `keep_existing_cover = true` leaves cover/accent untouched;
+    /// otherwise both are replaced by the passed values (None clears them).
     pub fn set_track_override(
         &self,
         file_path: &str,
@@ -2281,13 +2140,11 @@ impl MusicLibrary {
         accent_color: Option<&str>,
         keep_existing_cover: bool,
     ) -> Result<(), String> {
-        // Меняются title/artist → индекс поиска устарел.
         mark_track_indexes_dirty();
-        // Нормализуем пустые строки в None — пустое поле = «использовать оригинал».
+        // Empty string means "use the original".
         let title = title.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
         let artist = artist.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
 
-        // Текущая сигнатура обложки (для очистки осиротевшего файла) и accent.
         let existing: Option<(Option<String>, Option<String>)> = self
             .conn
             .query_row(
@@ -2298,8 +2155,7 @@ impl MusicLibrary {
             .ok();
         let old_sig = existing.as_ref().and_then(|(s, _)| s.clone());
 
-        // Новую обложку (data-URL) пишем файлом в track_covers/, в БД кладём
-        // только её сигнатуру. При keep_existing_cover оставляем как есть.
+        // New cover (data URL) is written to track_covers/; only its signature goes in the DB.
         let (final_sig, final_accent) = if keep_existing_cover {
             (old_sig.clone(), existing.and_then(|(_, a)| a))
         } else {
@@ -2317,15 +2173,14 @@ impl MusicLibrary {
             }
         };
 
-        // Чистим старый файл обложки, если она сменилась/сброшена и больше ни
-        // на один трек не ссылается (обложки дедуплицированы по сигнатуре).
+        // Covers are deduplicated by signature, so clean up the old file if it changed/cleared.
         if old_sig != final_sig {
             if let Some(ref sig) = old_sig {
                 self.remove_orphan_cover_file(sig, file_path);
             }
         }
 
-        // Если все поля пусты — удаляем запись, чтобы LEFT JOIN отдал оригинал
+        // All fields empty -> delete the row so the LEFT JOIN falls back to the original.
         if title.is_none() && artist.is_none() && final_sig.is_none() && final_accent.is_none() {
             self.conn
                 .execute(
@@ -2351,8 +2206,7 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Удалить файл обложки `sig`, если он больше не используется ни одним
-    /// треком (кроме `excluding_path`, чью запись мы как раз меняем/удаляем).
+    /// Removes cover file `sig` if no track (other than `excluding_path`) still references it.
     fn remove_orphan_cover_file(&self, sig: &str, excluding_path: &str) {
         let still_used: i64 = self
             .conn
@@ -2368,10 +2222,8 @@ impl MusicLibrary {
         }
     }
 
-
-    /// Удалить ВСЕ переопределения треков. Возвращает количество сброшенных треков.
-    /// Также сбрасывает кэшированный accent_color, чтобы следующее воспроизведение
-    /// пересчитало его из оригинальной обложки файла.
+    /// Also resets cached accent_color so the next playback recomputes it from
+    /// the track's original embedded cover.
     pub fn clear_all_track_overrides(&self) -> Result<usize, String> {
         mark_track_indexes_dirty();
         let count = self
@@ -2381,12 +2233,10 @@ impl MusicLibrary {
         let _ = self
             .conn
             .execute("UPDATE tracks SET accent_color = NULL", []);
-        // Сносим папку с файлами кастомных обложек целиком — все записи удалены.
         let _ = std::fs::remove_dir_all(crate::track_covers::covers_dir(self.app_data_dir()));
         Ok(count)
     }
 
-    /// Проверить, есть ли пользовательская обложка у трека.
     pub fn has_override_cover(&self, file_path: &str) -> bool {
         self.conn
             .query_row(
@@ -2398,9 +2248,7 @@ impl MusicLibrary {
             .unwrap_or(false)
     }
 
-    /// Получить кэшированный accent_color для трека.
-    /// Если у трека есть пользовательское переопределение обложки — возвращаем
-    /// его accent, иначе фолбэчимся на тот, что вычислен из оригинальной обложки.
+    /// Override accent_color wins if set, otherwise falls back to the one cached from the original cover.
     pub fn get_accent_color(&self, file_path: &str) -> Option<String> {
         self.conn
             .query_row(
@@ -2415,8 +2263,7 @@ impl MusicLibrary {
             .flatten()
     }
 
-    /// Сигнатура пользовательской обложки (если установлена). Это короткая строка
-    /// — ключ файла в `track_covers/` и параметр `?s=` в URL миниатюры.
+    /// Short string used as both the `track_covers/` file key and the `?s=` thumbnail URL param.
     pub fn get_override_cover_sig(&self, file_path: &str) -> Option<String> {
         self.conn
             .query_row(
@@ -2428,14 +2275,12 @@ impl MusicLibrary {
             .flatten()
     }
 
-    /// Сырые байты пользовательской обложки (читаются с диска лениво — только
-    /// когда реально нужны: генерация миниатюры, расчёт акцентного цвета).
+    /// Reads bytes from disk lazily, only when actually needed (thumbnail gen, accent color calc).
     pub fn override_cover_bytes(&self, file_path: &str) -> Option<Vec<u8>> {
         let sig = self.get_override_cover_sig(file_path)?;
         crate::track_covers::read_cover(self.app_data_dir(), &sig)
     }
 
-    /// Сохранить accent_color для трека в кэш
     pub fn set_accent_color(&self, file_path: &str, color: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -2446,7 +2291,6 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Получить все альбомы (удобный метод)
     pub fn get_albums(&self) -> Vec<PlaylistInfo> {
         self.get_playlists()
             .into_iter()
@@ -2454,7 +2298,6 @@ impl MusicLibrary {
             .collect()
     }
 
-    /// Получить пользовательские плейлисты
     pub fn get_user_playlists(&self) -> Vec<PlaylistInfo> {
         self.get_playlists()
             .into_iter()
@@ -2462,7 +2305,6 @@ impl MusicLibrary {
             .collect()
     }
 
-    /// Получить все плейлисты исполнителей
     pub fn get_artists(&self) -> Vec<PlaylistInfo> {
         self.get_playlists()
             .into_iter()
@@ -2527,8 +2369,8 @@ impl MusicLibrary {
     }
 
     pub fn get_top_artists(&self, limit: usize) -> Vec<TopArtist> {
-        // Группируем по точному написанию в SQL, затем сливаем регистронезависимо
-        // в Rust, чтобы «MZLFF» и «mzlff» были одним артистом в статистике.
+        // Grouped by exact spelling in SQL, then merged case-insensitively in Rust
+        // so "MZLFF"/"mzlff" count as one artist.
         let sql = "SELECT COALESCE(o.artist, t.artist) AS artist_name,
                           SUM(s.listen_count) AS total_listens,
                           SUM(s.total_listened_secs) AS total_secs,
@@ -2554,7 +2396,6 @@ impl MusicLibrary {
             Err(_) => return Vec::new(),
         };
 
-        // ключ (нижний регистр) -> (варианты написания с числом треков, агрегаты)
         struct Agg {
             variants: HashMap<String, usize>,
             listen_count: i64,
@@ -2675,20 +2516,13 @@ impl MusicLibrary {
         }
     }
 
-    /// Средний «характер» прослушанной музыки: взвешенные (по числу
-    /// прослушиваний) средние и дисперсии аудио-фич. Используется, чтобы
-    /// подбирать похожие («любимое») либо непохожие («незнакомое») треки.
-    ///
-    /// Берётся из кэша накопителей (см. [`MusicLibrary::centroid_accumulators`]),
-    /// поэтому повторные вызовы при выдаче рекомендаций не пересчитывают всю
-    /// историю заново.
+    /// Listen-weighted mean/variance of audio features, used to pick similar
+    /// ("favorite") or dissimilar ("fresh") tracks. Backed by the accumulator
+    /// cache, so repeated calls don't rescan the whole history.
     fn listening_centroid(&self) -> Option<ListeningCentroid> {
         self.centroid_accumulators().to_centroid()
     }
 
-    /// Накопители центроида: либо из кэша, либо однократный O(N) пересчёт по БД.
-    /// Если межпоточный флаг отметил историю как изменившуюся (анализ фич,
-    /// ре-скан) — кэш сбрасывается и считается заново.
     fn centroid_accumulators(&self) -> CentroidAccumulators {
         if CENTROID_CACHE_DIRTY.swap(false, Ordering::SeqCst) {
             self.centroid_cache.borrow_mut().take();
@@ -2701,7 +2535,6 @@ impl MusicLibrary {
         acc
     }
 
-    /// Полный пересчёт накопителей по всей истории прослушиваний.
     fn compute_centroid_accumulators(&self) -> CentroidAccumulators {
         let mut acc = CentroidAccumulators::default();
         let mut stmt = match self.conn.prepare(
@@ -2737,16 +2570,14 @@ impl MusicLibrary {
         acc
     }
 
-    /// Инкрементально обновить кэш центроида при изменении числа прослушиваний
-    /// одного трека. Вызывается из [`MusicLibrary::add_track_statistics_delta`]
-    /// в момент завершения воспроизведения.
+    /// Called from `add_track_statistics_delta` when a listen completes.
     fn update_centroid_for_listen(&self, file_path: &str, old_count: i64, new_count: i64) {
-        // Кэш ещё не загружен — пропускаем, он лениво пересчитается целиком.
+        // Cache not loaded yet: skip, it will be rebuilt lazily in full.
         if self.centroid_cache.borrow().is_none() {
             return;
         }
 
-        // Вес трека = его число прослушиваний (треки без прослушиваний не входят).
+        // Track weight = its listen count; tracks with none don't contribute.
         let old_w = if old_count > 0 { old_count.max(1) as f64 } else { 0.0 };
         let new_w = if new_count > 0 { new_count.max(1) as f64 } else { 0.0 };
         let dw = new_w - old_w;
@@ -2754,8 +2585,7 @@ impl MusicLibrary {
             return;
         }
 
-        // Фичи трека должны быть полностью посчитаны — иначе он не участвует в
-        // центроиде (полный пересчёт такие треки пропускает).
+        // Must have all features computed, matching what the full recompute requires.
         let feats: Option<(f64, f64, f64, f64, f64)> = self
             .conn
             .query_row(
@@ -2773,7 +2603,6 @@ impl MusicLibrary {
             None => return,
         };
 
-        // Изменение числа уникальных треков в центроиде.
         let dn = if old_count <= 0 && new_count > 0 {
             1
         } else if old_count > 0 && new_count <= 0 {
@@ -2787,7 +2616,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Публичный профиль вкуса для раздела статистики.
     pub fn taste_profile(&self) -> TasteProfile {
         match self.listening_centroid() {
             Some(c) => TasteProfile {
@@ -2818,7 +2646,6 @@ impl MusicLibrary {
     ) -> Vec<TrackMetadata> {
         let mut clauses: Vec<&str> = Vec::new();
 
-        // Настроение — по аудио-фичам трека.
         match mood {
             "energetic" => clauses.push("af.energy >= 0.55 AND af.danceability >= 0.45"),
             "relax" => clauses.push("af.energy < 0.4 AND (af.bpm < 100 OR af.bpm IS NULL)"),
@@ -2838,19 +2665,14 @@ impl MusicLibrary {
             clauses.join(" AND ")
         };
 
-        // Знакомость теперь определяется по «характеру» прослушанного:
-        //   favorite — близкие к среднему профилю треки,
-        //   fresh    — наиболее далёкие от него,
-        //   balanced — без учёта характера (случайно).
+        // favorite = close to the taste centroid, fresh = farthest from it, balanced = random.
         let centroid = match familiarity {
             "favorite" | "fresh" => self.listening_centroid(),
             _ => None,
         };
 
-        // ORDER BY: для favorite/fresh — по нормированному расстоянию до центроида
-        // (с лёгким джиттером, чтобы поток обновлялся), иначе — случайно.
-        // Литералы оборачиваем в скобки, чтобы отрицательные значения (loudness)
-        // не превращались в SQL-комментарий «--».
+        // Numeric literals are parenthesized so a negative value (loudness) can't
+        // turn `--` into a SQL line comment.
         let order_by = match centroid {
             Some(ct) => {
                 let ke = 1.0 / ct.e_var.max(1e-4);
@@ -2869,7 +2691,7 @@ impl MusicLibrary {
                 );
                 let jitter = "(0.5 + (ABS(RANDOM()) % 1000) / 1000.0)";
                 let dir = if familiarity == "favorite" { "ASC" } else { "DESC" };
-                // Треки без аудио-фич уходят в конец, оставшийся объём добивается ими.
+                // Tracks without audio features sort last, used to fill any remaining slots.
                 format!("(af.energy IS NULL) ASC, {dist} * {jitter} {dir}")
             }
             None => "RANDOM()".to_string(),
@@ -2906,8 +2728,6 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    // ── Порядок треков в альбоме ────────────────────────────────────────────────
-
     pub fn get_album_track_order(&self, album_name: &str) -> Result<Option<Vec<String>>, String> {
         let result: Result<String, rusqlite::Error> = self.conn.query_row(
             "SELECT track_paths FROM album_track_order WHERE album_name = ?1",
@@ -2938,11 +2758,8 @@ impl MusicLibrary {
         Ok(())
     }
 
-    // ── Внешние источники: треки альбома ────────────────────────────────────────
-
-    /// Локальные треки альбома для сопоставления с внешним списком:
-    /// (file_path, эффективное название, эффективный исполнитель). Эффективные
-    /// значения учитывают пользовательские переопределения (track_overrides).
+    /// Local album tracks for matching against an external list: (file_path,
+    /// effective title, effective artist), with overrides applied.
     pub fn get_album_local_tracks(&self, album_name: &str) -> Vec<(String, String, String)> {
         let mut stmt = match self.conn.prepare(
             "SELECT t.file_path,
@@ -2968,7 +2785,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Прочитать кэш внешнего альбома: (source, status, fetched_secs, треки).
     pub fn get_external_album(
         &self,
         album_key: &str,
@@ -2989,17 +2805,15 @@ impl MusicLibrary {
         }
     }
 
-    /// Удалить негативные записи кэша внешних альбомов (status='none'). Нужно
-    /// одноразовой миграцией: старые «нет» могли быть закэшированы из-за
-    /// временных сетевых/парс-ошибок — теперь такие не кэшируются, и их стоит
-    /// перепроверить (см. `FetchOutcome` в external.rs).
+    /// One-time cleanup: old "none" results may have been cached from transient
+    /// network/parse errors that are no longer cached today, so they're worth
+    /// re-fetching (see `FetchOutcome` in external.rs).
     pub fn clear_external_album_negative_cache(&self) -> Result<usize, String> {
         self.conn
             .execute("DELETE FROM external_album WHERE status = 'none'", [])
             .map_err(|e| format!("Ошибка очистки негативного кэша альбомов: {}", e))
     }
 
-    /// Сохранить кэш внешнего альбома.
     pub fn set_external_album(
         &self,
         album_key: &str,
@@ -3025,8 +2839,8 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Пути треков с пользовательской (override) обложкой — для батч-прохода
-    /// внешних обложек: такие треки локально покрыты, внешняя не нужна.
+    /// Tracks with an override cover, used by the external-cover batch pass to
+    /// skip ones that are already locally covered.
     pub fn override_cover_paths(&self) -> std::collections::HashSet<String> {
         let mut stmt = match self
             .conn
@@ -3042,12 +2856,9 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// Альбомы, для которых ещё нет окончательного внешнего макета (ok/none).
-    /// Для каждого берётся самый частый исполнитель — так же, как при запросе
-    /// макета, — чтобы ключ кэша совпадал. Кэш бессрочный, поэтому уже
-    /// обработанные альбомы в сеть не ходят.
+    /// Albums with no settled external layout (status ok/none) yet. Uses the
+    /// same most-common-artist rule as the layout lookup, so cache keys match.
     pub fn pending_external_album_names(&self) -> Vec<String> {
-        // Самый частый исполнитель на альбом (с учётом override).
         let mut best_artist: std::collections::HashMap<String, (String, i64)> =
             std::collections::HashMap::new();
         if let Ok(mut stmt) = self.conn.prepare(
@@ -3074,7 +2885,6 @@ impl MusicLibrary {
             }
         }
 
-        // Уже обработанные ключи (ok/none) — пропускаем.
         let mut settled: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Ok(mut stmt) = self
             .conn
@@ -3096,14 +2906,13 @@ impl MusicLibrary {
     }
 }
 
-/// Накопители для инкрементального расчёта центроида вкусов: взвешенные суммы
-/// и суммы квадратов аудио-фич (вес = число прослушиваний). Из них один раз
-/// выводятся средние и дисперсии, см. [`CentroidAccumulators::to_centroid`].
+/// Weighted sums and sums-of-squares of audio features (weight = listen count),
+/// for incremental centroid updates; see [`CentroidAccumulators::to_centroid`].
 #[derive(Clone, Default)]
 struct CentroidAccumulators {
-    /// Число уникальных треков в центроиде.
+    /// Number of unique tracks in the centroid.
     n: i64,
-    /// Сумма весов (Σ listen_count).
+    /// Sum of weights (sum of listen_count).
     wsum: f64,
     se: f64, se2: f64,
     sd: f64, sd2: f64,
@@ -3113,7 +2922,7 @@ struct CentroidAccumulators {
 }
 
 impl CentroidAccumulators {
-    /// Добавить (или, при отрицательном весе/`dn`, убрать) вклад трека.
+    /// Adds a track's contribution (or removes it, via a negative weight/`dn`).
     #[allow(clippy::too_many_arguments)]
     fn apply(&mut self, w: f64, e: f64, d: f64, b: f64, c: f64, l: f64, dn: i64) {
         self.n += dn;
@@ -3145,7 +2954,7 @@ impl CentroidAccumulators {
     }
 }
 
-/// Взвешенный средний профиль аудио-фич прослушанных треков (+ дисперсии).
+/// Listen-weighted mean audio-feature profile, plus variances.
 struct ListeningCentroid {
     n: usize,
     e: f64,
@@ -3160,8 +2969,7 @@ struct ListeningCentroid {
     l_var: f64,
 }
 
-/// Средний «характер» прослушанной музыки — публичный профиль вкуса.
-/// Показывается в статистике и используется фильтром «Любимое».
+/// Public taste profile shown in statistics and used by the "Favorite" filter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TasteProfile {
     pub analyzed_tracks: usize,
@@ -3247,7 +3055,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Вставляет голую строку `tracks` (без фич) с заданным `modified_secs`.
+    /// Inserts a bare `tracks` row (no audio features) with a given `modified_secs`.
     fn insert_bare_track(library: &MusicLibrary, path: &str, modified_secs: i64) {
         library
             .conn
@@ -3334,8 +3142,6 @@ mod tests {
         drop(library);
         let _ = fs::remove_dir_all(dir);
     }
-
-    // ── ON DELETE CASCADE (track_audio_features/playlist_tracks) ────────────
 
     #[test]
     fn deleting_a_track_cascades_to_features_playlist_tracks_and_statistics_but_not_overrides() {
@@ -3427,7 +3233,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Вставить трек с полным набором аудио-фич и числом прослушиваний.
+    /// Inserts a track with a full set of audio features and a listen count.
     fn insert_listened_track(
         library: &MusicLibrary,
         path: &str,
@@ -3500,10 +3306,9 @@ mod tests {
         insert_listened_track(&library, "/music/a.flac", 2, (0.8, 0.6, 128.0, 3200.0, -8.0));
         insert_listened_track(&library, "/music/b.flac", 5, (0.3, 0.4, 90.0, 1500.0, -14.0));
 
-        // Первый вызов загружает кэш накопителей (O(N) скан).
+        // First call loads the accumulator cache (O(N) scan).
         let _ = library.taste_profile();
 
-        // Инкрементальные обновления через завершение прослушиваний.
         library
             .add_track_statistics_delta(TrackStatisticsDelta {
                 file_path: "/music/a.flac".to_string(),
@@ -3511,7 +3316,7 @@ mod tests {
                 ..Default::default()
             })
             .expect("delta a");
-        // Новый трек, ранее не входивший в центроид (listen_count 0 -> 1).
+        // New track not previously in the centroid (listen_count 0 -> 1).
         insert_listened_track(&library, "/music/c.flac", 0, (0.5, 0.55, 110.0, 2400.0, -11.0));
         library
             .add_track_statistics_delta(TrackStatisticsDelta {
@@ -3523,7 +3328,7 @@ mod tests {
 
         let incremental = library.taste_profile();
 
-        // Сбрасываем кэш и считаем профиль с нуля — должен совпасть.
+        // Reset cache and recompute from scratch; should match.
         library.centroid_cache.borrow_mut().take();
         let full = library.taste_profile();
 
@@ -3533,10 +3338,6 @@ mod tests {
         drop(library);
         let _ = fs::remove_dir_all(dir);
     }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // Доп. покрытие
-    // ════════════════════════════════════════════════════════════════════════
 
     fn insert_track_row(
         library: &MusicLibrary,
@@ -3559,9 +3360,9 @@ mod tests {
             .expect("insert track row");
     }
 
-    /// Пишет минимальный валидный 16-бит PCM WAV — для тестов, которым нужен
-    /// реально читаемый аудиофайл на диске (insert_downloaded_track/add_folder
-    /// читают метаданные через AudioPlayer::get_metadata_light).
+    /// Writes a minimal valid 16-bit PCM WAV for tests that need a real
+    /// readable audio file on disk (insert_downloaded_track/add_folder read
+    /// metadata via AudioPlayer::get_metadata_light).
     fn write_test_wav(path: &Path, sample_rate: u32, channels: u16, num_frames: u32) {
         let bits_per_sample: u16 = 16;
         let block_align: u16 = channels * (bits_per_sample / 8);
@@ -3588,8 +3389,6 @@ mod tests {
         }
         fs::write(path, buf).expect("write test wav");
     }
-
-    // ── split_artists ────────────────────────────────────────────────────────
 
     #[test]
     fn split_artists_applies_each_separator_in_sequence() {
@@ -3624,8 +3423,6 @@ mod tests {
         assert!(split_artists("", &seps).is_empty());
         assert!(split_artists("   ", &seps).is_empty());
     }
-
-    // ── insert_downloaded_track / covering_folder / add_folder (реальный I/O) ─
 
     #[test]
     fn insert_downloaded_track_reads_real_metadata_and_registers_folder() {
@@ -3671,7 +3468,7 @@ mod tests {
             .insert_downloaded_track(track_path.to_str().unwrap(), sub.to_str().unwrap(), &[])
             .expect("insert into subfolder");
 
-        // Подпапка уже накрыта корневой — новой записи в folders быть не должно.
+        // Subfolder is already covered by the root folder — no new entry expected.
         assert_eq!(library.get_folders().len(), 1, "не должно появиться дублирующей папки");
 
         let folder_path: String = library
@@ -3721,11 +3518,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    // ── rescan_all / scan_folder_files (mtime, удаление, sort_order) ────────
-
-    /// Принудительно выставляет mtime файла, отличный от текущего (с запасом
-    /// в секундах — `get_mtime` хранит только целые секунды), чтобы детерминированно
-    /// проверить ветку "файл изменился" без гонок на быстрой файловой системе.
+    /// Bumps mtime by whole seconds (get_mtime only tracks second granularity),
+    /// so the "file changed" branch is deterministic on a fast filesystem.
     fn bump_mtime(path: &Path, delta_secs: u64) {
         let file = fs::OpenOptions::new()
             .write(true)
@@ -3788,14 +3582,13 @@ mod tests {
             )
             .expect("read sort_order");
 
-        // Файл "появляется" позже первого скана — у новых треков sort_order
-        // выше текущего максимума.
+        // File appears after the first scan — new tracks get sort_order above the current max.
         write_test_wav(&music.join("b.wav"), 44_100, 2, 44_100);
         library
             .rescan_all(&[], None, |_, _| {})
             .expect("rescan should pick up the new file");
 
-        // Меняем содержимое и mtime уже отслеживаемого файла.
+        // Change content and mtime of an already-tracked file.
         write_test_wav(&music.join("a.wav"), 44_100, 2, 22_050);
         bump_mtime(&music.join("a.wav"), 120);
 
@@ -3908,8 +3701,6 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    // ── remove_track / move_track_to_top ────────────────────────────────────
-
     #[test]
     fn remove_track_deletes_row_statistics_and_overrides() {
         let dir = temp_library_dir("remove_track");
@@ -3953,7 +3744,7 @@ mod tests {
         insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
         insert_track_row(&library, "/m/b.flac", Some("B"), Some("Y"), None, None, 2);
 
-        // B имеет больший sort_order -> по умолчанию идёт первым.
+        // B has a higher sort_order -> comes first by default.
         let before = library.get_all_tracks();
         assert_eq!(before[0].file_path, "/m/b.flac");
 
@@ -3967,8 +3758,6 @@ mod tests {
         drop(library);
         let _ = fs::remove_dir_all(dir);
     }
-
-    // ── list_genres / search_tracks / get_catalog_paths ────────────────────
 
     #[test]
     fn list_genres_excludes_genres_with_only_one_track() {
@@ -4021,8 +3810,6 @@ mod tests {
         drop(library);
         let _ = fs::remove_dir_all(dir);
     }
-
-    // ── Плейлисты ────────────────────────────────────────────────────────────
 
     #[test]
     fn user_playlist_crud_round_trip() {
@@ -4151,8 +3938,8 @@ mod tests {
 
     #[test]
     fn rebuild_artist_playlists_creates_playlist_even_for_single_track_artist() {
-        // В отличие от альбомов, у плейлистов исполнителей нет фильтра «>1 трек»
-        // — это намеренная асимметрия (см. rebuild_album_playlists/rebuild_artist_playlists).
+        // Unlike albums, artist playlists have no ">1 track" filter — intentional
+        // asymmetry (see rebuild_album_playlists/rebuild_artist_playlists).
         let dir = temp_library_dir("artist_single_track");
         let mut library = MusicLibrary::new(dir.clone()).expect("library init");
         insert_track_row(&library, "/m/1.flac", Some("Solo"), Some("Solo Artist"), None, None, 1);
@@ -4163,8 +3950,6 @@ mod tests {
         drop(library);
         let _ = fs::remove_dir_all(dir);
     }
-
-    // ── Статистика ───────────────────────────────────────────────────────────
 
     #[test]
     fn sum_track_listen_count_aggregates_across_paths() {
@@ -4217,8 +4002,6 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    // ── Переопределения треков (overrides) ──────────────────────────────────
-
     #[test]
     fn set_track_override_overlays_title_and_artist_on_get_track() {
         let dir = temp_library_dir("override_basic");
@@ -4247,7 +4030,7 @@ mod tests {
             .unwrap();
         assert_eq!(library.get_track("/m/a.flac").unwrap().title.as_deref(), Some("Custom"));
 
-        // Передаём всё как None/пусто без keep_existing_cover -> запись должна удалиться.
+        // All None/empty without keep_existing_cover -> the override row should be deleted.
         library
             .set_track_override("/m/a.flac", None, None, None, None, false)
             .unwrap();
@@ -4307,8 +4090,6 @@ mod tests {
         drop(library);
         let _ = fs::remove_dir_all(dir);
     }
-
-    // ── Топы/недавнее/сводка ─────────────────────────────────────────────────
 
     #[test]
     fn get_recently_played_orders_by_most_recent_first() {
@@ -4424,8 +4205,6 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    // ── Рекомендации по настроению ───────────────────────────────────────────
-
     #[test]
     fn get_recommendations_by_mood_filters_energetic_tracks() {
         let dir = temp_library_dir("mood_energetic");
@@ -4446,8 +4225,8 @@ mod tests {
     fn get_recommendations_by_mood_respects_lossless_only_filter() {
         let dir = temp_library_dir("mood_lossless");
         let library = MusicLibrary::new(dir.clone()).expect("library init");
-        // insert_listened_track всегда ставит format='flac', is_lossless=0 —
-        // правим вручную, чтобы получить ровно один lossless и один lossy трек.
+        // insert_listened_track always sets format='flac', is_lossless=0 — patch
+        // manually to get exactly one lossless and one lossy track.
         insert_listened_track(&library, "/m/lossless.flac", 1, (0.8, 0.7, 128.0, 3000.0, -6.0));
         library
             .conn
@@ -4497,8 +4276,6 @@ mod tests {
         drop(library);
         let _ = fs::remove_dir_all(dir);
     }
-
-    // ── Порядок треков в альбоме / внешний кэш альбомов ─────────────────────
 
     #[test]
     fn album_track_order_round_trips_and_is_none_when_unset() {
@@ -4571,7 +4348,7 @@ mod tests {
         let library = MusicLibrary::new(dir.clone()).expect("library init");
         insert_track_row(&library, "/m/a.flac", Some("A"), None, None, None, 1);
         insert_track_row(&library, "/m/b.flac", Some("B"), None, None, None, 2);
-        // a.flac получает реальную обложку через override (data URL -> cover_sig).
+        // a.flac gets a real cover via override (data URL -> cover_sig).
         library
             .set_track_override(
                 "/m/a.flac",
@@ -4582,7 +4359,7 @@ mod tests {
                 false,
             )
             .unwrap();
-        // b.flac — override только title, без обложки.
+        // b.flac — title-only override, no cover.
         library.set_track_override("/m/b.flac", Some("B2"), None, None, None, false).unwrap();
 
         let paths = library.override_cover_paths();

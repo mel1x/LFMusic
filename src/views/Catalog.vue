@@ -44,7 +44,7 @@ const {
 const { getCustomCover } = useCustomCovers();
 const catalogCustomCover = computed(() => getCustomCover('catalog', 'catalog'));
 
-// ── Genre filter ───────────────────────────────────────────────────────────
+// Genre filter
 
 const selectedGenre = ref<string | null>(null)
 
@@ -52,7 +52,6 @@ const genreBarEl = ref<HTMLElement | null>(null)
 const canScrollLeft = ref(false)
 const canScrollRight = ref(false)
 
-// Список жанров (с количеством) — агрегат из SQLite.
 const genreList = ref<{ name: string; count: number }[]>([])
 async function loadGenres() {
     try {
@@ -121,9 +120,8 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-// Отфильтрованные пути каталога (жанр + поиск) приходят с бэкенда (SQLite-индекс
-// по жанру + перенесённое ранжирование поиска). Виртуальный скролл идёт по путям,
-// метаданные видимого окна материализуются по требованию через кэш.
+// Filtered paths (genre + search) come from the backend; virtual scroll iterates
+// paths, metadata for the visible window is materialized on demand via cache.
 const filteredPaths = ref<string[]>([])
 let filterReqId = 0
 async function refreshFilteredPaths() {
@@ -138,10 +136,10 @@ async function refreshFilteredPaths() {
     }
 }
 watch([debouncedSearch, selectedGenre], refreshFilteredPaths)
-// Перезапрашиваем при изменении состава каталога (добавление/удаление папок).
+// Refresh when the catalog composition changes (folders added/removed).
 watch(catalogCount, () => { void loadGenres(); void refreshFilteredPaths() })
 
-// ── Header height (for virtual scroll offset) ─────────────────────────────
+// Header height (for virtual scroll offset)
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
@@ -162,14 +160,12 @@ onMounted(() => {
     }
     updateGenreScrollState()
 
-    // Восстанавливаем выбранный жанр из источника воспроизведения
+    // Restore selected genre from the active playback source
     const source = activePlaylistSource.value
     if (source && source.startsWith('catalog:genre:')) {
         selectedGenre.value = source.slice('catalog:genre:'.length)
-        // Скроллим до чипа жанра после рендера (watch сам перезапросит пути).
         setTimeout(() => scrollToActiveGenre(), 100)
     }
-    // Первичная загрузка отфильтрованных путей (полный каталог при пустом фильтре).
     void refreshFilteredPaths()
 })
 
@@ -177,7 +173,7 @@ onUnmounted(() => {
     headerResizeObserver?.disconnect()
 })
 
-// ── Virtual scroll ──────────────────────────────────────────────────────────
+// Virtual scroll
 
 const {
     containerEl: trackListEl,
@@ -188,9 +184,8 @@ const {
     resetScroll,
 } = useVirtualScroll(filteredPaths, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
 
-// Заглушка для ещё не подгруженного пути — сохраняет 1 строку на путь окна,
-// чтобы высота виртуального списка не «съезжала» при быстрой прокрутке.
-// Когда метаданные приедут в кэш, computed пересоберётся и заменит заглушку.
+// Placeholder for a not-yet-loaded path — keeps 1 row per path so the virtual
+// list height doesn't shift during fast scrolling; replaced once cached.
 function stubTrack(path: string): TrackMetadata {
     return {
         file_path: path, title: null, artist: null, album: null, genre: null,
@@ -201,17 +196,14 @@ function stubTrack(path: string): TrackMetadata {
     }
 }
 
-// Объекты видимого окна (резолв из кэша; промахи — заглушка + фоновая дозагрузка).
 const visibleTracks = computed<TrackMetadata[]>(() =>
     visiblePaths.value.map(p => getTrackByPath(p) ?? stubTrack(p))
 )
 
-// Reset scroll on search/genre change
 watch([debouncedSearch, selectedGenre], () => {
     resetScroll()
 })
 
-// Материализуем метаданные видимого окна одним пакетным запросом.
 watch(visiblePaths, (paths) => {
     if (paths.length) void fetchTracksByPaths(paths)
 }, { immediate: true })
@@ -234,7 +226,7 @@ watch(visibleTracks, (tracks) => {
     }
 }, { immediate: true })
 
-// ── Catalog play button ─────────────────────────────────────────────────────
+// Catalog play button
 
 const isCatalogActive = computed(() => {
     const src = activePlaylistSource.value
@@ -253,7 +245,7 @@ function onPlayCatalog() {
     }
 }
 
-// ── Sticky header ───────────────────────────────────────────────────────────
+// Sticky header
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -273,7 +265,7 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// ── Track click ─────────────────────────────────────────────────────────────
+// Track click
 
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
@@ -283,7 +275,7 @@ function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     createRipple(e)
 }
 
-// ── Context menus ──────────────────────────────────────────────────────────
+// Context menus
 
 const catalogMenu = ref<{ x: number; y: number } | null>(null)
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
@@ -312,11 +304,9 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 
 async function moveTrackToTop(track: TrackMetadata) {
     await moveCatalogTrackToTop(track.file_path)
-    // Перезапрашиваем порядок страницы (sort_order изменился на бэкенде).
+    // Refresh page order (sort_order changed on the backend).
     await refreshFilteredPaths()
 }
-
-// ── Track click ─────────────────────────────────────────────────────────
 
 const catalogSourceId = computed(() => {
     let id = 'catalog'

@@ -2,9 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { ref } from "vue";
 import type { TrackMetadata } from "./usePlayer";
 
-// Порядок треков внутри альбома. Хранится в SQLite (album_track_order),
-// в сессии кэшируется в памяти. null = «не загружено», undefined-ключ = загружено,
-// но кастомного порядка нет (сортируем по file_path по умолчанию).
+// Persisted in SQLite (album_track_order), cached in memory per session.
+// Missing key = not loaded yet; null value = loaded, no custom order (falls
+// back to file_path sort).
 const orderCache = ref<Record<string, string[] | null>>({});
 
 function byFilePath(a: TrackMetadata, b: TrackMetadata): number {
@@ -15,7 +15,7 @@ function byFilePath(a: TrackMetadata, b: TrackMetadata): number {
 }
 
 export function useAlbumTrackOrder() {
-  /** Загрузить порядок из БД (один раз за сессию для каждого альбома). */
+  /** Loads the order from the DB once per session per album. */
   async function loadOrder(albumName: string): Promise<void> {
     if (albumName in orderCache.value) return;
     try {
@@ -30,9 +30,8 @@ export function useAlbumTrackOrder() {
   }
 
   /**
-   * Применяет сохранённый порядок к трекам альбома. Треки из сохранённого
-   * порядка идут первыми, новые (ещё не переставлявшиеся) — в конце по
-   * file_path. Без сохранённого порядка — обычная сортировка по file_path.
+   * Applies the saved order: known tracks first (in saved order), new tracks
+   * not yet reordered appended after, sorted by file_path.
    */
   function applyOrder(albumName: string, tracks: TrackMetadata[]): TrackMetadata[] {
     const order = orderCache.value[albumName];
@@ -50,7 +49,7 @@ export function useAlbumTrackOrder() {
     return [...known, ...unknown];
   }
 
-  /** Сохранить полный порядок file_path для альбома (и обновить кэш). */
+  /** Saves the full file_path order for an album and updates the cache. */
   async function setOrder(albumName: string, paths: string[]): Promise<void> {
     orderCache.value = { ...orderCache.value, [albumName]: paths.slice() };
     try {
@@ -63,10 +62,7 @@ export function useAlbumTrackOrder() {
     }
   }
 
-  /**
-   * Переместить трек fromPath на позицию toPath в рамках текущего порядка
-   * (currentPaths — порядок треков как он отображается сейчас).
-   */
+  /** Moves fromPath to toPath's position within currentPaths (the order as currently displayed). */
   async function moveTrack(
     albumName: string,
     currentPaths: string[],

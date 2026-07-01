@@ -1,34 +1,34 @@
 import { onMounted, onUnmounted, type Ref } from 'vue'
 
 /**
- * Автофокус на поле поиска при наборе: если на странице ничего не сфокусировано
- * (или фокус не на поле ввода) и пользователь печатает букву/цифру — фокусируем
- * поле поиска и подставляем туда этот символ. Так не нужно сначала кликать в поле.
+ * Auto-focuses the search input on typing: if nothing (or a non-input) is
+ * focused and the user types a letter/digit, focus the search field and
+ * insert that character, so users don't have to click the field first.
  *
- * Слушатель вешается per-страница (on mount → off unmount); т.к. одновременно
- * активна одна страница роутера, конфликтов между полями нет.
+ * Listener is attached per-page (on mount / off unmount); since only one
+ * router page is active at a time, there's no conflict between fields.
  *
- * Реализация: сами дописываем символ в `input.value` и шлём нативный `input`-
- * эвент — тогда отрабатывают и v-model, и `@input`-обработчики страницы (включая
- * дебаунс). Это же гарантирует, что ПЕРВАЯ буква не теряется (если бы мы просто
- * сфокусировали поле на keydown, текущий символ ушёл бы в «пустоту»).
+ * We append the char to `input.value` ourselves and dispatch a native `input`
+ * event, so both v-model and the page's `@input` handlers (including debounce)
+ * fire. This also ensures the FIRST character isn't lost — just focusing on
+ * keydown would drop the current char into the void.
  *
- * @param inputRef  ссылка на `<input>` поля поиска страницы
- * @param enabled   доп. условие активности (напр., поиск заблокирован) — по
- *                  умолчанию всегда включено; отключённый `input.disabled`
- *                  учитывается автоматически.
+ * @param inputRef  ref to the page's search `<input>`
+ * @param enabled   extra activation condition (e.g. search is locked);
+ *                  defaults to always-on. A disabled `input.disabled` is
+ *                  handled automatically.
  */
 export function useTypeToSearch(
     inputRef: Ref<HTMLInputElement | null>,
     enabled: () => boolean = () => true,
 ) {
     function onKeydown(e: KeyboardEvent) {
-        // Только «чистый» набор: без модификаторов и не во время IME-композиции.
+        // Plain typing only: no modifiers, not during IME composition.
         if (e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return
-        // Одиночная буква/цифра (Enter/Tab/стрелки/F-клавиши/пробел/пунктуация — мимо).
+        // Single letter/digit only (Enter/Tab/arrows/F-keys/space/punctuation excluded).
         if (e.key.length !== 1 || !/[\p{L}\p{N}]/u.test(e.key)) return
 
-        // Уже печатают в каком-то поле ввода — не вмешиваемся.
+        // Already typing in some input, don't interfere.
         const ae = document.activeElement as HTMLElement | null
         if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) {
             return
@@ -39,14 +39,14 @@ export function useTypeToSearch(
 
         e.preventDefault()
         input.focus()
-        // Дописываем символ в конец и эмитим input — отрабатывают v-model/@input.
+        // Append the char and emit input, so v-model/@input handlers fire.
         input.value = input.value + e.key
         input.dispatchEvent(new Event('input', { bubbles: true }))
         const len = input.value.length
         try {
             input.setSelectionRange(len, len)
         } catch {
-            /* у некоторых типов input нет setSelectionRange — не критично */
+            // Some input types don't support setSelectionRange; not critical.
         }
     }
 

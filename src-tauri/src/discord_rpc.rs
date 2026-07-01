@@ -1,23 +1,18 @@
-//! Интеграция с Discord Rich Presence (десктоп): в профиле Discord отображается
-//! «Слушает LFMusic» — обложка, название трека, источник воспроизведения
-//! и прогресс-бар прослушивания (Discord ведёт его сам по таймстемпам).
+//! Discord Rich Presence (desktop): shows cover, track title, source, and a
+//! listening progress bar (Discord animates it itself from timestamps).
 //!
-//! Состояние присылает фронтенд (он держит реактивную модель и подписи
-//! источников — см. useDiscordRpc.ts), бэкенд только поддерживает
-//! IPC-соединение с локальным клиентом Discord.
-//!
-//! Весь модуль — no-op на мобильных платформах (см. заглушки в конце файла).
+//! Frontend sends state (see useDiscordRpc.ts); backend just maintains the
+//! IPC connection to the local Discord client. No-op on mobile (see stubs below).
 
-/// Снимок состояния плеера для Rich Presence (присылает фронтенд)
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PresencePayload {
-    /// Первая строка — название трека (с маркером паузы, если на паузе)
+    /// Line 1: track title (with a pause marker if paused).
     pub details: String,
-    /// Вторая строка — исполнитель
+    /// Line 2: artist.
     pub state: String,
-    /// https-URL обложки трека либо None — тогда ассет приложения `logo`
+    /// Track cover https URL, or None to use the `logo` app asset.
     pub cover_url: Option<String>,
-    /// Третья строка — источник: альбом/плейлист/артист/каталог/микс
+    /// Line 3: source (album/playlist/artist/catalog/mix).
     pub cover_text: Option<String>,
     pub duration_secs: f64,
     pub position_secs: f64,
@@ -34,15 +29,13 @@ mod imp {
 
     use super::PresencePayload;
 
-    /// Application ID из Discord Developer Portal
     const DISCORD_APP_ID: &str = "1514702255843053699";
 
-    /// Минимальная пауза между попытками подключения, когда Discord не запущен.
+    /// Minimum gap between reconnect attempts when Discord isn't running.
     const RECONNECT_INTERVAL: Duration = Duration::from_secs(15);
 
     struct RpcState {
         client: Option<DiscordIpcClient>,
-        /// Момент последней неудачной попытки подключения (для троттлинга).
         last_failed_attempt: Option<Instant>,
     }
 
@@ -71,15 +64,14 @@ mod imp {
                 true
             }
             None => {
-                // Discord не запущен или ID невалиден — повторим не раньше,
-                // чем через RECONNECT_INTERVAL.
+                // Discord not running or bad ID — retry no sooner than RECONNECT_INTERVAL.
                 state.last_failed_attempt = Some(Instant::now());
                 false
             }
         }
     }
 
-    /// Discord требует 2–128 символов в details/state.
+    /// Discord requires 2-128 chars in details/state.
     fn clamp_line(s: &str) -> String {
         let mut out: String = s.trim().chars().take(128).collect();
         while out.chars().count() < 2 {
@@ -88,8 +80,7 @@ mod imp {
         out
     }
 
-    /// Обновить активность. Возвращает false, если клиент Discord недоступен —
-    /// фронтенд по этому признаку планирует повторную отправку.
+    /// Returns false if Discord is unavailable, signaling the frontend to retry later.
     pub fn update_presence(payload: PresencePayload) -> bool {
         let Ok(mut state) = STATE.lock() else {
             return true;
@@ -113,8 +104,8 @@ mod imp {
             .state(&state_line)
             .assets(assets);
 
-        // Прогресс-бар: Discord рисует его сам по паре start/end и сам же
-        // двигает — поэтому слать обновления каждую секунду не нужно.
+        // Discord animates the progress bar itself from start/end timestamps,
+        // no need to push updates every second.
         if payload.playing {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -130,7 +121,7 @@ mod imp {
 
         let client = state.client.as_mut().expect("client после ensure_connected");
         if client.set_activity(activity).is_err() {
-            // Соединение оборвалось (Discord закрыли) — сбросим и попробуем позже.
+            // Connection dropped (Discord closed) — reset and retry later.
             let _ = client.close();
             state.client = None;
             state.last_failed_attempt = Some(Instant::now());
@@ -139,7 +130,6 @@ mod imp {
         true
     }
 
-    /// Убрать активность из профиля (стоп, выключение настройки, нет трека).
     pub fn clear_presence() {
         let Ok(mut state) = STATE.lock() else { return };
         let Some(client) = state.client.as_mut() else {
@@ -181,9 +171,8 @@ mod imp {
 
         #[test]
         fn clamp_line_counts_unicode_chars_not_bytes() {
-            // Кириллица — несколько байт на символ; лимит должен считаться по
-            // символам (chars), а не по байтам, иначе строка обрезалась бы
-            // посередине UTF-8 последовательности и паниковала бы на индексации.
+            // Cyrillic is multi-byte; limit must count chars, not bytes, or
+            // truncation could split a UTF-8 sequence and panic on indexing.
             let long = "я".repeat(200);
             let clamped = clamp_line(&long);
             assert_eq!(clamped.chars().count(), 128);
@@ -191,12 +180,11 @@ mod imp {
     }
 }
 
-// ── Заглушки для мобильных платформ ──────────────────────────────────────────
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod imp {
     use super::PresencePayload;
 
-    // true = «доставлено», чтобы фронтенд не планировал бессмысленные повторы.
+    // true = "delivered" so the frontend doesn't schedule pointless retries.
     pub fn update_presence(_payload: PresencePayload) -> bool {
         true
     }

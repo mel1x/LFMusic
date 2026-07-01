@@ -89,7 +89,7 @@ export function getSummaryStats(): Promise<SummaryStats> {
 }
 
 export interface RecommendationOptions {
-  /** 'fresh' — реже среднего/незнакомое, 'favorite' — чаще среднего/любимое, 'balanced' — без фильтра */
+  /** 'fresh' = rarer/unfamiliar tracks, 'favorite' = more familiar/liked, 'balanced' = no filter */
   familiarity?: 'fresh' | 'balanced' | 'favorite'
   losslessOnly?: boolean
 }

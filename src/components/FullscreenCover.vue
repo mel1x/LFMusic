@@ -2,8 +2,8 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import CloseIcon from './Icons/CloseIcon.vue';
 
-// Глобальный оверлей обложки на весь экран. Открывается событием окна
-// `lfmusic:show-fullscreen-cover` (диспатчится из карточек/просмотрщиков обложек).
+// Global fullscreen cover overlay, opened via the `lfmusic:show-fullscreen-cover`
+// window event (dispatched from cover cards/viewers).
 const fullscreenCoverSrc = ref<string | null>(null);
 
 function showFullscreenCover(src: string) {
@@ -21,7 +21,7 @@ function handleFullscreenCoverEvent(e: Event) {
     }
 }
 
-// Закрытие по Escape (раньше обрабатывалось централизованно в App.vue).
+// Escape closes (previously handled centrally in App.vue).
 function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && fullscreenCoverSrc.value) {
         e.preventDefault();
@@ -59,10 +59,8 @@ onUnmounted(() => {
     </Teleport>
 </template>
 
-<!-- Стили НЕ scoped: класс .fullscreenCover* был глобальным в App.vue; сохраняем
-     глобальную специфичность (мобильных оверрайдов нет, но для единообразия). -->
+<!-- Styles NOT scoped: .fullscreenCover* was global in App.vue; kept global for consistency. -->
 <style>
-/* Fullscreen Cover Overlay */
 .fullscreenCoverBackdrop {
     position: fixed;
     top: 0;

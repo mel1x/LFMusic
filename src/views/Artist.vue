@@ -51,18 +51,17 @@ const rawArtistName = computed(() => {
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
-// Плейлист исполнителя ищем регистронезависимо: бэкенд группирует артистов по
-// нижнему регистру имени, поэтому «Pyrokinesis» и «pyrokinesis» — один артист.
+// Case-insensitive lookup: backend groups artists by lowercased name, so
+// "Pyrokinesis" and "pyrokinesis" are the same artist.
 const artistPlaylist = computed(() => {
     const lower = rawArtistName.value.toLowerCase()
     return artistPlaylists.value.find(p => p.name.toLowerCase() === lower)
 })
 
-// Каноничное имя артиста (как в плейлисте) — гарантирует один ник и одну
-// аватарку независимо от регистра в ссылке. До загрузки плейлистов — исходное.
+// Canonical artist name (from the playlist) ensures one nickname/avatar
+// regardless of URL casing. Falls back to the raw name before playlists load.
 const artistName = computed(() => artistPlaylist.value?.name ?? rawArtistName.value)
 
-// Треки исполнителя — из плейлиста исполнителя (бэкенд группирует по артисту).
 const artistTracks = ref<TrackMetadata[]>([])
 async function loadArtistTracks() {
     const pl = artistPlaylist.value
@@ -70,8 +69,8 @@ async function loadArtistTracks() {
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
-        // Живые объекты из кэша — иначе у ранее закэшированных треков обложка не
-        // отобразится (грузится в кэш-объект, а рендерится сырой). См. cacheTrack.
+        // Use live cache objects, or covers loaded into the cached object later
+        // won't show up on these (raw, uncached) track references.
         artistTracks.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     } catch {
         artistTracks.value = []
@@ -87,8 +86,8 @@ const { avatarFor } = useExternalSources()
 const artistCover = computed(() => {
     const custom = getCustomCoverFn('artist', artistName.value)
     if (custom) return custom
-    // Внешняя аватарка (если включена настройка) имеет приоритет над обложкой
-    // первого трека — она точнее представляет исполнителя.
+    // External avatar (if enabled) takes priority over the first track's cover
+    // since it represents the artist more accurately.
     const external = avatarFor(artistName.value)
     if (external) return external
     const path = artistPlaylist.value?.first_file_path

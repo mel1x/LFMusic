@@ -10,25 +10,22 @@ import { useI18n } from '../composables/useI18n'
 const { t } = useI18n()
 const { queue, remove, retry, clearFinished } = useDownloads()
 
-// Активные (в очереди + качаются) и завершённые (готово/ошибка) элементы.
 const activeQueue = computed(() =>
     queue.value.filter((i) => i.status === 'queued' || i.status === 'downloading'),
 )
 const finishedQueue = computed(() =>
     queue.value.filter((i) => i.status === 'done' || i.status === 'error'),
 )
-// Сначала активные, затем завершённые — общий порядок для списка.
+// Active items first, then finished ones.
 const allItems = computed(() => [...activeQueue.value, ...finishedQueue.value])
-// Сколько треков сейчас в работе — цифра в кружке-бейдже.
 const activeCount = computed(() => activeQueue.value.length)
-// Бейдж не вмещает большие числа — сжимаем «99+».
+// Badge can't fit large numbers, cap display at "99+".
 const badgeText = computed(() => (activeCount.value > 99 ? '99+' : String(activeCount.value)))
-// Индикатор показываем, пока в очереди есть хоть что-то (активное или
-// завершённое, которое пользователь ещё не очистил).
+// Shown while the queue has anything, active or finished but not yet cleared.
 const hasQueue = computed(() => queue.value.length > 0)
 const hasFinished = computed(() => finishedQueue.value.length > 0)
 
-// Подсказка кнопки справа: активное — «Отменить», завершённое — «Убрать».
+// Active item -> "Cancel", finished item -> "Remove".
 function removeTooltip(status: string): string {
     return status === 'queued' || status === 'downloading'
         ? t('downloads.cancel')
@@ -67,7 +64,7 @@ async function onClear() {
             :class="{ active: activeCount > 0 }"
             :aria-label="t('downloads.queueTitle')"
         >
-            <!-- Иконка скачивания: нижняя «полка» статична, стрелка «парит». -->
+            <!-- Download icon: bottom tray is static, arrow floats. -->
             <svg
                 class="dlDownloadIcon"
                 width="14"
@@ -85,7 +82,7 @@ async function onClear() {
             <span v-if="activeCount > 0" class="dlBadge">{{ badgeText }}</span>
         </button>
 
-        <!-- Выпадающий список очереди (по наведению) -->
+        <!-- Queue dropdown (on hover) -->
         <div class="dlDropdown" role="tooltip">
             <div class="dlDropdownCard">
                 <div class="dlDropdownHead">
@@ -110,8 +107,7 @@ async function onClear() {
                             <div v-truncate class="dlArtist">{{ item.artist }}</div>
                         </div>
 
-                        <!-- При ошибке: кнопка «Попробовать снова» слева от «Убрать»
-                             (тот же круг-стиль, что у статус-кнопки). -->
+                        <!-- On error: "Retry" button left of "Remove" (same circle style). -->
                         <button
                             v-if="item.status === 'error'"
                             class="dlStatusBtn dlRetryBtn"
@@ -124,8 +120,8 @@ async function onClear() {
                             </svg>
                         </button>
 
-                        <!-- Круг-статус: спинер (качается) → зелёная галочка (готово)
-                             → красный крест (ошибка); при наведении — крест (отмена). -->
+                        <!-- Status circle: spinner (downloading) -> green check (done)
+                             -> red cross (error); hover shows cross (cancel). -->
                         <button
                             class="dlStatusBtn"
                             :class="{ done: item.status === 'done', error: item.status === 'error' }"
@@ -142,8 +138,8 @@ async function onClear() {
                             </svg>
                         </button>
 
-                        <!-- Только при ошибке: блок трека затемнён, поверх — красный текст.
-                             v-truncate: при обрезании (2 строки) показывает полный текст в tooltip. -->
+                        <!-- Error only: track block dimmed, red text on top.
+                             v-truncate shows the full text in a tooltip when clipped (2 lines). -->
                         <div v-if="item.status === 'error'" class="dlErrorOverlay">
                             <span v-truncate class="dlErrorText">{{ item.error || t('downloads.finishedErrorFallback') }}</span>
                         </div>
@@ -163,7 +159,7 @@ async function onClear() {
     align-items: center;
 }
 
-/* ── Круглая кнопка-иконка с бейджем ─────────────────────────────────────── */
+/* Round icon button with badge */
 .dlIndicatorBtn {
     position: relative;
     cursor: pointer;
@@ -180,7 +176,7 @@ async function onClear() {
 .dlIndicatorBtn:hover {
     color: #fff;
 }
-/* Стрелка «парит» во время скачивания; нижняя полка остаётся статичной. */
+/* Arrow floats during download; the bottom tray stays static. */
 .dlDownloadIcon .dlArrow {
     transform-box: fill-box;
     transform-origin: center;
@@ -214,13 +210,13 @@ async function onClear() {
     user-select: none;
 }
 
-/* ── Выпадающий список ───────────────────────────────────────────────────── */
+/* Dropdown list */
 .dlDropdown {
     position: absolute;
     top: 100%;
     right: 0;
-    /* Прозрачный «мостик» сверху: курсор переходит с кнопки на карточку, не
-       теряя :hover (gap не разрывает наведение, т.к. он внутри элемента). */
+    /* Transparent "bridge" above: cursor moving from button to card keeps :hover
+       since the gap is inside the element, not a real gap. */
     padding-top: 9px;
     width: 320px;
     opacity: 0;
@@ -282,7 +278,7 @@ async function onClear() {
     border-radius: 3px;
 }
 
-/* ── Элемент очереди ─────────────────────────────────────────────────────── */
+/* Queue item */
 .dlItem {
     position: relative;
     display: flex;
@@ -331,7 +327,7 @@ async function onClear() {
     text-overflow: ellipsis;
 }
 
-/* ── Круг-статус справа (спинер / галочка / крест) ───────────────────────── */
+/* Status circle on the right (spinner / check / cross) */
 .dlStatusBtn {
     position: relative;
     z-index: 2;
@@ -344,14 +340,14 @@ async function onClear() {
     align-items: center;
     justify-content: center;
     color: hsla(0, 0%, 100%, 0.55);
-    /* Тёмный кружок (а не белый): чуть темнее карточки дропдауна. */
+    /* Dark circle (not white): slightly darker than the dropdown card. */
     background-color: hsla(var(--accent-h), min(var(--accent-s), 42%), 5%, 0.55);
     transition: background-color .2s ease;
 }
 .dlStatusBtn:hover {
     background-color: hsla(var(--accent-h), min(var(--accent-s), 42%), 3%, 0.8);
 }
-/* Кнопка «Попробовать снова» — тот же круг, что и «Убрать», с иконкой-стрелкой. */
+/* Retry button: same circle as "Remove", with an arrow icon. */
 .dlRetryBtn {
     color: hsla(0, 0%, 100%, 0.72);
 }
@@ -384,19 +380,19 @@ async function onClear() {
 }
 .dlStatusGlyph {
     position: absolute;
-    /* Центрируем через inset+margin:auto (а не translate(-50%,-50%)): под зумом
-       WebView2 дробный translate даёт сдвиг на пиксель — крест казался съехавшим. */
+    /* Centered via inset+margin:auto, not translate(-50%,-50%): under WebView2 zoom
+       a fractional translate shifted it by a pixel and the cross looked off. */
     inset: 0;
     margin: auto;
     width: 15px;
     height: 15px;
     transition: opacity .15s ease;
 }
-/* Галочка «готово» — зелёная. */
+/* "Done" check is green. */
 .dlStatusCheck {
     color: hsla(145, 55%, 60%, 0.95);
 }
-/* Крест по умолчанию скрыт; проступает при наведении. */
+/* Cross is hidden by default; appears on hover. */
 .dlStatusCross {
     color: hsla(0, 0%, 100%, 0.85);
     opacity: 0;
@@ -408,13 +404,13 @@ async function onClear() {
 .dlStatusBtn:hover .dlStatusCross {
     opacity: 1;
 }
-/* Ошибка: всегда красный крест (спинер/галочка не отрисовываются). */
+/* Error: cross is always red (spinner/check aren't rendered). */
 .dlStatusBtn.error .dlStatusCross {
     opacity: 1;
     color: hsla(2, 78%, 64%, 0.95);
 }
 
-/* ── Ошибка: затемняем содержимое и кладём поверх красный текст ───────────── */
+/* Error: dim the content, overlay red text on top */
 .dlItem.error .dlCover,
 .dlItem.error .dlInfo {
     opacity: 0.16;
@@ -425,7 +421,7 @@ async function onClear() {
     display: flex;
     align-items: center;
     justify-content: center;
-    /* Справа оставляем место под обе кнопки (повтор + убрать). */
+    /* Leave room on the right for both buttons (retry + remove). */
     padding: 0 76px 0 14px;
     pointer-events: none;
 }
@@ -439,8 +435,8 @@ async function onClear() {
     line-height: 1.3;
     font-weight: 600;
     color: hsla(2, 80%, 68%, 0.95);
-    /* Оверлей не ловит события (клики проходят к кнопкам), но сам текст должен —
-       чтобы v-truncate показал полный текст ошибки в tooltip при наведении. */
+    /* Overlay ignores events (clicks pass to buttons), but the text itself must
+       catch them so v-truncate can show the full error text in a tooltip. */
     pointer-events: auto;
 }
 </style>

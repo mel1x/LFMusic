@@ -60,7 +60,6 @@ async function onReset(e: MouseEvent) {
 </template>
 
 <style>
-/* ───────── Затемнение обложки только при наведении на кнопки ───────── */
 .cover-edit-host {
     position: relative;
 }
@@ -71,7 +70,6 @@ async function onReset(e: MouseEvent) {
     filter: brightness(0.55);
 }
 
-/* ───────── Кнопки редактирования ───────── */
 .coverEditButtons {
     position: absolute;
     top: 50%;
@@ -123,7 +121,6 @@ async function onReset(e: MouseEvent) {
     color: hsl(0, 70%, 75%);
 }
 
-/* Анимация появления/исчезновения крестика */
 .cover-edit-reset-enter-active,
 .cover-edit-reset-leave-active {
     transition: opacity .22s ease, transform .22s ease;

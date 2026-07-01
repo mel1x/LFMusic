@@ -114,6 +114,13 @@
       "bannerSelect": "Sign in to YouTube — required to bypass the bot wall and download tracks. Do it on the settings page.",
       "bannerInvalid": "Your saved YouTube session didn't pass validation (it may have expired). Sign in again on the settings page."
     },
+    "pot": {
+      "desc": "Helps bypass YouTube's \"Confirm you're not a bot\" check, which can appear even with a valid sign-in and a working VPN. Optional.",
+      "statusMissing": "Bot-wall bypass not installed",
+      "statusReady": "Bot-wall bypass installed",
+      "statusReadyVersion": "Bot-wall bypass installed ({version})",
+      "statusUpdate": "Bot-wall bypass: update available"
+    },
     "comp": {
       "sectionTitle": "Required for downloads",
       "ytdlpDesc": "Required to search and download tracks. The Deno JS engine is installed alongside it for reliable YouTube extraction.",

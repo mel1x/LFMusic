@@ -5,7 +5,6 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-/// Описание одной кастомной обложки на фронте: уникальный ключ и data-URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomCoverEntry {
     pub kind: String,
@@ -86,8 +85,6 @@ fn read_as_data_url(file_path: &PathBuf) -> Option<String> {
     Some(format!("data:{};base64,{}", mime, b64))
 }
 
-/// Сохранить кастомную обложку из файла на диске пользователя.
-/// Возвращает data-URL новой обложки.
 pub fn set_custom_cover(
     app_data_dir: &PathBuf,
     kind: &str,
@@ -98,7 +95,7 @@ pub fn set_custom_cover(
     let mut manifest = load_manifest(app_data_dir);
     let id = entry_id(kind, key);
 
-    // Удаляем предыдущий файл (если был), чтобы не оставались сироты.
+    // Remove previous file (if any) to avoid orphans.
     if let Some(prev) = manifest.get(&id) {
         let _ = fs::remove_file(dir.join(prev));
     }
@@ -169,13 +166,10 @@ mod tests {
         assert_eq!(entry_id("artist", "Queen"), "artist:Queen");
     }
 
-    /// `entry_id` не экранирует `:` внутри `kind`/`key` — два РАЗНЫХ значения
-    /// kind+key теоретически могут дать одинаковую строку (напр. kind="a",
-    /// key="b:c" и kind="a:b", key="c" оба дают "a:b:c"). На практике это не
-    /// эксплуатируется: `kind` всюду в кодовой базе — один из 4 жёстко заданных
-    /// литералов ("catalog"/"playlist"/"album"/"artist"), никогда не
-    /// пользовательский ввод, поэтому реального коллижна между РАЗНЫМИ kind не
-    /// возникает. Тест документирует это намеренное ограничение, а не баг.
+    /// `entry_id` doesn't escape `:` in kind/key, so different kind+key pairs
+    /// could theoretically collide (e.g. kind="a", key="b:c" vs kind="a:b",
+    /// key="c"). Not exploitable in practice: `kind` is always one of 4 fixed
+    /// literals, never user input. Documents the intentional limitation.
     #[test]
     fn entry_id_is_not_collision_proof_for_arbitrary_kind_values() {
         assert_eq!(entry_id("a", "b:c"), entry_id("a:b", "c"));
@@ -183,8 +177,6 @@ mod tests {
 
     #[test]
     fn entry_id_distinguishes_real_kinds_for_the_same_key_containing_colon() {
-        // Реалистичный сценарий: ключ (имя артиста/альбома) содержит «:», но kind
-        // всегда один из фиксированных литералов — коллизий между ними не бывает.
         let key_with_colon = "Greatest Hits: Volume 1";
         assert_ne!(
             entry_id("artist", key_with_colon),
@@ -243,7 +235,6 @@ mod tests {
         remove_custom_cover(&dir, "artist", "Queen").expect("remove cover");
         assert_eq!(load_all(&dir).len(), 0);
 
-        // Удаление уже отсутствующей записи не должно возвращать ошибку.
         remove_custom_cover(&dir, "artist", "Queen").expect("idempotent remove");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -257,8 +248,6 @@ mod tests {
     }
 }
 
-/// Получить все кастомные обложки в виде data-URL, чтобы фронт мог
-/// быстро ими отрисоваться без последующих запросов.
 pub fn load_all(app_data_dir: &PathBuf) -> Vec<CustomCoverEntry> {
     let dir = covers_dir(app_data_dir);
     let manifest = load_manifest(app_data_dir);

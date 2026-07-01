@@ -26,10 +26,10 @@ export function useCoverGate(
 
     const targets = computed(() => targetTracks());
     const targetKey = computed(() => targets.value.map(t => t.file_path).join("|"));
-    // `armed` гейтит открытие: пока источник данных не готов (например, плейлисты
-    // ещё грузятся), пустой список целей НЕ должен считаться «всё загружено» —
-    // иначе гейт откроется до данных, мелькнёт пустой контент, и лоадер появится
-    // уже после подгрузки обложек (обратный порядок).
+    // `armed` gates the reveal: while the data source isn't ready yet (e.g.
+    // playlists still loading), an empty target list must NOT count as "all
+    // loaded" — otherwise the gate would open before data arrives, flash empty
+    // content, then show the loader only after covers start loading (reversed order).
     const armed = computed(() => armedFn());
     const resolved = computed(() =>
         armed.value && targets.value.every(t => isCoverResolved(t)),
@@ -49,12 +49,10 @@ export function useCoverGate(
         if (resolved.value) {
             ready.value = true;
         } else if (armed.value) {
-            // Таймер-страховку запускаем ТОЛЬКО когда источник готов (armed).
-            // Иначе при медленной загрузке данных гейт открылся бы по таймауту до
-            // появления данных, мелькнул бы пустой контент, а затем закрылся снова
-            // при armed=true (тот самый «обратный порядок»). Когда armed станет
-            // true, этот watch перезапустится (armed — его зависимость) и заведёт
-            // таймер уже корректно.
+            // Safety timer only starts once armed — otherwise on slow data loads it
+            // would fire before data arrives (the same "reversed order" flash this
+            // gate exists to prevent). Once armed flips true this watch re-runs
+            // (armed is a dependency) and starts the timer correctly.
             timer = setTimeout(() => { ready.value = true; timer = null; }, timeout);
         }
     }, { immediate: true });

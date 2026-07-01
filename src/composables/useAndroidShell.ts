@@ -1,13 +1,10 @@
 import { ref, computed, effectScope } from "vue";
 import { isAndroidRuntime } from "./usePlatform";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Android-оболочка: статус runtime-разрешений (медиа/уведомления) и системные
-// safe-area insets (выставляются в CSS-переменные). Слушает мост window.LFMusicAndroid
-// и события фокуса/видимости. Синглтон: и App (для инициализации), и
-// AndroidPermissionWarning (для чтения состояния) используют один экземпляр.
-// Вынесено из App.vue без изменения поведения.
-// ──────────────────────────────────────────────────────────────────────────────
+// Android shell: runtime permission status (media/notifications) and safe-area
+// insets (exposed as CSS vars). Listens to the window.LFMusicAndroid bridge and
+// focus/visibility events. Singleton shared by App (init) and
+// AndroidPermissionWarning (reads state).
 
 interface AndroidPermissionStatus {
     mediaGranted: boolean;
@@ -95,7 +92,7 @@ function createAndroidShell() {
         try {
             applyAndroidInsets(JSON.parse(raw) as AndroidSafeInsets);
         } catch {
-            // Native inset updates are best-effort; CSS env() and fallback values stay in place.
+            // Best-effort: CSS env() and fallback values stay in place.
         }
     }
 
@@ -132,14 +129,14 @@ function createAndroidShell() {
         scheduleAndroidInsetsRefresh();
     }
 
-    // Слушатели живут на всё время жизни приложения (корень не размонтируется).
+    // Listeners live for the app's whole lifetime (root never unmounts).
     window.addEventListener("focus", onWindowFocus);
     window.addEventListener("lfmusic:android-permissions", onAndroidPermissionsEvent as EventListener);
     window.addEventListener("lfmusic:android-insets", onAndroidInsetsEvent as EventListener);
     window.visualViewport?.addEventListener("resize", scheduleAndroidInsetsRefresh);
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    // Первичное считывание состояния (мост может быть уже доступен).
+    // Initial read (bridge may already be available).
     refreshAndroidPermissions();
     scheduleAndroidInsetsRefresh();
 

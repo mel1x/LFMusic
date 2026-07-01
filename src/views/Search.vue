@@ -29,7 +29,6 @@ import { useScrollLine } from '../composables/useScrollLine'
 
 const router = useRouter()
 
-// ── Past search queries ─────────────────────────────────────────────────
 const PAST_SEARCHES_KEY = 'lfmusic_past_searches'
 const MAX_PAST_SEARCHES = 15
 
@@ -39,7 +38,7 @@ function loadPastSearches() {
     try {
         const raw = localStorage.getItem(PAST_SEARCHES_KEY)
         if (raw) pastSearches.value = JSON.parse(raw)
-    } catch { /* ignore */ }
+    } catch { }
 }
 
 function savePastSearches() {
@@ -85,8 +84,6 @@ onMounted(() => {
     loadPastSearches()
 })
 
-// ── Search input ───────────────────────────────────────────────────────────
-
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
 useTypeToSearch(searchInput)
@@ -112,9 +109,9 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-// Любое целевое действие над результатами (воспроизведение, открытие,
-// разворачивание секции) означает, что текущий запрос оказался полезным —
-// сохраняем его в подсказки. Сам ввод/выбор подсказки сюда не входит.
+// Any meaningful action on results (play, open, expand a section) means the
+// query was useful, so we save it to past searches. Typing/picking a past
+// search itself doesn't count.
 function rememberCurrentSearch() {
     const trimmed = rawSearch.value.trim()
     if (trimmed) addPastSearch(trimmed)
@@ -162,8 +159,6 @@ function playlistCoverFor(id: number, fallback: string | null): string {
 function artistCoverFor(name: string, fallback: string | null): string {
     return getCustomCover('artist', name) || avatarFor(name) || fallback || defaultTrackCover
 }
-
-// ── Artists ────────────────────────────────────────────────────────────────
 
 interface ArtistResult {
     id: number
@@ -245,8 +240,6 @@ function openArtist(a: ArtistResult) {
     router.push(`/artist/${encodeURIComponent(a.name)}`)
 }
 
-// ── Albums ─────────────────────────────────────────────────────────────────
-
 interface AlbumResult {
     id: number
     name: string
@@ -297,9 +290,7 @@ async function onPlayAlbum(e: MouseEvent, a: AlbumResult) {
     await playTrack(merged[0], { searchStart: true })
 }
 
-// ── Tracks ─────────────────────────────────────────────────────────────────
-
-// Поиск треков — на бэкенде (то же ранжирование, перенесённое в Rust).
+// Track search runs on the backend (same ranking logic, ported to Rust).
 const trackResults = ref<TrackMetadata[]>([])
 let trackSearchReqId = 0
 watch(query, async (q) => {
@@ -318,11 +309,10 @@ watch(query, async (q) => {
 
 const tracksExpanded = ref(false)
 
-// ── Виртуализация раскрытого списка треков ───────────────────────────────────
-// Раскрытый список («Больше») может содержать тысячи строк — рендерим окном
-// видимых через useVirtualScroll (как в Catalog). Скроллер — вся страница
-// (pageRootEl), смещение секции — её offsetTop внутри страницы (pageRoot имеет
-// position: relative). Фиксированная высота строки 58px согласована со scrollTop.
+// Expanded list ("More") can hold thousands of rows, so we render a visible
+// window via useVirtualScroll (like Catalog). Scroller is the whole page
+// (pageRootEl); section offset is its offsetTop within the page. Fixed row
+// height of 58px must stay in sync with scrollTop.
 const tracksListEl = ref<HTMLElement | null>(null)
 const tracksOffset = ref(0)
 
@@ -334,7 +324,7 @@ const {
     paddingBottom: vsPaddingBottom,
 } = useVirtualScroll(trackResults, { itemHeight: 58, buffer: 6, scrollOffset: tracksOffset })
 
-// Свёрнуто — первые 8; раскрыто — окно виртуализации.
+// Collapsed: first 8 items; expanded: virtualized window.
 const renderedTracks = computed(() =>
     tracksExpanded.value ? vsVisibleTracks.value : trackResults.value.slice(0, 8),
 )
@@ -424,8 +414,6 @@ const { ready: coversReady } = useCoverGate(() => {
     return out
 })
 
-// ── Playlists ──────────────────────────────────────────────────────────────
-
 const playlistResults = computed<PlaylistInfo[]>(() => {
     if (!hasQuery.value) return []
     return searchRanked(userPlaylists.value, query.value, (p) => [p.name])
@@ -483,8 +471,6 @@ async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     await playTrack(merged[0], { searchStart: true })
 }
 
-// ── Horizontal scroll helper ───────────────────────────────────────────────
-
 const albumsLine = useScrollLine(190, 16)
 const playlistsLine = useScrollLine(190, 16)
 
@@ -508,15 +494,11 @@ onUnmounted(() => {
     window.removeEventListener('resize', recomputeTracksOffset)
 })
 
-// ── No results ─────────────────────────────────────────────────────────────
-
 const noResults = computed(() => hasQuery.value &&
     artistResults.value.length === 0 &&
     albumResults.value.length === 0 &&
     trackResults.value.length === 0 &&
     playlistResults.value.length === 0)
-
-// ── Sticky header ──────────────────────────────────────────────────────────
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 200)
@@ -564,7 +546,6 @@ function scrollToTop() {
             </div>
         </div>
 
-        <!-- Past search queries -->
         <div class="pastSearchesBar" v-if="pastSearches.length > 0 && !rawSearch.trim()">
             <button
                 v-for="(pq, idx) in filteredPastSearches"
@@ -592,7 +573,6 @@ function scrollToTop() {
         <LoadingSpinner v-else-if="!coversReady" key="gate-spinner" />
 
         <div v-else class="searchResults" key="gate-results">
-            <!-- Artists -->
             <section v-if="artistResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Исполнители</div>
@@ -632,7 +612,6 @@ function scrollToTop() {
                 </div>
             </section>
 
-            <!-- Albums -->
             <section v-if="albumResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Альбомы</div>
@@ -671,7 +650,6 @@ function scrollToTop() {
                 </div>
             </section>
 
-            <!-- Tracks -->
             <section v-if="trackResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Треки</div>
@@ -728,7 +706,6 @@ function scrollToTop() {
                 </button>
             </section>
 
-            <!-- Playlists -->
             <section v-if="playlistResults.length > 0" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">Плейлисты</div>
@@ -802,7 +779,7 @@ function scrollToTop() {
     border-radius: 3px;
 }
 
-/* ── Sticky header ────────────────────────────────────────────── */
+/* Sticky header */
 .stickyHeaderAnchor {
     position: sticky;
     top: -20px;
@@ -847,7 +824,7 @@ function scrollToTop() {
     background-color: hsla(0, 0%, 100%, 0.12);
 }
 
-/* ── Search input ─────────────────────────────────────────────── */
+/* Search input */
 .searchZone {
     position: relative;
     width: 100%;
@@ -901,7 +878,7 @@ function scrollToTop() {
     font-weight: 600;
 }
 
-/* ── Past search queries ─────────────────────────────────────── */
+/* Past search queries */
 .pastSearchesBar {
     display: flex;
     flex-direction: row;
@@ -939,7 +916,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 0.8);
 }
 
-/* ── Section ──────────────────────────────────────────────────── */
+/* Section */
 .pageLine {
     width: 100%;
     display: flex;
@@ -1000,7 +977,7 @@ function scrollToTop() {
     opacity: 0.65;
 }
 
-/* ── Artists row (badges) ─────────────────────────────────────── */
+/* Artists row (badges) */
 .artistsBlockWrap {
     position: relative;
 }
@@ -1132,7 +1109,7 @@ function scrollToTop() {
     transform: rotate(180deg);
 }
 
-/* ── Horizontal lines (albums / playlists) ────────────────────── */
+/* Horizontal lines (albums / playlists) */
 .lineList {
     position: relative;
     display: flex;
@@ -1200,7 +1177,7 @@ function scrollToTop() {
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     background-color: hsla(0, 0%, 100%, 0.95);
 }
-/* У альбомов главная кнопка — в правом нижнем углу. */
+/* Albums: main button sits bottom-right instead of bottom-left. */
 .albumItem .playBtn {
     left: auto;
     right: 12px;
@@ -1240,7 +1217,7 @@ function scrollToTop() {
     text-overflow: ellipsis;
 }
 
-/* ── Tracks list (mirrors Catalog) ────────────────────────────── */
+/* Tracks list (mirrors Catalog) */
 .tracksList {
     display: flex;
     flex-direction: column;
@@ -1418,7 +1395,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 1);
 }
 
-/* ── Empty state ──────────────────────────────────────────────── */
+/* Empty state */
 .emptyState {
     flex: 1;
     display: flex;

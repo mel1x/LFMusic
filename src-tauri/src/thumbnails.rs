@@ -1,12 +1,11 @@
-//! Кэш уменьшенных WebP-миниатюр обложек + кастомный URI-протокол `lfmusic-cover`.
+//! WebP thumbnail cache + the custom `lfmusic-cover` URI protocol.
 //!
-//! Вместо передачи полноразмерных обложек как base64 data-URL через IPC, фронт
-//! получает короткий URL вида `…/lfmusic-cover/<base64url(file_path)>?s=<sig>&size=<n>`
-//! и подставляет его в `<img :src>`. Обработчик протокола **лениво** генерирует
-//! миниатюру (downscale → WebP lossless) и кэширует её на диск; повторные запросы
-//! отдаются мгновенно из кэша. Это разгружает CPU (нет base64), снижает RAM
-//! (короткие строки вместо мегабайтных, декод 512px вместо полноразмерного)
-//! и убирает чтение исходных картинок 2–5 МБ при каждом показе.
+//! Instead of shipping full-size covers as base64 data-URLs over IPC, the
+//! frontend gets a short URL `…/lfmusic-cover/<base64url(file_path)>?s=<sig>&size=<n>`
+//! for `<img :src>`. The protocol handler lazily generates the thumbnail
+//! (downscale -> WebP lossless) and caches it to disk; repeat requests are
+//! served instantly from cache. Avoids base64 CPU cost, keeps RAM down, and
+//! avoids re-reading multi-MB source images on every render.
 
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -20,14 +19,12 @@ use tauri::{AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 use crate::audio_player::AudioPlayer;
 use crate::library::MusicLibrary;
 
-/// Размер обычной миниатюры (вписывается в квадрат, пропорции сохраняются).
 const THUMB_SIZE: u32 = 512;
-/// Размер миниатюры для размытого фона полноэкранного плеера.
+/// Smaller size used for the blurred full-screen player background.
 const BLUR_SIZE: u32 = 96;
 
 const SCHEME: &str = "lfmusic-cover";
 
-/// Папка кэша миниатюр (создаётся при первом обращении).
 pub fn cache_dir(app_data_dir: &Path) -> PathBuf {
     let dir = app_data_dir.join("thumb_cache");
     let _ = fs::create_dir_all(&dir);
@@ -40,7 +37,7 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-/// Сигнатура встроенной обложки — по mtime файла (меняется при изменении файла).
+/// Embedded-cover signature derived from file mtime (changes when file changes).
 pub fn embedded_sig(file_path: &str) -> String {
     let mtime = fs::metadata(file_path)
         .and_then(|m| m.modified())
@@ -51,13 +48,12 @@ pub fn embedded_sig(file_path: &str) -> String {
     format!("e{}", mtime)
 }
 
-/// Сигнатура пользовательской (override) обложки — по хешу её содержимого.
-/// Меняется при смене обложки → инвалидирует кэш вебвью и файл кэша.
+/// Override-cover signature from a content hash; changes on cover change,
+/// invalidating both the webview and on-disk cache.
 pub fn override_sig(cover_data: &str) -> String {
     format!("o{:016x}", hash_str(cover_data))
 }
 
-/// Платформенный origin кастомного протокола (как его видит вебвью).
 fn scheme_origin() -> String {
     #[cfg(any(windows, target_os = "android"))]
     {
@@ -69,15 +65,15 @@ fn scheme_origin() -> String {
     }
 }
 
-/// Чистый билдер URL обложки для `<img :src>` (без I/O).
-/// `file_path` кодируется base64url — безопасно для путей Windows (`\`, `:`, пробелы).
+/// Builds the cover URL for `<img :src>` (no I/O). `file_path` is base64url
+/// encoded to survive Windows path chars (`\`, `:`, spaces).
 pub fn cover_protocol_url(file_path: &str, sig: &str) -> String {
     let key = URL_SAFE_NO_PAD.encode(file_path.as_bytes());
     format!("{}/{}?s={}&size={}", scheme_origin(), key, sig, THUMB_SIZE)
 }
 
-/// URL обложки трека с учётом override/встроенной обложки, либо `None` если
-/// обложки нет вовсе (фронт подставит дефолтную). Картинки не декодирует.
+/// Cover URL preferring override over embedded, or `None` if there's no cover
+/// at all (frontend falls back to a default). Doesn't decode any image.
 pub fn cover_url(lib: &MusicLibrary, file_path: &str) -> Option<String> {
     if let Some(sig) = lib.get_override_cover_sig(file_path) {
         return Some(cover_protocol_url(file_path, &sig));
@@ -93,7 +89,6 @@ pub(crate) fn decode_data_url(data_url: &str) -> Option<Vec<u8>> {
     STANDARD.decode(b64).ok()
 }
 
-/// Декод исходных байтов → downscale → WebP lossless.
 fn encode_thumbnail(source: &[u8], size: u32) -> Option<Vec<u8>> {
     let img = image::load_from_memory(source).ok()?;
     let thumb = img.thumbnail(size, size);
@@ -104,13 +99,12 @@ fn encode_thumbnail(source: &[u8], size: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Оставить в сигнатуре только безопасные для имени файла символы.
 fn sanitize(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
-/// Убедиться, что миниатюра трека сгенерирована и закэширована; вернуть её путь.
-/// Источник: override-обложка (из БД) либо встроенная обложка файла.
+/// Ensures the track's thumbnail is generated and cached; returns its path.
+/// Source is the override cover (DB) if present, else the embedded cover.
 pub fn ensure_thumbnail<R: Runtime>(
     app: &AppHandle<R>,
     file_path: &str,
@@ -129,9 +123,9 @@ pub fn ensure_thumbnail<R: Runtime>(
         return Some(cache_file);
     }
 
-    // Источник выбираем по префиксу сигнатуры: `e…` — встроенная обложка из
-    // тегов (в т.ч. превью «оригинал» в обход override), `o…`/прочее —
-    // пользовательская (приоритет), иначе встроенная.
+    // Signature prefix picks the source: `e…` forces the embedded tag cover
+    // (used to preview the "original" even with an override set); anything
+    // else prefers the override, falling back to embedded.
     let source = if sig.starts_with('e') {
         AudioPlayer::extract_cover_bytes(file_path)?
     } else {
@@ -148,8 +142,8 @@ pub fn ensure_thumbnail<R: Runtime>(
 
     let webp = encode_thumbnail(&source, size)?;
 
-    // Атомарная запись: temp + rename, чтобы параллельные запросы не читали
-    // недописанный файл.
+    // Atomic write via temp + rename so concurrent requests never read a
+    // partially-written file.
     let tmp = dir.join(format!(
         ".tmp_{:016x}_{}_{}.webp",
         hash_str(file_path),
@@ -162,7 +156,6 @@ pub fn ensure_thumbnail<R: Runtime>(
     Some(cache_file)
 }
 
-/// Прочитать байты миниатюры (генерируя при необходимости).
 pub fn thumbnail_bytes<R: Runtime>(
     app: &AppHandle<R>,
     file_path: &str,
@@ -173,9 +166,8 @@ pub fn thumbnail_bytes<R: Runtime>(
     fs::read(path).ok()
 }
 
-/// Путь к кэшированной миниатюре обложки трека (генерируя при необходимости),
-/// с учётом override/встроенной обложки — для нативных интеграций (MPRIS).
-/// Сигнатура вычисляется внутри (как в `cover_url`).
+/// Cached thumbnail path for native integrations (MPRIS); signature computed
+/// internally like `cover_url`.
 pub fn cover_file<R: Runtime>(app: &AppHandle<R>, file_path: &str, size: u32) -> Option<PathBuf> {
     let override_sig = {
         let lib_state = app.state::<crate::LibraryState>();
@@ -194,7 +186,7 @@ pub fn cover_file<R: Runtime>(app: &AppHandle<R>, file_path: &str, size: u32) ->
     ensure_thumbnail(app, file_path, size, &sig)
 }
 
-/// Байты кэшированной миниатюры обложки трека (для taskbar). См. `cover_file`.
+/// Cached thumbnail bytes for the taskbar integration. See `cover_file`.
 pub fn cover_bytes<R: Runtime>(app: &AppHandle<R>, file_path: &str, size: u32) -> Option<Vec<u8>> {
     let path = cover_file(app, file_path, size)?;
     fs::read(path).ok()
@@ -209,7 +201,7 @@ fn not_found() -> Response<Vec<u8>> {
 }
 
 fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Response<Vec<u8>> {
-    // Путь = base64url(file_path)
+    // Path segment is base64url(file_path).
     let path_seg = uri.path().trim_start_matches('/');
     let Some(file_path) = URL_SAFE_NO_PAD
         .decode(path_seg)
@@ -219,7 +211,7 @@ fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Res
         return not_found();
     };
 
-    // Параметры запроса: size (512|blur|<n>), s (сигнатура).
+    // Query params: size (512|blur|<n>), s (signature).
     let mut size = THUMB_SIZE;
     let mut sig = String::new();
     if let Some(query) = uri.query() {
@@ -250,8 +242,8 @@ fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Res
     }
 }
 
-/// Асинхронный обработчик протокола `lfmusic-cover`. Генерация (декод + resize +
-/// кодирование WebP) выполняется в отдельном потоке, чтобы не блокировать вебвью.
+/// Async `lfmusic-cover` protocol handler; generation runs on its own thread
+/// so it doesn't block the webview.
 pub fn protocol_handler<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
@@ -295,7 +287,7 @@ mod tests {
         let sig1 = embedded_sig(file.to_str().unwrap());
         assert!(sig1.starts_with('e'));
 
-        // Файл, которого не существует, не должен паниковать — фолбэк "e0".
+        // Missing file must not panic, falls back to "e0".
         let missing_sig = embedded_sig(dir.join("missing.flac").to_str().unwrap());
         assert_eq!(missing_sig, "e0");
 
@@ -307,8 +299,8 @@ mod tests {
         let url = cover_protocol_url("C:\\Music\\Artist\\Track.flac", "o1234567890abcdef");
         assert!(url.contains("s=o1234567890abcdef"));
         assert!(url.contains(&format!("size={}", THUMB_SIZE)));
-        // Сегмент пути (между origin и `?`) — чистый base64url, без `\`/`:`/пробелов
-        // из исходного Windows-пути (которые сломали бы парсинг URL вебвью).
+        // Path segment must be pure base64url — raw Windows path chars would
+        // break webview URL parsing.
         let path_segment = url.rsplit('/').next().unwrap().split('?').next().unwrap();
         assert!(!path_segment.contains('\\'));
         assert!(!path_segment.contains(':'));
@@ -324,7 +316,7 @@ mod tests {
 
     #[test]
     fn decode_data_url_extracts_base64_payload() {
-        // "hello" в base64 = "aGVsbG8="
+        // "hello" base64-encoded.
         let data_url = "data:image/jpeg;base64,aGVsbG8=";
         let bytes = decode_data_url(data_url).expect("should decode");
         assert_eq!(bytes, b"hello");
@@ -341,7 +333,6 @@ mod tests {
         let dir = temp_dir("cache_dir");
         let cache1 = cache_dir(&dir);
         assert!(cache1.exists());
-        // Повторный вызов не должен падать на уже существующей папке.
         let cache2 = cache_dir(&dir);
         assert_eq!(cache1, cache2);
         let _ = std::fs::remove_dir_all(&dir);

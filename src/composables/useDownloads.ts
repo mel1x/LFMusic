@@ -4,28 +4,22 @@ import { listen } from '@tauri-apps/api/event'
 import { usePlayer } from './usePlayer'
 import { useFolders } from './useFolders'
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Типы (зеркало serde-структур из src-tauri/src/{external,downloads}.rs)
-// ──────────────────────────────────────────────────────────────────────────────
+// Types mirroring serde structs from src-tauri/src/{external,downloads}.rs
 
-/** Найденный во внешнем источнике трек — кандидат на скачивание. */
 export interface ExternalSearchTrack {
   title: string
   artist: string
   album: string | null
   duration_secs: number | null
-  /** Прямой URL обложки (Deezer/iTunes CDN) для <img>. */
   cover_url: string | null
   source: string
-  /** Трек уже есть в локальной библиотеке (по исполнителю+названию). */
   in_library: boolean
-  /** Deezer-id исполнителя — артист трека кликабелен (→ страница скачивания). null у iTunes. */
+  /** Deezer artist id; null for iTunes. */
   artist_id: number | null
-  /** Deezer-id альбома — альбом трека кликабелен (→ страница скачивания). null у iTunes. */
+  /** Deezer album id; null for iTunes. */
   album_id: number | null
 }
 
-/** Альбом из внешнего источника (Deezer) — результат поиска. */
 export interface ExternalSearchAlbum {
   id: number
   title: string
@@ -36,7 +30,6 @@ export interface ExternalSearchAlbum {
   source: string
 }
 
-/** Исполнитель из внешнего источника (Deezer) — результат поиска. */
 export interface ExternalSearchArtist {
   id: number
   name: string
@@ -45,7 +38,6 @@ export interface ExternalSearchArtist {
   source: string
 }
 
-/** Детальная карточка альбома (метаданные + треки) для страницы скачивания. */
 export interface ExternalAlbumDetail {
   id: number
   title: string
@@ -55,7 +47,6 @@ export interface ExternalAlbumDetail {
   tracks: ExternalSearchTrack[]
 }
 
-/** Детальная карточка исполнителя (альбомы + популярные треки). */
 export interface ExternalArtistDetail {
   id: number
   name: string
@@ -64,25 +55,23 @@ export interface ExternalArtistDetail {
   top_tracks: ExternalSearchTrack[]
 }
 
-/** Страница результатов поиска с явным курсором пагинации (считается по Deezer). */
+/** Search results page with an explicit pagination cursor (Deezer-based). */
 export interface ExternalSearchPage {
   tracks: ExternalSearchTrack[]
-  /** Альбомы (только на первой странице, index === 0). */
+  /** Only populated on the first page (index === 0). */
   albums: ExternalSearchAlbum[]
-  /** Исполнители (только на первой странице, index === 0). */
+  /** Only populated on the first page (index === 0). */
   artists: ExternalSearchArtist[]
-  /** Смещение для следующего запроса (передаётся как index). */
   next_index: number
-  /** Есть ли ещё страницы. */
   has_more: boolean
 }
 
 export type DownloadStatus = 'queued' | 'downloading' | 'done' | 'error'
 
 /**
- * Тип ошибки скачивания (зеркало `downloads.rs::DownloadErrorKind`). UI различает
- * причины по типу, а НЕ по тексту: `bot_wall_network` (IP/VPN-стена, НЕ протухание
- * входа) ≠ `cookies_expired` (реально нужен перелогин).
+ * Mirrors `downloads.rs::DownloadErrorKind`. UI distinguishes causes by type, not
+ * text: `bot_wall_network` (IP/VPN block, not an expired login) vs `cookies_expired`
+ * (actually needs re-login).
  */
 export type DownloadErrorKind =
   | 'bot_wall_network'
@@ -93,7 +82,6 @@ export type DownloadErrorKind =
   | 'cancelled'
   | 'unknown'
 
-/** Элемент очереди скачивания. */
 export interface DownloadItem {
   id: number
   title: string
@@ -104,35 +92,33 @@ export interface DownloadItem {
   status: DownloadStatus
   progress: number
   error: string | null
-  /** Тип ошибки (для honest-диагностики в UI). null, если не ошибка. */
+  /** null when not an error. */
   error_kind: DownloadErrorKind | null
   file_path: string | null
 }
 
-/** Конфигурация прокси для yt-dlp (зеркало `downloads.rs::ProxyConfig`). */
+/** Mirrors `downloads.rs::ProxyConfig`. */
 export type ProxyMode = 'system' | 'none' | 'custom'
 export interface ProxyConfig {
   mode: ProxyMode
   url: string
 }
 
-/** Доступность внешних утилит + статус авторизации YouTube (зеркало downloads.rs::ToolsStatus). */
+/** Mirrors `downloads.rs::ToolsStatus`. */
 export interface ToolsStatus {
   ytdlp: boolean
   ffmpeg: boolean
-  /** JS-движок Deno (ставится/удаляется вместе с yt-dlp). */
+  /** Installed/removed alongside yt-dlp. */
   deno: boolean
+  /** PO-token provider for YouTube's bot-wall — optional, installed separately. */
+  pot: boolean
   preparing: boolean
   message: string | null
-  /** Есть сохранённые cookies (пользователь авторизовался в YouTube). */
   cookies_authorized: boolean
-  /** Cookies прошли проверку — скачивание разблокировано. */
+  /** Cookies passed validation — downloading is unlocked. */
   cookies_valid: boolean
-  /** Идёт проверка cookies (сетевой тест). */
   cookies_checking: boolean
-  /** Открыто окно входа в YouTube. */
   cookies_login_open: boolean
-  /** Сообщение об ошибке проверки/авторизации. */
   cookies_message: string | null
 }
 
@@ -141,28 +127,27 @@ interface DownloadSnapshot {
   tools: ToolsStatus
 }
 
-/** Информация об одной утилите (для страницы настроек и уведомлений). */
 export interface ToolInfo {
-  /** Доступна (в bin-папке приложения или в системном PATH). */
+  /** In the app's bin folder or on system PATH. */
   installed: boolean
-  /** Установлена приложением (в bin-папке) — можно обновлять/удалять. */
+  /** Installed by the app (bin folder) — can be updated/removed. */
   managed: boolean
-  /** Версия установленной утилиты, если удалось получить. */
   version: string | null
-  /** Доступна более новая версия. Для yt-dlp — и для системного (PATH): при
-   *  обновлении скачается управляемая приложением копия; для ffmpeg — только managed. */
+  /** For yt-dlp this also covers the system (PATH) case: updating installs an
+   *  app-managed copy. For ffmpeg only the managed case applies. */
   update_available: boolean
 }
 
 export interface ToolsInfo {
   ytdlp: ToolInfo
   ffmpeg: ToolInfo
-  /** JS-движок Deno (ставится/удаляется с yt-dlp; нужен для YouTube). Полный
-   *  ToolInfo — UI смотрит на managed, чтобы разрешить удаление app-managed Deno. */
+  /** UI checks `managed` to allow removing an app-managed Deno install. */
   deno: ToolInfo
+  /** PO-token provider — desktop-only, installed independently (not part of "install all"). */
+  pot: ToolInfo
 }
 
-export type ToolKey = 'ytdlp' | 'ffmpeg'
+export type ToolKey = 'ytdlp' | 'ffmpeg' | 'pot'
 
 interface ToolsProgressEvent {
   tool: ToolKey
@@ -170,46 +155,38 @@ interface ToolsProgressEvent {
   active: boolean
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
 // Singleton state
-// ──────────────────────────────────────────────────────────────────────────────
 
 const queue = ref<DownloadItem[]>([])
 const tools = ref<ToolsStatus>({
-  ytdlp: false, ffmpeg: false, deno: false, preparing: false, message: null,
+  ytdlp: false, ffmpeg: false, deno: false, pot: false, preparing: false, message: null,
   cookies_authorized: false, cookies_valid: false, cookies_checking: false, cookies_login_open: false, cookies_message: null,
 })
 
 const emptyTool = (): ToolInfo => ({ installed: false, managed: false, version: null, update_available: false })
-const toolsInfo = ref<ToolsInfo>({ ytdlp: emptyTool(), ffmpeg: emptyTool(), deno: emptyTool() })
-// Папка скачиваний — чтобы фронт определял «скачанные приложением» треки (для
-// пункта «Удалить трек» в контекстном меню). Грузится один раз в init().
+const toolsInfo = ref<ToolsInfo>({ ytdlp: emptyTool(), ffmpeg: emptyTool(), deno: emptyTool(), pot: emptyTool() })
+// Used to detect app-downloaded tracks (for "Delete track" in the context menu). Loaded once in init().
 const downloadsDir = ref<string>('')
-// Конфигурация прокси для yt-dlp (страница настроек «Внешние источники»). По
-// умолчанию системный; грузится один раз в init().
 const proxyConfig = ref<ProxyConfig>({ mode: 'system', url: '' })
-/** Текст прогресса установки/обновления по утилите (null — не идёт). */
-const toolsProgress = ref<Record<ToolKey, string | null>>({ ytdlp: null, ffmpeg: null })
-// Статус утилит ещё не загружен — отображаем оптимистично (как будто всё на
-// месте), чтобы не было ложной вспышки баннера/блокировки поиска до первой
-// (быстрой, локальной) проверки.
+const toolsProgress = ref<Record<ToolKey, string | null>>({ ytdlp: null, ffmpeg: null, pot: null })
+// Optimistic default (as if everything's installed) until the first local check
+// completes, to avoid a false banner/search-block flash on startup.
 const toolsLoaded = ref(false)
 
-// yt-dlp — обязательная зависимость: без него поиск/скачивание недоступны.
+// yt-dlp is a hard dependency: search/download don't work without it.
 const ytdlpMissing = computed(() => toolsLoaded.value && !toolsInfo.value.ytdlp.installed)
-// ffmpeg — рекомендованный компонент (лучшее качество), не обязательный.
+// ffmpeg is recommended (better quality) but not required.
 const ffmpegMissing = computed(() => toolsLoaded.value && !toolsInfo.value.ffmpeg.installed)
-// yt-dlp есть, а JS-движок Deno — нет (обязателен для YouTube). Так бывает у тех,
-// кто поставил yt-dlp до появления связки с Deno: нужно доустановить Deno.
+// yt-dlp present but Deno missing — happens for installs predating the Deno pairing.
 const denoMissing = computed(() => toolsLoaded.value && toolsInfo.value.ytdlp.installed && !toolsInfo.value.deno.installed)
-// Не хватает обязательной зависимости (yt-dlp).
 const depsMissing = ytdlpMissing
-// Для какой-то из установленных утилит доступно обновление.
 const depsUpdateAvailable = computed(() => toolsLoaded.value && (toolsInfo.value.ytdlp.update_available || toolsInfo.value.ffmpeg.update_available))
+// POT provider is fully optional (opt-in bot-wall mitigation) — not folded into depsMissing/depsUpdateAvailable.
+const potMissing = computed(() => toolsLoaded.value && !toolsInfo.value.pot.installed)
+const potUpdateAvailable = computed(() => toolsLoaded.value && toolsInfo.value.pot.update_available)
 
-// ── Авторизация YouTube (обязательная фаза разблокировки скачивания) ─────────
-// Вход выполняется в отдельном webview-окне; после него cookies сохраняются и
-// проверяются. Статус прилетает снапшотом `download_queue` в `tools`.
+// YouTube login runs in a separate webview window; afterward cookies are saved and
+// validated. Status arrives via the `download_queue` snapshot into `tools`.
 async function openYoutubeLogin(): Promise<void> {
   await invoke('downloads_youtube_login')
 }
@@ -227,16 +204,12 @@ const cookiesMessage = computed(() => tools.value.cookies_message)
 
 async function refreshToolsInfo(): Promise<ToolsInfo> {
   const info = await invoke<ToolsInfo>('tools_info')
-  // `tools_info` — локальная проверка (без сети): она не знает про обновления и
-  // всегда отдаёт update_available=false. Переносим флаг из последнего результата
-  // сетевой проверки (checkToolUpdates), пока версия утилиты та же. Иначе
-  // refreshToolsInfo (вызывается при входе на «Скачивание»/настройки и по событию
-  // tools_changed) затирал бы «доступно обновление» в false — баннер мигал и
-  // пропадал, а TTL-кэш checkToolUpdates потом отдавал то же false. Если версия
-  // изменилась (утилиту поставили/обновили) — прежний флаг неактуален, оставляем
-  // false (после обновления checkToolUpdates всё равно сходит в сеть заново).
+  // `tools_info` is a local (offline) check that always reports update_available=false.
+  // Carry over the flag from the last network check (checkToolUpdates) as long as the
+  // version hasn't changed, otherwise the banner would flicker off until the TTL cache
+  // re-checks. If the version changed, the old flag is stale so we drop it.
   const prev = toolsInfo.value
-  for (const key of ['ytdlp', 'ffmpeg', 'deno'] as const) {
+  for (const key of ['ytdlp', 'ffmpeg', 'deno', 'pot'] as const) {
     if (info[key].version === prev[key].version && prev[key].update_available) {
       info[key].update_available = true
     }
@@ -246,18 +219,13 @@ async function refreshToolsInfo(): Promise<ToolsInfo> {
   return info
 }
 
-// Проверка обновлений утилит ходит в сеть (GitHub). Страница «Скачивание» и
-// настройки «Внешние источники» дёргают её при каждом mount — кэшируем результат
-// на TTL, чтобы переходы между страницами не порождали лишних запросов. Метку
-// ставим только при успехе (без сети повторим при следующем заходе).
+// Update check hits the network (GitHub). Both the Downloads page and External
+// Sources settings call this on every mount, so cache on a TTL to avoid duplicate
+// requests. The timestamp is only set on success (retry next visit if offline).
 const TOOL_UPDATE_TTL_MS = 15 * 60 * 1000
 let lastToolUpdateCheck = 0
 
-/**
- * Проверить наличие обновлений утилит (обращается к сети). Результат кэшируется
- * на TTL — повторные вызовы в его пределах возвращают текущий `toolsInfo` без
- * запроса. `force` обходит кэш (после установки/обновления).
- */
+/** `force` bypasses the TTL cache (used right after install/update). */
 async function checkToolUpdates(force = false): Promise<ToolsInfo> {
   if (!force && lastToolUpdateCheck && Date.now() - lastToolUpdateCheck < TOOL_UPDATE_TTL_MS) {
     return toolsInfo.value
@@ -271,10 +239,8 @@ async function checkToolUpdates(force = false): Promise<ToolsInfo> {
 
 let initialized = false
 
-// Дебаунс обновления библиотеки: при пакетном скачивании событие
-// `downloads_library_updated` прилетает на КАЖДЫЙ трек. Без дебаунса очередь из N
-// треков вызвала бы N полных перезагрузок каталога. Коалесцируем всплески в одну
-// перезагрузку (треки появляются почти сразу — задержка незаметна).
+// Debounced: `downloads_library_updated` fires per track during a batch download,
+// so without this an N-track queue would trigger N full catalog reloads.
 let libraryRefreshTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleLibraryRefresh(): void {
   if (libraryRefreshTimer) clearTimeout(libraryRefreshTimer)
@@ -288,21 +254,17 @@ async function init(): Promise<void> {
   if (initialized) return
   initialized = true
   try {
-    // Синглтон-композабл живёт всё время работы приложения — не отписываемся.
+    // Singleton composable lives for the app's lifetime — never unsubscribed.
     await listen<DownloadSnapshot>('download_queue', (e) => {
       queue.value = e.payload.items
       tools.value = e.payload.tools
     })
-    // После скачивания библиотека пересканирована — обновляем каталог, чтобы
-    // новые треки появились без перехода между страницами.
     await listen('downloads_library_updated', () => {
       scheduleLibraryRefresh()
     })
-    // Утилиты установлены/обновлены/удалены где-то ещё — обновляем статус.
     await listen('tools_changed', () => {
       void refreshToolsInfo()
     })
-    // Прогресс установки/обновления утилиты (страница настроек).
     await listen<ToolsProgressEvent>('tools_progress', (e) => {
       toolsProgress.value = {
         ...toolsProgress.value,
@@ -319,24 +281,19 @@ async function init(): Promise<void> {
   } catch (e) {
     console.error('Ошибка загрузки очереди скачивания:', e)
   }
-  // Локальный статус утилит (быстро, без сети) — для блокировки поиска и баннера.
   try {
     await refreshToolsInfo()
   } catch (e) {
     console.error('Ошибка загрузки статуса утилит:', e)
   }
-  // Проверка обновлений (сеть) один раз при запуске — чтобы баннер «доступно
-  // обновление» появлялся сразу, без захода на «Скачивание»/в настройки.
-  // Fire-and-forget (не задерживаем запуск); TTL-кэш не даст дублировать запрос
-  // при последующих заходах на эти страницы.
-  void checkToolUpdates().catch(() => { /* без сети — просто без обновлений */ })
-  // Путь папки скачиваний — для определения «скачанных приложением» треков.
+  // Fire-and-forget so startup isn't delayed; TTL cache avoids duplicate requests
+  // from later page visits.
+  void checkToolUpdates().catch(() => { /* offline — skip update banner */ })
   try {
     downloadsDir.value = await invoke<string>('downloads_dir_path')
   } catch (e) {
     console.error('Ошибка получения папки скачиваний:', e)
   }
-  // Конфигурация прокси (для настроек «Внешние источники»).
   try {
     proxyConfig.value = await invoke<ProxyConfig>('downloads_get_proxy')
   } catch (e) {
@@ -344,62 +301,49 @@ async function init(): Promise<void> {
   }
 }
 
-/** Трек скачан этим приложением (его файл лежит в папке скачиваний). */
 function isDownloadedTrack(filePath: string): boolean {
   const dir = downloadsDir.value
   if (!dir || !filePath) return false
   const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase()
-  // Требуем границу-разделитель, иначе соседняя папка с тем же префиксом
-  // («…/LFMusic Downloads-old/…») ошибочно считалась бы «скачанной».
+  // Require a separator boundary so a sibling folder sharing the same prefix
+  // (e.g. "…/LFMusic Downloads-old/…") isn't mistaken for the downloads folder.
   let d = norm(dir)
   if (!d.endsWith('/')) d += '/'
   return norm(filePath).startsWith(d)
 }
 
-/** Удалить скачанный приложением трек (из библиотеки и файл с диска). */
 async function deleteDownloadedTrack(filePath: string): Promise<void> {
   await invoke('downloads_delete_track', { filePath })
 }
 
 /**
- * Сменить папку скачиваний. `folderPath` — абсолютный путь выбранной папки, либо
- * `null`/`undefined` для сброса на стандартную папку «LFMusic Downloads» в
- * системной музыкальной директории. Бэкенд при любой ошибке делает fallback на
- * стандартную папку и возвращает фактически применённый путь — обновляем им
- * локальное состояние. Старая папка убирается из сканируемых, новая добавляется,
- * поэтому перечитываем список папок и каталог.
+ * `folderPath` null/undefined resets to the default "LFMusic Downloads" folder.
+ * Backend falls back to the default on any error and returns the path actually
+ * applied. Old folder is unscanned, new one added, so refresh folders + catalog.
  */
 async function setDownloadsDir(folderPath?: string | null): Promise<string> {
   const resolved = await invoke<string>('downloads_set_dir', { folderPath: folderPath ?? null })
   downloadsDir.value = resolved
-  // Набор сканируемых папок и каталог изменились — обновляем оба представления.
-  try { await useFolders().refreshFolders() } catch { /* список папок ещё не инициализирован */ }
-  try { await usePlayer().refreshLibrary() } catch { /* каталог обновится по событию */ }
+  try { await useFolders().refreshFolders() } catch { /* folder list not yet initialized */ }
+  try { await usePlayer().refreshLibrary() } catch { /* catalog will refresh via event */ }
   return resolved
 }
 
-/**
- * Сохранить конфигурацию прокси для yt-dlp. `mode`: системный/нет/указать; `url`
- * нужен только для 'custom' (напр. socks5://127.0.0.1:1080 для ByeDPI). Применяется
- * к следующим скачиваниям и проверке cookies.
- */
+/** `url` only applies to `mode: 'custom'` (e.g. socks5://127.0.0.1:1080 for ByeDPI). */
 async function setProxy(mode: ProxyMode, url = ''): Promise<void> {
   await invoke('downloads_set_proxy', { mode, url })
   proxyConfig.value = { mode, url: mode === 'custom' ? url.trim() : '' }
 }
 
 /**
- * Нормализация строки — порт Rust-функции `external::normalize`: приводит к
- * нижнему регистру, оставляет только буквы/цифры (любых алфавитов), а любые
- * прочие символы схлопывает в одиночные пробелы (без ведущих/хвостовых).
- * Держим идентичной бэкенду, чтобы дедупликация очереди совпадала с ним.
+ * Port of Rust `external::normalize`. Kept identical to the backend so queue
+ * dedup matches it exactly.
  */
-// Кэшируем регулярку: литерал в теле цикла пересоздавался бы на каждом символе.
 const ALNUM_RE = /[\p{L}\p{N}]/u
 
 function normalizeKey(s: string): string {
   let out = ''
-  let prevSpace = true // схлопываем ведущие пробелы
+  let prevSpace = true // collapse leading spaces too
   for (const ch of s.toLowerCase()) {
     if (ALNUM_RE.test(ch)) {
       out += ch
@@ -413,11 +357,8 @@ function normalizeKey(s: string): string {
 }
 
 /**
- * Ключ идентичности трека (исполнитель + название + альбом). Совпадает с Rust
- * `external::track_identity_key` = `normalize("{artist} {title} {album}")`.
- * Включает альбом, чтобы одноимённые треки одного исполнителя из РАЗНЫХ альбомов
- * не схлопывались в один — они показываются и качаются по отдельности. Пустой
- * альбом → ключ сводится к «исполнитель + название».
+ * Mirrors Rust `external::track_identity_key`. Includes album so same-titled
+ * tracks from different albums by the same artist aren't collapsed together.
  */
 export function trackKey(artist: string, title: string, album?: string | null): string {
   return normalizeKey(`${artist || ''} ${title || ''} ${album || ''}`)
@@ -427,10 +368,10 @@ export function useDownloads() {
   void init()
 
   /**
-   * Поиск треков во внешних источниках (постранично: index — смещение). При
-   * клике по «фантому» альбома известны точные исполнитель и название — передаём
-   * их в `exact`, тогда бэкенд добавляет точный поиск по полям Deezer (иначе
-   * нишевый трек с «общим» названием, напр. «Интро», теряется в свободной выдаче).
+   * `exact` is passed when the artist/title are already known (e.g. clicking a
+   * phantom album track) so the backend adds a precise Deezer field search —
+   * otherwise a niche track with a generic title (e.g. "Intro") gets lost in
+   * free-text results.
    */
   async function search(
     query: string,
@@ -449,7 +390,6 @@ export function useDownloads() {
     })
   }
 
-  /** Поставить трек в очередь скачивания (force — повторное скачивание). */
   async function enqueue(track: ExternalSearchTrack, force = false): Promise<number> {
     return await invoke<number>('downloads_enqueue', {
       request: {
@@ -462,7 +402,6 @@ export function useDownloads() {
     })
   }
 
-  /** Поставить пачку треков в очередь одним вызовом (кнопка «Скачать все треки»). */
   async function enqueueMany(tracks: ExternalSearchTrack[], force = false): Promise<number[]> {
     if (tracks.length === 0) return []
     return await invoke<number[]>('downloads_enqueue_many', {
@@ -476,61 +415,52 @@ export function useDownloads() {
     })
   }
 
-  /** Детальная карточка альбома по Deezer-id (метаданные + треки). null — не найден. */
   async function albumDetail(id: number): Promise<ExternalAlbumDetail | null> {
     return await invoke<ExternalAlbumDetail | null>('downloads_album', { albumId: id })
   }
 
-  /** Детальная карточка исполнителя по Deezer-id (альбомы + популярные треки). */
   async function artistDetail(id: number): Promise<ExternalArtistDetail | null> {
     return await invoke<ExternalArtistDetail | null>('downloads_artist', { artistId: id })
   }
 
-  /** Убрать/отменить элемент очереди. */
   async function remove(id: number): Promise<void> {
     await invoke('downloads_remove', { id })
   }
 
-  /** Повторить скачивание ошибочного элемента очереди (error → queued). */
+  /** error -> queued */
   async function retry(id: number): Promise<void> {
     await invoke('downloads_retry', { id })
   }
 
-  /** Очистить завершённые/ошибочные элементы. */
   async function clearFinished(): Promise<void> {
     await invoke('downloads_clear_finished')
   }
 
-  /** Проверить доступность утилит (без скачивания). */
   async function checkTools(): Promise<ToolsStatus> {
     const s = await invoke<ToolsStatus>('downloads_check_tools')
     tools.value = s
     return s
   }
 
-  /** Установить/обновить утилиту (скачивает в папку приложения). */
   async function installTool(tool: ToolKey): Promise<void> {
     const info = await invoke<ToolsInfo>('tools_install', { tool })
     toolsInfo.value = info
-    // Версия изменилась — следующая проверка обновлений должна сходить в сеть.
+    // Version changed — force the next update check to hit the network.
     lastToolUpdateCheck = 0
   }
 
-  /** Доустановить Deno (для тех, кто поставил yt-dlp до связки с Deno). */
   async function installDeno(): Promise<void> {
     const info = await invoke<ToolsInfo>('tools_install_deno')
     toolsInfo.value = info
   }
 
-  /** Установить сразу все утилиты (yt-dlp + Deno + ffmpeg) одним действием. */
   async function installAll(): Promise<void> {
     const info = await invoke<ToolsInfo>('tools_install_all')
     toolsInfo.value = info
-    // Версии изменились — следующая проверка обновлений должна сходить в сеть.
+    // Versions changed — force the next update check to hit the network.
     lastToolUpdateCheck = 0
   }
 
-  /** Удалить скачанную приложением утилиту. */
   async function deleteTool(tool: ToolKey): Promise<void> {
     const info = await invoke<ToolsInfo>('tools_delete', { tool })
     toolsInfo.value = info
@@ -547,6 +477,8 @@ export function useDownloads() {
     ytdlpMissing,
     ffmpegMissing,
     denoMissing,
+    potMissing,
+    potUpdateAvailable,
     openYoutubeLogin,
     validateCookies,
     logoutYoutube,

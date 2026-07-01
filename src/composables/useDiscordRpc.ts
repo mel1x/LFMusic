@@ -12,18 +12,18 @@ interface DiscordRpcOptions {
   playbackState: Ref<PlaybackState>
   positionSecs: Ref<number>
   durationSecs: ComputedRef<number>
-  /** Подпись источника: альбом/плейлист/артист/каталог/микс (см. Player.vue) */
+  /** Source label: album/playlist/artist/catalog/mix (see Player.vue) */
   sourceLabel: ComputedRef<string>
 }
 
-/** Зеркало discord_rpc::PresencePayload (ключи — snake_case, как в Rust) */
+/** Mirrors discord_rpc::PresencePayload (snake_case keys, matching Rust) */
 interface PresencePayload {
-  /** Первая строка — название трека */
+  /** Line 1: track title */
   details: string
-  /** Вторая строка — исполнитель */
+  /** Line 2: artist */
   state: string
   cover_url: string | null
-  /** Третья строка — источник: альбом/плейлист/артист/каталог/микс */
+  /** Line 3: source (album/playlist/artist/catalog/mix) */
   cover_text: string | null
   duration_secs: number
   position_secs: number
@@ -31,9 +31,9 @@ interface PresencePayload {
 }
 
 const SEND_DEBOUNCE_MS = 250
-/** Повтор, если клиент Discord был недоступен (вдруг его запустят) */
+/** Retry in case Discord client was unavailable (may get launched later) */
 const RETRY_MS = 20_000
-/** Расхождение позиции с экстраполяцией, считающееся перемоткой */
+/** Position drift from extrapolation that counts as a seek */
 const SEEK_RESEND_THRESHOLD_SECS = 3
 
 function presenceTitle(track: TrackMetadata): string {
@@ -41,12 +41,11 @@ function presenceTitle(track: TrackMetadata): string {
   return track.title || fileName || 'LFMusic'
 }
 
-// Кэш найденных обложек на сессию: file_path → https-URL (null — не нашлась).
+// Session cache of resolved covers: file_path -> https URL (null = not found).
 const coverUrlCache = new Map<string, string | null>()
 
-// Rich Presence принимает только https-URL картинок, а обложки библиотеки —
-// локальные файлы. Ищем обложку по артисту+названию в iTunes Search API
-// (без ключа, отдаёт CORS) и отдаём увеличенный артворк.
+// Rich Presence only accepts https image URLs, but library covers are local
+// files, so look up cover art via the iTunes Search API (no key, CORS-enabled).
 async function findCoverUrl(track: TrackMetadata): Promise<string | null> {
   const cached = coverUrlCache.get(track.file_path)
   if (cached !== undefined) return cached
@@ -68,15 +67,14 @@ async function findCoverUrl(track: TrackMetadata): Promise<string | null> {
     coverUrlCache.set(track.file_path, url)
     return url
   } catch {
-    // Сеть недоступна — не кэшируем, попробуем в следующий раз.
+    // Network unavailable: don't cache, retry next time.
     return null
   }
 }
 
-// Discord Rich Presence: транслирует текущий трек в профиль Discord —
-// «Слушает LFMusic», обложка, название, источник и прогресс-бар.
-// Прогресс-бар Discord двигает сам по таймстемпам, поэтому шлём обновления
-// только на смену трека/источника, паузу и перемотку. На Android — no-op.
+// Discord Rich Presence: publishes the current track to the Discord profile.
+// Discord animates the progress bar itself from timestamps, so we only send
+// updates on track/source change, pause, and seeks. No-op on Android.
 export function useDiscordRpc(options: DiscordRpcOptions) {
   if (isAndroidRuntime()) return
 
@@ -114,7 +112,7 @@ export function useDiscordRpc(options: DiscordRpcOptions) {
     }
 
     const coverUrl = await findCoverUrl(track)
-    // Пока искали обложку, состояние могло смениться — обновление устарело.
+    // State may have changed while awaiting the cover lookup; this update is stale.
     if (seq !== sendSeq) return
 
     const playing = options.playbackState.value === 'Playing'
@@ -153,7 +151,7 @@ export function useDiscordRpc(options: DiscordRpcOptions) {
     { immediate: true },
   )
 
-  // Перемотка: позиция разошлась с экстраполяцией от последней отправки.
+  // Seek: position diverged from the extrapolation of the last sent update.
   watch(options.positionSecs, (pos) => {
     if (options.playbackState.value !== 'Playing') return
     if (!settings.value.discord_rpc_enabled || !options.currentTrack.value) return

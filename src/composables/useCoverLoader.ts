@@ -4,27 +4,27 @@ import type { TrackMetadata } from "./usePlayer";
 import { useExternalSources, clearExternalCoverFlag } from "./useExternalSources";
 
 const MAX_CONCURRENT_COVERS = 3;
-// Ограничение пула ожидающих: текущий экран всегда в приоритете, самые старые
-// (вне экрана) запросы отбрасываются и запрашиваются заново при возврате.
+// Cap on the waiting pool: current screen always wins priority; oldest
+// off-screen requests get dropped and re-requested if scrolled back to.
 const MAX_PENDING_COVERS = 150;
-// Промах кэша метаданных: трек ещё не материализован — повторяем чуть позже.
+// Track metadata cache miss: not materialized yet, retry shortly after.
 const COVER_MISS_RETRIES = 6;
 const COVER_MISS_RETRY_MS = 150;
 
-/** Резолвер живого объекта трека по пути (обычно `getTrackByPath` из usePlayer). */
+/** Resolves a live track object by path (usually `getTrackByPath` from usePlayer). */
 type TrackResolver = (filePath: string) => TrackMetadata | undefined;
 
-// Очередь с приоритетом по «свежести»: последний запрошенный путь грузится
-// первым, повторный запрос поднимает приоритет — загрузка следует за текущим
-// экраном, а не идёт строго с начала списка.
-const order: string[] = []; // ожидающие пути, конец массива = высший приоритет
+// Priority queue by recency: the most recently requested path loads first;
+// re-requesting bumps priority, so loading follows the current screen
+// instead of strictly draining from the start of the list.
+const order: string[] = []; // pending paths, end of array = highest priority
 const items = new Map<string, TrackResolver>();
 const running = new Set<string>();
 const missRetries = new Map<string, number>();
 let active = 0;
 
-// Пути, для которых обложка уже определена (загружена либо подтверждено
-// отсутствие). Реактивно — экраны гейтят первую отрисовку до резолва первых N.
+// Paths whose cover is already resolved (loaded or confirmed absent).
+// Reactive — screens gate first paint until the first N resolve.
 const resolvedCovers = reactive(new Set<string>());
 
 function markCoverResolved(filePath: string) {
@@ -55,8 +55,8 @@ function pump(): void {
         }
 
         if (!track) {
-            // Метаданные ещё не подъехали в кэш — повторим чуть позже (трек
-            // материализуется фоновой дозагрузкой). Ограничиваем число попыток.
+            // Metadata hasn't landed in the cache yet (track materializes via
+            // background loading) — retry shortly, bounded by retry count.
             const tries = missRetries.get(filePath) ?? 0;
             if (tries < COVER_MISS_RETRIES) {
                 missRetries.set(filePath, tries + 1);
@@ -68,7 +68,7 @@ function pump(): void {
             continue;
         }
 
-        // Трек есть, обложки нет — читаем встроенную.
+        // Track exists, no cover yet — read the embedded one.
         missRetries.delete(filePath);
         running.add(filePath);
         active++;
@@ -76,15 +76,15 @@ function pump(): void {
             .then(art => {
                 const cached = resolve(filePath);
                 if (art) {
-                    // Записываем обложку в живой объект из кэша того же экрана (реактивно).
-                    // Это локальная (встроенная/override) обложка — снимаем пометку
-                    // внешней, чтобы выключение внешних обложек её не откатило.
+                    // Write into the live object from the same screen's cache (reactive).
+                    // This is a local (embedded/override) cover — clear the external
+                    // flag so disabling external covers won't revert it.
                     if (cached) {
                         cached.cover_art = art;
                         clearExternalCoverFlag(cached);
                     }
                 } else if (cached) {
-                    // Встроенной обложки нет — пробуем внешний источник (если включено).
+                    // No embedded cover — try an external source (if enabled).
                     useExternalSources().fetchTrackCover(cached);
                 }
             })
@@ -98,12 +98,12 @@ function pump(): void {
     }
 }
 
-/** Поставить путь в очередь (или поднять приоритет, если уже ждёт). */
+/** Queues a path (or bumps its priority if already waiting). */
 function schedule(filePath: string, resolve: TrackResolver): void {
     if (running.has(filePath)) return;
     if (items.has(filePath)) {
-        // Уже в очереди — поднимаем приоритет (текущий экран вперёд) и обновляем
-        // резолвер на актуальный экран.
+        // Already queued — bump priority (current screen first) and refresh
+        // the resolver to the current screen.
         const i = order.indexOf(filePath);
         if (i !== -1) order.splice(i, 1);
         order.push(filePath);
@@ -120,8 +120,8 @@ function schedule(filePath: string, resolve: TrackResolver): void {
 }
 
 export function useCoverLoader(options: CoverLoaderOptions) {
-    // Захватываем резолвер этого вызова локально — никаких общих мутируемых
-    // переменных модуля, которые мог бы затереть следующий экран.
+    // Captures this call's resolver locally — no shared mutable module state
+    // that a subsequent screen could overwrite.
     const resolve = options.getTrackByPath;
 
     function setupPreloadWatch(
@@ -136,7 +136,7 @@ export function useCoverLoader(options: CoverLoaderOptions) {
                 const visible = visibleTracks.value.map(t => t.file_path);
                 const visibleSet = new Set(visible);
                 const preloadOnly = tracks.map(t => t.file_path).filter(p => !visibleSet.has(p));
-                // Предзагрузка — ниже приоритетом, видимое окно — выше (ставим последним).
+                // Preload is lower priority; visible window is higher (scheduled last).
                 for (const filePath of preloadOnly) {
                     const t = resolve(filePath);
                     if (!t || !t.cover_art) schedule(filePath, resolve);

@@ -3,9 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "./useSettings";
 import type { TrackMetadata } from "./usePlayer";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Типы (зеркало serde-структур из src-tauri/src/external.rs)
-// ──────────────────────────────────────────────────────────────────────────────
+// Types mirror the serde structs in src-tauri/src/external.rs
 
 export interface AlbumLayoutEntry {
   position: number;
@@ -13,7 +11,7 @@ export interface AlbumLayoutEntry {
   title: string;
   artist: string;
   duration_secs: number | null;
-  /** Путь к локальному файлу или null — «фантомный» (не скачанный) трек. */
+  /** Local file path, or null for a "phantom" (not downloaded) track. */
   file_path: string | null;
 }
 
@@ -26,7 +24,7 @@ export interface AlbumLayout {
 interface ArtistImageResult {
   status: "ok" | "none";
   source: string | null;
-  /** URL кастомного протокола lfmusic-external:// (картинку тянет вебвью). */
+  /** lfmusic-external:// custom protocol URL (webview fetches the image). */
   url: string | null;
 }
 
@@ -35,15 +33,13 @@ interface CachedArtistImage {
   url: string;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
 // Singleton state
-// ──────────────────────────────────────────────────────────────────────────────
 
-// Аватарки исполнителей: нормализованный ключ -> data-URL (или null = «нет»).
+// Artist avatars: normalized key -> data URL (or null = "none").
 const avatars = reactive<Record<string, string | null>>({});
 
-// Макеты альбомов: имя альбома -> layout (кэш сессии, чтобы не дёргать IPC при
-// каждом ререндере).
+// Album layouts: album name -> layout, cached for the session to avoid
+// re-hitting IPC on every re-render.
 const albumLayouts = reactive<Record<string, AlbumLayout>>({});
 const inFlightAlbums = new Set<string>();
 
@@ -51,15 +47,15 @@ let cachedAvatarsLoaded = false;
 const cachedAvatarsReady = ref(false);
 
 /**
- * Планировщик внешних запросов с приоритетом по «свежести»: последний
- * запрошенный ключ выполняется первым, повторный запрос поднимает приоритет.
- * Так загрузка следует за текущим экраном, а не идёт строго с начала списка.
- * Очередь ограничена — самые старые (вне экрана) запросы отбрасываются и при
- * необходимости запрашиваются заново при возврате в зону видимости.
+ * External request scheduler prioritized by recency: the most recently
+ * requested key runs first, and re-requesting bumps priority. This makes
+ * loading follow the current screen instead of the start of the list.
+ * The queue is capped — oldest (off-screen) requests get dropped and
+ * re-requested if they scroll back into view.
  */
 function createScheduler(concurrency: number, maxPending: number) {
   let active = 0;
-  const order: string[] = []; // ожидающие ключи, конец массива = высший приоритет
+  const order: string[] = []; // pending keys, end of array = highest priority
   const tasks = new Map<string, () => Promise<void>>();
   const running = new Set<string>();
 
@@ -81,7 +77,7 @@ function createScheduler(concurrency: number, maxPending: number) {
   function schedule(key: string, run: () => Promise<void>): void {
     if (running.has(key)) return;
     if (tasks.has(key)) {
-      // Уже в очереди — поднимаем приоритет (текущий экран вперёд).
+      // Already queued — bump priority (current screen first).
       const i = order.indexOf(key);
       if (i !== -1) order.splice(i, 1);
       order.push(key);
@@ -99,37 +95,37 @@ function createScheduler(concurrency: number, maxPending: number) {
   return { schedule };
 }
 
-// Внешние API имеют rate-limit, а список может запросить десятки картинок разом.
+// External APIs are rate-limited, and a list can request dozens of images at once.
 const avatarScheduler = createScheduler(4, 60);
 const coverScheduler = createScheduler(4, 80);
 
-// Обложки треков без встроенной обложки: ключ кэша (артист+альбом) -> data-URL
-// (или null = «не нашлось»). Несколько треков одного альбома делят одну обложку.
+// Covers for tracks without embedded art: cache key (artist+album) -> data URL
+// (or null = "not found"). Tracks from the same album share one cover.
 const trackCovers = reactive<Record<string, string | null>>({});
 const coverWaiters = new Map<string, Set<TrackMetadata>>();
 
-// Живые объекты треков, которым проставлена внешняя обложка (file_path -> track).
-// Нужно для отката при выключении настройки и восстановления при включении.
-// Сами data-URL остаются в trackCovers (и в бессрочном кэше бэкенда), поэтому
-// повторное включение не ходит в сеть.
+// Live track objects that got an external cover applied (file_path -> track).
+// Needed to roll back when the setting is disabled and restore when re-enabled.
+// The data URLs themselves stay in trackCovers (and the backend's permanent
+// cache), so re-enabling doesn't hit the network again.
 const externallyCovered = new Map<string, TrackMetadata>();
 
-/** Применить внешнюю обложку к треку и запомнить его для отката/восстановления. */
+/** Apply an external cover to a track and remember it for rollback/restore. */
 function applyExternalCover(track: TrackMetadata, url: string): void {
   track.cover_art = url;
   track.cover_external = true;
   externallyCovered.set(track.file_path, track);
 }
 
-// Откат/восстановление внешних обложек при переключении настройки. Watch в
-// отвязанном scope живёт всё время работы приложения (синглтон-композабл).
+// Roll back/restore external covers when the setting is toggled. The watch
+// runs in a detached scope that lives for the app's lifetime (singleton composable).
 effectScope(true).run(() => {
   const { settings } = useSettings();
   watch(
     () => settings.value.external_track_covers,
     (enabled) => {
       if (enabled) {
-        // Восстанавливаем из сессионного кэша (сеть не дёргаем).
+        // Restore from the session cache (no network hit).
         for (const track of externallyCovered.values()) {
           if (track.cover_art) continue;
           const key = coverCacheKey(track.artist || "", track.album || "", track.title || "");
@@ -137,8 +133,8 @@ effectScope(true).run(() => {
           if (url) applyExternalCover(track, url);
         }
       } else {
-        // Прячем внешние обложки → показываются локальные (плейсхолдер). Кэш и
-        // флаг cover_external сохраняем, чтобы восстановить при включении.
+        // Hide external covers -> local placeholder shows. Keep the cache and
+        // cover_external flag so we can restore on re-enable.
         for (const track of externallyCovered.values()) {
           if (track.cover_external) track.cover_art = null;
         }
@@ -147,7 +143,7 @@ effectScope(true).run(() => {
   );
 });
 
-/** Сбросить пометку внешней обложки (когда у трека появилась локальная). */
+/** Clear the external-cover flag once a track has a local cover. */
 export function clearExternalCoverFlag(track: TrackMetadata): void {
   if (track.cover_external) {
     track.cover_external = false;
@@ -155,7 +151,7 @@ export function clearExternalCoverFlag(track: TrackMetadata): void {
   }
 }
 
-/** Ключ кэша обложки — должен совпадать с `cover_cache_key` в external.rs. */
+/** Cover cache key — must match `cover_cache_key` in external.rs. */
 function coverCacheKey(artist: string, album: string, title: string): string {
   const alb = album.trim();
   return alb
@@ -164,9 +160,9 @@ function coverCacheKey(artist: string, album: string, title: string): string {
 }
 
 /**
- * Нормализация имени исполнителя — должна совпадать с `normalize` в
- * src-tauri/src/external.rs: нижний регистр, только буквы/цифры, прочее →
- * одиночный пробел, обрезка краёв.
+ * Artist name normalization — must match `normalize` in
+ * src-tauri/src/external.rs: lowercase, letters/digits only, everything
+ * else collapses to a single space, trimmed.
  */
 function normalizeKey(s: string): string {
   let out = "";
@@ -186,7 +182,7 @@ function normalizeKey(s: string): string {
 export function useExternalSources() {
   const { settings } = useSettings();
 
-  /** Однократно подгружает уже закэшированные аватарки (быстрый старт). */
+  /** Load already-cached avatars once, for a fast start. */
   async function loadCachedAvatars(): Promise<void> {
     if (cachedAvatarsLoaded) return;
     cachedAvatarsLoaded = true;
@@ -203,18 +199,18 @@ export function useExternalSources() {
   }
 
   /**
-   * Аватарка исполнителя из внешних источников (или null). Реактивно: пока идёт
-   * загрузка возвращает то, что уже известно, и обновляется по готовности.
-   * Сетевой запрос выполняется только если настройка включена.
+   * Artist avatar from external sources (or null). Reactive: returns what's
+   * already known while loading, then updates when ready. Network request
+   * only fires if the setting is enabled.
    */
   function avatarFor(artistName: string): string | null {
     if (!artistName) return null;
-    // Настройка скрывает внешние аватарки даже при наличии их в кэше.
+    // The setting hides external avatars even if already cached.
     if (!settings.value.external_artist_avatars) return null;
     const key = normalizeKey(artistName);
     if (key in avatars) return avatars[key];
 
-    // Запрос (или подъём приоритета, если уже в очереди) — текущий экран вперёд.
+    // Request (or bump priority if already queued) — current screen first.
     avatarScheduler.schedule(key, () =>
       invoke<ArtistImageResult>("external_artist_image", { artistName, refresh: false })
         .then((res) => {
@@ -228,7 +224,7 @@ export function useExternalSources() {
     return avatars[key] ?? null;
   }
 
-  /** Принудительно перезапросить аватарку (минуя кэш). */
+  /** Force a re-request of the avatar, bypassing the cache. */
   async function refreshAvatar(artistName: string): Promise<string | null> {
     const key = normalizeKey(artistName);
     try {
@@ -245,13 +241,13 @@ export function useExternalSources() {
   }
 
   /**
-   * Макет альбома (канонический порядок + фантомные треки). Кэшируется в памяти
-   * сессии. Запрос идёт только если настройка включена.
+   * Album layout (canonical order + phantom tracks). Cached in session memory.
+   * Only requested if the setting is enabled.
    */
   async function getAlbumLayout(albumName: string, refresh = false): Promise<AlbumLayout | null> {
     if (!albumName) return null;
     if (!refresh && albumName in albumLayouts) return albumLayouts[albumName];
-    // Макет нужен, если включён внешний порядок ИЛИ дополнение недостающими.
+    // Layout is needed if external order OR supplement-missing is enabled.
     if (!settings.value.external_album_order && !settings.value.external_supplement_missing && !refresh) return null;
     if (inFlightAlbums.has(albumName) && !refresh) return albumLayouts[albumName] ?? null;
 
@@ -269,9 +265,9 @@ export function useExternalSources() {
   }
 
   /**
-   * Для трека без встроенной обложки лениво подгружает обложку альбома из
-   * внешних источников и реактивно проставляет её в `track.cover_art`.
-   * Запрос идёт только если настройка включена. Безопасно вызывать многократно.
+   * For a track without an embedded cover, lazily fetches an album cover from
+   * external sources and reactively sets it on `track.cover_art`. Only
+   * requests if the setting is enabled. Safe to call repeatedly.
    */
   function fetchTrackCover(track: TrackMetadata): void {
     if (!settings.value.external_track_covers) return;
@@ -288,7 +284,7 @@ export function useExternalSources() {
       return;
     }
 
-    // Регистрируем трек как ожидающего эту обложку (несколько треков альбома).
+    // Register the track as waiting for this cover (multiple tracks per album).
     let waiters = coverWaiters.get(key);
     if (!waiters) {
       waiters = new Set();
@@ -296,7 +292,7 @@ export function useExternalSources() {
     }
     waiters.add(track);
 
-    // Запрос (или подъём приоритета) — текущий экран вперёд.
+    // Request (or bump priority) — current screen first.
     coverScheduler.schedule(key, () =>
       invoke<ArtistImageResult>("external_track_cover", { artist, album, title, refresh: false })
         .then((res) => {

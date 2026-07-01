@@ -58,9 +58,8 @@ function getTooltip(): HTMLElement {
     return tooltipEl
 }
 
-// Текст обрезан либо по ширине (single-line ellipsis), либо по высоте
-// (-webkit-line-clamp / многострочное обрезание). Проверяем оба измерения, чтобы
-// директива работала и для однострочных, и для многострочных усечений.
+// Text can be clipped by width (single-line ellipsis) or height (-webkit-line-clamp);
+// check both so the directive works for single- and multi-line truncation.
 function isOverflowing(el: HTMLElement): boolean {
     return el.scrollWidth - el.clientWidth > 1 || el.scrollHeight - el.clientHeight > 1
 }
@@ -69,10 +68,9 @@ type Placement = 'auto' | 'top' | 'bottom'
 
 const placementMap = new WeakMap<HTMLElement, Placement>()
 
-// В Chromium (WebView2) body масштабируется через `zoom`, а getBoundingClientRect
-// возвращает ВИЗУАЛЬНЫЕ (зумленные) координаты. Тултип лежит в зумленном body,
-// поэтому его left/top (CSS-px) надо делить на scale, иначе под зумом он уезжает
-// (в частности — вниз при принудительном верхнем размещении).
+// In Chromium (WebView2), body is scaled via `zoom` and getBoundingClientRect returns
+// visual (zoomed) coordinates. The tooltip lives in that zoomed body, so its left/top
+// (CSS px) must be divided by scale or it drifts under zoom (e.g. downward when forced to top).
 function getUiScale(): number {
     const scale = Number((window as any).__uiScale)
     if (Number.isFinite(scale) && scale > 0) return scale
@@ -93,14 +91,13 @@ function position(el: HTMLElement, tt: HTMLElement) {
     if (left > maxLeft) left = Math.max(margin, maxLeft)
 
     const placement = placementMap.get(el) ?? 'auto'
-    // Для принудительных сторон (плеер) держим тултип ближе к элементу — иначе
-    // на длинных названиях/артистах он висит слишком высоко.
+    // Forced placement (player bar) keeps the tooltip closer to the element, otherwise
+    // it hangs too high above long titles/artists.
     const gap = placement === 'auto' ? margin : 3
     const above = rect.top - ttRect.height - gap
     const below = rect.bottom + gap
     let top: number
     if (placement === 'top') {
-        // Принудительно сверху (плеер внизу экрана — места сверху достаточно).
         top = Math.max(margin, above)
     } else if (placement === 'bottom') {
         top = below

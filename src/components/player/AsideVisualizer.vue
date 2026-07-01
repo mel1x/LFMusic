@@ -21,11 +21,9 @@ const {
 } = usePlayer();
 const { nextTrack, nextTrackTitle } = usePlayerUi();
 
-// ── Реальный визуализатор спектра (FFT из Rust-движка) ─────────────────
-// Бэкенд считает БПФ по реально воспроизводимому звуку и отдаёт N полос (0..1).
-// Опрашиваем его на кадрах rAF (~30 fps по данным) и сглаживаем переход к
-// целевым значениям на каждом кадре (~60 fps по рендеру): быстрый «удар»,
-// плавный спад — так визуализатор выглядит живым, без рывков.
+// Real FFT spectrum from the Rust backend, N bars (0..1). Polled on rAF frames
+// (~30fps data) and smoothed toward targets every render frame (~60fps): fast
+// attack, slow decay so it looks alive instead of jittery.
 const SPECTRUM_BARS = 16;
 const SPECTRUM_INDICES = Array.from({ length: SPECTRUM_BARS }, (_, i) => i);
 const spectrumLevels = ref<number[]>(new Array(SPECTRUM_BARS).fill(0));
@@ -49,7 +47,7 @@ async function fetchSpectrum() {
             spectrumTargets = bars;
         }
     } catch {
-        // Бэкенд недоступен (например, чистый Vite-режим) — оставляем нули.
+        // Backend unavailable (e.g. plain Vite mode) — keep zeros.
     } finally {
         spectrumFetching = false;
     }
@@ -72,7 +70,7 @@ function spectrumFrame(now: number) {
     for (let i = 0; i < SPECTRUM_BARS; i++) {
         const target = spectrumTargets[i] ?? 0;
         const c = cur[i];
-        // Атака быстрее спада — пики «выстреливают», но не дёргаются вниз.
+        // Attack faster than decay: peaks jump up, don't jitter down.
         const k = target > c ? 0.5 : 0.16;
         let next = c + (target - c) * k;
         if (target === 0 && next < 0.001) next = 0;
@@ -100,8 +98,8 @@ function stopSpectrum() {
     }
 }
 
-// Включаем/выключаем снятие спектра в Rust-движке: при выключенном
-// визуализаторе бэкенд не тратит ничего на отвод звука и БПФ.
+// Toggle spectrum capture in the Rust engine: when the visualizer is off,
+// the backend spends nothing on audio tap/FFT.
 watch(
     visualizerActive,
     (active) => {
@@ -119,7 +117,7 @@ watch(
             stopSpectrum();
             spectrumLevels.value = new Array(SPECTRUM_BARS).fill(0);
         } else {
-            // Пауза/стоп при активном визуализаторе: даём полосам плавно осесть.
+            // Paused/stopped while visualizer active: let bars settle smoothly.
             startSpectrum();
         }
     },
@@ -135,7 +133,7 @@ onBeforeUnmount(() => {
     void invoke('player_set_spectrum_enabled', { enabled: false }).catch(() => {});
 });
 
-// Прогружаем обложку следующего трека для режима «следующий трек».
+// Preload next track's cover for "next track" mode.
 const shouldLoadAsideNextCover = computed(() =>
     settings.value.show_player_extra_block && settings.value.player_extra_block_mode === 'next_track'
 );
@@ -321,7 +319,7 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
     min-height: 4px;
     border-radius: 3px;
     background-color: hsla(0, 0%, 100%, 0.62);
-    /* Высоту (--bar-scale) задаёт JS на каждом кадре rAF по реальному БПФ. */
+    /* Height (--bar-scale) is set by JS every rAF frame from the real FFT. */
     transform: scaleY(var(--bar-scale, 0.04));
     transform-origin: bottom;
     opacity: 0.56;

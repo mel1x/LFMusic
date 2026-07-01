@@ -141,8 +141,8 @@ export function translateText(text: string): string {
     return finish(text)
 }
 
-// Единственный экземпляр: раньше каждый вызвавший компонент регистрировал
-// собственный watch на language (дубли установки document.documentElement.lang).
+// Singleton: previously every calling component registered its own watch on
+// language, duplicating document.documentElement.lang writes.
 let i18nInstance: ReturnType<typeof createI18n> | null = null
 
 export function useI18n() {

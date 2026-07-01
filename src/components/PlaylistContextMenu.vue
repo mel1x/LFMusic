@@ -16,9 +16,8 @@ const props = withDefaults(defineProps<{
     isPinned?: boolean
     showMoveToTop?: boolean
     showDelete?: boolean
-    /** Использовать стрелку вверх и подпись «Поднять вверх»
-     *  (для закреплений в боковой панели). По умолчанию —
-     *  стрелка влево и подпись «Перенести в начало». */
+    /** Use an up-arrow + "Move up" label (for sidebar pins).
+     *  Defaults to a left-arrow + "Move to start" label. */
     moveToTopUp?: boolean
     customCoverKind?: CoverKind
     customCoverKey?: string | number

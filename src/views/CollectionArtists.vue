@@ -42,7 +42,6 @@ interface ArtistEntry {
 
 // Don't read track fields in this computed — looking them up at render time
 // keeps a single cover load from invalidating the whole list.
-// Sort by track count desc, then name as tiebreaker.
 const artists = computed<ArtistEntry[]>(() => {
     return artistPlaylists.value
         .map(pl => ({
@@ -70,17 +69,15 @@ function artistCoverFor(artist: ArtistEntry): string {
     return coverFor(artist.firstPath) || defaultTrackCover;
 }
 
-// Источник данных готов (исполнители загружены). До этого гейт обложек не должен
-// открываться — иначе он откроется на пустом списке, контент мелькнёт, а лоадер
-// появится уже поверх подгрузки обложек (обратный порядок).
+// Data source ready (artists loaded). Before this the cover gate must not
+// open, or it'd open on an empty list, content would flash, and the loader
+// would appear after covers already loaded (backwards order).
 const dataReady = ref(false);
 
 onMounted(async () => {
     await loadPlaylists();
     dataReady.value = true;
 });
-
-// ── Search ──────────────────────────────────────────────────────────────────
 
 import { useTypeToSearch } from '../composables/useTypeToSearch';
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -136,8 +133,6 @@ const { ready: coversReady } = useCoverGate(() =>
     { armed: () => dataReady.value },
 );
 
-// ── Pinned ─────────────────────────────────────────────────────────────────
-
 const { isPinned: isPinnedFn, togglePin } = usePins();
 
 function isArtistPinned(name: string) {
@@ -152,8 +147,6 @@ function onToggleArtistPinClick(e: MouseEvent, artist: ArtistEntry) {
     e.stopPropagation();
     toggleArtistPin(artist.name);
 }
-
-// ── Play artist ────────────────────────────────────────────────────────────
 
 function isArtistActive(artist: ArtistEntry) {
     return activePlaylistSource.value === `artist:${artist.name}`;
@@ -172,8 +165,6 @@ async function onPlayArtist(e: MouseEvent, artist: ArtistEntry) {
     setPlaylistSource(`artist:${artist.name}`, merged);
     await playTrack(merged[0]);
 }
-
-// ── Context menu ───────────────────────────────────────────────────────────
 
 const artistMenu = ref<{ x: number; y: number; artist: ArtistEntry; centerX: boolean } | null>(null);
 
@@ -198,7 +189,6 @@ function onMoveArtistToTopFromMenu(artist: ArtistEntry) {
     moveArtistToTop(artist.name);
 }
 
-// ── Lazy cover loading ─────────────────────────────────────────────────────
 // Render every card up-front so the document height stays constant; off-screen
 // cards are skipped via CSS `content-visibility: auto`. A single
 // IntersectionObserver whose `root` is the actual scroll container
@@ -226,7 +216,7 @@ function onIntersect(entries: IntersectionObserverEntry[]) {
     const pending: TrackMetadata[] = [];
     for (const entry of entries) {
         if (!entry.isIntersecting) continue;
-        // Видимая карточка — поднимаем приоритет её внешней аватарки (если включено).
+        // Visible card — bump priority of its external avatar (if enabled).
         const name = elArtist.get(entry.target as HTMLElement);
         if (name) avatarFor(name);
         const path = elPath.get(entry.target as HTMLElement);
@@ -325,8 +315,6 @@ watch(catalogCount, () => {
 function goBack() {
     router.back();
 }
-
-// ── Sticky header ───────────────────────────────────────────────────────────
 
 const pageRootEl = ref<HTMLElement | null>(null);
 const scrollY = ref(0);

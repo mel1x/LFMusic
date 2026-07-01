@@ -43,7 +43,6 @@ function isPresetActive(color: string): boolean {
     return settings.value.static_accent_color.toLowerCase() === color.toLowerCase();
 }
 
-// ── HSV picker ───────────────────────────────────────────────────────────
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
     const n = parseInt(hex.replace('#', ''), 16);
     return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
@@ -86,8 +85,7 @@ function hsvToHex(h: number, s: number, v: number): string {
     return rgbToHex(r, g, b);
 }
 
-// ── Палитра для превью 2×2 ──────────────────────────────────────────────────
-// Повторяет формулы тем из App.vue: --light-bg / --dark-bg / surface карточек.
+// Mirrors the theme formulas in App.vue (--light-bg / --dark-bg / card surface).
 function hexToHsl(hex: string): { h: number; s: number; l: number } {
     const { r, g, b } = hexToRgb(hex);
     const rn = r / 255, gn = g / 255, bn = b / 255;
@@ -127,7 +125,7 @@ const hueArea = ref<HTMLElement | null>(null);
 function syncHSVFromHex(hex: string) {
     const { r, g, b } = hexToRgb(hex);
     const hsv = rgbToHsv(r, g, b);
-    // Сохраняем hue при ахроматическом цвете, чтобы маркер не прыгал в 0
+    // Keep the previous hue for achromatic colors so the marker doesn't jump to 0
     if (hsv.s > 0) hue.value = hsv.h;
     sat.value = hsv.s;
     val.value = hsv.v;
@@ -211,7 +209,7 @@ onUnmounted(() => {
     document.removeEventListener('keydown', onDocKey);
 });
 
-// Синхронизация HSV при внешнем изменении hex (hex-input / пресеты)
+// Sync HSV when the hex changes externally (hex input / presets)
 watch(() => settings.value.static_accent_color, (newHex) => {
     if (!pickerOpen.value) return;
     const currentHex = hsvToHex(hue.value, sat.value, val.value).toLowerCase();
@@ -219,7 +217,7 @@ watch(() => settings.value.static_accent_color, (newHex) => {
     syncHSVFromHex(newHex);
 });
 
-// Закрываем попап, если выключили статичный режим
+// Close the popup if static mode gets turned off
 watch(() => settings.value.dynamic_accent_color, (isDynamic) => {
     if (isDynamic) pickerOpen.value = false;
 });
@@ -407,7 +405,6 @@ async function selectPreset(color: string) {
     width: 100%;
 }
 
-/* ── Доп. блок плеера: выбор режима ─────────────────────────────────────── */
 .extraModePanel {
     margin: -4px 0 8px 48px;
     display: inline-flex;
@@ -472,7 +469,6 @@ async function selectPreset(color: string) {
     margin-bottom: -4px;
 }
 
-/* ── Палитра статичного акцента ─────────────────────────────────────────── */
 .accentPicker {
     margin-top: 8px;
     padding: 16px;
@@ -510,7 +506,6 @@ async function selectPreset(color: string) {
         box-shadow: 0 0 0 2px #ffffff, 0 4px 14px hsla(0, 0%, 0%, 0.4);
     }
 }
-/* Сетка 2×2 предпросмотра палитры: акцент / светлый фон / поверхность / тёмный фон */
 .swatchGrid {
     display: grid;
     grid-template-columns: 1fr 1fr;

@@ -3,16 +3,15 @@ export function isAndroidRuntime(): boolean {
     return /android/i.test(navigator.userAgent)
 }
 
-// WebKit без Chromium — это WebKitGTK (десктоп Linux) и WKWebView (macOS).
-// У этого движка иначе ведут себя вертикальные range-инпуты (writing-mode)
-// и CSS `zoom` относительно vw-единиц, поэтому такие места правим адресно.
+// Non-Chromium WebKit (WebKitGTK on desktop Linux, WKWebView on macOS): vertical
+// range inputs (writing-mode) and CSS `zoom` vs vw units behave differently there.
 export function isWebKitRuntime(): boolean {
     if (typeof navigator === 'undefined') return false
     const ua = navigator.userAgent
     return /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg\//.test(ua)
 }
 
-// Десктопный Linux (WebKitGTK), исключая Android.
+// Desktop Linux (WebKitGTK), excluding Android.
 export function isLinuxDesktop(): boolean {
     if (typeof navigator === 'undefined') return false
     const ua = navigator.userAgent
