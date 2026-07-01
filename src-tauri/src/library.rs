@@ -974,6 +974,15 @@ impl MusicLibrary {
 
         let count = dead.len();
         if !dead.is_empty() {
+            // track_overrides — единственная таблица без FK на tracks (в отличие от
+            // track_audio_features/playlist_tracks/track_statistics, которые чистит
+            // ON DELETE CASCADE), поэтому без явного DELETE здесь она осиротела бы —
+            // та же таблица, что вручную чистит remove_track() для одиночного удаления.
+            let cover_sigs: Vec<String> = dead
+                .iter()
+                .filter_map(|p| self.get_override_cover_sig(p))
+                .collect();
+
             let tx = self
                 .conn
                 .transaction()
@@ -986,14 +995,21 @@ impl MusicLibrary {
                     .map(|i| format!("?{}", i + 1))
                     .collect::<Vec<_>>()
                     .join(",");
-                let sql = format!("DELETE FROM tracks WHERE file_path IN ({})", placeholders);
                 let params: Vec<&dyn rusqlite::ToSql> =
                     chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-                tx.execute(&sql, params.as_slice()).ok();
+                let overrides_sql =
+                    format!("DELETE FROM track_overrides WHERE file_path IN ({})", placeholders);
+                tx.execute(&overrides_sql, params.as_slice()).ok();
+                let tracks_sql = format!("DELETE FROM tracks WHERE file_path IN ({})", placeholders);
+                tx.execute(&tracks_sql, params.as_slice()).ok();
             }
 
             tx.commit()
                 .map_err(|e| format!("Ошибка коммита: {}", e))?;
+
+            for sig in &cover_sigs {
+                self.remove_orphan_cover_file(sig, "");
+            }
 
             // Удалены треки (вместе с их статистикой) — центроид мог измениться.
             CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
@@ -3231,6 +3247,186 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Вставляет голую строку `tracks` (без фич) с заданным `modified_secs`.
+    fn insert_bare_track(library: &MusicLibrary, path: &str, modified_secs: i64) {
+        library
+            .conn
+            .execute(
+                "INSERT INTO tracks
+                 (file_path, folder_path, title, artist, album, duration_secs, format,
+                  sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
+                 VALUES (?1, '/music', 'T', 'A', 'Al', 180.0, 'flac', 44100, 16, 2, 320, 0, ?2, 1)",
+                params![path, modified_secs],
+            )
+            .expect("track insert");
+    }
+
+    #[test]
+    fn pending_audio_feature_jobs_requeues_stale_analyzer_version() {
+        let dir = temp_library_dir("pending_stale_version");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/music/stale.flac", 100);
+        library
+            .conn
+            .execute(
+                "INSERT INTO track_audio_features (file_path, analyzed_modified_secs, analyzer_version)
+                 VALUES ('/music/stale.flac', 100, ?1)",
+                params![AUDIO_FEATURE_ANALYZER_VERSION - 1],
+            )
+            .expect("features insert");
+
+        let jobs = library.pending_audio_feature_jobs().expect("pending jobs");
+        assert_eq!(
+            jobs.iter().filter(|(p, _, _)| p == "/music/stale.flac").count(),
+            1,
+            "a track analyzed with an older analyzer version must be requeued"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_audio_feature_jobs_requeues_track_whose_mtime_changed() {
+        let dir = temp_library_dir("pending_mtime_changed");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/music/touched.flac", 200);
+        library
+            .conn
+            .execute(
+                "INSERT INTO track_audio_features (file_path, analyzed_modified_secs, analyzer_version)
+                 VALUES ('/music/touched.flac', 100, ?1)",
+                params![AUDIO_FEATURE_ANALYZER_VERSION],
+            )
+            .expect("features insert");
+
+        let jobs = library.pending_audio_feature_jobs().expect("pending jobs");
+        assert_eq!(
+            jobs.iter().filter(|(p, _, _)| p == "/music/touched.flac").count(),
+            1,
+            "a track whose file mtime changed since analysis must be requeued"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_audio_feature_jobs_excludes_up_to_date_track() {
+        let dir = temp_library_dir("pending_up_to_date");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/music/done.flac", 300);
+        library
+            .conn
+            .execute(
+                "INSERT INTO track_audio_features (file_path, analyzed_modified_secs, analyzer_version)
+                 VALUES ('/music/done.flac', 300, ?1)",
+                params![AUDIO_FEATURE_ANALYZER_VERSION],
+            )
+            .expect("features insert");
+
+        let jobs = library.pending_audio_feature_jobs().expect("pending jobs");
+        assert!(
+            jobs.iter().all(|(p, _, _)| p != "/music/done.flac"),
+            "a track analyzed at its current mtime with the current analyzer version must not be requeued"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── ON DELETE CASCADE (track_audio_features/playlist_tracks) ────────────
+
+    #[test]
+    fn deleting_a_track_cascades_to_features_playlist_tracks_and_statistics_but_not_overrides() {
+        let dir = temp_library_dir("fk_cascade");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/music/a.flac", 1);
+        library
+            .conn
+            .execute(
+                "INSERT INTO track_audio_features (file_path, analyzed_modified_secs, analyzer_version)
+                 VALUES ('/music/a.flac', 1, ?1)",
+                params![AUDIO_FEATURE_ANALYZER_VERSION],
+            )
+            .expect("features insert");
+        let playlist_id: i64 = library
+            .conn
+            .query_row(
+                "INSERT INTO playlists (name, kind) VALUES ('My list', 'user') RETURNING id",
+                [],
+                |r| r.get(0),
+            )
+            .expect("playlist insert");
+        library
+            .conn
+            .execute(
+                "INSERT INTO playlist_tracks (playlist_id, file_path, sort_order) VALUES (?1, '/music/a.flac', 0)",
+                params![playlist_id],
+            )
+            .expect("playlist_tracks insert");
+        library
+            .set_track_override("/music/a.flac", Some("Override"), None, None, None, false)
+            .expect("set override");
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: "/music/a.flac".to_string(),
+                listen_count_delta: 1,
+                ..Default::default()
+            })
+            .expect("record statistic");
+
+        library
+            .conn
+            .execute("DELETE FROM tracks WHERE file_path = '/music/a.flac'", [])
+            .expect("delete track row directly");
+
+        let features: i64 = library
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_audio_features WHERE file_path = '/music/a.flac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(features, 0, "track_audio_features has an FK and must cascade");
+        let playlist_rows: i64 = library
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_tracks WHERE file_path = '/music/a.flac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(playlist_rows, 0, "playlist_tracks has an FK and must cascade");
+        let stats: i64 = library
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_statistics WHERE file_path = '/music/a.flac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 0, "track_statistics has an FK and must cascade");
+
+        // track_overrides is the one table with NO FK to tracks (by design — see
+        // delete_missing_tracks, which cleans it explicitly for that reason). A raw
+        // DELETE FROM tracks, unlike remove_track()/rescan, does NOT clean it up;
+        // documenting this so the asymmetry isn't "rediscovered" as a bug.
+        let overrides: i64 = library
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_overrides WHERE file_path = '/music/a.flac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(overrides, 1, "track_overrides has no FK, so a raw DELETE leaves it orphaned");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// Вставить трек с полным набором аудио-фич и числом прослушиваний.
     fn insert_listened_track(
         library: &MusicLibrary,
@@ -3520,6 +3716,193 @@ mod tests {
             .expect("add folder");
         assert_eq!(tracks.len(), 1);
         assert_eq!(library.get_all_tracks().len(), 1);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ── rescan_all / scan_folder_files (mtime, удаление, sort_order) ────────
+
+    /// Принудительно выставляет mtime файла, отличный от текущего (с запасом
+    /// в секундах — `get_mtime` хранит только целые секунды), чтобы детерминированно
+    /// проверить ветку "файл изменился" без гонок на быстрой файловой системе.
+    fn bump_mtime(path: &Path, delta_secs: u64) {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open file for writing to bump mtime");
+        let current = file.metadata().expect("metadata").modified().expect("modified");
+        file.set_modified(current + std::time::Duration::from_secs(delta_secs))
+            .expect("set_modified should succeed on a local filesystem");
+    }
+
+    #[test]
+    fn rescan_all_skips_unchanged_file_and_keeps_accent_color() {
+        let dir = temp_library_dir("rescan_unchanged");
+        let music = dir.join("music");
+        fs::create_dir_all(&music).unwrap();
+        write_test_wav(&music.join("a.wav"), 44_100, 2, 44_100);
+
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        library
+            .add_folder(music.to_str().unwrap().to_string(), &[], None, |_, _| {})
+            .expect("add folder");
+        let path = library.get_all_tracks()[0].file_path.clone();
+        library.set_accent_color(&path, "#abcdef").expect("set accent color");
+
+        let tracks = library
+            .rescan_all(&[], None, |_, _| {})
+            .expect("rescan should succeed");
+
+        assert_eq!(tracks.len(), 1, "rescan should not duplicate or drop the track");
+        let track = library.get_track(&path).expect("track still present");
+        assert_eq!(
+            track.accent_color.as_deref(),
+            Some("#abcdef"),
+            "unchanged mtime must not touch the cached accent color"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rescan_all_rewrites_changed_file_without_bumping_its_sort_order() {
+        let dir = temp_library_dir("rescan_changed");
+        let music = dir.join("music");
+        fs::create_dir_all(&music).unwrap();
+        write_test_wav(&music.join("a.wav"), 44_100, 2, 44_100);
+
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        library
+            .add_folder(music.to_str().unwrap().to_string(), &[], None, |_, _| {})
+            .expect("add folder");
+        let path = music.join("a.wav").to_string_lossy().to_string();
+        library.set_accent_color(&path, "#abcdef").expect("set accent color");
+        let sort_order_before: i64 = library
+            .conn
+            .query_row(
+                "SELECT sort_order FROM tracks WHERE file_path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .expect("read sort_order");
+
+        // Файл "появляется" позже первого скана — у новых треков sort_order
+        // выше текущего максимума.
+        write_test_wav(&music.join("b.wav"), 44_100, 2, 44_100);
+        library
+            .rescan_all(&[], None, |_, _| {})
+            .expect("rescan should pick up the new file");
+
+        // Меняем содержимое и mtime уже отслеживаемого файла.
+        write_test_wav(&music.join("a.wav"), 44_100, 2, 22_050);
+        bump_mtime(&music.join("a.wav"), 120);
+
+        library
+            .rescan_all(&[], None, |_, _| {})
+            .expect("rescan should pick up the changed file");
+
+        let sort_order_after: i64 = library
+            .conn
+            .query_row(
+                "SELECT sort_order FROM tracks WHERE file_path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .expect("read sort_order");
+        assert_eq!(
+            sort_order_before, sort_order_after,
+            "a changed mtime on an already-known track must not bump it to the top of the catalog"
+        );
+
+        let track = library.get_track(&path).expect("track still present");
+        assert_eq!(
+            track.accent_color, None,
+            "a content/mtime change must invalidate the cached accent color"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rescan_all_removes_track_whose_file_disappeared() {
+        let dir = temp_library_dir("rescan_deleted");
+        let music = dir.join("music");
+        fs::create_dir_all(&music).unwrap();
+        let file = music.join("a.wav");
+        write_test_wav(&file, 44_100, 2, 44_100);
+
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        library
+            .add_folder(music.to_str().unwrap().to_string(), &[], None, |_, _| {})
+            .expect("add folder");
+        let path = file.to_string_lossy().to_string();
+        assert!(library.get_track(&path).is_some());
+
+        fs::remove_file(&file).expect("delete underlying file");
+        let tracks = library
+            .rescan_all(&[], None, |_, _| {})
+            .expect("rescan should succeed");
+
+        assert!(tracks.is_empty());
+        assert!(
+            library.get_track(&path).is_none(),
+            "a track whose file disappeared must be removed by rescan"
+        );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rescan_all_clears_statistics_and_overrides_for_a_deleted_track() {
+        let dir = temp_library_dir("rescan_deleted_orphans");
+        let music = dir.join("music");
+        fs::create_dir_all(&music).unwrap();
+        let file = music.join("a.wav");
+        write_test_wav(&file, 44_100, 2, 44_100);
+
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        library
+            .add_folder(music.to_str().unwrap().to_string(), &[], None, |_, _| {})
+            .expect("add folder");
+        let path = file.to_string_lossy().to_string();
+        library
+            .set_track_override(&path, Some("Override Title"), None, None, None, false)
+            .expect("set override");
+        library
+            .add_track_statistics_delta(TrackStatisticsDelta {
+                file_path: path.clone(),
+                listen_count_delta: 1,
+                ..Default::default()
+            })
+            .expect("record statistic");
+
+        fs::remove_file(&file).expect("delete underlying file");
+        library
+            .rescan_all(&[], None, |_, _| {})
+            .expect("rescan should succeed");
+
+        let overrides: i64 = library
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_overrides WHERE file_path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(overrides, 0, "rescan must clear the override of a removed track, like remove_track does");
+        let stats: i64 = library
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_statistics WHERE file_path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 0, "rescan must clear the statistics of a removed track, like remove_track does");
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

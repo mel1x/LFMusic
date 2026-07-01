@@ -363,20 +363,36 @@ impl SymphoniaSource {
 
         let format_reader = probed.format;
 
-        let track = format_reader
+        let candidates: Vec<(u32, symphonia::core::codecs::CodecParameters)> = format_reader
             .tracks()
             .iter()
-            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-            .ok_or_else(|| "Не найден аудио трек".to_string())?;
+            .filter(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+            .map(|t| (t.id, t.codec_params.clone()))
+            .collect();
 
-        let track_id = track.id;
-        let codec_params = &track.codec_params;
+        // Контейнер может нести больше одного ненулевого потока — например,
+        // некоторые инструменты встраивают обложку в OGG/Opus как отдельный
+        // MJPEG-"видео"-поток (легаси-механизм OGM), а не через
+        // METADATA_BLOCK_PICTURE. CodecParameters не различает аудио/видео, и
+        // такой поток может оказаться первым в списке треков — декодер под
+        // него не соберётся (в реестре symphonia нет видео-декодеров), и
+        // раньше это валило воспроизведение всего файла. Поэтому пробуем
+        // собрать декодер по очереди для каждого ненулевого трека и берём
+        // первый, для которого это удалось.
+        let mut last_err = "Не найден аудио трек".to_string();
+        let mut resolved = None;
+        for (id, params) in candidates {
+            match symphonia::default::get_codecs().make(&params, &DecoderOptions::default()) {
+                Ok(decoder) => {
+                    resolved = Some((id, params, decoder));
+                    break;
+                }
+                Err(e) => last_err = format!("Не удалось создать декодер: {}", e),
+            }
+        }
+        let (track_id, codec_params, decoder) = resolved.ok_or(last_err)?;
         let sample_rate = codec_params.sample_rate.unwrap_or(44100);
         let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
-
-        let decoder = symphonia::default::get_codecs()
-            .make(codec_params, &DecoderOptions::default())
-            .map_err(|e| format!("Не удалось создать декодер: {}", e))?;
 
         Ok(Self {
             decoder,

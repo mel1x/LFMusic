@@ -200,6 +200,111 @@ impl DownloadManager {
             },
         }
     }
+
+    /// Взять следующий элемент очереди в работу: queued -> downloading. Чистая
+    /// часть очереди воркера (без AppHandle/subprocess) — юнит-тестируема напрямую.
+    fn take_next_queued(&mut self) -> Option<DownloadItem> {
+        let pos = self.items.iter().position(|i| i.status == "queued")?;
+        self.items[pos].status = "downloading".into();
+        self.items[pos].progress = 0.0;
+        Some(self.items[pos].clone())
+    }
+
+    /// Применить исход скачивания (успех/импорт-ошибка/ошибка) к элементу очереди
+    /// и засчитать прогресс прогона. Чистая часть очереди воркера.
+    fn apply_download_result(
+        &mut self,
+        job_id: u64,
+        result: &Result<PathBuf, DownloadError>,
+        import_err: Option<&str>,
+    ) {
+        self.run_done += 1;
+        let Some(item) = self.items.iter_mut().find(|i| i.id == job_id) else {
+            return;
+        };
+        match result {
+            Ok(path) => {
+                item.file_path = Some(path.to_string_lossy().to_string());
+                if let Some(err) = import_err {
+                    item.status = "error".into();
+                    item.progress = 100.0;
+                    item.error = Some(format!("Трек скачан, но не добавлен в библиотеку: {}", err));
+                    item.error_kind = Some(DownloadErrorKind::Unknown);
+                } else {
+                    item.status = "done".into();
+                    item.progress = 100.0;
+                    item.error = None;
+                    item.error_kind = None;
+                }
+            }
+            Err(e) => {
+                item.status = "error".into();
+                item.error = Some(e.message.clone());
+                item.error_kind = Some(e.kind);
+            }
+        }
+    }
+
+    /// Снять элемент из очереди: queued — просто убрать (и сдвинуть run_total);
+    /// downloading — убрать и вернуть активный дочерний процесс для отмены (если
+    /// он ещё не был взят воркером); done/error — убрать из истории. Чистая часть
+    /// (без убийства процесса/эмиссии — это делает вызывающий [`remove`]).
+    fn remove_item(&mut self, id: u64) -> Option<Child> {
+        let pos = self.items.iter().position(|i| i.id == id)?;
+        let status = self.items[pos].status.clone();
+        match status.as_str() {
+            "queued" => {
+                self.items.remove(pos);
+                self.run_total = self.run_total.saturating_sub(1);
+                None
+            }
+            "downloading" => {
+                // Удаляем из списка; воркер увидит пропажу и зачтёт run_done.
+                self.items.remove(pos);
+                self.current_child
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+            }
+            _ => {
+                // done / error — просто убрать из истории.
+                self.items.remove(pos);
+                None
+            }
+        }
+    }
+
+    /// Вернуть ошибочный элемент в очередь (error -> queued), сбросив прогресс/
+    /// ошибку, и засчитать его в текущий прогон. `true`, если элемент найден и
+    /// был в статусе error.
+    fn retry_item(&mut self, id: u64) -> bool {
+        let Some(item) = self.items.iter_mut().find(|i| i.id == id && i.status == "error") else {
+            return false;
+        };
+        item.status = "queued".into();
+        item.progress = 0.0;
+        item.error = None;
+        item.error_kind = None;
+        item.file_path = None;
+        self.run_total += 1;
+        true
+    }
+
+    /// Убрать завершённые/ошибочные элементы, оставив queued/downloading.
+    fn clear_finished_items(&mut self) {
+        self.items
+            .retain(|i| i.status == "queued" || i.status == "downloading");
+    }
+
+    /// Завершить прогон: сбросить счётчики/флаг воркера, вернуть (done, total)
+    /// до сброса — для финального толчка прогресс-бара в шапке.
+    fn take_run_counts(&mut self) -> (usize, usize) {
+        let r = (self.run_done, self.run_total);
+        self.run_done = 0;
+        self.run_total = 0;
+        self.worker_running = false;
+        r
+    }
 }
 
 /// Обёртка для [`tauri::Manager::manage`].
@@ -551,32 +656,7 @@ fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) 
 
 /// Убрать элемент из очереди. Активный (скачивающийся) — отменяется (kill).
 pub fn remove(app: &AppHandle, id: u64) {
-    let child_to_kill = with_manager(app, |m| {
-        let Some(pos) = m.items.iter().position(|i| i.id == id) else {
-            return None;
-        };
-        let status = m.items[pos].status.clone();
-        match status.as_str() {
-            "queued" => {
-                m.items.remove(pos);
-                m.run_total = m.run_total.saturating_sub(1);
-                None
-            }
-            "downloading" => {
-                // Удаляем из списка; воркер увидит пропажу и зачтёт run_done.
-                m.items.remove(pos);
-                m.current_child
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take()
-            }
-            _ => {
-                // done / error — просто убрать из истории.
-                m.items.remove(pos);
-                None
-            }
-        }
-    });
+    let child_to_kill = with_manager(app, |m| m.remove_item(id));
 
     if let Some(mut child) = child_to_kill {
         kill_child_tree(&mut child);
@@ -590,23 +670,7 @@ pub fn remove(app: &AppHandle, id: u64) {
 /// обратно в очередь (queued), очистить ошибку/прогресс и поднять воркер.
 /// Метаданные и поисковый запрос сохраняются — повторно ничего вводить не нужно.
 pub fn retry(app: &AppHandle, id: u64) {
-    let restarted = with_manager(app, |m| {
-        let Some(item) = m
-            .items
-            .iter_mut()
-            .find(|i| i.id == id && i.status == "error")
-        else {
-            return false;
-        };
-        item.status = "queued".into();
-        item.progress = 0.0;
-        item.error = None;
-        item.error_kind = None;
-        item.file_path = None;
-        // Добавляем в текущий прогон, чтобы прогресс-бар в шапке учёл повтор.
-        m.run_total += 1;
-        true
-    });
+    let restarted = with_manager(app, |m| m.retry_item(id));
     if restarted {
         emit_snapshot(app);
         report_titlebar(app);
@@ -616,10 +680,7 @@ pub fn retry(app: &AppHandle, id: u64) {
 
 /// Очистить завершённые/ошибочные элементы из списка.
 pub fn clear_finished(app: &AppHandle) {
-    with_manager(app, |m| {
-        m.items
-            .retain(|i| i.status == "queued" || i.status == "downloading");
-    });
+    with_manager(app, DownloadManager::clear_finished_items);
     emit_snapshot(app);
 }
 
@@ -1430,12 +1491,7 @@ fn worker_loop(app: AppHandle) {
 
     loop {
         // Берём следующий элемент в очереди.
-        let job = with_manager(&app, |m| {
-            let pos = m.items.iter().position(|i| i.status == "queued")?;
-            m.items[pos].status = "downloading".into();
-            m.items[pos].progress = 0.0;
-            Some(m.items[pos].clone())
-        });
+        let job = with_manager(&app, DownloadManager::take_next_queued);
         let Some(job) = job else {
             break;
         };
@@ -1452,33 +1508,7 @@ fn worker_loop(app: AppHandle) {
             Err(_) => None,
         };
 
-        with_manager(&app, |m| {
-            m.run_done += 1;
-            if let Some(item) = m.items.iter_mut().find(|i| i.id == job.id) {
-                match &result {
-                    Ok(path) => {
-                        item.file_path = Some(path.to_string_lossy().to_string());
-                        if let Some(err) = &import_err {
-                            item.status = "error".into();
-                            item.progress = 100.0;
-                            item.error =
-                                Some(format!("Трек скачан, но не добавлен в библиотеку: {}", err));
-                            item.error_kind = Some(DownloadErrorKind::Unknown);
-                        } else {
-                            item.status = "done".into();
-                            item.progress = 100.0;
-                            item.error = None;
-                            item.error_kind = None;
-                        }
-                    }
-                    Err(e) => {
-                        item.status = "error".into();
-                        item.error = Some(e.message.clone());
-                        item.error_kind = Some(e.kind);
-                    }
-                }
-            }
-        });
+        with_manager(&app, |m| m.apply_download_result(job.id, &result, import_err.as_deref()));
         emit_snapshot(&app);
         report_titlebar(&app);
     }
@@ -1503,13 +1533,7 @@ fn restart_audio_feature_analysis(app: &AppHandle) {
 /// Завершить прогон: сбросить счётчики, снять флаг воркера, дотолкнуть прогресс
 /// шапки до «готово» и запустить воркер заново, если что-то добавили в гонке.
 fn finish_run(app: &AppHandle) {
-    let (done, total) = with_manager(app, |m| {
-        let r = (m.run_done, m.run_total);
-        m.run_done = 0;
-        m.run_total = 0;
-        m.worker_running = false;
-        r
-    });
+    let (done, total) = with_manager(app, DownloadManager::take_run_counts);
     // Равные done/total → прогресс-бар отметит фазу завершённой и спрячется.
     crate::report_download_progress(app, total.max(done), total.max(done));
     emit_snapshot(app);
@@ -1605,6 +1629,59 @@ fn search_targets(query: &str) -> Vec<String> {
     ]
 }
 
+/// Один "сырой" вызов скачивания (попытка под конкретные `stem`/цель/клиент) плюс
+/// сопутствующие побочные эффекты (уборка хвостов, статус входа в YouTube).
+/// Абстракция нужна, чтобы протестировать ротацию клиентов/обработку бот-стены и
+/// протухших cookies в [`download_one_core`] без реального subprocess yt-dlp и без
+/// `AppHandle` — в проде эти методы дёргают [`download_one_with_stem`]/
+/// `mark_cookies_*`/`emit_snapshot`, в тесте просто пишут в `Vec` фейковые ответы.
+trait DownloadAttempt {
+    fn try_download(&self, stem: &str, target: &str, client: &str) -> Result<PathBuf, DownloadError>;
+    fn cleanup_stem(&self, stem: &str, keep: Option<&Path>);
+    /// Успешное скачивание с cookies → снять возможный залипший маркер «вход
+    /// устарел» (мог остаться от прошлой транзиентной бот-стены по IP).
+    fn mark_login_still_valid(&self);
+    /// yt-dlp явно отверг сами cookies → пометить вход устаревшим (статус
+    /// переживёт перезапуск) и попросить перелогиниться.
+    fn mark_login_expired(&self);
+}
+
+struct RealDownloadAttempt<'a> {
+    app: &'a AppHandle,
+    resolved: &'a tools::ResolvedTools,
+    dir: &'a Path,
+    job: &'a DownloadItem,
+    child_slot: &'a Arc<Mutex<Option<Child>>>,
+}
+
+impl DownloadAttempt for RealDownloadAttempt<'_> {
+    fn try_download(&self, stem: &str, target: &str, client: &str) -> Result<PathBuf, DownloadError> {
+        download_one_with_stem(
+            self.app,
+            self.resolved,
+            self.dir,
+            self.job,
+            self.child_slot,
+            stem,
+            target,
+            client,
+        )
+    }
+
+    fn cleanup_stem(&self, stem: &str, keep: Option<&Path>) {
+        remove_stem_files(self.dir, stem, keep);
+    }
+
+    fn mark_login_still_valid(&self) {
+        mark_cookies_valid_after_success(self.app);
+    }
+
+    fn mark_login_expired(&self) {
+        mark_cookies_invalid(self.app);
+        emit_snapshot(self.app);
+    }
+}
+
 /// Скачать один трек через yt-dlp, проставить теги. Возвращает путь к файлу.
 /// Пробует поисковые цели по очереди (см. [`search_targets`]) — это страхует от
 /// нестабильного music-экстрактора. На отмене/«бот-стене» дальше не пробуем.
@@ -1617,7 +1694,32 @@ fn download_one(
 ) -> Result<PathBuf, DownloadError> {
     let stem = unique_stem(dir, &job.artist, &job.title);
     let targets = search_targets(&job.query);
+    let attempt = RealDownloadAttempt {
+        app,
+        resolved,
+        dir,
+        job,
+        child_slot,
+    };
+    download_one_core(
+        resolved.cookies_file.is_some(),
+        &stem,
+        &targets,
+        Duration::from_secs(2),
+        &attempt,
+    )
+}
 
+/// Оркестрация ротации клиентов/целей вокруг [`DownloadAttempt::try_download`] —
+/// без AppHandle/subprocess, поэтому юнит-тестируема напрямую с фейковой реализацией.
+/// `has_cookies` — `resolved.cookies_file.is_some()` на момент вызова.
+fn download_one_core(
+    has_cookies: bool,
+    stem: &str,
+    targets: &[String],
+    retry_delay: Duration,
+    attempt: &impl DownloadAttempt,
+) -> Result<PathBuf, DownloadError> {
     // Бот-стена YouTube почти всегда транзиентна и привязана к IP (а не к cookies):
     // те же cookies проходят со 2–3 попытки. Поэтому при бот-стене не сдаёмся сразу,
     // а ПОВТОРЯЕМ, МЕНЯЯ player_client (см. [`YT_PLAYER_CLIENTS`]) — часть отказов
@@ -1630,26 +1732,23 @@ fn download_one(
     let mut bot_wall_seen = false;
     let mut cookies_expired_seen = false;
 
-    for (attempt, &client) in YT_PLAYER_CLIENTS.iter().enumerate() {
+    for (idx, &client) in YT_PLAYER_CLIENTS.iter().enumerate() {
         let mut should_retry = false;
-        for target in &targets {
-            let result =
-                download_one_with_stem(app, resolved, dir, job, child_slot, &stem, target, client);
+        for target in targets {
+            let result = attempt.try_download(stem, target, client);
             // Уборка хвостов yt-dlp (фрагменты, `.part`, `.ytdl`) при любом исходе.
             // `stem` уникален для задания: при ошибке безопасно удалить все `stem.*`,
             // при успехе — всё, кроме итогового файла.
             match result {
                 Ok(final_path) => {
-                    remove_stem_files(dir, &stem, Some(&final_path));
-                    // Успех с cookies → снимаем возможный залипший маркер «протухли»
-                    // (мог быть выставлен прошлой транзиентной бот-стеной по IP).
-                    if resolved.cookies_file.is_some() {
-                        mark_cookies_valid_after_success(app);
+                    attempt.cleanup_stem(stem, Some(&final_path));
+                    if has_cookies {
+                        attempt.mark_login_still_valid();
                     }
                     return Ok(final_path);
                 }
                 Err(e) => {
-                    remove_stem_files(dir, &stem, None);
+                    attempt.cleanup_stem(stem, None);
                     match e.kind {
                         // Отмена пользователем — прекращаем немедленно.
                         DownloadErrorKind::Cancelled => return Err(e),
@@ -1675,16 +1774,13 @@ fn download_one(
         if !should_retry {
             break;
         }
-        if attempt + 1 < YT_PLAYER_CLIENTS.len() {
-            std::thread::sleep(Duration::from_secs(2));
+        if idx + 1 < YT_PLAYER_CLIENTS.len() && !retry_delay.is_zero() {
+            std::thread::sleep(retry_delay);
         }
     }
 
-    // Cookies реально отвергнуты yt-dlp → помечаем вход устаревшим (статус переживёт
-    // перезапуск) и просим перелогиниться.
-    if cookies_expired_seen && resolved.cookies_file.is_some() {
-        mark_cookies_invalid(app);
-        emit_snapshot(app);
+    if cookies_expired_seen && has_cookies {
+        attempt.mark_login_expired();
         return Err(DownloadError::new(
             DownloadErrorKind::CookiesExpired,
             "Вход в YouTube устарел — войдите заново в «Внешние источники»",
@@ -1693,7 +1789,7 @@ fn download_one(
     // Generic бот-стена пережила все клиенты. Это про IP/сеть, а НЕ про cookies —
     // вход НЕ инвалидируем. Подсказка зависит от того, входил ли пользователь.
     if bot_wall_seen {
-        let message = if resolved.cookies_file.is_some() {
+        let message = if has_cookies {
             "YouTube запросил подтверждение (IP/сеть) — попробуйте позже, смените сеть/VPN или прокси"
         } else {
             "YouTube запросил подтверждение (IP/сеть) — войдите в YouTube или смените сеть/прокси в «Внешних источниках»"
@@ -1720,12 +1816,10 @@ fn download_one_with_stem(
 
     // Библиотека сканирует только определённые контейнеры (m4a/opus/ogg/mp3/…),
     // а YouTube обычно отдаёт лучшее аудио в .webm, который НЕ поддерживается.
-    // Поэтому: с ffmpeg берём абсолютно лучшее аудио и ремуксируем webm/mkv в
-    // .opus (копирование потока, без перекодирования; именно `.opus`, а не
-    // `.ogg`, — иначе по расширению теги читаются как Vorbis и не пишутся). Без
-    // ffmpeg жёстко ограничиваем выбор поддерживаемыми контейнерами — без
-    // запасного `best`, чтобы при отсутствии подходящего потока yt-dlp вернул
-    // ошибку, а не скачал .webm.
+    // Поэтому с ffmpeg берём абсолютно лучшее аудио и извлекаем его в .m4a (см.
+    // `-x --audio-format m4a` ниже). Без ffmpeg жёстко ограничиваем выбор
+    // поддерживаемыми контейнерами — без запасного `best`, чтобы при отсутствии
+    // подходящего потока yt-dlp вернул ошибку, а не скачал .webm.
     let ffmpeg_available = resolved.ffmpeg.is_some();
     let format = if ffmpeg_available {
         "bestaudio/best"
@@ -1760,7 +1854,20 @@ fn download_one_with_stem(
         .arg(&out_template)
         .arg(search_target);
     if let Some(ff) = &resolved.ffmpeg {
-        cmd.arg("--remux-video").arg("webm>opus/mkv>opus/mka>opus");
+        // -x/--audio-format m4a вместо простого --remux-video: YouTube's bestaudio
+        // часто отдаёт настоящий Opus (itag 251/250/249, в WebM), а наш плеер
+        // (symphonia 0.5 — см. Cargo.lock) не содержит Opus-декодера вообще.
+        // Голый remux контейнера (webm→opus, без транскода) давал файл с верным
+        // контейнером, но НЕЧЕМ было декодировать поток — воспроизведение молча
+        // падало (см. AudioPlayer::supported_formats). -x с явным --audio-format
+        // m4a переводит источник в AAC/M4A, который symphonia декодирует; если
+        // исходный кодек уже AAC (обычный случай для части YouTube-форматов) —
+        // yt-dlp просто копирует поток без перекодирования, потеря качества
+        // возникает только там, где раньше был полностью нерабочий файл. Заодно
+        // -x всегда отбрасывает видеодорожку (-vn) — некоторые ролики несут
+        // встроенную обложку как отдельный mjpeg-поток внутри bestaudio, и
+        // голый remux эту видеодорожку раньше сохранял.
+        cmd.arg("-x").arg("--audio-format").arg("m4a");
         // --ffmpeg-location указываем только для нашего скачанного бинаря
         // (абсолютный путь). Для ffmpeg из PATH (голое имя) parent() == "" —
         // флаг сломал бы вызов, поэтому полагаемся на PATH.
@@ -2641,7 +2748,557 @@ fn import_track(app: &AppHandle, dir: &Path, file_path: &Path) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::path::Path;
+
+    fn temp_downloads_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lfmusic_dl_{name}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn queued_item(id: u64) -> DownloadItem {
+        DownloadItem {
+            id,
+            title: "T".into(),
+            artist: "A".into(),
+            album: None,
+            query: "A T".into(),
+            cover_url: None,
+            status: "queued".into(),
+            progress: 0.0,
+            error: None,
+            error_kind: None,
+            file_path: None,
+        }
+    }
+
+    fn item_with_status(id: u64, status: &str) -> DownloadItem {
+        DownloadItem {
+            status: status.into(),
+            ..queued_item(id)
+        }
+    }
+
+    // ── DownloadManager: очередь (queued/downloading/done/error/cancelled) ──
+
+    #[test]
+    fn take_next_queued_marks_downloading_and_clones_it() {
+        let mut m = DownloadManager::default();
+        m.items.push(queued_item(1));
+
+        let job = m.take_next_queued().expect("should return the queued item");
+        assert_eq!(job.status, "downloading");
+        assert_eq!(m.items[0].status, "downloading");
+        assert_eq!(m.items[0].progress, 0.0);
+    }
+
+    #[test]
+    fn take_next_queued_returns_none_when_nothing_queued() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "downloading"));
+        m.items.push(item_with_status(2, "done"));
+        assert!(m.take_next_queued().is_none());
+    }
+
+    #[test]
+    fn apply_download_result_marks_done_on_success() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "downloading"));
+
+        m.apply_download_result(1, &Ok(PathBuf::from("/music/a.mp3")), None);
+
+        assert_eq!(m.items[0].status, "done");
+        assert_eq!(m.items[0].progress, 100.0);
+        assert_eq!(m.items[0].file_path.as_deref(), Some("/music/a.mp3"));
+        assert!(m.items[0].error.is_none());
+        assert_eq!(m.run_done, 1);
+    }
+
+    #[test]
+    fn apply_download_result_marks_error_when_import_fails_after_a_successful_download() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "downloading"));
+
+        m.apply_download_result(1, &Ok(PathBuf::from("/music/a.mp3")), Some("disk full"));
+
+        assert_eq!(m.items[0].status, "error");
+        assert_eq!(m.items[0].file_path.as_deref(), Some("/music/a.mp3"));
+        assert!(m.items[0].error.as_deref().unwrap().contains("disk full"));
+        assert_eq!(m.items[0].error_kind, Some(DownloadErrorKind::Unknown));
+    }
+
+    #[test]
+    fn apply_download_result_marks_error_on_download_failure() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "downloading"));
+
+        let err = DownloadError::new(DownloadErrorKind::NoFormat, "no suitable format");
+        m.apply_download_result(1, &Err(err), None);
+
+        assert_eq!(m.items[0].status, "error");
+        assert_eq!(m.items[0].error.as_deref(), Some("no suitable format"));
+        assert_eq!(m.items[0].error_kind, Some(DownloadErrorKind::NoFormat));
+    }
+
+    #[test]
+    fn apply_download_result_still_counts_run_done_if_item_was_removed_meanwhile() {
+        // Пользователь мог убрать элемент из очереди (см. remove_item) пока он
+        // качался — воркер об этом не знает и всё равно должен зачесть его в
+        // run_done, иначе прогресс-бар прогона зависнет не на 100%.
+        let mut m = DownloadManager::default();
+        m.run_total = 1;
+        m.apply_download_result(999, &Ok(PathBuf::from("/music/a.mp3")), None);
+        assert_eq!(m.run_done, 1);
+    }
+
+    #[test]
+    fn remove_item_from_queued_status_decrements_run_total() {
+        let mut m = DownloadManager::default();
+        m.items.push(queued_item(1));
+        m.run_total = 1;
+
+        let child = m.remove_item(1);
+        assert!(child.is_none());
+        assert!(m.items.is_empty());
+        assert_eq!(m.run_total, 0);
+    }
+
+    #[test]
+    fn remove_item_from_downloading_status_with_no_active_child_returns_none() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "downloading"));
+
+        let child = m.remove_item(1);
+        assert!(child.is_none());
+        assert!(m.items.is_empty());
+    }
+
+    #[test]
+    fn remove_item_from_done_or_error_status_just_drops_it() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "done"));
+        m.items.push(item_with_status(2, "error"));
+
+        assert!(m.remove_item(1).is_none());
+        assert!(m.remove_item(2).is_none());
+        assert!(m.items.is_empty());
+    }
+
+    #[test]
+    fn remove_item_of_unknown_id_is_a_no_op() {
+        let mut m = DownloadManager::default();
+        m.items.push(queued_item(1));
+        assert!(m.remove_item(404).is_none());
+        assert_eq!(m.items.len(), 1);
+    }
+
+    #[test]
+    fn retry_item_requeues_an_errored_item_and_grows_run_total() {
+        let mut m = DownloadManager::default();
+        let mut errored = item_with_status(1, "error");
+        errored.error = Some("boom".into());
+        errored.error_kind = Some(DownloadErrorKind::NetworkTimeout);
+        errored.progress = 42.0;
+        m.items.push(errored);
+        m.run_total = 0;
+
+        assert!(m.retry_item(1));
+        assert_eq!(m.items[0].status, "queued");
+        assert_eq!(m.items[0].progress, 0.0);
+        assert!(m.items[0].error.is_none());
+        assert!(m.items[0].error_kind.is_none());
+        assert_eq!(m.run_total, 1);
+    }
+
+    #[test]
+    fn retry_item_refuses_non_error_items() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "downloading"));
+        assert!(!m.retry_item(1));
+        assert_eq!(m.items[0].status, "downloading");
+    }
+
+    #[test]
+    fn retry_item_of_unknown_id_returns_false() {
+        let mut m = DownloadManager::default();
+        assert!(!m.retry_item(1));
+    }
+
+    #[test]
+    fn clear_finished_items_keeps_only_queued_and_downloading() {
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "queued"));
+        m.items.push(item_with_status(2, "downloading"));
+        m.items.push(item_with_status(3, "done"));
+        m.items.push(item_with_status(4, "error"));
+
+        m.clear_finished_items();
+
+        let remaining: Vec<u64> = m.items.iter().map(|i| i.id).collect();
+        assert_eq!(remaining, vec![1, 2]);
+    }
+
+    #[test]
+    fn take_run_counts_resets_counters_and_worker_flag() {
+        let mut m = DownloadManager::default();
+        m.run_done = 3;
+        m.run_total = 5;
+        m.worker_running = true;
+
+        let (done, total) = m.take_run_counts();
+        assert_eq!((done, total), (3, 5));
+        assert_eq!(m.run_done, 0);
+        assert_eq!(m.run_total, 0);
+        assert!(!m.worker_running);
+    }
+
+    // ── insert_request: дедупликация/force ───────────────────────────────────
+
+    fn request(artist: &str, title: &str) -> DownloadRequest {
+        DownloadRequest {
+            title: title.into(),
+            artist: artist.into(),
+            album: None,
+            query: None,
+            cover_url: None,
+            force: None,
+        }
+    }
+
+    #[test]
+    fn insert_request_of_a_new_track_queues_it_and_grows_run_total() {
+        let mut m = DownloadManager::default();
+        let (id, is_new) = insert_request(&mut m, request("Artist", "Title"));
+        assert!(is_new);
+        assert_eq!(m.items.len(), 1);
+        assert_eq!(m.items[0].id, id);
+        assert_eq!(m.items[0].status, "queued");
+        assert_eq!(m.run_total, 1);
+    }
+
+    #[test]
+    fn insert_request_of_an_already_queued_track_does_not_duplicate() {
+        let mut m = DownloadManager::default();
+        let (first_id, _) = insert_request(&mut m, request("Artist", "Title"));
+        let (second_id, is_new) = insert_request(&mut m, request("Artist", "Title"));
+        assert!(!is_new);
+        assert_eq!(first_id, second_id);
+        assert_eq!(m.items.len(), 1);
+        assert_eq!(m.run_total, 1, "duplicate must not inflate the run counter");
+    }
+
+    #[test]
+    fn insert_request_with_force_bypasses_dedup() {
+        let mut m = DownloadManager::default();
+        let (first_id, _) = insert_request(&mut m, request("Artist", "Title"));
+        let mut forced = request("Artist", "Title");
+        forced.force = Some(true);
+        let (second_id, is_new) = insert_request(&mut m, forced);
+        assert!(is_new);
+        assert_ne!(first_id, second_id);
+        assert_eq!(m.items.len(), 2);
+    }
+
+    #[test]
+    fn insert_request_replaces_a_previously_errored_duplicate() {
+        let mut m = DownloadManager::default();
+        let (first_id, _) = insert_request(&mut m, request("Artist", "Title"));
+        m.items[0].status = "error".into();
+
+        let (second_id, is_new) = insert_request(&mut m, request("Artist", "Title"));
+        assert!(is_new);
+        assert_ne!(first_id, second_id);
+        assert_eq!(m.items.len(), 1, "the stale errored duplicate must be dropped");
+        assert_eq!(m.items[0].status, "queued");
+    }
+
+    // ── download_one_core: ротация клиентов, bot-wall, cookies ──────────────
+
+    #[derive(Default)]
+    struct FakeAttempt {
+        responses: RefCell<VecDeque<Result<PathBuf, DownloadError>>>,
+        calls: RefCell<Vec<(String, String, String)>>,
+        cleanup_calls: RefCell<Vec<(String, Option<PathBuf>)>>,
+        login_still_valid_calls: RefCell<u32>,
+        login_expired_calls: RefCell<u32>,
+    }
+
+    impl DownloadAttempt for FakeAttempt {
+        fn try_download(&self, stem: &str, target: &str, client: &str) -> Result<PathBuf, DownloadError> {
+            self.calls
+                .borrow_mut()
+                .push((stem.to_string(), target.to_string(), client.to_string()));
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| Err(DownloadError::new(DownloadErrorKind::Unknown, "no fake response left")))
+        }
+
+        fn cleanup_stem(&self, stem: &str, keep: Option<&Path>) {
+            self.cleanup_calls
+                .borrow_mut()
+                .push((stem.to_string(), keep.map(|p| p.to_path_buf())));
+        }
+
+        fn mark_login_still_valid(&self) {
+            *self.login_still_valid_calls.borrow_mut() += 1;
+        }
+
+        fn mark_login_expired(&self) {
+            *self.login_expired_calls.borrow_mut() += 1;
+        }
+    }
+
+    #[test]
+    fn download_one_core_succeeds_on_first_attempt_and_marks_login_valid_with_cookies() {
+        let fake = FakeAttempt::default();
+        fake.responses
+            .borrow_mut()
+            .push_back(Ok(PathBuf::from("/music/song.opus")));
+
+        let result = download_one_core(true, "song", &["t1".to_string()], Duration::ZERO, &fake);
+
+        assert_eq!(result.unwrap(), PathBuf::from("/music/song.opus"));
+        assert_eq!(fake.calls.borrow().len(), 1);
+        assert_eq!(*fake.login_still_valid_calls.borrow(), 1);
+        assert_eq!(*fake.login_expired_calls.borrow(), 0);
+        assert_eq!(
+            fake.cleanup_calls.borrow()[0],
+            ("song".to_string(), Some(PathBuf::from("/music/song.opus")))
+        );
+    }
+
+    #[test]
+    fn download_one_core_does_not_touch_login_state_without_cookies() {
+        let fake = FakeAttempt::default();
+        fake.responses
+            .borrow_mut()
+            .push_back(Ok(PathBuf::from("/music/song.opus")));
+
+        let result = download_one_core(false, "song", &["t1".to_string()], Duration::ZERO, &fake);
+
+        assert!(result.is_ok());
+        assert_eq!(*fake.login_still_valid_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn download_one_core_stops_immediately_on_cancelled() {
+        let fake = FakeAttempt::default();
+        fake.responses.borrow_mut().push_back(Err(DownloadError::new(
+            DownloadErrorKind::Cancelled,
+            "cancelled",
+        )));
+
+        let result = download_one_core(
+            true,
+            "song",
+            &["t1".to_string(), "t2".to_string()],
+            Duration::ZERO,
+            &fake,
+        );
+
+        assert_eq!(result.unwrap_err().kind, DownloadErrorKind::Cancelled);
+        assert_eq!(fake.calls.borrow().len(), 1, "must not retry after a cancellation");
+    }
+
+    #[test]
+    fn download_one_core_rotates_player_client_on_bot_wall_then_succeeds() {
+        let fake = FakeAttempt::default();
+        fake.responses.borrow_mut().push_back(Err(DownloadError::new(
+            DownloadErrorKind::BotWallNetwork,
+            "bot wall",
+        )));
+        fake.responses
+            .borrow_mut()
+            .push_back(Ok(PathBuf::from("/music/song.opus")));
+
+        let result = download_one_core(true, "song", &["t1".to_string()], Duration::ZERO, &fake);
+
+        assert!(result.is_ok());
+        let calls = fake.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].2, "tv");
+        assert_eq!(calls[1].2, "web_safari");
+        assert_eq!(*fake.login_expired_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn download_one_core_tries_all_targets_before_rotating_client() {
+        let fake = FakeAttempt::default();
+        fake.responses.borrow_mut().push_back(Err(DownloadError::new(
+            DownloadErrorKind::BotWallNetwork,
+            "bot wall",
+        )));
+        fake.responses.borrow_mut().push_back(Err(DownloadError::new(
+            DownloadErrorKind::BotWallNetwork,
+            "bot wall",
+        )));
+        fake.responses
+            .borrow_mut()
+            .push_back(Ok(PathBuf::from("/music/song.opus")));
+
+        let result = download_one_core(
+            false,
+            "song",
+            &["t1".to_string(), "t2".to_string()],
+            Duration::ZERO,
+            &fake,
+        );
+
+        assert!(result.is_ok());
+        let calls = fake.calls.borrow();
+        assert_eq!(
+            calls.as_slice(),
+            &[
+                ("song".to_string(), "t1".to_string(), "tv".to_string()),
+                ("song".to_string(), "t2".to_string(), "tv".to_string()),
+                ("song".to_string(), "t1".to_string(), "web_safari".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn download_one_core_marks_cookies_expired_only_when_every_client_rejects_them() {
+        let fake = FakeAttempt::default();
+        for _ in 0..3 {
+            fake.responses.borrow_mut().push_back(Err(DownloadError::new(
+                DownloadErrorKind::CookiesExpired,
+                "cookies rejected",
+            )));
+        }
+
+        let result = download_one_core(true, "song", &["t1".to_string()], Duration::ZERO, &fake);
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, DownloadErrorKind::CookiesExpired);
+        assert_eq!(*fake.login_expired_calls.borrow(), 1);
+        assert_eq!(fake.calls.borrow().len(), 3, "should have rotated through all clients");
+    }
+
+    #[test]
+    fn download_one_core_bot_wall_message_mentions_login_only_without_cookies() {
+        let fake_no_cookies = FakeAttempt::default();
+        for _ in 0..3 {
+            fake_no_cookies
+                .responses
+                .borrow_mut()
+                .push_back(Err(DownloadError::new(DownloadErrorKind::BotWallNetwork, "x")));
+        }
+        let err = download_one_core(false, "song", &["t1".to_string()], Duration::ZERO, &fake_no_cookies)
+            .unwrap_err();
+        assert!(err.message.contains("войдите в YouTube"));
+
+        let fake_with_cookies = FakeAttempt::default();
+        for _ in 0..3 {
+            fake_with_cookies
+                .responses
+                .borrow_mut()
+                .push_back(Err(DownloadError::new(DownloadErrorKind::BotWallNetwork, "x")));
+        }
+        let err = download_one_core(true, "song", &["t1".to_string()], Duration::ZERO, &fake_with_cookies)
+            .unwrap_err();
+        assert!(err.message.contains("смените сеть"));
+    }
+
+    #[test]
+    fn download_one_core_generic_error_does_not_rotate_clients() {
+        let fake = FakeAttempt::default();
+        fake.responses.borrow_mut().push_back(Err(DownloadError::new(
+            DownloadErrorKind::NoFormat,
+            "no format",
+        )));
+
+        let result = download_one_core(true, "song", &["t1".to_string()], Duration::ZERO, &fake);
+
+        assert_eq!(result.unwrap_err().kind, DownloadErrorKind::NoFormat);
+        assert_eq!(fake.calls.borrow().len(), 1, "a non-transient error must not rotate clients");
+        assert_eq!(*fake.login_expired_calls.borrow(), 0);
+    }
+
+    // ── Уборка временных хвостов yt-dlp (.part/.ytdl/фрагменты) ─────────────
+
+    #[test]
+    fn cleanup_orphan_temp_files_removes_only_old_temp_markers() {
+        let dir = temp_downloads_dir("cleanup_orphans");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let old_part = dir.join("stale.part");
+        let old_ytdl = dir.join("stale.ytdl");
+        let old_frag = dir.join("stale.part-Frag1.part");
+        let old_trash = dir.join(".lfm-trash-abc123");
+        let fresh_part = dir.join("active.part");
+        let finished_audio = dir.join("done.opus");
+        for f in [&old_part, &old_ytdl, &old_frag, &old_trash, &fresh_part, &finished_audio] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        // "Давно не трогали" эмулируем явной установкой mtime на 2 суток назад.
+        let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        for f in [&old_part, &old_ytdl, &old_frag, &old_trash] {
+            let file = std::fs::OpenOptions::new().write(true).open(f).unwrap();
+            file.set_modified(two_days_ago).unwrap();
+        }
+
+        cleanup_orphan_temp_files(&dir);
+
+        assert!(!old_part.exists(), "old .part must be cleaned up");
+        assert!(!old_ytdl.exists(), "old .ytdl must be cleaned up");
+        assert!(!old_frag.exists(), "old fragment temp file must be cleaned up");
+        assert!(!old_trash.exists(), "old quarantine leftover must be cleaned up");
+        assert!(fresh_part.exists(), "a recently-touched .part might be an active download — must survive");
+        assert!(finished_audio.exists(), "cleanup must never touch finished audio files");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_stem_files_keeps_lrc_sidecar_and_the_excluded_final_file() {
+        let dir = temp_downloads_dir("remove_stem");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let part = dir.join("song.part");
+        let frag = dir.join("song.f140.m4a");
+        let lrc = dir.join("song.lrc");
+        let final_file = dir.join("song.opus");
+        let unrelated = dir.join("other.mp3");
+        for f in [&part, &frag, &lrc, &final_file, &unrelated] {
+            std::fs::write(f, b"x").unwrap();
+        }
+
+        remove_stem_files(&dir, "song", Some(&final_file));
+
+        assert!(!part.exists());
+        assert!(!frag.exists());
+        assert!(lrc.exists(), ".lrc sidecar is a deliberate output, not a temp tail");
+        assert!(final_file.exists(), "the kept final file must survive");
+        assert!(unrelated.exists(), "files outside the stem must be untouched");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_stem_files_without_a_keep_path_removes_the_whole_stem_except_lrc() {
+        let dir = temp_downloads_dir("remove_stem_all");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let webm = dir.join("song.webm");
+        let lrc = dir.join("song.lrc");
+        for f in [&webm, &lrc] {
+            std::fs::write(f, b"x").unwrap();
+        }
+
+        remove_stem_files(&dir, "song", None);
+
+        assert!(!webm.exists());
+        assert!(lrc.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn clamp_keeps_normal_names() {
