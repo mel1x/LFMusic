@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::http::{header, Response, StatusCode};
@@ -149,6 +149,27 @@ fn host_of(url: &str) -> String {
         .to_lowercase()
 }
 
+/// Hosts strict enough (MusicBrainz/CAA document ≤1 req/s) that pacing request
+/// *starts* isn't sufficient on its own: `host_throttle` only spaces out when
+/// requests begin, so a response that's still in flight when the next thread's
+/// slot opens leaves two connections to the same host open at once. Under the
+/// prep pool's several concurrent workers that reliably produced connection
+/// resets ("error sending request") from these hosts, so they additionally get
+/// a per-host lock held across the whole request (see [`send_throttled`]).
+fn host_needs_serialized_requests(host: &str) -> bool {
+    matches!(host, "musicbrainz.org" | "coverartarchive.org")
+}
+
+fn host_send_lock(host: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let table = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = table.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entry(host.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 /// Waits until the host's next slot is free, then reserves it. The sleep
 /// happens after releasing the mutex, not while holding it.
 fn host_throttle(host: &str) {
@@ -202,6 +223,12 @@ fn send_throttled(
     builder: reqwest::blocking::RequestBuilder,
     host: &str,
 ) -> Result<reqwest::blocking::Response, String> {
+    // For strict hosts, hold a per-host lock across the whole request (not just
+    // the pacing wait) so no two requests to that host are ever in flight at
+    // once — see host_needs_serialized_requests. `lock` must outlive `_guard`.
+    let lock = host_needs_serialized_requests(host).then(|| host_send_lock(host));
+    let _guard = lock.as_ref().map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
+
     host_throttle(host);
     let resp = builder.send().map_err(|e| e.to_string())?;
     let code = resp.status().as_u16();

@@ -50,6 +50,20 @@ async function load(id: number) {
 watch(albumId, (id) => { void load(id) })
 onMounted(() => { void load(albumId.value) })
 
+// Once a track finishes downloading, mark the matching track as "in library" so
+// its button stays "Downloaded" after the queue's "done" entry is cleared,
+// instead of reverting to "Download" (in_library is a one-shot snapshot from
+// the initial albumDetail() fetch, never refreshed on its own).
+watch(queue, (items) => {
+    const doneKeys = new Set(
+        items.filter(i => i.status === 'done').map(i => trackKey(i.artist, i.title, i.album)),
+    )
+    if (doneKeys.size === 0 || !detail.value) return
+    for (const tr of detail.value.tracks) {
+        if (!tr.in_library && doneKeys.has(trackKey(tr.artist, tr.title, tr.album))) tr.in_library = true
+    }
+})
+
 function goBack() { router.back() }
 
 function openArtist() {

@@ -141,11 +141,11 @@ fn prep_clock() -> &'static Instant {
 }
 
 /// Apply a mutation to the counters and (throttled) emit combined progress.
-/// Counters reset to zero once 100% is reached, so the next pass starts clean.
 fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCounts)) {
     let (current, total, percent, force_done, phase) = {
         let mut p = PREP_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
         mutate(&mut p);
+
         let current = p.f_done + p.e_done + p.d_done;
         let total = p.f_total + p.e_total + p.d_total;
         let done = total == 0 || current >= total;
@@ -166,17 +166,31 @@ fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCou
         } else {
             100.0
         };
-        if done && total > 0 {
-            *p = PrepCounts {
-                f_done: 0,
-                f_total: 0,
-                e_done: 0,
-                e_total: 0,
-                d_done: 0,
-                d_total: 0,
-                d_frac: 0.0,
-            };
+
+        // Each phase clears only its OWN counters once it individually reaches
+        // its own 100%, instead of a combined reset gated on the summed total.
+        // The old combined reset only fired once every *concurrently active*
+        // phase happened to be done at once — a phase that finished earlier
+        // (e.g. external prep) while another was still running (e.g. analysis)
+        // stayed at "100/100" indefinitely, sitting in the sum. With analysis/
+        // downloads now finishing faster, phases interleave and hand off to each
+        // other far more often, so a finished-but-not-yet-cleared phase's stale
+        // total kept getting added back into the combined bar on every update
+        // from an unrelated phase — the "jumps between unrelated numbers" bug.
+        if p.f_total > 0 && p.f_done >= p.f_total {
+            p.f_total = 0;
+            p.f_done = 0;
         }
+        if p.e_total > 0 && p.e_done >= p.e_total {
+            p.e_total = 0;
+            p.e_done = 0;
+        }
+        if p.d_total > 0 && p.d_done >= p.d_total {
+            p.d_total = 0;
+            p.d_done = 0;
+            p.d_frac = 0.0;
+        }
+
         (current, total, percent, done, phase)
     };
 
