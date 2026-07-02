@@ -97,6 +97,7 @@
     },
     "cookies": {
       "sectionTitle": "YouTube cookies",
+      "desc": "Optional: working cookies lift age and bot restrictions on downloads.",
       "recheck": "Re-check",
       "getCookie": "Get cookie",
       "openFolder": "Open extension folder",

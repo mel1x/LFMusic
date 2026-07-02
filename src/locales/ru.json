@@ -97,6 +97,7 @@
     },
     "cookies": {
       "sectionTitle": "Cookies YouTube",
+      "desc": "Необязательно: рабочие cookies снимают возрастные и бот-ограничения при скачивании.",
       "recheck": "Перепроверить",
       "getCookie": "Получить cookie",
       "openFolder": "Открыть папку расширения",

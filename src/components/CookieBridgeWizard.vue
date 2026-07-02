@@ -12,13 +12,16 @@ const { prepareBrowserExtension } = useDownloads();
 
 const STEP_COUNT = 4;
 const currentStep = ref(0);
+// 1 = forward, -1 = back — picks the slide direction of step transitions.
+const direction = ref<1 | -1>(1);
 const folderBusy = ref(false);
 const folderError = ref<string | null>(null);
 const bodyEl = ref<HTMLElement | null>(null);
+const stepPaneEl = ref<HTMLElement | null>(null);
 
 // Placeholder until the real step-by-step recordings are dropped in - one
-// looped clip per step, shown above the description. `null` renders a plain
-// placeholder frame instead of a broken <video>.
+// looped webm clip per step, shown above the description. `null` renders a
+// quiet placeholder frame instead of a broken <video>.
 const stepVideos: (string | null)[] = [null, null, null, null];
 
 const steps = computed(() => [
@@ -31,55 +34,53 @@ const steps = computed(() => [
 const isFirstStep = computed(() => currentStep.value === 0);
 const isLastStep = computed(() => currentStep.value === STEP_COUNT - 1);
 const isFolderStep = computed(() => currentStep.value === 0);
+const stepTransition = computed(() => (direction.value > 0 ? 'stepFwd' : 'stepBack'));
 
 // Steps have different text length (and only step 1 has the folder button),
-// so the body's natural height differs per step. Animate between them
-// (measure-before/after, like a mini FLIP) instead of letting the card snap
-// to a new height. Suppressed on the reset-to-step-0 that happens when the
-// modal opens, since there's no visible "before" state to animate from.
-let skipNextAnimation = false;
+// so the body's natural height differs per step. The body always carries an
+// explicit pixel height (CSS-transitioned) kept in sync with the active pane
+// by a ResizeObserver — the leaving pane is absolutely positioned during the
+// step transition, so the entering pane alone defines the target height, and
+// late content changes (an error appearing) animate too instead of snapping.
+let paneObserver: ResizeObserver | null = null;
 
-async function animateBodyHeight() {
+function syncBodyHeight() {
     const el = bodyEl.value;
-    if (!el) return;
-    const startHeight = el.getBoundingClientRect().height;
-    el.style.height = `${startHeight}px`;
-    await nextTick();
-    const endHeight = el.scrollHeight;
-    requestAnimationFrame(() => {
-        el.style.height = `${endHeight}px`;
-    });
+    const pane = stepPaneEl.value;
+    if (!el || !pane) return;
+    el.style.height = `${pane.offsetHeight}px`;
 }
 
-function onBodyTransitionEnd(e: TransitionEvent) {
-    if (e.propertyName === 'height' && bodyEl.value) {
-        bodyEl.value.style.height = '';
+watch(stepPaneEl, (pane, old) => {
+    if (!paneObserver) return;
+    if (old) paneObserver.unobserve(old);
+    if (pane) {
+        paneObserver.observe(pane);
+        syncBodyHeight();
     }
-}
-
-watch(currentStep, () => {
-    if (skipNextAnimation) {
-        skipNextAnimation = false;
-        return;
-    }
-    void animateBodyHeight();
-});
+}, { flush: 'post' });
 
 watch(() => props.open, async (isOpen) => {
-    if (isOpen) {
-        skipNextAnimation = true;
-        currentStep.value = 0;
-        folderError.value = null;
-        await nextTick();
-        skipNextAnimation = false;
-    }
+    if (!isOpen) return;
+    direction.value = 1;
+    currentStep.value = 0;
+    folderError.value = null;
+    // First height set happens from `auto`, which the browser can't
+    // interpolate — it applies instantly, so opening never animates height.
+    await nextTick();
+    syncBodyHeight();
 });
 
+function goToStep(i: number) {
+    if (i === currentStep.value || i < 0 || i >= STEP_COUNT) return;
+    direction.value = i > currentStep.value ? 1 : -1;
+    currentStep.value = i;
+}
 function prevStep() {
-    if (!isFirstStep.value) currentStep.value -= 1;
+    goToStep(currentStep.value - 1);
 }
 function nextStep() {
-    if (!isLastStep.value) currentStep.value += 1;
+    goToStep(currentStep.value + 1);
 }
 function close() {
     emit('close');
@@ -115,79 +116,98 @@ function onKeydown(e: KeyboardEvent) {
     }
 }
 
-onMounted(() => document.addEventListener('keydown', onKeydown));
-onUnmounted(() => document.removeEventListener('keydown', onKeydown));
+onMounted(() => {
+    document.addEventListener('keydown', onKeydown);
+    paneObserver = new ResizeObserver(() => syncBodyHeight());
+    if (stepPaneEl.value) {
+        paneObserver.observe(stepPaneEl.value);
+        syncBodyHeight();
+    }
+});
+onUnmounted(() => {
+    document.removeEventListener('keydown', onKeydown);
+    paneObserver?.disconnect();
+    paneObserver = null;
+});
 </script>
 
 <template>
     <Teleport to="body">
         <Transition name="modal">
             <div v-if="open" class="modalBackdrop" @mousedown="onBackdropMousedown">
-                <div class="wizardCard" @mousedown.stop>
+                <div class="wizardCard" role="dialog" aria-modal="true" @mousedown.stop>
                     <button class="wizardClose" type="button" @click="close" aria-label="Close">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
                             <path d="M6 6l12 12M18 6L6 18" />
                         </svg>
                     </button>
 
-                    <div class="wizardVideo">
-                        <video
-                            v-if="stepVideos[currentStep]"
-                            :key="currentStep"
-                            class="wizardVideoEl"
-                            :src="stepVideos[currentStep]!"
-                            loop
-                            muted
-                            autoplay
-                            playsinline
-                        />
-                        <div v-else class="wizardVideoPlaceholder">
-                            <span class="wizardStepBadge">{{ currentStep + 1 }}/{{ STEP_COUNT }}</span>
-                        </div>
+                    <div class="wizardVisual">
+                        <Transition :name="stepTransition">
+                            <div class="visualPane" :key="currentStep">
+                                <video
+                                    v-if="stepVideos[currentStep]"
+                                    class="wizardVideoEl"
+                                    :src="stepVideos[currentStep]!"
+                                    loop
+                                    muted
+                                    autoplay
+                                    playsinline
+                                />
+                                <div v-else class="visualPlaceholder"></div>
+                            </div>
+                        </Transition>
+                        <span class="wizardStepBadge">{{ currentStep + 1 }} / {{ STEP_COUNT }}</span>
                     </div>
 
-                    <div class="wizardBody" ref="bodyEl" @transitionend="onBodyTransitionEnd">
-                        <h3 class="wizardStepTitle">{{ steps[currentStep].title }}</h3>
-                        <p class="wizardStepDesc">{{ steps[currentStep].desc }}</p>
-                        <p v-if="folderError" class="wizardError">{{ folderError }}</p>
-
-                        <button
-                            v-if="isFolderStep"
-                            class="wizardFolderBtn"
-                            type="button"
-                            :disabled="folderBusy"
-                            @click="openExtensionFolder"
-                        >{{ t('downloads.cookies.openFolder') }}</button>
+                    <div class="wizardBody" ref="bodyEl">
+                        <Transition :name="stepTransition">
+                            <div class="stepPane" :key="currentStep" ref="stepPaneEl">
+                                <h3 class="wizardStepTitle">{{ steps[currentStep].title }}</h3>
+                                <p class="wizardStepDesc">{{ steps[currentStep].desc }}</p>
+                                <Transition name="noteSlide">
+                                    <p v-if="isFolderStep && folderError" class="wizardError">{{ folderError }}</p>
+                                </Transition>
+                                <button
+                                    v-if="isFolderStep"
+                                    class="wizardFolderBtn"
+                                    :class="{ loading: folderBusy }"
+                                    type="button"
+                                    :disabled="folderBusy"
+                                    @click="openExtensionFolder"
+                                >
+                                    <span class="btnLabel">{{ t('downloads.cookies.openFolder') }}</span>
+                                    <span class="miniSpinner btnSpinner" aria-hidden="true"></span>
+                                </button>
+                            </div>
+                        </Transition>
                     </div>
 
                     <div class="wizardNav">
                         <div class="wizardDots">
-                            <span
+                            <button
                                 v-for="i in STEP_COUNT"
                                 :key="i"
+                                type="button"
                                 class="wizardDot"
-                                :class="{ active: i - 1 === currentStep }"
-                            ></span>
+                                :class="{ active: i - 1 === currentStep, done: i - 1 < currentStep }"
+                                :aria-label="`${i} / ${STEP_COUNT}`"
+                                @click="goToStep(i - 1)"
+                            ></button>
                         </div>
                         <div class="wizardNavBtns">
                             <button
-                                v-if="!isFirstStep"
                                 class="wizardNavBtn"
+                                :class="{ hiddenBtn: isFirstStep }"
+                                :disabled="isFirstStep"
                                 type="button"
                                 @click="prevStep"
                             >{{ t('downloads.cookies.wizard.back') }}</button>
                             <button
-                                v-if="!isLastStep"
                                 class="wizardNavBtn primary"
                                 type="button"
-                                @click="nextStep"
-                            >{{ t('downloads.cookies.wizard.next') }}</button>
-                            <button
-                                v-else
-                                class="wizardNavBtn primary"
-                                type="button"
-                                @click="close"
-                            >{{ t('downloads.cookies.wizard.done') }}</button>
+                                @click="isLastStep ? close() : nextStep()"
+                            >{{ isLastStep ? t('downloads.cookies.wizard.done') : t('downloads.cookies.wizard.next') }}</button>
                         </div>
                     </div>
                 </div>
@@ -212,7 +232,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
 }
 .wizardCard {
     position: relative;
-    width: 440px;
+    width: 540px;
     max-width: calc(100vw - 42px);
     border-radius: 28px;
     background-color: var(--light-bg);
@@ -221,10 +241,10 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
 }
 .wizardClose {
     position: absolute;
-    top: 12px;
-    right: 12px;
-    width: 28px;
-    height: 28px;
+    top: 14px;
+    right: 14px;
+    width: 30px;
+    height: 30px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -233,54 +253,72 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
     background: hsla(0, 0%, 0%, 0.35);
     color: hsla(0, 0%, 100%, 0.85);
     cursor: pointer;
-    z-index: 1;
-    transition: background-color .2s ease;
+    z-index: 2;
+    transition: background-color .2s ease, transform .2s ease;
 }
 .wizardClose:hover {
     background: hsla(0, 0%, 0%, 0.55);
 }
+.wizardClose:active {
+    transform: scale(0.92);
+}
 
-.wizardVideo {
+/* Visual area: a looped webm clip per step (crossfades on step change), or a
+   quiet placeholder frame until the recordings are dropped in. */
+.wizardVisual {
+    position: relative;
     aspect-ratio: 16 / 10;
     width: 100%;
     background: hsla(0, 0%, 0%, 0.3);
+    overflow: hidden;
+}
+.visualPane {
+    position: absolute;
+    inset: 0;
 }
 .wizardVideoEl {
     width: 100%;
     height: 100%;
     object-fit: cover;
 }
-.wizardVideoPlaceholder {
+.visualPlaceholder {
     width: 100%;
     height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     background: linear-gradient(155deg, hsla(var(--accent-h), var(--accent-s), 22%, 0.5), hsla(0, 0%, 0%, 0.25));
 }
 .wizardStepBadge {
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 15px;
-    font-weight: 800;
+    position: absolute;
+    top: 14px;
+    left: 16px;
+    padding: 4px 11px;
+    border-radius: 999px;
+    background: hsla(0, 0%, 0%, 0.35);
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
-    color: hsla(0, 0%, 100%, 0.55);
+    color: hsla(0, 0%, 100%, 0.75);
+    user-select: none;
 }
 
 .wizardBody {
-    padding: 20px 24px 4px;
+    position: relative;
     overflow: hidden;
-    transition: height .22s ease;
+    transition: height .3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.stepPane {
+    padding: 22px 28px 8px;
 }
 .wizardStepTitle {
     margin: 0;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-weight: 800;
-    font-size: 18px;
+    font-size: 19px;
     color: hsla(0, 0%, 100%, 0.95);
 }
 .wizardStepDesc {
-    margin: 8px 0 0;
-    font-size: 14px;
+    margin: 9px 0 0;
+    font-size: 14.5px;
     line-height: 1.5;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.6);
@@ -292,9 +330,23 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
     line-height: 1.4;
     color: hsla(38, 85%, 72%, 0.95);
 }
+.noteSlide-enter-active {
+    transition: opacity .22s ease, transform .22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.noteSlide-leave-active {
+    transition: opacity .14s ease;
+}
+.noteSlide-enter-from {
+    opacity: 0;
+    transform: translateY(-4px);
+}
+.noteSlide-leave-to {
+    opacity: 0;
+}
 .wizardFolderBtn {
-    margin-top: 14px;
-    padding: 9px 18px;
+    position: relative;
+    margin-top: 16px;
+    padding: 10px 20px;
     border: none;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.95);
@@ -307,42 +359,108 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
 }
 .wizardFolderBtn:disabled {
     cursor: default;
-    opacity: 0.5;
+    opacity: 0.6;
 }
 .wizardFolderBtn:not(:disabled):hover {
     background-color: #fff;
     transform: translateY(-1px);
 }
+.wizardFolderBtn:not(:disabled):active {
+    transform: translateY(0) scale(0.97);
+}
+/* Spinner over the label (label fades, width stays) — same loading pattern
+   as the settings-page action buttons. Centered via negative margins, not
+   translate — the spin animation owns the transform property. */
+.wizardFolderBtn .btnLabel {
+    opacity: 1;
+    transition: opacity .18s ease;
+}
+.wizardFolderBtn.loading .btnLabel {
+    opacity: 0;
+}
+.wizardFolderBtn .btnSpinner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    margin: -6.5px 0 0 -6.5px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+}
+.wizardFolderBtn.loading .btnSpinner {
+    opacity: 1;
+}
+.miniSpinner {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 2px solid hsla(var(--accent-h), var(--accent-s), 30%, 0.25);
+    border-top-color: hsla(var(--accent-h), var(--accent-s), 25%, 0.9);
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Directional step transitions: forward slides left, back slides right.
+   The leaving pane is pulled out of flow so the body height tracks only
+   the entering pane. */
+.stepFwd-enter-active,
+.stepBack-enter-active {
+    transition: opacity .3s ease, transform .3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.stepFwd-leave-active,
+.stepBack-leave-active {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    transition: opacity .18s ease, transform .18s ease;
+}
+.stepFwd-enter-from { opacity: 0; transform: translateX(26px); }
+.stepFwd-leave-to { opacity: 0; transform: translateX(-20px); }
+.stepBack-enter-from { opacity: 0; transform: translateX(-26px); }
+.stepBack-leave-to { opacity: 0; transform: translateX(20px); }
 
 .wizardNav {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 18px 24px 22px;
+    padding: 20px 28px 24px;
 }
 .wizardDots {
     display: flex;
     align-items: center;
     gap: 6px;
 }
+/* Clickable step dots; the active one stretches into a small pill. */
 .wizardDot {
     width: 6px;
     height: 6px;
-    border-radius: 50%;
+    padding: 0;
+    border: none;
+    border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.2);
-    transition: background-color .2s ease, transform .2s ease;
+    cursor: pointer;
+    transition: width .26s cubic-bezier(0.22, 1, 0.36, 1), background-color .2s ease;
+}
+.wizardDot:hover {
+    background-color: hsla(0, 0%, 100%, 0.45);
+}
+.wizardDot.done {
+    background-color: hsla(0, 0%, 100%, 0.38);
 }
 .wizardDot.active {
+    width: 20px;
     background-color: hsla(0, 0%, 100%, 0.85);
-    transform: scale(1.2);
 }
 .wizardNavBtns {
     display: flex;
     gap: 8px;
 }
 .wizardNavBtn {
-    padding: 8px 16px;
+    padding: 9px 18px;
     border: none;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.06);
@@ -351,31 +469,49 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
-    transition: background-color .2s ease, color .2s ease;
+    transition: background-color .2s ease, color .2s ease, opacity .2s ease, transform .2s ease;
 }
-.wizardNavBtn:hover {
+.wizardNavBtn:not(:disabled):hover {
     background-color: hsla(0, 0%, 100%, 0.12);
     color: #fff;
+}
+.wizardNavBtn:not(:disabled):active {
+    transform: scale(0.96);
 }
 .wizardNavBtn.primary {
     background-color: hsla(0, 0%, 100%, 0.95);
     color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
 }
-.wizardNavBtn.primary:hover {
+/* Same specificity weight as the generic hover rule above, declared later —
+   otherwise the generic rule paints white text on the white primary bg. */
+.wizardNavBtn.primary:not(:disabled):hover {
     background-color: #fff;
+    color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
+}
+/* "Back" on the first step: invisible but keeps its slot, so "Next" never
+   jumps sideways when it appears. */
+.wizardNavBtn.hiddenBtn {
+    opacity: 0;
+    pointer-events: none;
 }
 
-.modal-enter-active, .modal-leave-active {
+.modal-enter-active {
+    transition: opacity .22s ease;
+}
+.modal-leave-active {
     transition: opacity .18s ease;
 }
-.modal-enter-active .wizardCard, .modal-leave-active .wizardCard {
+.modal-enter-active .wizardCard {
+    transition: transform .28s cubic-bezier(0.22, 1, 0.36, 1), opacity .22s ease;
+}
+.modal-leave-active .wizardCard {
     transition: transform .18s ease, opacity .18s ease;
 }
 .modal-enter-from, .modal-leave-to {
     opacity: 0;
 }
 .modal-enter-from .wizardCard, .modal-leave-to .wizardCard {
-    transform: scale(0.96) translateY(4px);
+    transform: scale(0.95) translateY(10px);
     opacity: 0;
 }
 </style>

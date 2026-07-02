@@ -10,7 +10,6 @@ import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
 import ConfirmModal from '../../components/ConfirmModal.vue';
 import CookieBridgeWizard from '../../components/CookieBridgeWizard.vue';
-import LoadingSpinner from '../../components/LoadingSpinner.vue';
 import FolderIcon from '../../components/Icons/FolderIcon.vue';
 import ArrowUpIcon from '../../components/Icons/ArrowUpIcon.vue';
 
@@ -104,14 +103,14 @@ const updateTooltip = computed(() => {
     return t('downloads.deps.updateTooltip', { list: names.join(', ') });
 });
 
-// The three components as status chips, so the user sees what's missing.
+// The three components as status cells, so the user sees what's missing.
 const depComponents = computed(() => [
     { name: 'yt-dlp', on: toolsInfo.value.ytdlp.installed, version: toolsInfo.value.ytdlp.version },
     { name: 'ffmpeg', on: toolsInfo.value.ffmpeg.installed, version: toolsInfo.value.ffmpeg.version },
     { name: 'Deno', on: toolsInfo.value.deno.installed, version: toolsInfo.value.deno.version },
 ]);
 
-// Detail label under the chips (install progress / version / error).
+// Detail label under the title (install progress / version / error).
 const depDetail = computed(() => {
     if (depError.value) return depError.value;
     if (installProgress.value) return installProgress.value;
@@ -131,7 +130,7 @@ const installLabel = computed(() =>
     depAnyInstalled.value ? t('downloads.comp.btnInstallNeeded') : t('downloads.comp.btnInstallAll'),
 );
 
-// Long versions (e.g. ffmpeg rolling builds) break the chip layout — truncate,
+// Long versions (e.g. ffmpeg rolling builds) break the cell layout — truncate,
 // show the full string in the tooltip.
 const VER_MAX = 16;
 function shortVer(v: string): string {
@@ -402,6 +401,10 @@ const proxyModeOptions = computed<{ key: ProxyMode; label: string }[]>(() => [
     { key: 'none', label: t('downloads.proxy.modeNone') },
     { key: 'custom', label: t('downloads.proxy.modeCustom') },
 ]);
+// Index of the active mode — drives the sliding thumb of the segmented control.
+const proxyIndex = computed(() =>
+    Math.max(0, proxyModeOptions.value.findIndex(m => m.key === proxyConfig.value.mode)),
+);
 // Local copy of the URL for input; synced once proxyConfig loads.
 const proxyUrlInput = ref(proxyConfig.value.url);
 const proxyError = ref<string | null>(null);
@@ -479,14 +482,17 @@ onMounted(async () => {
         <!-- Everything below (folder -> components -> login -> proxy -> footnote)
              only shows when the "Downloads" page is enabled — otherwise these
              settings are meaningless. -->
-        <template v-if="settings.show_downloads_page">
+        <Transition name="dlZone">
+        <div v-if="settings.show_downloads_page" class="dlZone">
         <!-- Download folder -->
         <template v-if="!isAndroid">
             <h2 class="sectionTitle">{{ t('downloads.folder.sectionTitle') }}</h2>
             <div class="dlFolder">
                 <div class="dlFolderRow">
                     <button
-                        class="dlFolderIcon"
+                        class="dlFolderTile"
+                        type="button"
+                        v-tooltip="t('downloads.folder.open')"
                         @click="openDownloadFolder"
                     >
                         <FolderIcon />
@@ -513,21 +519,38 @@ onMounted(async () => {
                         >{{ t('downloads.folder.reset') }}</button>
                     </div>
                 </div>
-                <p v-if="folderFellBack" class="dlFolderWarn">{{ t('downloads.folder.fallback') }}</p>
-                <p v-else-if="folderError" class="dlFolderWarn">{{ folderError }}</p>
+                <Transition name="noteSlide">
+                    <p v-if="folderFellBack" class="dlWarn">{{ t('downloads.folder.fallback') }}</p>
+                    <p v-else-if="folderError" class="dlWarn">{{ folderError }}</p>
+                </Transition>
             </div>
         </template>
 
         <!-- Download components + cookies + advanced: one unified panel -->
         <h2 class="sectionTitle">{{ t('downloads.comp.sectionTitle') }}</h2>
-        <div v-if="!toolsLoaded" class="unifiedPanel toolLoading">
-            <LoadingSpinner />
+        <div v-if="!toolsLoaded" class="unifiedPanel skeletonPanel" aria-hidden="true">
+            <div class="panelSection">
+                <div class="skelRow">
+                    <span class="skel" style="width: 210px; height: 15px;"></span>
+                    <span class="skel skelPill" style="width: 88px; height: 26px; margin-left: auto;"></span>
+                </div>
+                <span class="skel" style="width: 55%; height: 11px; margin-top: 11px;"></span>
+                <div class="skelRow" style="margin-top: 16px; gap: 6px;">
+                    <span class="skel skelPill" style="flex: 1; height: 42px;"></span>
+                    <span class="skel skelPill" style="flex: 1; height: 42px;"></span>
+                    <span class="skel skelPill" style="flex: 1; height: 42px;"></span>
+                </div>
+                <div class="skelRow" style="margin-top: 18px;">
+                    <span class="skel skelPill" style="width: 168px; height: 35px;"></span>
+                    <span class="skel skelPill" style="width: 132px; height: 35px;"></span>
+                </div>
+            </div>
         </div>
         <div v-else class="unifiedPanel" :class="depStatusKind">
             <div class="panelSection depSection">
                 <div class="depTop">
                     <div class="depHead">
-                        <h3 class="depTitle">{{ t('downloads.deps.title') }}</h3>
+                        <h3 class="subTitle">{{ t('downloads.deps.title') }}</h3>
                         <p class="depDesc" v-truncate>{{ depDetail }}</p>
                     </div>
                     <div class="depState" :class="depStatusKind" v-tooltip:bottom="updateTooltip">
@@ -537,19 +560,22 @@ onMounted(async () => {
                     </div>
                 </div>
 
-                <div class="depChips">
-                    <span v-for="c in depComponents" :key="c.name" class="depChip" :class="{ on: c.on }">
-                        <span class="chipDot"></span>
-                        <span class="chipName">{{ c.name }}</span>
+                <div class="toolRail">
+                    <div v-for="c in depComponents" :key="c.name" class="toolCell" :class="{ on: c.on }">
+                        <span class="toolDot"><span class="toolDotCore"></span></span>
+                        <span class="toolName">{{ c.name }}</span>
                         <span
                             v-if="c.on && c.version"
-                            class="chipVer"
+                            class="toolVer"
                             v-tooltip="c.version.length > VER_MAX ? c.version : ''"
                         >{{ shortVer(c.version) }}</span>
-                    </span>
+                        <span v-else-if="!c.on" class="toolVer off">—</span>
+                    </div>
                 </div>
 
-                <div v-if="depBusy" class="depBar"><span class="depBarFill"></span></div>
+                <Transition name="noteSlide">
+                    <div v-if="depBusy" class="depBar"><span class="depBarFill"></span></div>
+                </Transition>
 
                 <div class="depActions">
                     <button
@@ -592,29 +618,33 @@ onMounted(async () => {
 
             <!-- YouTube cookies (optional) -->
             <div class="panelSection cookiesSection" :class="cookieStatusKind">
-                <div class="ytAuthStatusRow">
-                    <span v-if="cookieStatusKind === 'checking'" class="miniSpinner"></span>
-                    <span v-else class="stateDot"></span>
-                    <span class="ytAuthState">{{ cookieStatusText }}</span>
-                </div>
-                <div class="ytAuthActions">
-                    <button
-                        v-if="!cookiesAuthorized"
-                        class="actBtn primary"
-                        @click="wizardOpen = true"
-                    >{{ t('downloads.cookies.getCookie') }}</button>
-                    <template v-else>
+                <h3 class="subTitle">{{ t('downloads.cookies.sectionTitle') }}</h3>
+                <p class="subDesc">{{ t('downloads.cookies.desc') }}</p>
+                <div class="statusRow">
+                    <div class="statusLine">
+                        <span v-if="cookieStatusKind === 'checking'" class="miniSpinner"></span>
+                        <span v-else class="stateDot"></span>
+                        <span class="statusText" v-truncate>{{ cookieStatusText }}</span>
+                    </div>
+                    <div class="rowActions">
                         <button
-                            class="actBtn ghost"
-                            :disabled="cookiesChecking"
-                            @click="recheck"
-                        >{{ t('downloads.cookies.recheck') }}</button>
-                        <button
-                            class="actBtn ghost danger"
-                            :disabled="cookiesActionBusy"
-                            @click="clearCookies"
-                        >{{ t('downloads.cookies.clear') }}</button>
-                    </template>
+                            v-if="!cookiesAuthorized"
+                            class="actBtn primary"
+                            @click="wizardOpen = true"
+                        >{{ t('downloads.cookies.getCookie') }}</button>
+                        <template v-else>
+                            <button
+                                class="actBtn ghost"
+                                :disabled="cookiesChecking"
+                                @click="recheck"
+                            >{{ t('downloads.cookies.recheck') }}</button>
+                            <button
+                                class="actBtn ghost danger"
+                                :disabled="cookiesActionBusy"
+                                @click="clearCookies"
+                            >{{ t('downloads.cookies.clear') }}</button>
+                        </template>
+                    </div>
                 </div>
             </div>
 
@@ -625,6 +655,7 @@ onMounted(async () => {
                     class="advancedToggle"
                     :class="{ open: advancedOpen }"
                     type="button"
+                    :aria-expanded="advancedOpen"
                     @click="advancedOpen = !advancedOpen"
                 >
                     <span>{{ t('downloads.pot.advancedToggle') }}</span>
@@ -632,36 +663,38 @@ onMounted(async () => {
                 </button>
 
                 <!-- PO-token provider (optional; bypasses YouTube's bot-wall even with valid cookies) -->
-                <transition name="advancedPanel">
-                    <div v-if="advancedOpen" class="panelSection potSection" :class="potStatusClass">
-                        <div class="ytAuthStatusRow">
-                            <span v-if="potActionBusy" class="miniSpinner"></span>
-                            <span v-else class="stateDot"></span>
-                            <span class="ytAuthState">{{ potStatusText }}</span>
-                        </div>
-                        <p class="ytAuthDesc">{{ t('downloads.pot.desc') }}</p>
-                        <div class="ytAuthActions">
-                            <button
-                                v-if="!toolsInfo.pot.installed"
-                                class="actBtn primary"
-                                :disabled="potActionBusy"
-                                @click="requestInstallPot"
-                            >{{ t('downloads.comp.btnInstall') }}</button>
-                            <button
-                                v-else-if="potUpdateAvailable"
-                                class="actBtn primary"
-                                :disabled="potActionBusy"
-                                @click="requestInstallPot"
-                            >{{ t('downloads.comp.btnUpdate') }}</button>
-                            <button
-                                v-if="toolsInfo.pot.managed"
-                                class="actBtn ghost danger"
-                                :disabled="potActionBusy"
-                                @click="onDeletePot"
-                            >{{ t('downloads.comp.btnDelete') }}</button>
+                <div class="advCollapse" :class="{ open: advancedOpen }" :inert="!advancedOpen">
+                    <div class="advInner">
+                        <div class="panelSection potSection" :class="potStatusClass">
+                            <div class="statusLine">
+                                <span v-if="potActionBusy" class="miniSpinner"></span>
+                                <span v-else class="stateDot"></span>
+                                <span class="statusText" v-truncate>{{ potStatusText }}</span>
+                            </div>
+                            <p class="subDesc">{{ t('downloads.pot.desc') }}</p>
+                            <div class="rowActions potActions">
+                                <button
+                                    v-if="!toolsInfo.pot.installed"
+                                    class="actBtn primary"
+                                    :disabled="potActionBusy"
+                                    @click="requestInstallPot"
+                                >{{ t('downloads.comp.btnInstall') }}</button>
+                                <button
+                                    v-else-if="potUpdateAvailable"
+                                    class="actBtn primary"
+                                    :disabled="potActionBusy"
+                                    @click="requestInstallPot"
+                                >{{ t('downloads.comp.btnUpdate') }}</button>
+                                <button
+                                    v-if="toolsInfo.pot.managed"
+                                    class="actBtn ghost danger"
+                                    :disabled="potActionBusy"
+                                    @click="onDeletePot"
+                                >{{ t('downloads.comp.btnDelete') }}</button>
+                            </div>
                         </div>
                     </div>
-                </transition>
+                </div>
             </template>
         </div>
 
@@ -672,7 +705,8 @@ onMounted(async () => {
             <h2 class="sectionTitle">{{ t('downloads.proxy.sectionTitle') }}</h2>
             <div class="dlProxy">
                 <p class="dlProxyDesc">{{ t('downloads.proxy.desc') }}</p>
-                <div class="proxySeg" role="radiogroup">
+                <div class="proxySeg" role="radiogroup" :style="{ '--seg-i': proxyIndex }">
+                    <span class="segThumb" aria-hidden="true"></span>
                     <button
                         v-for="m in proxyModeOptions"
                         :key="m.key"
@@ -685,27 +719,34 @@ onMounted(async () => {
                         <span>{{ m.label }}</span>
                     </button>
                 </div>
-                <div v-if="proxyConfig.mode === 'custom'" class="proxyCustom">
-                    <input
-                        class="proxyInput"
-                        type="text"
-                        :placeholder="t('downloads.proxy.customPlaceholder')"
-                        v-model="proxyUrlInput"
-                        spellcheck="false"
-                        autocapitalize="off"
-                        autocomplete="off"
-                        @blur="saveCustomUrl"
-                        @keydown.enter="saveCustomUrl"
-                    />
+                <div class="proxyCustomWrap" :class="{ open: proxyConfig.mode === 'custom' }" :inert="proxyConfig.mode !== 'custom'">
+                    <div class="proxyCustomInner">
+                        <input
+                            class="proxyInput"
+                            type="text"
+                            :placeholder="t('downloads.proxy.customPlaceholder')"
+                            v-model="proxyUrlInput"
+                            spellcheck="false"
+                            autocapitalize="off"
+                            autocomplete="off"
+                            @blur="saveCustomUrl"
+                            @keydown.enter="saveCustomUrl"
+                        />
+                    </div>
                 </div>
-                <p class="proxyHint">{{ proxyHint }}</p>
-                <p v-if="proxyError" class="dlFolderWarn">{{ proxyError }}</p>
+                <Transition name="hintFade" mode="out-in">
+                    <p class="proxyHint" :key="proxyConfig.mode">{{ proxyHint }}</p>
+                </Transition>
+                <Transition name="noteSlide">
+                    <p v-if="proxyError" class="dlWarn">{{ proxyError }}</p>
+                </Transition>
             </div>
         </template>
 
         <!-- Regional blocking: downloading may be unavailable -->
         <p class="regionNote">{{ t('downloads.vpnNote') }}</p>
-        </template>
+        </div>
+        </Transition>
 
         <ConfirmModal
             :open="confirmOpen"
@@ -745,15 +786,70 @@ onMounted(async () => {
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.42);
 }
 
+/* The whole downloads zone appears/disappears with the master toggle above. */
+.dlZone {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
+.dlZone-enter-active {
+    transition: opacity .32s ease, transform .32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.dlZone-leave-active {
+    transition: opacity .16s ease;
+}
+.dlZone-enter-from {
+    opacity: 0;
+    transform: translateY(12px);
+}
+.dlZone-leave-to {
+    opacity: 0;
+}
+
 /* Bottom footnote about regional blocking/VPN — quiet, no call to action. */
 .regionNote {
-    margin-top: 28px;
+    margin-top: 30px;
+    padding-top: 18px;
     max-width: 800px;
     width: 100%;
+    border-top: 1px solid hsla(0, 0%, 100%, 0.05);
     font-weight: 500;
     font-size: 12.5px;
     line-height: 1.5;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.38);
+}
+
+/* Warning/error notes shared by folder and proxy blocks; animated in. */
+.dlWarn {
+    margin: 10px 0 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: hsla(38, 85%, 72%, 0.95);
+}
+.noteSlide-enter-active {
+    transition: opacity .22s ease, transform .22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.noteSlide-leave-active {
+    transition: opacity .14s ease;
+}
+.noteSlide-enter-from {
+    opacity: 0;
+    transform: translateY(-4px);
+}
+.noteSlide-leave-to {
+    opacity: 0;
+}
+
+/* Section titles of the downloads zone */
+.sectionTitle {
+    margin-top: 40px;
+    margin-bottom: 16px;
+    max-width: 800px;
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-weight: 800;
+    font-size: 19px;
+    color: hsla(0, 0%, 100%, 0.92);
 }
 
 /* Download folder */
@@ -766,24 +862,35 @@ onMounted(async () => {
     flex-direction: row;
     align-items: center;
     gap: 14px;
-    padding: 12px 16px;
-    border-radius: 16px;
+    padding: 12px 16px 12px 12px;
+    border-radius: 18px;
     background: hsla(0, 0%, 100%, 0.028);
+    transition: background-color .2s ease;
 }
-.dlFolderIcon {
+.dlFolderRow:hover {
+    background: hsla(0, 0%, 100%, 0.04);
+}
+/* Accent-tinted tile; opens the folder in the system explorer. */
+.dlFolderTile {
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 6px;
-    border-radius: 8px;
+    width: 42px;
+    height: 42px;
+    border-radius: 13px;
     cursor: pointer;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.55);
-    background: transparent;
-    transition: .2s ease;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 78%, 0.8);
+    background: hsla(var(--accent-h), var(--accent-s), 62%, 0.1);
+    transition: background-color .2s ease, color .2s ease, transform .2s ease;
 }
-.dlFolderIcon:hover {
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.85);
+.dlFolderTile:hover {
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.5), 88%, 1);
+    background: hsla(var(--accent-h), var(--accent-s), 62%, 0.16);
+    transform: translateY(-1px);
+}
+.dlFolderTile:active {
+    transform: translateY(0) scale(0.96);
 }
 .dlFolderInfo {
     flex: 1;
@@ -817,44 +924,6 @@ onMounted(async () => {
     align-items: center;
     gap: 8px;
 }
-.dlFolderActions .actBtn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-}
-/* Spinner sits ON TOP of the text (absolute); text is just faded via opacity,
-   so button width never changes. Both stay in the DOM and cross-fade via
-   opacity instead of flicking with v-if. */
-.dlFolderActions .actBtn.primary {
-    position: relative;
-}
-.dlFolderActions .btnLabel {
-    opacity: 1;
-    transition: opacity .18s ease;
-}
-.dlFolderActions .actBtn.loading .btnLabel {
-    opacity: 0;
-}
-.dlFolderActions .btnSpinner {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity .18s ease;
-}
-.dlFolderActions .actBtn.loading .btnSpinner {
-    opacity: 1;
-}
-.dlFolderWarn {
-    margin: 10px 0 0;
-    font-size: 12.5px;
-    font-weight: 600;
-    line-height: 1.4;
-    color: hsla(38, 85%, 72%, 0.95);
-}
 
 /* Proxy for yt-dlp */
 .dlProxy {
@@ -868,25 +937,40 @@ onMounted(async () => {
     line-height: 1.5;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
 }
-/* Mode switcher — matches the "block mode" pattern in appearance settings:
-   dark container with an inset border, transparent buttons, soft active bg. */
+/* Mode switcher — dark container with an inset border and a sliding thumb
+   behind the active option (equal-width segments make the slide exact). */
 .proxySeg {
-    display: inline-flex;
-    align-items: center;
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
     gap: 2px;
     padding: 3px;
+    width: min(100%, 340px);
     border-radius: 16px;
     background-color: var(--dark-bg);
     box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
 }
+.segThumb {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    left: 3px;
+    width: calc((100% - 6px - 4px) / 3);
+    border-radius: 13px;
+    background-color: hsla(0, 0%, 100%, 0.09);
+    transform: translateX(calc(var(--seg-i, 0) * (100% + 2px)));
+    transition: transform .26s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+}
 .proxySegBtn {
     user-select: none;
-    min-width: 92px;
+    position: relative;
+    z-index: 1;
     height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0 14px;
+    padding: 0 10px;
     border-radius: 13px;
     background-color: transparent;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.35), 84%, 0.58);
@@ -894,33 +978,52 @@ onMounted(async () => {
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
-    transition: background-color .18s ease, color .18s ease;
+    transition: color .18s ease;
 }
 .proxySegBtn:hover {
     color: hsla(0, 0%, 100%, 0.82);
 }
 .proxySegBtn.active {
-    background-color: hsla(0, 0%, 100%, 0.09);
     color: #ffffff;
 }
-.proxyCustom {
-    margin-top: 12px;
+/* Custom URL field appears only in "custom" mode — smooth grid collapse. */
+.proxyCustomWrap {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows .3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.proxyCustomWrap.open {
+    grid-template-rows: 1fr;
+}
+.proxyCustomInner {
+    overflow: hidden;
+    min-height: 0;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity .22s ease, transform .3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.proxyCustomWrap.open .proxyCustomInner {
+    opacity: 1;
+    transform: none;
 }
 .proxyInput {
     width: 100%;
     max-width: 420px;
+    margin-top: 12px;
     padding: 10px 16px;
     border-radius: 999px;
     border: none;
     background: hsla(0, 0%, 100%, 0.04);
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0);
     color: hsla(0, 0%, 100%, 0.92);
     font-family: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 13px;
     outline: none;
-    transition: background-color .18s ease;
+    transition: background-color .18s ease, box-shadow .18s ease;
 }
 .proxyInput:focus {
     background: hsla(0, 0%, 100%, 0.07);
+    box-shadow: inset 0 0 0 1px hsla(var(--accent-h), var(--accent-s), 70%, 0.35);
 }
 .proxyHint {
     margin: 10px 0 0;
@@ -929,26 +1032,15 @@ onMounted(async () => {
     line-height: 1.45;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.42);
 }
+.hintFade-enter-active,
+.hintFade-leave-active {
+    transition: opacity .14s ease;
+}
+.hintFade-enter-from,
+.hintFade-leave-to {
+    opacity: 0;
+}
 
-/* Required components */
-.sectionTitle {
-    margin-top: 40px;
-    margin-bottom: 16px;
-    max-width: 800px;
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-weight: 800;
-    font-size: 19px;
-    color: hsla(0, 0%, 100%, 0.92);
-}
-/* Dependency-block loader: same box as .unifiedPanel, just with a spinner
-   inside — otherwise a small disconnected spinner would flash instead of a panel. */
-.toolLoading {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 168px;
-    padding: 18px 20px 16px;
-}
 .miniSpinner {
     flex-shrink: 0;
     width: 13px;
@@ -969,7 +1061,6 @@ onMounted(async () => {
     width: 100%;
     border-radius: 24px;
     background: hsla(0, 0%, 100%, 0.028);
-    transition: border-color .24s ease;
     overflow: hidden;
 }
 /* Something missing / update available — a soft accent top nudges toward
@@ -980,6 +1071,25 @@ onMounted(async () => {
         linear-gradient(180deg, hsla(var(--accent-h), var(--accent-s), 50%, 0.07), hsla(0, 0%, 100%, 0.028) 70px),
         hsla(0, 0%, 100%, 0.028);
 }
+/* Staggered entrance when the panel replaces the skeleton. */
+.unifiedPanel:not(.skeletonPanel) > * {
+    animation: panelRise .4s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.unifiedPanel:not(.skeletonPanel) > *:nth-child(2) { animation-delay: .04s; }
+.unifiedPanel:not(.skeletonPanel) > *:nth-child(3) { animation-delay: .07s; }
+.unifiedPanel:not(.skeletonPanel) > *:nth-child(4) { animation-delay: .1s; }
+.unifiedPanel:not(.skeletonPanel) > *:nth-child(5) { animation-delay: .13s; }
+.unifiedPanel:not(.skeletonPanel) > *:nth-child(6) { animation-delay: .16s; }
+@keyframes panelRise {
+    from {
+        opacity: 0;
+        transform: translateY(7px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
 .panelSection {
     padding: 18px 20px 16px;
 }
@@ -988,6 +1098,36 @@ onMounted(async () => {
     margin: 0 20px;
     background: hsla(0, 0%, 100%, 0.05);
 }
+
+/* Skeleton while tool info loads — mirrors the real panel's layout. */
+.skeletonPanel {
+    min-height: 168px;
+}
+.skelRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.skel {
+    display: block;
+    border-radius: 7px;
+    background: linear-gradient(
+        90deg,
+        hsla(0, 0%, 100%, 0.04) 25%,
+        hsla(0, 0%, 100%, 0.085) 50%,
+        hsla(0, 0%, 100%, 0.04) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.4s linear infinite;
+}
+.skelPill {
+    border-radius: 999px;
+}
+@keyframes shimmer {
+    from { background-position: 200% 0; }
+    to { background-position: -200% 0; }
+}
+
 .depTop {
     display: flex;
     flex-direction: row;
@@ -995,12 +1135,19 @@ onMounted(async () => {
     gap: 16px;
 }
 .depHead { flex: 1; min-width: 0; }
-.depTitle {
+.subTitle {
     margin: 0;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-weight: 800;
     font-size: 15px;
     color: hsla(0, 0%, 100%, 0.95);
+}
+.subDesc {
+    margin: 5px 0 0;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.45;
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.45);
 }
 .depDesc {
     margin: 4px 0 0;
@@ -1024,6 +1171,7 @@ onMounted(async () => {
     font-weight: 700;
     color: hsla(0, 0%, 100%, 0.6);
     white-space: nowrap;
+    transition: color .24s ease, background-color .24s ease;
 }
 .stateDot {
     flex-shrink: 0;
@@ -1031,50 +1179,94 @@ onMounted(async () => {
     height: 7px;
     border-radius: 50%;
     background-color: hsla(0, 0%, 100%, 0.3);
+    transition: background-color .24s ease;
 }
 .depState.ok { color: hsla(145, 55%, 70%, 0.95); background: hsla(145, 45%, 45%, 0.12); }
 .depState.ok .stateDot { background-color: hsla(145, 60%, 55%, 0.95); }
 .depState.update { color: hsla(38, 90%, 70%, 1); background: hsla(38, 85%, 50%, 0.14); cursor: help; }
-.depState.update .stateDot { background-color: hsla(38, 90%, 58%, 0.95); }
+.depState.update .stateDot {
+    background-color: hsla(38, 90%, 58%, 0.95);
+    animation: dotPulse 2.2s ease-in-out infinite;
+}
 .depState.missing { color: hsla(0, 0%, 100%, 0.5); }
 .depState.missing .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
+@keyframes dotPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
 
-.depChips {
+/* The three tools as one rail of equal cells with hairline separators. */
+.toolRail {
     display: flex;
-    flex-flow: row wrap;
-    gap: 8px;
+    flex-direction: row;
     margin-top: 14px;
+    border-radius: 13px;
+    background: hsla(0, 0%, 0%, 0.16);
+    overflow: hidden;
 }
-.depChip {
-    display: inline-flex;
+.toolCell {
+    flex: 1;
+    min-width: 0;
+    display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 6px 11px;
-    border-radius: 9px;
-    background: hsla(0, 0%, 100%, 0.035);
+    gap: 8px;
+    padding: 10px 14px;
 }
-.chipDot {
+.toolCell + .toolCell {
+    border-left: 1px solid hsla(0, 0%, 100%, 0.05);
+}
+/* Ring + core dot: the core pops green when the tool becomes installed. */
+.toolDot {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.14);
+    transition: box-shadow .24s ease;
+}
+.toolDotCore {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background-color: hsla(0, 0%, 100%, 0.25);
+    background-color: hsla(0, 0%, 100%, 0.22);
     transition: background-color .24s ease;
 }
-.depChip.on .chipDot { background-color: hsla(145, 60%, 55%, 0.95); }
-.chipName {
+.toolCell.on .toolDot {
+    box-shadow: inset 0 0 0 1px hsla(145, 50%, 55%, 0.4);
+}
+.toolCell.on .toolDotCore {
+    background-color: hsla(145, 60%, 55%, 0.95);
+    animation: dotPop .35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes dotPop {
+    0% { transform: scale(0.4); }
+    60% { transform: scale(1.35); }
+    100% { transform: scale(1); }
+}
+.toolName {
     font-family: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 12.5px;
     font-weight: 600;
     letter-spacing: -0.01em;
     color: hsla(0, 0%, 100%, 0.45);
+    transition: color .24s ease;
+    white-space: nowrap;
 }
-.depChip.on .chipName { color: hsla(0, 0%, 100%, 0.9); }
-.chipVer {
+.toolCell.on .toolName { color: hsla(0, 0%, 100%, 0.9); }
+.toolVer {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 11px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.35);
 }
+.toolVer.off { color: hsla(0, 0%, 100%, 0.2); }
 
 /* Thin indicator bar during install. */
 .depBar {
@@ -1108,9 +1300,10 @@ onMounted(async () => {
     margin-top: 16px;
 }
 
-/* Action buttons (shared by both blocks) */
+/* Action buttons (shared across the zone) */
 .actBtn {
     cursor: pointer;
+    position: relative;
     padding: 9px 18px;
     border-radius: 999px;
     font-size: 13px;
@@ -1121,6 +1314,9 @@ onMounted(async () => {
     cursor: default;
     opacity: 0.35;
 }
+.actBtn:not(:disabled):active {
+    transform: scale(0.97);
+}
 .actBtn.primary {
     color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
     background-color: hsla(0, 0%, 100%, 0.95);
@@ -1128,6 +1324,9 @@ onMounted(async () => {
 .actBtn.primary:not(:disabled):hover {
     background-color: #fff;
     transform: translateY(-1px);
+}
+.actBtn.primary:not(:disabled):active {
+    transform: translateY(0) scale(0.97);
 }
 .actBtn.ghost {
     color: hsla(0, 0%, 100%, 0.6);
@@ -1141,6 +1340,30 @@ onMounted(async () => {
 .actBtn.ghost.danger:not(:disabled):hover {
     color: hsla(2, 72%, 80%, 1);
     background-color: hsla(2, 60%, 50%, 0.16);
+}
+/* Spinner sits ON TOP of the text (absolute); text is just faded via opacity,
+   so button width never changes. Both stay in the DOM and cross-fade via
+   opacity instead of flicking with v-if. */
+.actBtn .btnLabel {
+    opacity: 1;
+    transition: opacity .18s ease;
+}
+.actBtn.loading .btnLabel {
+    opacity: 0;
+}
+/* Centered via negative margins, not translate — the spin animation owns
+   the transform property. */
+.actBtn .btnSpinner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    margin: -6.5px 0 0 -6.5px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+}
+.actBtn.loading .btnSpinner {
+    opacity: 1;
 }
 
 /* "Check updates" button: both labels sit in the same grid cell, so width is
@@ -1164,20 +1387,22 @@ onMounted(async () => {
 .checkBtn.checking .checkLabel.busy { visibility: visible; }
 
 /* Cookies/PO-token sections: quieter than the components section (both
-   optional). Content stacked (status/desc, then an actions row), matching
-   the components section's own depTop -> depActions pattern for a
-   consistent look across all sub-sections of the unified panel. */
-.panelSection.cookiesSection,
-.panelSection.potSection {
+   optional). A sub-title + short description, then one row with the live
+   status on the left and actions on the right. */
+.statusRow {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
 }
-.ytAuthStatusRow {
+.statusLine {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 8px;
 }
-.ytAuthState {
+.statusText {
     min-width: 0;
     font-size: 13px;
     font-weight: 700;
@@ -1185,29 +1410,30 @@ onMounted(async () => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    transition: color .24s ease;
 }
-.panelSection.valid .stateDot { background-color: hsla(145, 60%, 55%, 0.95); }
-.panelSection.valid .ytAuthState { color: hsla(145, 45%, 75%, 0.95); }
-.panelSection.invalid .ytAuthState { color: hsla(2, 60%, 74%, 0.92); }
-.panelSection.invalid .stateDot { background-color: hsla(2, 70%, 60%, 0.95); }
-.panelSection.none .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
-.ytAuthDesc {
-    margin: 5px 0 0;
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.45;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.45);
-}
-.ytAuthActions {
+.rowActions {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
-    justify-content: flex-end;
     gap: 8px;
+}
+.panelSection.valid .stateDot { background-color: hsla(145, 60%, 55%, 0.95); }
+.panelSection.valid .statusText { color: hsla(145, 45%, 75%, 0.95); }
+.panelSection.invalid .statusText { color: hsla(2, 60%, 74%, 0.92); }
+.panelSection.invalid .stateDot { background-color: hsla(2, 70%, 60%, 0.95); }
+.panelSection.none .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
+
+/* PO-token section: status line first (it IS the title there), then the
+   description, then right-aligned actions. */
+.potSection .statusLine { margin-top: 0; }
+.potActions {
+    justify-content: flex-end;
     margin-top: 12px;
 }
 
 /* "Advanced" collapsible toggle (PO-token, optional) — same weight/color
-   family as .depTitle so it reads as a sub-section header, not a stray link. */
+   family as .subTitle so it reads as a sub-section header, not a stray link. */
 .advancedToggle {
     display: flex;
     align-items: center;
@@ -1235,27 +1461,36 @@ onMounted(async () => {
     height: 14px;
     opacity: 0.55;
     transform: rotate(180deg);
-    transition: transform .2s ease, opacity .2s ease;
+    transition: transform .26s cubic-bezier(0.22, 1, 0.36, 1), opacity .2s ease;
 }
 .advancedChevron.open {
     opacity: 0.8;
     transform: rotate(0deg);
 }
 
-/* Height/fade transition for the PO-token section — same recipe as
-   .extraModePanel in Appearance.vue (max-height, not a measured height, since
-   the content's natural height is small and bounded). */
-.advancedPanel-enter-active,
-.advancedPanel-leave-active {
-    transition: opacity .18s ease, transform .18s ease, max-height .18s ease;
-    max-height: 260px;
-    overflow: hidden;
+/* Smooth height collapse for the PO-token section (grid-rows trick: content
+   stays mounted, so no re-fetch/re-render on every open). */
+.advCollapse {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows .3s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.advancedPanel-enter-from,
-.advancedPanel-leave-to {
+.advCollapse.open {
+    grid-template-rows: 1fr;
+}
+.advInner {
+    overflow: hidden;
+    min-height: 0;
     opacity: 0;
     transform: translateY(-4px);
-    max-height: 0;
+    transition: opacity .22s ease, transform .3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.advCollapse.open .advInner {
+    opacity: 1;
+    transform: none;
+}
+.advCollapse .potSection {
+    padding-top: 4px;
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
@@ -1271,8 +1506,15 @@ onMounted(async () => {
     .dlFolderRow { flex-wrap: wrap; }
     .dlFolderActions { flex: 1 0 100%; }
     .dlFolderActions .actBtn { flex: 1; }
-    .depActions,
-    .ytAuthActions { flex-wrap: wrap; }
+    .toolRail { flex-direction: column; }
+    .toolCell + .toolCell {
+        border-left: none;
+        border-top: 1px solid hsla(0, 0%, 100%, 0.05);
+    }
+    .statusRow { flex-wrap: wrap; }
+    .rowActions { flex: 1 0 100%; }
+    .depActions { flex-wrap: wrap; }
     .actBtn { flex: 1; padding: 12px 18px; }
+    .proxySeg { width: 100%; }
 }
 </style>
