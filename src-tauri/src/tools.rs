@@ -25,6 +25,8 @@ pub struct ResolvedTools {
     pub ffmpeg: Option<PathBuf>,
     /// JS runtime for yt-dlp (YouTube nsig decryption); some formats unavailable without it.
     pub deno: Option<PathBuf>,
+    /// Netscape-format cookies file for yt-dlp's `--cookies`, populated by the
+    /// browser-extension bridge (see `browser_bridge`), not by an in-app login.
     pub cookies_file: Option<PathBuf>,
     /// `--proxy` value: `None` = don't pass the flag (system proxy/env), `Some("")` =
     /// direct connection, `Some(url)` = explicit proxy.
@@ -126,13 +128,20 @@ fn pot_local(app_data_dir: &Path) -> PathBuf {
     })
 }
 
-/// Directory passed to yt-dlp's `--plugin-dirs`; holds only the POT provider's
-/// script/CLI plugin as a `yt_dlp_plugins/extractor/...` namespace package.
+/// Directory passed to yt-dlp's `--plugin-dirs`.
+///
+/// yt-dlp expects portable plugins under
+/// `yt-dlp-plugins/<package-name>/yt_dlp_plugins/...`, not directly under
+/// `yt-dlp-plugins/yt_dlp_plugins/...`.
 fn pot_plugin_dir(app_data_dir: &Path) -> PathBuf {
     bin_dir(app_data_dir).join("yt-dlp-plugins")
 }
 
-/// The script/CLI provider's files, relative to [`pot_plugin_dir`]. The
+fn pot_plugin_package_dir(app_data_dir: &Path) -> PathBuf {
+    pot_plugin_dir(app_data_dir).join("bgutil-ytdlp-pot-provider")
+}
+
+/// The script/CLI provider's files, relative to [`pot_plugin_package_dir`]. The
 /// HTTP-server provider (`getpot_bgutil_http.py`) is deliberately not
 /// installed — we only ever run bgutil-pot in one-shot CLI mode, and shipping
 /// the HTTP provider too would make yt-dlp waste a request probing a server
@@ -142,9 +151,29 @@ const POT_PLUGIN_FILES: &[&str] = &[
     "yt_dlp_plugins/extractor/getpot_bgutil_cli.py",
 ];
 
-fn pot_plugin_files_present(app_data_dir: &Path) -> bool {
-    let dir = pot_plugin_dir(app_data_dir);
+fn pot_plugin_files_present_in(dir: &Path) -> bool {
     POT_PLUGIN_FILES.iter().all(|rel| dir.join(rel).exists())
+}
+
+fn pot_plugin_files_present(app_data_dir: &Path) -> bool {
+    pot_plugin_files_present_in(&pot_plugin_package_dir(app_data_dir))
+}
+
+fn repair_legacy_pot_plugin_layout(app_data_dir: &Path) {
+    let legacy_dir = pot_plugin_dir(app_data_dir);
+    let package_dir = pot_plugin_package_dir(app_data_dir);
+    if pot_plugin_files_present_in(&package_dir) || !pot_plugin_files_present_in(&legacy_dir) {
+        return;
+    }
+
+    for rel in POT_PLUGIN_FILES {
+        let src = legacy_dir.join(rel);
+        let dst = package_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(src, dst);
+    }
 }
 
 /// Sanity-checks that `program` runs by invoking it with a version argument.
@@ -206,6 +235,7 @@ pub fn resolve_pot(app_data_dir: &Path) -> Option<PotProvider> {
     if !local.exists() || !runs(&local, "--version") {
         return None;
     }
+    repair_legacy_pot_plugin_layout(app_data_dir);
     if !pot_plugin_files_present(app_data_dir) {
         return None;
     }
@@ -1199,7 +1229,7 @@ pub fn install_pot(app_data_dir: &Path, report: &(dyn Fn(String) + Sync)) -> Res
     let plugin_zip = staging.path().join("plugin.zip");
     download_to_file(&plugin_zip_url, &plugin_zip, |_, _| {})
         .map_err(|e| format!("Не удалось скачать плагин yt-dlp: {}", e))?;
-    extract_zip_paths(&plugin_zip, &pot_plugin_dir(app_data_dir), POT_PLUGIN_FILES)
+    extract_zip_paths(&plugin_zip, &pot_plugin_package_dir(app_data_dir), POT_PLUGIN_FILES)
         .map_err(|e| format!("Не удалось распаковать плагин yt-dlp: {}", e))?;
 
     // Only swap the live binary in once the plugin is confirmed in place too —
@@ -1342,6 +1372,38 @@ mod tests {
     fn deno_runtime_value_preserves_forward_slash_paths() {
         let path = Path::new("/home/user/bin/deno");
         assert_eq!(deno_runtime_value(path), "deno:/home/user/bin/deno");
+    }
+
+    #[test]
+    fn pot_plugin_layout_uses_package_dir_under_plugin_root() {
+        let dir = temp_dir("pot_plugin_layout");
+        let root = pot_plugin_dir(&dir);
+        let package = pot_plugin_package_dir(&dir);
+
+        assert_eq!(root, bin_dir(&dir).join("yt-dlp-plugins"));
+        assert_eq!(package, root.join("bgutil-ytdlp-pot-provider"));
+
+        let _ = std::fs::remove_dir_all(bin_dir(&dir));
+    }
+
+    #[test]
+    fn repair_legacy_pot_plugin_layout_copies_into_named_package() {
+        let dir = temp_dir("pot_plugin_repair");
+        let legacy = pot_plugin_dir(&dir);
+        for rel in POT_PLUGIN_FILES {
+            let p = legacy.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"plugin").unwrap();
+        }
+
+        assert!(!pot_plugin_files_present(&dir));
+        repair_legacy_pot_plugin_layout(&dir);
+        assert!(pot_plugin_files_present(&dir));
+        for rel in POT_PLUGIN_FILES {
+            assert!(pot_plugin_package_dir(&dir).join(rel).exists());
+        }
+
+        let _ = std::fs::remove_dir_all(bin_dir(&dir));
     }
 
     #[test]

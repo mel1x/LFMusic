@@ -9,7 +9,7 @@
 //! status bar as the `download` phase (via [`crate::report_download_progress`]),
 //! last after analysis and external sources.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -105,7 +105,6 @@ pub struct ToolsStatus {
     /// Cookies passed validation — downloading is unlocked.
     pub cookies_valid: bool,
     pub cookies_checking: bool,
-    pub cookies_login_open: bool,
     pub cookies_message: Option<String>,
 }
 
@@ -132,13 +131,14 @@ pub struct DownloadManager {
     cookies_authorized: bool,
     cookies_valid: bool,
     cookies_checking: bool,
-    cookies_login_open: bool,
     cookies_message: Option<String>,
     /// Whether cookie state was loaded from disk yet this run; until then the
     /// cookies_* fields are zeroed and don't reflect a saved login.
     cookies_seeded: bool,
-    /// Active download's child process (for cancellation).
-    current_child: Arc<Mutex<Option<Child>>>,
+    /// Active downloads' child processes, keyed by job id (for cancellation).
+    /// Multiple entries when [`DOWNLOAD_CONCURRENCY`] > 1 workers are each
+    /// mid-download at once.
+    active_children: HashMap<u64, Arc<Mutex<Option<Child>>>>,
 }
 
 impl Default for DownloadManager {
@@ -158,10 +158,9 @@ impl Default for DownloadManager {
             cookies_authorized: false,
             cookies_valid: false,
             cookies_checking: false,
-            cookies_login_open: false,
             cookies_message: None,
             cookies_seeded: false,
-            current_child: Arc::new(Mutex::new(None)),
+            active_children: HashMap::new(),
         }
     }
 }
@@ -180,7 +179,6 @@ impl DownloadManager {
                 cookies_authorized: self.cookies_authorized,
                 cookies_valid: self.cookies_valid,
                 cookies_checking: self.cookies_checking,
-                cookies_login_open: self.cookies_login_open,
                 cookies_message: self.cookies_message.clone(),
             },
         }
@@ -231,9 +229,9 @@ impl DownloadManager {
     }
 
     /// Remove an item: queued just drops it (and shrinks run_total); downloading
-    /// drops it and returns the active child process for cancellation (if the
-    /// worker hasn't already taken it); done/error just drops it from history.
-    /// Killing the process/emitting is left to the caller ([`remove`]).
+    /// drops it and returns that job's active child process for cancellation (if
+    /// its worker hasn't already taken it); done/error just drops it from
+    /// history. Killing the process/emitting is left to the caller ([`remove`]).
     fn remove_item(&mut self, id: u64) -> Option<Child> {
         let pos = self.items.iter().position(|i| i.id == id)?;
         let status = self.items[pos].status.clone();
@@ -246,10 +244,9 @@ impl DownloadManager {
             "downloading" => {
                 // Worker will notice it's gone and count it toward run_done.
                 self.items.remove(pos);
-                self.current_child
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take()
+                self.active_children
+                    .get(&id)
+                    .and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take())
             }
             _ => {
                 self.items.remove(pos);
@@ -325,17 +322,18 @@ pub fn snapshot(app: &AppHandle) -> DownloadSnapshot {
     with_manager(app, |m| m.snapshot())
 }
 
-/// Kill the active yt-dlp child process on app exit. Rust doesn't kill running
-/// `Child`s when the parent exits, so without this yt-dlp would linger as a
-/// zombie background process. Hooked to `RunEvent::Exit` in lib.rs.
+/// Kill all active yt-dlp child processes on app exit. Rust doesn't kill
+/// running `Child`s when the parent exits, so without this yt-dlp would linger
+/// as a zombie background process (one per concurrent download worker).
+/// Hooked to `RunEvent::Exit` in lib.rs.
 pub fn cleanup_on_exit(app: &AppHandle) {
-    let child = with_manager(app, |m| {
-        m.current_child
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+    let children: Vec<Child> = with_manager(app, |m| {
+        m.active_children
+            .drain()
+            .filter_map(|(_, slot)| slot.lock().unwrap_or_else(|e| e.into_inner()).take())
+            .collect()
     });
-    if let Some(mut c) = child {
+    for mut c in children {
         kill_child_tree(&mut c);
     }
 }
@@ -664,20 +662,23 @@ pub fn refresh_tools_status(app: &AppHandle) -> ToolsStatus {
     })
 }
 
-// YouTube login: signs in via our own webview window, then saves session
-// cookies to cookies.txt. `--cookies-from-browser` is broken on Windows
-// (Chrome/Edge encrypt cookies with App-Bound Encryption since 2024, yt-dlp
-// fails on DPAPI). Reading the webview's own cookie store gets HttpOnly auth
-// cookies unavailable via document.cookie. The login window shares the cookie
-// store with the main webview, so the session survives app restarts.
+// YouTube cookies: imported via a companion browser extension (see
+// `browser_bridge`), which reads the browser's live cookie jar through the
+// privileged `chrome.cookies` API and posts it to a tiny local HTTP server
+// this app runs. That sidesteps two dead ends tried before:
+// - An in-app WebView2 login popup: the resulting session was treated as
+//   untrustworthy by YouTube's bot-detection at the player-API level
+//   (`LOGIN_REQUIRED` on every client, even with a valid PO token).
+// - yt-dlp's own `--cookies-from-browser` (reading the browser's cookie DB
+//   file directly): requires the browser closed, and fails outright on
+//   Chrome/Edge since 2024 (App-Bound Encryption blocks other processes from
+//   decrypting the DB). The extension has neither problem — the browser
+//   decrypts cookies for its own extension regardless of whether it's the
+//   process reading its own DB file, and regardless of whether it's running.
 
-const LOGIN_LABEL: &str = "youtube-login";
-const LOGIN_URL: &str =
-    "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F";
-/// Regular desktop Chrome UA: Google refuses to show the login form to
-/// "embedded" webviews (WebView2's default UA has `Edg/...` + embedded
-/// markers) and serves a blank/blocked page instead.
-const LOGIN_UA: &str =
+/// Regular desktop Chrome UA: makes yt-dlp's requests look like a normal
+/// browser session.
+const YOUTUBE_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 /// Stable video for a cookie validity check (popular, unlikely to be removed).
@@ -687,46 +688,180 @@ fn cookies_file(app: &AppHandle) -> PathBuf {
     app_data_dir(app).join("youtube_cookies.txt")
 }
 
-/// Isolated WebView2 data folder for the login window (Windows). Keeps its
-/// own Google session separate from the app's main profile — key for a
-/// correct "Log out": deleting cookies alone didn't drop the session (Google
-/// silently re-authed from the saved profile, so the login window reopened
-/// "already signed in"). This folder can be wiped entirely without touching
-/// the app's own localStorage/cookies.
-#[cfg(windows)]
-fn youtube_webview_dir(app: &AppHandle) -> PathBuf {
-    app_data_dir(app).join("youtube_webview")
-}
-
-/// Marker: "wipe the webview profile on next login". Set by [`logout`] when
-/// the folder couldn't be wiped immediately (WebView2 still held it after a
-/// recent window). [`build_login_window`] wipes it before opening, by which
-/// point the prior webview process has exited and the folder is free.
-#[cfg(windows)]
-fn youtube_webview_reset_marker(app: &AppHandle) -> PathBuf {
-    app_data_dir(app).join("youtube_webview.reset")
-}
-
-/// Wipes the login window's isolated WebView2 profile, retrying since WebView2
-/// may hold the folder briefly after the window closes.
-#[cfg(windows)]
-fn purge_youtube_webview_dir(app: &AppHandle) -> bool {
-    let dir = youtube_webview_dir(app);
-    for _ in 0..10 {
-        if !dir.exists() {
-            return true;
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        if !dir.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
-    !dir.exists()
-}
-
 pub fn is_authorized(app: &AppHandle) -> bool {
     cookies_file(app).exists()
+}
+
+/// One cookie as reported by the browser extension's `chrome.cookies.getAll()`
+/// — richer than a flattened `Cookie:` header string, so the Netscape file
+/// below carries an accurate domain/secure/expiry per cookie rather than
+/// guessing them.
+/// Field names match `chrome.cookies.Cookie` (camelCase) — the extension
+/// forwards its `chrome.cookies.getAll()` results essentially as-is.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub http_only: bool,
+    /// Seconds since epoch; absent = session cookie.
+    #[serde(default)]
+    pub expiration_date: Option<f64>,
+}
+
+/// YouTube auth cookie names; their presence means the browser session is signed in.
+const AUTH_COOKIE_NAMES: &[&str] = &["__Secure-3PSID", "__Secure-1PSID", "LOGIN_INFO", "SID"];
+
+fn has_bridge_auth_cookie(cookies: &[BridgeCookie]) -> bool {
+    cookies.iter().any(|c| {
+        let domain = c.domain.trim_start_matches('.').to_ascii_lowercase();
+        domain.contains("youtube.com") && AUTH_COOKIE_NAMES.contains(&c.name.as_str())
+    })
+}
+
+/// Maps a cookie's domain to the wildcard form yt-dlp expects (`.youtube.com`
+/// etc., `include_sub=TRUE`) regardless of the browser-reported domain's exact
+/// shape, so a cookie scoped to e.g. `accounts.google.com` still matches
+/// requests to `music.youtube.com`. `None` for domains outside the three we
+/// care about (everything else is dropped, not just left host-only).
+fn netscape_youtube_domain_field(domain: &str, http_only: bool) -> Option<(String, &'static str)> {
+    let trimmed = domain.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let bare = trimmed.trim_start_matches('.').to_ascii_lowercase();
+    let normalized = if bare == "youtube.com" || bare.ends_with(".youtube.com") {
+        ".youtube.com"
+    } else if bare == "google.com" || bare.ends_with(".google.com") {
+        ".google.com"
+    } else if bare == "googlevideo.com" || bare.ends_with(".googlevideo.com") {
+        ".googlevideo.com"
+    } else {
+        return None;
+    };
+    let field = if http_only {
+        format!("#HttpOnly_{}", normalized)
+    } else {
+        normalized.to_string()
+    };
+    Some((field, "TRUE"))
+}
+
+/// Renders cookies received from the browser-extension bridge into a
+/// Netscape-format cookies file body for yt-dlp's `--cookies`. Pure (no
+/// AppHandle/filesystem), so it's directly unit-testable. Returns the
+/// rendered content and row count.
+fn render_bridge_cookies_file(cookies: &[BridgeCookie]) -> Result<(String, usize), String> {
+    let mut out = String::from("# Netscape HTTP Cookie File\n# Generated by LFMusic from the browser extension\n\n");
+    let mut count = 0usize;
+    for c in cookies {
+        let Some((domain_field, include_sub)) = netscape_youtube_domain_field(&c.domain, c.http_only) else {
+            continue;
+        };
+        let path = c.path.as_deref().unwrap_or("/");
+        let secure = if c.secure { "TRUE" } else { "FALSE" };
+        // Session cookies (no expiry date) -> 0.
+        let expiry = c
+            .expiration_date
+            .map(|d| d as i64)
+            .filter(|&t| t > 0)
+            .unwrap_or(0);
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            domain_field, include_sub, path, secure, expiry, c.name, c.value
+        ));
+        count += 1;
+    }
+    if count == 0 {
+        return Err("Cookies YouTube не найдены — войдите в аккаунт в браузере и отправьте сессию снова.".to_string());
+    }
+    Ok((out, count))
+}
+
+/// Writes cookies received from the browser-extension bridge to
+/// `cookies_file`. Returns the row count.
+fn write_bridge_cookies_file(app: &AppHandle, cookies: &[BridgeCookie]) -> Result<usize, String> {
+    let (content, count) = render_bridge_cookies_file(cookies)?;
+    write_private_atomic(&cookies_file(app), content.as_bytes())?;
+    Ok(count)
+}
+
+/// Writes a file atomically and privately. Cookies carry an active session, so:
+/// (1) write to a temp sibling and atomically rename, avoiding a partial file
+/// on failure; (2) set 0600 perms on Unix (umask might otherwise leave it
+/// readable by other users).
+fn write_private_atomic(target: &Path, data: &[u8]) -> Result<(), String> {
+    let tmp = target.with_extension("tmp");
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    // rename atomically replaces target, but it can be briefly locked by a
+    // concurrent yt-dlp reading cookies (sharing violation on Windows) —
+    // retry a few times before giving up.
+    let mut last: Option<std::io::Error> = None;
+    for _ in 0..10 {
+        match std::fs::rename(&tmp, target) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(format!(
+        "не удалось сохранить cookies (файл занят?): {}",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
+/// Called by the local browser-bridge server (see `browser_bridge`) when the
+/// extension posts a captured session. Validates it actually contains an auth
+/// cookie, writes the Netscape file, and marks the session valid immediately
+/// (no network re-check here — mirrors the old WebView2 login's rationale:
+/// avoids a "sent -> checking" flicker every time; a real failure surfaces via
+/// manual "Check" or a bot-wall on download).
+pub fn import_bridge_cookies(app: &AppHandle, cookies: Vec<BridgeCookie>) -> Result<usize, String> {
+    if !has_bridge_auth_cookie(&cookies) {
+        return Err(
+            "В присланной сессии нет cookies авторизации YouTube — убедитесь, что вы вошли в аккаунт в браузере."
+                .to_string(),
+        );
+    }
+    let count = write_bridge_cookies_file(app, &cookies)?;
+    clear_cookies_invalid(app);
+    with_manager(app, |m| {
+        m.cookies_authorized = true;
+        m.cookies_valid = true;
+        m.cookies_checking = false;
+        m.cookies_message = None;
+        m.cookies_seeded = true;
+    });
+    emit_snapshot(app);
+    Ok(count)
+}
+
+/// Clears the imported session: removes cookies.txt and resets status.
+pub fn clear_bridge_cookies(app: &AppHandle) {
+    let _ = std::fs::remove_file(cookies_file(app));
+    clear_cookies_invalid(app);
+    with_manager(app, |m| {
+        m.cookies_authorized = false;
+        m.cookies_valid = false;
+        m.cookies_checking = false;
+        m.cookies_message = None;
+        m.cookies_seeded = true;
+    });
+    emit_snapshot(app);
 }
 
 /// Marker file: its PRESENCE means the login is no longer valid (a check
@@ -769,8 +904,8 @@ fn mark_cookies_valid_after_success(app: &AppHandle) {
     emit_snapshot(app);
 }
 
-/// Loads saved login state from disk once per run (fields default to zero
-/// until then, not reflecting an actual saved login).
+/// Loads the saved cookies-import state from disk once per run (fields
+/// default to zero until then, not reflecting an actual imported session).
 fn ensure_cookie_seed(app: &AppHandle) {
     if with_manager(app, |m| m.cookies_seeded) {
         return;
@@ -785,359 +920,6 @@ fn ensure_cookie_seed(app: &AppHandle) {
         m.cookies_valid = authorized && !invalid;
         m.cookies_seeded = true;
     });
-}
-
-/// Opens the YouTube login window and starts watching for auth. Idempotent:
-/// if already open, just focuses it.
-pub fn open_login(app: &AppHandle) {
-    eprintln!("[youtube-login] open_login: запрошен вход");
-    if let Some(win) = app.get_webview_window(LOGIN_LABEL) {
-        let _ = win.set_focus();
-        return;
-    }
-    with_manager(app, |m| {
-        m.cookies_login_open = true;
-        m.cookies_message = None;
-    });
-    emit_snapshot(app);
-
-    // Must create the window on a background thread, not via run_on_main_thread:
-    // `WebviewWindowBuilder::build()` dispatches into the event loop and blocks
-    // the caller until ready. Calling it from the main thread would deadlock
-    // the event loop (blank window + frozen app).
-    let app2 = app.clone();
-    if std::thread::Builder::new()
-        .name("youtube-login".into())
-        .spawn(move || {
-            if let Err(e) = build_login_window(&app2) {
-                with_manager(&app2, |m| {
-                    m.cookies_login_open = false;
-                    m.cookies_message = Some(format!("Не удалось открыть окно входа: {}", e));
-                });
-                emit_snapshot(&app2);
-                return;
-            }
-            login_watch_loop(app2);
-        })
-        .is_err()
-    {
-        // Thread failed to spawn — clear the flag, or the UI would be stuck
-        // waiting for login forever.
-        with_manager(app, |m| {
-            m.cookies_login_open = false;
-            m.cookies_message = Some("Не удалось запустить вход".to_string());
-        });
-        emit_snapshot(app);
-    }
-}
-
-fn build_login_window(app: &AppHandle) -> Result<(), String> {
-    let url = tauri::Url::parse(LOGIN_URL).map_err(|e| e.to_string())?;
-
-    // If a previous "Log out" requested a reset but the folder was busy then,
-    // wipe it now (the last login window is closed, so it's free). Only clear
-    // the marker on success; otherwise leave it for the next attempt.
-    #[cfg(windows)]
-    if youtube_webview_reset_marker(app).exists() && purge_youtube_webview_dir(app) {
-        let _ = std::fs::remove_file(youtube_webview_reset_marker(app));
-    }
-
-    let builder =
-        tauri::WebviewWindowBuilder::new(app, LOGIN_LABEL, tauri::WebviewUrl::External(url))
-            .title("Вход в YouTube — LFMusic")
-            .inner_size(520.0, 720.0)
-            .min_inner_size(420.0, 560.0)
-            .center()
-            .focused(true)
-            .user_agent(LOGIN_UA)
-            .on_navigation(|url| {
-                eprintln!("[youtube-login] navigate → {}", url);
-                true
-            })
-            .on_page_load(|_w, payload| {
-                eprintln!("[youtube-login] page_load → {}", payload.url());
-            });
-
-    // Isolated WebView2 profile (Windows): a separate Google session that
-    // "Log out" wipes entirely (see youtube_webview_dir). Other platforms
-    // share the app's main profile, where logout clears cookies selectively.
-    #[cfg(windows)]
-    let builder = {
-        let dir = youtube_webview_dir(app);
-        let _ = std::fs::create_dir_all(&dir);
-        builder.data_directory(dir)
-    };
-
-    let win = builder.build().map_err(|e| {
-        eprintln!("[youtube-login] ошибка создания окна: {}", e);
-        e.to_string()
-    })?;
-    eprintln!("[youtube-login] окно создано, грузим {}", LOGIN_URL);
-    // A freshly-created WebView2 window can stay blank until its first
-    // focus/resize event.
-    let _ = win.set_focus();
-    Ok(())
-}
-
-/// YouTube auth cookie names; their presence means the user is signed in.
-const AUTH_COOKIE_NAMES: &[&str] = &["__Secure-3PSID", "__Secure-1PSID", "LOGIN_INFO", "SID"];
-
-/// Reads Google/YouTube cookies from the shared webview cookie store (login
-/// window while open, else the main window).
-fn read_youtube_cookies(app: &AppHandle) -> Vec<tauri::webview::cookie::Cookie<'static>> {
-    let Some(win) = app
-        .get_webview_window(LOGIN_LABEL)
-        .or_else(|| app.get_webview_window("main"))
-    else {
-        return Vec::new();
-    };
-    // `cookies_for_url` is more reliable than a full `cookies()` dump across
-    // backends; collect per key domain and dedup by (name, domain).
-    let urls = [
-        "https://www.youtube.com/",
-        "https://accounts.google.com/",
-        "https://www.google.com/",
-    ];
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for u in urls {
-        let Ok(url) = tauri::Url::parse(u) else {
-            continue;
-        };
-        if let Ok(cookies) = win.cookies_for_url(url) {
-            for c in cookies {
-                let key = format!("{}|{}", c.name(), c.domain().unwrap_or(""));
-                if seen.insert(key) {
-                    out.push(c);
-                }
-            }
-        }
-    }
-    out
-}
-
-fn has_youtube_auth(app: &AppHandle) -> bool {
-    read_youtube_cookies(app).iter().any(|c| {
-        let domain = c.domain().unwrap_or("").to_ascii_lowercase();
-        domain.contains("youtube.com") && AUTH_COOKIE_NAMES.contains(&c.name())
-    })
-}
-
-/// Removes YouTube/Google cookies from the shared webview store, needed on
-/// logout: deleting cookies.txt alone would leave the old session in the
-/// webview, so the next login would silently reuse the same account. Only
-/// our domains' cookies are cleared (not the whole store, which would also
-/// wipe the main window's app state).
-fn clear_webview_youtube_cookies(app: &AppHandle) {
-    let Some(win) = app
-        .get_webview_window(LOGIN_LABEL)
-        .or_else(|| app.get_webview_window("main"))
-    else {
-        return;
-    };
-    for c in read_youtube_cookies(app) {
-        let _ = win.delete_cookie(c);
-    }
-}
-
-/// Writes cookies to a Netscape-format file for yt-dlp. Returns the row count.
-fn write_cookies_file(
-    app: &AppHandle,
-    cookies: &[tauri::webview::cookie::Cookie<'static>],
-) -> Result<usize, String> {
-    let mut out = String::from("# Netscape HTTP Cookie File\n# Сгенерировано LFMusic\n\n");
-    let mut count = 0usize;
-    for c in cookies {
-        let domain = match c.domain() {
-            Some(d) if !d.is_empty() => d,
-            _ => continue,
-        };
-        let dl = domain.to_ascii_lowercase();
-        if !(dl.contains("youtube.com")
-            || dl.contains("google.com")
-            || dl.contains("googlevideo.com"))
-        {
-            continue;
-        }
-        // HttpOnly is marked with a `#HttpOnly_` domain prefix (yt-dlp understands it).
-        let http_only = c.http_only().unwrap_or(false);
-        let domain_field = if http_only {
-            format!("#HttpOnly_{}", domain)
-        } else {
-            domain.to_string()
-        };
-        let include_sub = if domain.starts_with('.') {
-            "TRUE"
-        } else {
-            "FALSE"
-        };
-        let path = c.path().unwrap_or("/");
-        let secure = if c.secure().unwrap_or(false) {
-            "TRUE"
-        } else {
-            "FALSE"
-        };
-        // Session cookies (no expiry date) -> 0.
-        let expiry = c
-            .expires_datetime()
-            .map(|d| d.unix_timestamp())
-            .filter(|&t| t > 0)
-            .unwrap_or(0);
-        out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            domain_field,
-            include_sub,
-            path,
-            secure,
-            expiry,
-            c.name(),
-            c.value()
-        ));
-        count += 1;
-    }
-    if count == 0 {
-        return Err("Cookies YouTube не найдены — войдите в аккаунт.".to_string());
-    }
-    write_private_atomic(&cookies_file(app), out.as_bytes())?;
-    Ok(count)
-}
-
-/// Writes a file atomically and privately. Cookies carry an active session, so:
-/// (1) write to a temp sibling and atomically rename, avoiding a partial file
-/// on failure; (2) set 0600 perms on Unix (umask might otherwise leave it
-/// readable by other users).
-fn write_private_atomic(target: &Path, data: &[u8]) -> Result<(), String> {
-    let tmp = target.with_extension("tmp");
-    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    // rename atomically replaces target, but it can be briefly locked by a
-    // concurrent yt-dlp reading cookies (sharing violation on Windows) —
-    // retry a few times before giving up.
-    let mut last: Option<std::io::Error> = None;
-    for _ in 0..10 {
-        match std::fs::rename(&tmp, target) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last = Some(e);
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-    Err(format!(
-        "не удалось сохранить cookies (файл занят?): {}",
-        last.map(|e| e.to_string()).unwrap_or_default()
-    ))
-}
-
-/// Saves cookies.txt and immediately treats login as valid. No automatic
-/// network re-check (used to cause a "login -> checking" flicker each time);
-/// real cookie failure is surfaced by manual "Check" or a bot-wall on download.
-fn finalize_login(app: &AppHandle) {
-    // Don't finalize without auth cookies: merely opening/closing the Google
-    // login form leaves non-auth cookies (CONSENT/NID/SOCS) in the shared
-    // store, which write_cookies_file would otherwise happily write out,
-    // falsely marking login as done.
-    if !has_youtube_auth(app) {
-        return;
-    }
-    let cookies = read_youtube_cookies(app);
-    match write_cookies_file(app, &cookies) {
-        Ok(_) => {
-            clear_cookies_invalid(app);
-            with_manager(app, |m| {
-                m.cookies_authorized = true;
-                m.cookies_valid = true;
-                m.cookies_checking = false;
-                m.cookies_message = None;
-                m.cookies_seeded = true;
-            });
-            emit_snapshot(app);
-        }
-        Err(e) => {
-            let authorized = is_authorized(app);
-            with_manager(app, |m| {
-                m.cookies_authorized = authorized;
-                m.cookies_valid = false;
-                m.cookies_message = Some(e);
-            });
-            emit_snapshot(app);
-        }
-    }
-}
-
-/// Background poll waiting for login. Watches the cookie store; finalizes and
-/// closes the window once auth cookies appear. Gives up if the user closes
-/// the window or 5 minutes pass.
-fn login_watch_loop(app: AppHandle) {
-    let start = Instant::now();
-    let mut window_seen = false;
-    loop {
-        std::thread::sleep(Duration::from_millis(1200));
-
-        if app.get_webview_window(LOGIN_LABEL).is_some() {
-            window_seen = true;
-        } else {
-            // Window closed; finalize_login re-checks for auth cookies itself,
-            // so a plain close/cancel without logging in is a no-op.
-            if window_seen {
-                finalize_login(&app);
-            }
-            with_manager(&app, |m| m.cookies_login_open = false);
-            emit_snapshot(&app);
-            return;
-        }
-
-        if start.elapsed() > Duration::from_secs(300) {
-            if let Some(w) = app.get_webview_window(LOGIN_LABEL) {
-                let _ = w.close();
-            }
-            with_manager(&app, |m| m.cookies_login_open = false);
-            emit_snapshot(&app);
-            return;
-        }
-
-        if has_youtube_auth(&app) {
-            // Finalize while the window is still open, then close it.
-            finalize_login(&app);
-            if let Some(w) = app.get_webview_window(LOGIN_LABEL) {
-                let _ = w.close();
-            }
-            with_manager(&app, |m| m.cookies_login_open = false);
-            emit_snapshot(&app);
-            return;
-        }
-    }
-}
-
-/// Logs out: removes cookies.txt, wipes the YouTube/Google webview session,
-/// and resets status. Without wiping the session, the next login would
-/// silently reauth from the saved profile (deleting cookies alone isn't enough).
-pub fn logout(app: &AppHandle) {
-    let _ = std::fs::remove_file(cookies_file(app));
-    // Windows: wipe the isolated login profile. If still busy (WebView2 hasn't
-    // released the folder), set a marker so build_login_window retries it later.
-    #[cfg(windows)]
-    if !purge_youtube_webview_dir(app) {
-        let _ = std::fs::write(youtube_webview_reset_marker(app), b"1");
-    }
-    // Selective cookie cleanup on the shared profile: the main path on
-    // non-Windows, and a legacy-session cleanup on Windows (from before the
-    // isolated login profile existed).
-    clear_webview_youtube_cookies(app);
-    clear_cookies_invalid(app);
-    with_manager(app, |m| {
-        m.cookies_authorized = false;
-        m.cookies_valid = false;
-        m.cookies_checking = false;
-        m.cookies_message = None;
-        m.cookies_seeded = true;
-    });
-    emit_snapshot(app);
 }
 
 /// Validates saved cookies via a background `--simulate` extraction of a
@@ -1180,8 +962,8 @@ pub fn validate_youtube_cookies(app: &AppHandle) {
         .ok();
 }
 
-/// Runs yt-dlp in `--simulate` mode with saved cookies to check they're
-/// still good for downloading. Returns `(valid, error_message)`.
+/// Runs yt-dlp in `--simulate` mode with the imported cookies to check
+/// they're still good for downloading. Returns `(valid, error_message)`.
 fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
     let app_data_dir = app_data_dir(app);
     let Some(ytdlp) = tools::resolve_ytdlp(&app_data_dir) else {
@@ -1194,7 +976,7 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
     if !cookies.exists() {
         return (
             false,
-            Some("Нет cookies — авторизуйтесь в YouTube.".to_string()),
+            Some("Cookies не отправлены — используйте расширение браузера в «Внешних источниках».".to_string()),
         );
     }
 
@@ -1228,7 +1010,7 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
         .arg("--extractor-args")
         .arg(format!("youtube:player_client={}", YT_PLAYER_CLIENTS[0]))
         .arg("--user-agent")
-        .arg(LOGIN_UA);
+        .arg(YOUTUBE_UA);
     // Same proxy as a real download, for the same reason.
     if let Some(proxy) = proxy_arg(app) {
         cmd.arg("--proxy").arg(proxy);
@@ -1347,6 +1129,11 @@ fn ensure_worker(app: &AppHandle) {
     }
 }
 
+/// Concurrent download workers. Kept conservative (not user-configurable): each
+/// extra worker is another simultaneous yt-dlp/YouTube session, and too many at
+/// once raises the odds of tripping YouTube's bot-wall for the whole batch.
+const DOWNLOAD_CONCURRENCY: usize = 2;
+
 fn worker_loop(app: AppHandle) {
     let app_data_dir = app_data_dir(&app);
     let dl_dir = downloads_dir(&app);
@@ -1385,8 +1172,6 @@ fn worker_loop(app: AppHandle) {
     let ffmpeg = tools::resolve_ffmpeg(&app_data_dir);
     let deno = tools::resolve_deno(&app_data_dir);
     let pot = tools::resolve_pot(&app_data_dir);
-    let cookies_path = cookies_file(&app);
-    let cookies_file_opt = cookies_path.exists().then_some(cookies_path);
     with_manager(&app, |m| {
         m.tools_preparing = false;
         m.tools_message = None;
@@ -1396,17 +1181,52 @@ fn worker_loop(app: AppHandle) {
         m.pot_ready = pot.is_some();
     });
     emit_snapshot(&app);
-    let resolved = tools::ResolvedTools {
+    let cookies_path = cookies_file(&app);
+    let cookies_file_opt = cookies_path.exists().then_some(cookies_path);
+    let resolved = Arc::new(tools::ResolvedTools {
         ytdlp,
         ffmpeg,
         deno,
         cookies_file: cookies_file_opt,
         proxy: proxy_arg(&app),
         pot,
-    };
+    });
 
-    let child_slot = with_manager(&app, |m| m.current_child.clone());
+    // N-1 background workers + current thread as one more, all pulling from the
+    // same queue — a conservative concurrency so a burst of downloads finishes
+    // faster without multiplying YouTube bot-wall risk. finish_run below only
+    // runs once every worker's queue has drained, matching the single-worker
+    // "restart if items were added mid-run" behavior finish_run already provides.
+    let worker_count = DOWNLOAD_CONCURRENCY;
+    let mut handles = Vec::with_capacity(worker_count.saturating_sub(1));
+    for _ in 1..worker_count {
+        let app = app.clone();
+        let resolved = Arc::clone(&resolved);
+        let dl_dir = dl_dir.clone();
+        if let Ok(h) = std::thread::Builder::new()
+            .name("download-worker".into())
+            .spawn(move || download_worker_loop(app, resolved, dl_dir))
+        {
+            handles.push(h);
+        }
+    }
+    download_worker_loop(app.clone(), resolved, dl_dir);
+    for h in handles {
+        let _ = h.join();
+    }
 
+    // Run mood analysis once per batch (not per track), or an N-track queue
+    // would restart the background analyzer N times, hindering its progress.
+    restart_audio_feature_analysis(&app);
+
+    finish_run(&app);
+}
+
+/// One worker's pull loop: pops jobs off the shared queue until it's empty,
+/// downloading/tagging/importing each. Several of these run concurrently (see
+/// [`DOWNLOAD_CONCURRENCY`]), each with its own child-process slot registered
+/// under the job's id so [`DownloadManager::remove_item`] can cancel the right one.
+fn download_worker_loop(app: AppHandle, resolved: Arc<tools::ResolvedTools>, dl_dir: PathBuf) {
     loop {
         let job = with_manager(&app, DownloadManager::take_next_queued);
         let Some(job) = job else {
@@ -1414,7 +1234,16 @@ fn worker_loop(app: AppHandle) {
         };
         emit_snapshot(&app);
 
+        let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+        with_manager(&app, |m| {
+            m.active_children.insert(job.id, Arc::clone(&child_slot));
+        });
+
         let result = download_one(&app, &resolved, &dl_dir, &job, &child_slot);
+
+        with_manager(&app, |m| {
+            m.active_children.remove(&job.id);
+        });
 
         // Import happens right after a successful download, before the final
         // status is set: otherwise the UI would show "done" even if the scan
@@ -1428,12 +1257,6 @@ fn worker_loop(app: AppHandle) {
         emit_snapshot(&app);
         report_titlebar(&app);
     }
-
-    // Run mood analysis once per batch (not per track), or an N-track queue
-    // would restart the background analyzer N times, hindering its progress.
-    restart_audio_feature_analysis(&app);
-
-    finish_run(&app);
 }
 
 /// Restarts the background audio-feature analyzer so it picks up newly added
@@ -1680,16 +1503,16 @@ fn download_one_core(
         attempt.mark_login_expired();
         return Err(DownloadError::new(
             DownloadErrorKind::CookiesExpired,
-            "Вход в YouTube устарел — войдите заново в «Внешние источники»",
+            "Cookies YouTube больше не подходят — отправьте сессию браузера снова в «Внешних источниках»",
         ));
     }
     // Generic bot-wall survived every client — IP/network issue, not cookies,
-    // so the login isn't invalidated. Hint depends on whether the user is logged in.
+    // so the login isn't invalidated. Hint depends on whether cookies are configured.
     if bot_wall_seen {
         let message = if has_cookies {
             "YouTube запросил подтверждение (IP/сеть) — попробуйте позже, смените сеть/VPN или прокси"
         } else {
-            "YouTube запросил подтверждение (IP/сеть) — войдите в YouTube или смените сеть/прокси в «Внешних источниках»"
+            "YouTube запросил подтверждение (IP/сеть) — отправьте cookies браузера через расширение или смените сеть/прокси в «Внешних источниках»"
         };
         return Err(DownloadError::new(
             DownloadErrorKind::BotWallNetwork,
@@ -1719,7 +1542,13 @@ fn download_one_with_stem(
     // downloading an unsupported .webm.
     let ffmpeg_available = resolved.ffmpeg.is_some();
     let format = if ffmpeg_available {
-        "bestaudio/best"
+        // YouTube's plain "bestaudio" is almost always a higher-bitrate Opus/WebM
+        // stream, which `-x --audio-format m4a` below then has to actually
+        // transcode (Opus decode + AAC encode). Preferring an m4a/AAC stream when
+        // one exists (nearly always does) makes that step a copy instead — same
+        // final container, no re-encode CPU cost or generation loss. Falls back to
+        // plain bestaudio (and an actual transcode) only when no m4a stream exists.
+        "bestaudio[ext=m4a]/bestaudio/best"
     } else {
         "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=opus]/\
          bestaudio[ext=ogg]/bestaudio[ext=aac]/bestaudio[ext=flac]/bestaudio[ext=wav]"
@@ -1769,8 +1598,8 @@ fn download_one_with_stem(
             }
         }
     }
-    // Login is optional: pass cookies if present to work around the bot-wall,
-    // otherwise try without (most tracks download fine either way).
+    // Imported cookies are optional: pass them if present to work around the
+    // bot-wall, otherwise try without (most tracks download fine either way).
     if let Some(cookies) = &resolved.cookies_file {
         cmd.arg("--cookies").arg(cookies);
     }
@@ -1796,10 +1625,9 @@ fn download_one_with_stem(
     }
     cmd.arg("--extractor-args")
         .arg(format!("youtube:player_client={}", player_client));
-    // Same UA as the login window ([`LOGIN_UA`]): cookies were captured under
-    // this UA, and a matching browser fingerprint is less likely to trigger a
-    // bot challenge.
-    cmd.arg("--user-agent").arg(LOGIN_UA);
+    // Matching a real desktop Chrome fingerprint ([`YOUTUBE_UA`]) is less
+    // likely to trigger a bot challenge than yt-dlp's default UA.
+    cmd.arg("--user-agent").arg(YOUTUBE_UA);
     if let Some(proxy) = &resolved.proxy {
         cmd.arg("--proxy").arg(proxy);
     }
@@ -2525,7 +2353,16 @@ fn write_tags(
         let secs = tagged.properties().duration().as_secs();
         (secs > 0).then_some(secs)
     };
-    let lyrics = fetch_lyrics(artist, title, album, duration_secs);
+
+    // Lyrics (LRCLIB) and cover (direct URL, else external providers) hit
+    // different hosts and don't depend on each other — fetched concurrently
+    // instead of paying both round-trips back to back.
+    let (lyrics, cover_bytes) = std::thread::scope(|scope| {
+        let lyrics_task = scope.spawn(|| fetch_lyrics(artist, title, album, duration_secs));
+        let cover_task =
+            scope.spawn(|| resolve_cover_bytes(cover_url, artist, album.unwrap_or(""), title));
+        (lyrics_task.join().unwrap_or(None), cover_task.join().unwrap_or(None))
+    });
 
     let tag_type = tagged.primary_tag_type();
     if tagged.primary_tag().is_none() {
@@ -2547,7 +2384,7 @@ fn write_tags(
     // Cover: try the direct URL from search results (Deezer/iTunes CDN) first;
     // if missing or the download fails, fall back to external providers by
     // artist/album/title (same mechanism used for local tracks).
-    if let Some(bytes) = resolve_cover_bytes(cover_url, artist, album.unwrap_or(""), title) {
+    if let Some(bytes) = cover_bytes {
         let mime = detect_image_mime(&bytes);
         let pic = Picture::new_unchecked(PictureType::CoverFront, Some(mime), None, bytes);
         tag.push_picture(pic);
@@ -2751,6 +2588,22 @@ mod tests {
     }
 
     #[test]
+    fn remove_item_only_touches_its_own_job_id_child_slot() {
+        // With concurrent download workers, active_children holds one slot per
+        // in-flight job id — removing one job must not disturb another's slot.
+        let mut m = DownloadManager::default();
+        m.items.push(item_with_status(1, "downloading"));
+        m.items.push(item_with_status(2, "downloading"));
+        m.active_children.insert(2, Arc::new(Mutex::new(None)));
+
+        assert!(m.remove_item(1).is_none());
+        assert!(
+            m.active_children.contains_key(&2),
+            "removing job 1 must not touch job 2's registered child slot"
+        );
+    }
+
+    #[test]
     fn remove_item_from_done_or_error_status_just_drops_it() {
         let mut m = DownloadManager::default();
         m.items.push(item_with_status(1, "done"));
@@ -2838,6 +2691,72 @@ mod tests {
             cover_url: None,
             force: None,
         }
+    }
+
+    fn bridge_cookie(name: &str, domain: &str, http_only: bool) -> BridgeCookie {
+        BridgeCookie {
+            name: name.to_string(),
+            value: "secret".to_string(),
+            domain: domain.to_string(),
+            path: None,
+            secure: true,
+            http_only,
+            expiration_date: Some(4_000_000_000.0),
+        }
+    }
+
+    #[test]
+    fn netscape_youtube_domain_field_uses_wildcard_domains_for_ytdlp() {
+        assert_eq!(
+            netscape_youtube_domain_field("youtube.com", false).unwrap(),
+            (".youtube.com".to_string(), "TRUE")
+        );
+        assert_eq!(
+            netscape_youtube_domain_field("music.youtube.com", true).unwrap(),
+            ("#HttpOnly_.youtube.com".to_string(), "TRUE")
+        );
+        assert_eq!(
+            netscape_youtube_domain_field("accounts.google.com", false).unwrap(),
+            (".google.com".to_string(), "TRUE")
+        );
+        assert!(netscape_youtube_domain_field("example.com", false).is_none());
+    }
+
+    #[test]
+    fn has_bridge_auth_cookie_requires_a_known_name_on_a_youtube_domain() {
+        assert!(has_bridge_auth_cookie(&[bridge_cookie(
+            "SID",
+            "music.youtube.com",
+            false
+        )]));
+        assert!(!has_bridge_auth_cookie(&[bridge_cookie(
+            "CONSENT",
+            "youtube.com",
+            false
+        )]));
+        assert!(!has_bridge_auth_cookie(&[bridge_cookie(
+            "SID",
+            "accounts.google.com",
+            false
+        )]));
+    }
+
+    #[test]
+    fn render_bridge_cookies_file_skips_unrelated_domains_and_writes_wildcard_rows() {
+        let cookies = vec![
+            bridge_cookie("__Secure-3PSID", "music.youtube.com", true),
+            bridge_cookie("unrelated", "example.com", false),
+        ];
+        let (content, count) = render_bridge_cookies_file(&cookies).unwrap();
+        assert_eq!(count, 1);
+        assert!(content.contains("#HttpOnly_.youtube.com\tTRUE\t/\tTRUE"));
+        assert!(!content.contains("example.com"));
+    }
+
+    #[test]
+    fn render_bridge_cookies_file_errors_when_nothing_matches() {
+        let cookies = vec![bridge_cookie("unrelated", "example.com", false)];
+        assert!(render_bridge_cookies_file(&cookies).is_err());
     }
 
     #[test]
@@ -3059,7 +2978,7 @@ mod tests {
         }
         let err = download_one_core(false, "song", &["t1".to_string()], Duration::ZERO, &fake_no_cookies)
             .unwrap_err();
-        assert!(err.message.contains("войдите в YouTube"));
+        assert!(err.message.contains("отправьте cookies браузера"));
 
         let fake_with_cookies = FakeAttempt::default();
         for _ in 0..3 {

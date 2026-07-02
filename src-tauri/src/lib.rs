@@ -1,5 +1,6 @@
 mod audio_features;
 mod audio_player;
+mod browser_bridge;
 mod catalog_search;
 mod covers;
 mod discord_rpc;
@@ -1037,6 +1038,7 @@ fn external_prep_worker(
     done: Arc<AtomicUsize>,
     none_keys: Arc<Mutex<Vec<String>>>,
     override_paths: Arc<HashSet<String>>,
+    cover_present_paths: Arc<HashSet<String>>,
     dir: Arc<PathBuf>,
     total: usize,
     generation: u64,
@@ -1054,11 +1056,13 @@ fn external_prep_worker(
                 let _ = external::get_or_fetch_artist_image(&dir, name, false);
             }
             PrepTask::Cover(g) => {
-                // Needs an external cover if at least one track lacks both override and embedded art.
+                // Needs an external cover if at least one track lacks both override and
+                // embedded art. cover_present_paths is a precomputed snapshot (see
+                // run_external_preparation) instead of re-parsing tags per path here.
                 let needs_external = g
                     .paths
                     .iter()
-                    .any(|p| !override_paths.contains(p) && !AudioPlayer::has_embedded_cover(p));
+                    .any(|p| !override_paths.contains(p) && !cover_present_paths.contains(p));
                 if needs_external {
                     let _ =
                         external::get_or_fetch_track_cover(&dir, &g.artist, &g.album, &g.title, false);
@@ -1110,11 +1114,18 @@ fn run_external_preparation(
         Vec::new()
     };
 
-    let (cover_groups, override_paths): (Vec<CoverGroup>, HashSet<String>) = if covers_on {
+    let (cover_groups, override_paths, cover_present_paths): (
+        Vec<CoverGroup>,
+        HashSet<String>,
+        HashSet<String>,
+    ) = if covers_on {
         let state = app.state::<LibraryState>();
         let built = match state.0.lock() {
             Ok(lib) => {
                 let overrides = lib.override_cover_paths();
+                // Snapshot once up front instead of re-parsing tags per path inside
+                // the worker pool (see external_prep_worker's needs_external check).
+                let present = lib.cover_present_paths();
                 let mut by_key: std::collections::HashMap<String, CoverGroup> =
                     std::collections::HashMap::new();
                 for t in lib.get_all_tracks_light() {
@@ -1136,13 +1147,13 @@ fn run_external_preparation(
                         .paths
                         .push(t.file_path);
                 }
-                (by_key.into_values().collect(), overrides)
+                (by_key.into_values().collect(), overrides, present)
             }
-            Err(_) => (Vec::new(), HashSet::new()),
+            Err(_) => (Vec::new(), HashSet::new(), HashSet::new()),
         };
         built
     } else {
-        (Vec::new(), HashSet::new())
+        (Vec::new(), HashSet::new(), HashSet::new())
     };
 
     // ── Filter out already-settled entries, compute total ──
@@ -1210,6 +1221,7 @@ fn run_external_preparation(
     let done = Arc::new(AtomicUsize::new(0));
     let none_keys = Arc::new(Mutex::new(Vec::<String>::new()));
     let override_paths = Arc::new(override_paths);
+    let cover_present_paths = Arc::new(cover_present_paths);
     let dir = Arc::new(dir);
 
     // N-1 background threads + current thread as one more worker, so progress
@@ -1223,6 +1235,7 @@ fn run_external_preparation(
         let done = Arc::clone(&done);
         let none_keys = Arc::clone(&none_keys);
         let override_paths = Arc::clone(&override_paths);
+        let cover_present_paths = Arc::clone(&cover_present_paths);
         let dir = Arc::clone(&dir);
         if let Ok(h) = std::thread::Builder::new()
             .name(format!("external-prep-{}", i))
@@ -1234,6 +1247,7 @@ fn run_external_preparation(
                     done,
                     none_keys,
                     override_paths,
+                    cover_present_paths,
                     dir,
                     total,
                     generation,
@@ -1250,6 +1264,7 @@ fn run_external_preparation(
         Arc::clone(&done),
         Arc::clone(&none_keys),
         Arc::clone(&override_paths),
+        Arc::clone(&cover_present_paths),
         Arc::clone(&dir),
         total,
         generation,
@@ -1571,16 +1586,18 @@ fn fetch_track_with_override(
     // tags from disk if the track isn't in the library (e.g. playing an unsaved file).
     let from_lib = {
         let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-        lib.get_track(file_path)
+        lib.get_track(file_path).map(|mut t| {
+            // Mapper only fills cover_art for override covers; backfill embedded cover URL.
+            if t.cover_art.is_none() && lib.has_cover(file_path) {
+                t.cover_art = Some(thumbnails::cover_protocol_url(
+                    file_path,
+                    &thumbnails::embedded_sig(file_path),
+                ));
+            }
+            t
+        })
     };
-    if let Some(mut t) = from_lib {
-        // Mapper only fills cover_art for override covers; backfill embedded cover URL.
-        if t.cover_art.is_none() && AudioPlayer::has_embedded_cover(file_path) {
-            t.cover_art = Some(thumbnails::cover_protocol_url(
-                file_path,
-                &thumbnails::embedded_sig(file_path),
-            ));
-        }
+    if let Some(t) = from_lib {
         return Ok(t);
     }
 
@@ -1944,24 +1961,24 @@ async fn downloads_check_tools(app: tauri::AppHandle) -> Result<downloads::Tools
         .map_err(|e| format!("Task error: {}", e))
 }
 
-/// Cookies are saved and auto-validated after login; status arrives via `download_queue` snapshot.
-#[tauri::command]
-fn downloads_youtube_login(app: tauri::AppHandle) {
-    downloads::open_login(&app);
-}
-
-/// Background network check of saved YouTube cookies; result arrives via `download_queue` snapshot.
+/// Background network check of the imported YouTube cookies; result arrives via `download_queue` snapshot.
 #[tauri::command]
 fn downloads_validate_cookies(app: tauri::AppHandle) {
     downloads::validate_youtube_cookies(&app);
 }
 
-/// `(async)` is required: logout clears the webview cookie store, and those
-/// WebView2 calls block waiting for the main thread's message loop. A sync
-/// command would run on the main thread and deadlock on itself.
-#[tauri::command(async)]
-fn downloads_youtube_logout(app: tauri::AppHandle) {
-    downloads::logout(&app);
+/// Forgets the imported session (cookies.txt + status), e.g. to sign out.
+#[tauri::command]
+fn downloads_clear_youtube_cookies(app: tauri::AppHandle) {
+    downloads::clear_bridge_cookies(&app);
+}
+
+/// Writes the bundled browser-extension source to `<app_data_dir>/browser-extension/`
+/// (on demand, not at startup) and returns that folder's path so the UI can
+/// open it for "Load unpacked".
+#[tauri::command]
+fn browser_bridge_prepare_extension(app: tauri::AppHandle) -> Result<String, String> {
+    browser_bridge::prepare_extension_bundle(&app)
 }
 
 #[tauri::command]
@@ -2100,12 +2117,9 @@ async fn tools_install_deno(app: tauri::AppHandle) -> Result<tools::ToolsInfo, S
 async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
     let app_for_task = app.clone();
     let info = tauri::async_runtime::spawn_blocking(move || {
-        let dir = tools_app_data_dir(&app_for_task);
-
-        let make_report = |tool: &'static str| {
-            let app_for_report = app_for_task.clone();
+        fn make_report(app: tauri::AppHandle, tool: &'static str) -> impl Fn(String) {
             move |msg: String| {
-                let _ = app_for_report.emit(
+                let _ = app.emit(
                     "tools_progress",
                     ToolsProgress {
                         tool: tool.to_string(),
@@ -2114,9 +2128,9 @@ async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, St
                     },
                 );
             }
-        };
-        let clear_progress = |tool: &'static str| {
-            let _ = app_for_task.emit(
+        }
+        fn clear_progress(app: &tauri::AppHandle, tool: &'static str) {
+            let _ = app.emit(
                 "tools_progress",
                 ToolsProgress {
                     tool: tool.to_string(),
@@ -2124,31 +2138,44 @@ async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, St
                     active: false,
                 },
             );
-        };
-
-        // Only install what's missing — updating is a separate button.
-        // install_deno is idempotent (Ok if Deno already present).
-        let report_ytdlp = make_report("ytdlp");
-        let ytdlp_result: Result<(), String> = if tools::resolve_ytdlp(&dir).is_some() {
-            Ok(())
-        } else {
-            tools::install_ytdlp(&dir, &report_ytdlp).map(|_| ())
-        };
-        if ytdlp_result.is_ok() {
-            if let Err(e) = tools::install_deno(&dir, &report_ytdlp) {
-                report_ytdlp(format!("Deno не установлен: {}", e));
-            }
         }
-        clear_progress("ytdlp");
 
-        // ffmpeg optional: install only if missing; failure doesn't fail the whole call.
-        let report_ffmpeg = make_report("ffmpeg");
-        if tools::resolve_ffmpeg(&dir).is_none() {
-            if let Err(e) = tools::install_ffmpeg(&dir, &report_ffmpeg) {
-                report_ffmpeg(format!("ffmpeg не установлен: {}", e));
+        let dir = tools_app_data_dir(&app_for_task);
+
+        // yt-dlp+Deno and ffmpeg are independent downloads from different hosts;
+        // installing them on separate threads instead of back-to-back bounds
+        // first-run setup time by the larger of the two instead of their sum.
+        // Only installs what's missing — updating is a separate button.
+        let ffmpeg_app = app_for_task.clone();
+        let ffmpeg_dir = dir.clone();
+        let ytdlp_result = std::thread::scope(|scope| {
+            let ffmpeg_handle = scope.spawn(move || {
+                let report_ffmpeg = make_report(ffmpeg_app.clone(), "ffmpeg");
+                if tools::resolve_ffmpeg(&ffmpeg_dir).is_none() {
+                    if let Err(e) = tools::install_ffmpeg(&ffmpeg_dir, &report_ffmpeg) {
+                        report_ffmpeg(format!("ffmpeg не установлен: {}", e));
+                    }
+                }
+                clear_progress(&ffmpeg_app, "ffmpeg");
+            });
+
+            // install_deno is idempotent (Ok if Deno already present).
+            let report_ytdlp = make_report(app_for_task.clone(), "ytdlp");
+            let ytdlp_result: Result<(), String> = if tools::resolve_ytdlp(&dir).is_some() {
+                Ok(())
+            } else {
+                tools::install_ytdlp(&dir, &report_ytdlp).map(|_| ())
+            };
+            if ytdlp_result.is_ok() {
+                if let Err(e) = tools::install_deno(&dir, &report_ytdlp) {
+                    report_ytdlp(format!("Deno не установлен: {}", e));
+                }
             }
-        }
-        clear_progress("ffmpeg");
+            clear_progress(&app_for_task, "ytdlp");
+
+            let _ = ffmpeg_handle.join();
+            ytdlp_result
+        });
 
         ytdlp_result?;
         Ok::<_, String>(tools::info(&dir))
@@ -2274,6 +2301,8 @@ pub fn run() {
 
             app.manage(LibraryState(Mutex::new(library)));
 
+            browser_bridge::start(app.handle().clone());
+
             Ok(())
         })
         .manage(PlayerState(RwLock::new(player)))
@@ -2344,9 +2373,9 @@ pub fn run() {
             downloads_set_dir,
             downloads_delete_track,
             downloads_check_tools,
-            downloads_youtube_login,
             downloads_validate_cookies,
-            downloads_youtube_logout,
+            downloads_clear_youtube_cookies,
+            browser_bridge_prepare_extension,
             downloads_get_proxy,
             downloads_set_proxy,
             tools_info,

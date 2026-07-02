@@ -45,6 +45,12 @@ pub struct TrackMetadata {
     pub spectral_centroid: Option<f32>,
     pub key: Option<String>,
     pub audio_fingerprint: Option<String>,
+    /// Whether the file has any embedded cover picture (not the picture itself) —
+    /// cached in `tracks.has_cover` so cover-presence checks (`get_cover_art`,
+    /// external-prep) don't need to re-open/re-parse tags each time. Internal
+    /// only, never sent to the frontend.
+    #[serde(skip)]
+    pub has_cover: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -1399,6 +1405,7 @@ impl AudioPlayer {
         let mut bitrate = None;
         let mut cover_art: Option<String> = None;
         let mut accent_color: Option<String> = None;
+        let mut has_cover = false;
 
         if let Some(tagged_file) = Self::read_tagged_file(&path) {
             {
@@ -1410,8 +1417,12 @@ impl AudioPlayer {
                     artist = tag.artist().map(|s| s.to_string());
                     album = tag.album().map(|s| s.to_string());
                     genre = tag.genre().map(|s| s.to_string());
+                    // Presence check is a free byproduct of the tag already being
+                    // parsed (no picture bytes touched) — computed even in "light"
+                    // (with_cover=false) scan mode so it can be cached in the DB.
+                    has_cover = !tag.pictures().is_empty();
                     if with_cover {
-                        let (has_cover, accent) = cover_meta_from_tag(tag);
+                        let (_, accent) = cover_meta_from_tag(tag);
                         accent_color = accent;
                         if has_cover {
                             cover_art = Some(crate::thumbnails::cover_protocol_url(
@@ -1453,6 +1464,7 @@ impl AudioPlayer {
             spectral_centroid: None,
             key: None,
             audio_fingerprint: None,
+            has_cover,
         })
     }
 

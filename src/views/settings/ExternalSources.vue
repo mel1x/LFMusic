@@ -9,8 +9,10 @@ import { isAndroidRuntime } from '../../composables/usePlatform';
 import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
 import ConfirmModal from '../../components/ConfirmModal.vue';
+import CookieBridgeWizard from '../../components/CookieBridgeWizard.vue';
 import LoadingSpinner from '../../components/LoadingSpinner.vue';
 import FolderIcon from '../../components/Icons/FolderIcon.vue';
+import ArrowUpIcon from '../../components/Icons/ArrowUpIcon.vue';
 
 const { t } = useI18n();
 const { settings, settingItems, load, save } = useSettings();
@@ -25,13 +27,11 @@ const {
     deleteTool,
     denoMissing,
     potUpdateAvailable,
-    openYoutubeLogin,
     validateCookies,
-    logoutYoutube,
+    clearYoutubeCookies,
     cookiesAuthorized,
     cookiesChecking,
     cookiesValid,
-    cookiesLoginOpen,
     cookiesMessage,
     downloadsDir,
     setDownloadsDir,
@@ -227,12 +227,15 @@ async function onDeleteAll() {
     }
 }
 
-// YouTube auth (optional; only needed behind a bot-wall). Login state persists
-// on disk (backend: snapshot/refresh_tools_status), so a successful login shows
-// immediately and isn't re-checked on every startup.
-type CookieStatusKind = 'none' | 'login' | 'checking' | 'valid' | 'invalid';
+// YouTube cookies (optional; only needed behind a bot-wall). Imported via a
+// companion browser extension: its popup reads the browser's live cookie jar
+// through the privileged chrome.cookies API and posts it to a local bridge
+// server this app runs (browser_bridge.rs) — no in-app login window, no
+// direct access to the browser's cookie database (both tried before and
+// dropped: the former got flagged by YouTube's bot-detection, the latter
+// needs the browser closed and fails outright on Chrome/Edge since 2024).
+type CookieStatusKind = 'none' | 'checking' | 'valid' | 'invalid';
 const cookieStatusKind = computed<CookieStatusKind>(() => {
-    if (cookiesLoginOpen.value) return 'login';
     if (!cookiesAuthorized.value) return 'none';
     if (cookiesChecking.value) return 'checking';
     if (cookiesValid.value) return 'valid';
@@ -241,7 +244,6 @@ const cookieStatusKind = computed<CookieStatusKind>(() => {
 
 const cookieStatusText = computed(() => {
     switch (cookieStatusKind.value) {
-        case 'login': return t('downloads.cookies.statusLogin');
         case 'none': return t('downloads.cookies.statusNone');
         case 'checking': return t('downloads.cookies.statusChecking');
         case 'valid': return t('downloads.cookies.statusValid');
@@ -250,23 +252,30 @@ const cookieStatusText = computed(() => {
     return '';
 });
 
-function authorize() {
-    if (cookiesLoginOpen.value) return;
-    void openYoutubeLogin();
-}
+// Opening the extension folder now happens inside CookieBridgeWizard.vue
+// (self-contained: it calls useDownloads() itself).
+const wizardOpen = ref(false);
+const cookiesActionBusy = ref(false);
 function recheck() {
-    if (cookiesChecking.value || cookiesLoginOpen.value || !cookiesAuthorized.value) return;
+    if (cookiesChecking.value || !cookiesAuthorized.value) return;
     void validateCookies();
 }
-function signOut() {
-    if (cookiesLoginOpen.value) return;
-    void logoutYoutube();
+async function clearCookies() {
+    if (cookiesActionBusy.value) return;
+    cookiesActionBusy.value = true;
+    try {
+        await clearYoutubeCookies();
+    } finally {
+        cookiesActionBusy.value = false;
+    }
 }
 
-// PO-token provider (bgutil-pot): optional bypass for YouTube's bot-wall,
-// which can trigger even with valid cookies (it's IP/client-attestation
-// based, not account-based — see downloads.rs::is_bot_wall). Installed,
-// updated and removed independently of the required yt-dlp/ffmpeg/Deno stack.
+// PO-token provider (bgutil-pot): optional, hidden behind "Advanced" since most
+// downloads work fine without it — only bypasses YouTube's bot-wall, which can
+// trigger even with valid cookies (it's IP/client-attestation based, not
+// account-based — see downloads.rs::is_bot_wall). Installed, updated and
+// removed independently of the required yt-dlp/ffmpeg/Deno stack.
+const advancedOpen = ref(false);
 const potInstallBusy = ref(false);
 const potError = ref<string | null>(null);
 const potProgress = computed(() => toolsProgress.value.pot);
@@ -329,9 +338,10 @@ const folderBusy = ref(false);
 const folderFellBack = ref(false);
 const folderError = ref<string | null>(null);
 
+// downloadsDir is seeded synchronously from a localStorage cache (see
+// useDownloads.ts), so it's already populated by the time this renders —
+// no loading shimmer needed.
 const folderDisplay = computed(() => (downloadsDir.value || '').replace(/\\/g, '/'));
-// Path not loaded yet (init is async) — show a shimmer instead of blank.
-const folderLoading = computed(() => !downloadsDir.value);
 
 async function chooseDownloadFolder() {
     if (folderBusy.value) return;
@@ -482,8 +492,7 @@ onMounted(async () => {
                         <FolderIcon />
                     </button>
                     <div class="dlFolderInfo">
-                        <div v-if="!folderLoading" class="dlFolderPath" v-truncate>{{ folderDisplay }}</div>
-                        <div v-else class="dlFolderPathShimmer" aria-hidden="true"></div>
+                        <div class="dlFolderPath" v-truncate>{{ folderDisplay }}</div>
                         <div class="dlFolderHint">{{ t('downloads.folder.desc') }}</div>
                     </div>
                     <div class="dlFolderActions">
@@ -509,138 +518,154 @@ onMounted(async () => {
             </div>
         </template>
 
-        <!-- Download components: one block (yt-dlp + ffmpeg + Deno) -->
+        <!-- Download components + cookies + advanced: one unified panel -->
         <h2 class="sectionTitle">{{ t('downloads.comp.sectionTitle') }}</h2>
-        <div v-if="!toolsLoaded" class="toolLoading">
+        <div v-if="!toolsLoaded" class="unifiedPanel toolLoading">
             <LoadingSpinner />
         </div>
-        <div v-else class="depPanel" :class="depStatusKind">
-            <div class="depTop">
-                <div class="depHead">
-                    <h3 class="depTitle">{{ t('downloads.deps.title') }}</h3>
-                    <p class="depDesc" v-truncate>{{ depDetail }}</p>
+        <div v-else class="unifiedPanel" :class="depStatusKind">
+            <div class="panelSection depSection">
+                <div class="depTop">
+                    <div class="depHead">
+                        <h3 class="depTitle">{{ t('downloads.deps.title') }}</h3>
+                        <p class="depDesc" v-truncate>{{ depDetail }}</p>
+                    </div>
+                    <div class="depState" :class="depStatusKind" v-tooltip:bottom="updateTooltip">
+                        <span v-if="depStatusKind === 'busy'" class="miniSpinner"></span>
+                        <span v-else class="stateDot"></span>
+                        <span>{{ depStateLabel }}</span>
+                    </div>
                 </div>
-                <div class="depState" :class="depStatusKind" v-tooltip:bottom="updateTooltip">
-                    <span v-if="depStatusKind === 'busy'" class="miniSpinner"></span>
-                    <span v-else class="stateDot"></span>
-                    <span>{{ depStateLabel }}</span>
-                </div>
-            </div>
 
-            <div class="depChips">
-                <span v-for="c in depComponents" :key="c.name" class="depChip" :class="{ on: c.on }">
-                    <span class="chipDot"></span>
-                    <span class="chipName">{{ c.name }}</span>
-                    <span
-                        v-if="c.on && c.version"
-                        class="chipVer"
-                        v-tooltip="c.version.length > VER_MAX ? c.version : ''"
-                    >{{ shortVer(c.version) }}</span>
-                </span>
-            </div>
-
-            <div v-if="depBusy" class="depBar"><span class="depBarFill"></span></div>
-
-            <div class="depActions">
-                <button
-                    v-if="!depAllInstalled"
-                    class="actBtn primary"
-                    :disabled="depBusy"
-                    @click="requestInstallAll"
-                >{{ installLabel }}</button>
-                <button
-                    v-else
-                    class="actBtn primary"
-                    :disabled="depBusy || !depUpdateAvailable"
-                    @click="requestUpdate"
-                >{{ t('downloads.comp.btnUpdate') }}</button>
-                <button
-                    v-if="depAnyInstalled"
-                    class="actBtn ghost checkBtn"
-                    :class="{ checking: checkingUpdates }"
-                    :disabled="depBusy || checkingUpdates"
-                    @click="onCheckUpdates"
-                >
-                    <span class="checkLabels">
-                        <span class="checkLabel">{{ t('downloads.comp.btnCheckUpdates') }}</span>
-                        <span class="checkLabel busy">
-                            <span class="miniSpinner"></span>
-                            {{ t('downloads.comp.checkingUpdates') }}
-                        </span>
+                <div class="depChips">
+                    <span v-for="c in depComponents" :key="c.name" class="depChip" :class="{ on: c.on }">
+                        <span class="chipDot"></span>
+                        <span class="chipName">{{ c.name }}</span>
+                        <span
+                            v-if="c.on && c.version"
+                            class="chipVer"
+                            v-tooltip="c.version.length > VER_MAX ? c.version : ''"
+                        >{{ shortVer(c.version) }}</span>
                     </span>
-                </button>
-                <button
-                    class="actBtn ghost"
-                    :disabled="depBusy || !depDeletable"
-                    @click="onDeleteAll"
-                    v-tooltip="t('downloads.comp.deleteTooltip')"
-                >{{ t('downloads.comp.btnDelete') }}</button>
-            </div>
-        </div>
+                </div>
 
-        <!-- YouTube auth (optional) -->
-        <div class="ytAuth" :class="cookieStatusKind">
-            <div class="ytAuthMain">
+                <div v-if="depBusy" class="depBar"><span class="depBarFill"></span></div>
+
+                <div class="depActions">
+                    <button
+                        v-if="!depAllInstalled"
+                        class="actBtn primary"
+                        :disabled="depBusy"
+                        @click="requestInstallAll"
+                    >{{ installLabel }}</button>
+                    <button
+                        v-else
+                        class="actBtn primary"
+                        :disabled="depBusy || !depUpdateAvailable"
+                        @click="requestUpdate"
+                    >{{ t('downloads.comp.btnUpdate') }}</button>
+                    <button
+                        v-if="depAnyInstalled"
+                        class="actBtn ghost checkBtn"
+                        :class="{ checking: checkingUpdates }"
+                        :disabled="depBusy || checkingUpdates"
+                        @click="onCheckUpdates"
+                    >
+                        <span class="checkLabels">
+                            <span class="checkLabel">{{ t('downloads.comp.btnCheckUpdates') }}</span>
+                            <span class="checkLabel busy">
+                                <span class="miniSpinner"></span>
+                                {{ t('downloads.comp.checkingUpdates') }}
+                            </span>
+                        </span>
+                    </button>
+                    <button
+                        class="actBtn ghost"
+                        :disabled="depBusy || !depDeletable"
+                        @click="onDeleteAll"
+                        v-tooltip="t('downloads.comp.deleteTooltip')"
+                    >{{ t('downloads.comp.btnDelete') }}</button>
+                </div>
+            </div>
+
+            <div class="panelDivider"></div>
+
+            <!-- YouTube cookies (optional) -->
+            <div class="panelSection cookiesSection" :class="cookieStatusKind">
                 <div class="ytAuthStatusRow">
-                    <span v-if="cookieStatusKind === 'checking' || cookieStatusKind === 'login'" class="miniSpinner"></span>
+                    <span v-if="cookieStatusKind === 'checking'" class="miniSpinner"></span>
                     <span v-else class="stateDot"></span>
                     <span class="ytAuthState">{{ cookieStatusText }}</span>
                 </div>
-                <p class="ytAuthDesc">{{ t('downloads.cookies.desc') }}</p>
+                <div class="ytAuthActions">
+                    <button
+                        v-if="!cookiesAuthorized"
+                        class="actBtn primary"
+                        @click="wizardOpen = true"
+                    >{{ t('downloads.cookies.getCookie') }}</button>
+                    <template v-else>
+                        <button
+                            class="actBtn ghost"
+                            :disabled="cookiesChecking"
+                            @click="recheck"
+                        >{{ t('downloads.cookies.recheck') }}</button>
+                        <button
+                            class="actBtn ghost danger"
+                            :disabled="cookiesActionBusy"
+                            @click="clearCookies"
+                        >{{ t('downloads.cookies.clear') }}</button>
+                    </template>
+                </div>
             </div>
-            <div class="ytAuthActions">
+
+            <template v-if="!isAndroid">
+                <div class="panelDivider"></div>
+
                 <button
-                    v-if="cookieStatusKind === 'valid'"
-                    class="actBtn ghost"
-                    :disabled="cookiesChecking || cookiesLoginOpen"
-                    @click="recheck"
-                >{{ t('downloads.cookies.recheck') }}</button>
-                <button
-                    v-else
-                    class="actBtn primary"
-                    :disabled="cookiesLoginOpen"
-                    @click="authorize"
-                >{{ cookiesAuthorized ? t('downloads.cookies.reauthorize') : t('downloads.cookies.authorize') }}</button>
-                <button
-                    v-if="cookiesAuthorized"
-                    class="actBtn ghost danger"
-                    :disabled="cookiesLoginOpen"
-                    @click="signOut"
-                >{{ t('downloads.cookies.signOut') }}</button>
-            </div>
+                    class="advancedToggle"
+                    :class="{ open: advancedOpen }"
+                    type="button"
+                    @click="advancedOpen = !advancedOpen"
+                >
+                    <span>{{ t('downloads.pot.advancedToggle') }}</span>
+                    <ArrowUpIcon class="advancedChevron" :class="{ open: advancedOpen }" />
+                </button>
+
+                <!-- PO-token provider (optional; bypasses YouTube's bot-wall even with valid cookies) -->
+                <transition name="advancedPanel">
+                    <div v-if="advancedOpen" class="panelSection potSection" :class="potStatusClass">
+                        <div class="ytAuthStatusRow">
+                            <span v-if="potActionBusy" class="miniSpinner"></span>
+                            <span v-else class="stateDot"></span>
+                            <span class="ytAuthState">{{ potStatusText }}</span>
+                        </div>
+                        <p class="ytAuthDesc">{{ t('downloads.pot.desc') }}</p>
+                        <div class="ytAuthActions">
+                            <button
+                                v-if="!toolsInfo.pot.installed"
+                                class="actBtn primary"
+                                :disabled="potActionBusy"
+                                @click="requestInstallPot"
+                            >{{ t('downloads.comp.btnInstall') }}</button>
+                            <button
+                                v-else-if="potUpdateAvailable"
+                                class="actBtn primary"
+                                :disabled="potActionBusy"
+                                @click="requestInstallPot"
+                            >{{ t('downloads.comp.btnUpdate') }}</button>
+                            <button
+                                v-if="toolsInfo.pot.managed"
+                                class="actBtn ghost danger"
+                                :disabled="potActionBusy"
+                                @click="onDeletePot"
+                            >{{ t('downloads.comp.btnDelete') }}</button>
+                        </div>
+                    </div>
+                </transition>
+            </template>
         </div>
 
-        <!-- PO-token provider (optional; bypasses YouTube's bot-wall even with valid cookies) -->
-        <div v-if="!isAndroid" class="ytAuth" :class="potStatusClass">
-            <div class="ytAuthMain">
-                <div class="ytAuthStatusRow">
-                    <span v-if="potActionBusy" class="miniSpinner"></span>
-                    <span v-else class="stateDot"></span>
-                    <span class="ytAuthState">{{ potStatusText }}</span>
-                </div>
-                <p class="ytAuthDesc">{{ t('downloads.pot.desc') }}</p>
-            </div>
-            <div class="ytAuthActions">
-                <button
-                    v-if="!toolsInfo.pot.installed"
-                    class="actBtn primary"
-                    :disabled="potActionBusy"
-                    @click="requestInstallPot"
-                >{{ t('downloads.comp.btnInstall') }}</button>
-                <button
-                    v-else-if="potUpdateAvailable"
-                    class="actBtn primary"
-                    :disabled="potActionBusy"
-                    @click="requestInstallPot"
-                >{{ t('downloads.comp.btnUpdate') }}</button>
-                <button
-                    v-if="toolsInfo.pot.managed"
-                    class="actBtn ghost danger"
-                    :disabled="potActionBusy"
-                    @click="onDeletePot"
-                >{{ t('downloads.comp.btnDelete') }}</button>
-            </div>
-        </div>
+        <CookieBridgeWizard :open="wizardOpen" @close="wizardOpen = false" />
 
         <!-- Proxy for yt-dlp (at the very bottom) -->
         <template v-if="!isAndroid">
@@ -776,27 +801,6 @@ onMounted(async () => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-}
-/* Shimmer placeholder for the path while it's loading (init is async), instead
-   of a blank line. Height roughly matches the path line so the row doesn't jump. */
-.dlFolderPathShimmer {
-    height: 14px;
-    width: 55%;
-    max-width: 280px;
-    margin: 2px 0;
-    border-radius: 999px;
-    background: linear-gradient(
-        90deg,
-        hsla(var(--accent-h), calc(var(--accent-s) * 0.3), 82%, 0.06) 25%,
-        hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.16) 50%,
-        hsla(var(--accent-h), calc(var(--accent-s) * 0.3), 82%, 0.06) 75%
-    );
-    background-size: 200% 100%;
-    animation: lfmShimmer 1.4s linear infinite;
-}
-@keyframes lfmShimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
 }
 .dlFolderHint {
     font-size: 12px;
@@ -936,19 +940,14 @@ onMounted(async () => {
     font-size: 19px;
     color: hsla(0, 0%, 100%, 0.92);
 }
-/* Dependency-block loader: same box as .depPanel (size, padding, background,
-   rounded top to join .ytAuth below), just with a spinner inside — otherwise
-   a small disconnected spinner would flash instead of a panel. */
+/* Dependency-block loader: same box as .unifiedPanel, just with a spinner
+   inside — otherwise a small disconnected spinner would flash instead of a panel. */
 .toolLoading {
     display: flex;
     align-items: center;
     justify-content: center;
-    max-width: 800px;
-    width: 100%;
     min-height: 168px;
     padding: 18px 20px 16px;
-    border-radius: 24px 24px 0px 0px;
-    background: hsla(0, 0%, 100%, 0.028);
 }
 .miniSpinner {
     flex-shrink: 0;
@@ -963,22 +962,31 @@ onMounted(async () => {
     to { transform: rotate(360deg); }
 }
 
-/* Dependency block: component chips + actions */
-.depPanel {
+/* Unified panel: components + cookies + advanced (PO-token), one continuous
+   card with thin dividers between sub-sections instead of separate boxes. */
+.unifiedPanel {
     max-width: 800px;
     width: 100%;
-    padding: 18px 20px 16px;
-    border-radius: 24px 24px 0px 0px;
+    border-radius: 24px;
     background: hsla(0, 0%, 100%, 0.028);
     transition: border-color .24s ease;
+    overflow: hidden;
 }
 /* Something missing / update available — a soft accent top nudges toward
    action (no large bright surfaces, just a thin gradient at the top). */
-.depPanel.missing,
-.depPanel.update {
+.unifiedPanel.missing,
+.unifiedPanel.update {
     background:
         linear-gradient(180deg, hsla(var(--accent-h), var(--accent-s), 50%, 0.07), hsla(0, 0%, 100%, 0.028) 70px),
         hsla(0, 0%, 100%, 0.028);
+}
+.panelSection {
+    padding: 18px 20px 16px;
+}
+.panelDivider {
+    height: 1px;
+    margin: 0 20px;
+    background: hsla(0, 0%, 100%, 0.05);
 }
 .depTop {
     display: flex;
@@ -1155,19 +1163,15 @@ onMounted(async () => {
 .checkBtn.checking .checkLabel:not(.busy) { visibility: hidden; }
 .checkBtn.checking .checkLabel.busy { visibility: visible; }
 
-/* YouTube auth — quieter than the dependency block (login is optional) */
-.ytAuth {
+/* Cookies/PO-token sections: quieter than the components section (both
+   optional). Content stacked (status/desc, then an actions row), matching
+   the components section's own depTop -> depActions pattern for a
+   consistent look across all sub-sections of the unified panel. */
+.panelSection.cookiesSection,
+.panelSection.potSection {
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 18px;
-    max-width: 800px;
-    width: 100%;
-    padding: 15px 18px;
-    border-radius: 0px 0px 24px 24px;
-    background: hsla(0, 0%, 100%, 0.022);
+    flex-direction: column;
 }
-.ytAuthMain { flex: 1; min-width: 0; }
 .ytAuthStatusRow {
     display: flex;
     align-items: center;
@@ -1182,12 +1186,11 @@ onMounted(async () => {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.ytAuth.valid .stateDot { background-color: hsla(145, 60%, 55%, 0.95); }
-.ytAuth.valid .ytAuthState { color: hsla(145, 45%, 75%, 0.95); }
-.ytAuth.invalid .ytAuthState { color: hsla(2, 60%, 74%, 0.92); }
-.ytAuth.invalid .stateDot { background-color: hsla(2, 70%, 60%, 0.95); }
-.ytAuth.none .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
-.ytAuth.login .ytAuthState { color: hsla(var(--accent-h), calc(var(--accent-s) * 0.7), 78%, 0.9); }
+.panelSection.valid .stateDot { background-color: hsla(145, 60%, 55%, 0.95); }
+.panelSection.valid .ytAuthState { color: hsla(145, 45%, 75%, 0.95); }
+.panelSection.invalid .ytAuthState { color: hsla(2, 60%, 74%, 0.92); }
+.panelSection.invalid .stateDot { background-color: hsla(2, 70%, 60%, 0.95); }
+.panelSection.none .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
 .ytAuthDesc {
     margin: 5px 0 0;
     font-size: 12px;
@@ -1196,10 +1199,63 @@ onMounted(async () => {
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.45);
 }
 .ytAuthActions {
-    flex-shrink: 0;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 8px;
+    margin-top: 12px;
+}
+
+/* "Advanced" collapsible toggle (PO-token, optional) — same weight/color
+   family as .depTitle so it reads as a sub-section header, not a stray link. */
+.advancedToggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 14px 20px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 13.5px;
+    font-weight: 800;
+    color: hsla(0, 0%, 100%, 0.6);
+    transition: color .2s ease, background-color .2s ease;
+}
+.advancedToggle:hover {
+    color: hsla(0, 0%, 100%, 0.85);
+    background-color: hsla(0, 0%, 100%, 0.025);
+}
+.advancedToggle.open {
+    color: hsla(0, 0%, 100%, 0.9);
+}
+.advancedChevron {
+    width: 14px;
+    height: 14px;
+    opacity: 0.55;
+    transform: rotate(180deg);
+    transition: transform .2s ease, opacity .2s ease;
+}
+.advancedChevron.open {
+    opacity: 0.8;
+    transform: rotate(0deg);
+}
+
+/* Height/fade transition for the PO-token section — same recipe as
+   .extraModePanel in Appearance.vue (max-height, not a measured height, since
+   the content's natural height is small and bounded). */
+.advancedPanel-enter-active,
+.advancedPanel-leave-active {
+    transition: opacity .18s ease, transform .18s ease, max-height .18s ease;
+    max-height: 260px;
+    overflow: hidden;
+}
+.advancedPanel-enter-from,
+.advancedPanel-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
@@ -1208,19 +1264,15 @@ onMounted(async () => {
     .sectionTitle,
     .dlFolder,
     .dlProxy,
-    .toolLoading,
-    .depPanel,
-    .ytAuth,
+    .unifiedPanel,
     .regionNote {
         max-width: none;
     }
     .dlFolderRow { flex-wrap: wrap; }
     .dlFolderActions { flex: 1 0 100%; }
     .dlFolderActions .actBtn { flex: 1; }
-    .ytAuth { flex-wrap: wrap; }
     .depActions,
     .ytAuthActions { flex-wrap: wrap; }
-    .ytAuthActions { flex: 1 0 100%; justify-content: flex-end; }
     .actBtn { flex: 1; padding: 12px 18px; }
 }
 </style>

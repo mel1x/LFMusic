@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { usePlayer } from './usePlayer'
@@ -118,7 +118,6 @@ export interface ToolsStatus {
   /** Cookies passed validation — downloading is unlocked. */
   cookies_valid: boolean
   cookies_checking: boolean
-  cookies_login_open: boolean
   cookies_message: string | null
 }
 
@@ -160,13 +159,20 @@ interface ToolsProgressEvent {
 const queue = ref<DownloadItem[]>([])
 const tools = ref<ToolsStatus>({
   ytdlp: false, ffmpeg: false, deno: false, pot: false, preparing: false, message: null,
-  cookies_authorized: false, cookies_valid: false, cookies_checking: false, cookies_login_open: false, cookies_message: null,
+  cookies_authorized: false, cookies_valid: false, cookies_checking: false, cookies_message: null,
 })
 
 const emptyTool = (): ToolInfo => ({ installed: false, managed: false, version: null, update_available: false })
 const toolsInfo = ref<ToolsInfo>({ ytdlp: emptyTool(), ffmpeg: emptyTool(), deno: emptyTool(), pot: emptyTool() })
-// Used to detect app-downloaded tracks (for "Delete track" in the context menu). Loaded once in init().
-const downloadsDir = ref<string>('')
+// Used to detect app-downloaded tracks (for "Delete track" in the context menu) and
+// to display the folder in settings. Seeded synchronously from the last-known value
+// (cached on every resolve/change below) so the settings page never needs a loading
+// shimmer for it — refreshed from the backend in the background in init().
+const DOWNLOADS_DIR_CACHE_KEY = 'lfmusic:downloads-dir'
+const downloadsDir = ref<string>(localStorage.getItem(DOWNLOADS_DIR_CACHE_KEY) ?? '')
+watch(downloadsDir, (dir) => {
+  if (dir) localStorage.setItem(DOWNLOADS_DIR_CACHE_KEY, dir)
+})
 const proxyConfig = ref<ProxyConfig>({ mode: 'system', url: '' })
 const toolsProgress = ref<Record<ToolKey, string | null>>({ ytdlp: null, ffmpeg: null, pot: null })
 // Optimistic default (as if everything's installed) until the first local check
@@ -185,21 +191,23 @@ const depsUpdateAvailable = computed(() => toolsLoaded.value && (toolsInfo.value
 const potMissing = computed(() => toolsLoaded.value && !toolsInfo.value.pot.installed)
 const potUpdateAvailable = computed(() => toolsLoaded.value && toolsInfo.value.pot.update_available)
 
-// YouTube login runs in a separate webview window; afterward cookies are saved and
-// validated. Status arrives via the `download_queue` snapshot into `tools`.
-async function openYoutubeLogin(): Promise<void> {
-  await invoke('downloads_youtube_login')
-}
+// YouTube cookies are imported via a companion browser extension (see
+// browser_bridge.rs): its popup reads the browser's live cookie jar and POSTs
+// it to a local bridge server this app runs, which writes cookies.txt for
+// yt-dlp. Status arrives via the `download_queue` snapshot into `tools`.
 async function validateCookies(): Promise<void> {
   await invoke('downloads_validate_cookies')
 }
-async function logoutYoutube(): Promise<void> {
-  await invoke('downloads_youtube_logout')
+async function clearYoutubeCookies(): Promise<void> {
+  await invoke('downloads_clear_youtube_cookies')
+}
+/** Stages the bundled extension source to disk and returns the folder path (for "Load unpacked"). */
+async function prepareBrowserExtension(): Promise<string> {
+  return await invoke<string>('browser_bridge_prepare_extension')
 }
 const cookiesAuthorized = computed(() => tools.value.cookies_authorized)
 const cookiesChecking = computed(() => tools.value.cookies_checking)
 const cookiesValid = computed(() => tools.value.cookies_valid)
-const cookiesLoginOpen = computed(() => tools.value.cookies_login_open)
 const cookiesMessage = computed(() => tools.value.cookies_message)
 
 async function refreshToolsInfo(): Promise<ToolsInfo> {
@@ -479,13 +487,12 @@ export function useDownloads() {
     denoMissing,
     potMissing,
     potUpdateAvailable,
-    openYoutubeLogin,
     validateCookies,
-    logoutYoutube,
+    clearYoutubeCookies,
+    prepareBrowserExtension,
     cookiesAuthorized,
     cookiesChecking,
     cookiesValid,
-    cookiesLoginOpen,
     cookiesMessage,
     search,
     enqueue,

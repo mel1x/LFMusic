@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,9 +168,6 @@ fn spawn_audio_feature_analysis(
             let mut completed = initial_completed.min(total);
             if is_audio_feature_generation_current(generation) {
                 AUDIO_FEATURE_WORKER_ACTIVE.store(true, Ordering::SeqCst);
-            }
-
-            if is_audio_feature_generation_current(generation) {
                 if let Some(progress) = &progress {
                     progress(completed, total);
                 }
@@ -178,8 +176,6 @@ fn spawn_audio_feature_analysis(
             let Ok(mut conn) = Connection::open(db_path) else {
                 if is_audio_feature_generation_current(generation) {
                     AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
-                }
-                if is_audio_feature_generation_current(generation) {
                     if let Some(progress) = &progress {
                         progress(total, total);
                     }
@@ -202,8 +198,6 @@ fn spawn_audio_feature_analysis(
                 Err(_) => {
                     if is_audio_feature_generation_current(generation) {
                         AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
-                    }
-                    if is_audio_feature_generation_current(generation) {
                         if let Some(progress) = &progress {
                             progress(total, total);
                         }
@@ -212,90 +206,46 @@ fn spawn_audio_feature_analysis(
                 }
             };
 
-            let chunk_size = MusicLibrary::scan_thread_count().max(1);
-            for chunk in jobs.chunks(chunk_size) {
-                if !is_audio_feature_generation_current(generation) {
-                    return;
-                }
-
-                let results: Vec<(String, u64, Option<AudioFeatures>)> = pool.install(|| {
-                    chunk
-                        .par_iter()
-                        .filter_map(|(path, duration, mtime)| {
-                            if !is_audio_feature_generation_current(generation) {
-                                return None;
-                            }
-
-                            let features = audio_features::analyze_file(path, *duration).ok();
-                            if !is_audio_feature_generation_current(generation) {
-                                return None;
-                            }
-
-                            Some((
-                                path.clone(),
-                                *mtime,
-                                features,
-                            ))
-                        })
-                        .collect()
+            // Single unchunked parallel pass: rayon work-steals across the whole job
+            // list, so one slow file no longer stalls every other thread the way a
+            // fixed-size chunk-then-barrier loop used to (each chunk previously had to
+            // fully finish, including its slowest file, before the next chunk started).
+            // Results stream to this thread over a channel and are written in small
+            // batches as they arrive, so progress stays live and partial work survives
+            // an app close mid-run, instead of only ever writing at chunk boundaries.
+            let (tx, rx) = mpsc::channel::<(String, u64, Option<AudioFeatures>)>();
+            let analysis_thread = std::thread::spawn(move || {
+                pool.install(|| {
+                    jobs.into_par_iter().for_each_with(tx, |tx, (path, duration, mtime)| {
+                        if !is_audio_feature_generation_current(generation) {
+                            return;
+                        }
+                        let features = audio_features::analyze_file(&path, duration).ok();
+                        if is_audio_feature_generation_current(generation) {
+                            let _ = tx.send((path, mtime, features));
+                        }
+                    });
                 });
+            });
 
+            const WRITE_BATCH: usize = 16;
+            let mut pending: Vec<(String, u64, Option<AudioFeatures>)> =
+                Vec::with_capacity(WRITE_BATCH);
+            for result in rx {
                 if !is_audio_feature_generation_current(generation) {
-                    return;
+                    break;
                 }
-
-                let Ok(tx) = conn.transaction() else {
-                    continue;
-                };
-
-                if let Ok(mut stmt) = tx.prepare(
-                        "INSERT INTO track_audio_features
-                         (file_path, bpm, loudness, energy, danceability, spectral_centroid,
-                          track_key, audio_fingerprint,
-                          analyzed_modified_secs, analyzer_version)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-                         ON CONFLICT(file_path) DO UPDATE SET
-                            bpm = excluded.bpm,
-                            loudness = excluded.loudness,
-                            energy = excluded.energy,
-                            danceability = excluded.danceability,
-                            spectral_centroid = excluded.spectral_centroid,
-                            track_key = excluded.track_key,
-                            audio_fingerprint = excluded.audio_fingerprint,
-                            analyzed_modified_secs = excluded.analyzed_modified_secs,
-                            analyzer_version = excluded.analyzer_version",
-                    ) {
-                    for (file_path, mtime, features) in &results {
-                        let _ = stmt.execute(params![
-                            file_path,
-                            features.as_ref().and_then(|f| f.bpm),
-                            features.as_ref().and_then(|f| f.loudness),
-                            features.as_ref().and_then(|f| f.energy),
-                            features.as_ref().and_then(|f| f.danceability),
-                            features.as_ref().and_then(|f| f.spectral_centroid),
-                            features.as_ref().and_then(|f| f.key.as_deref()),
-                            features.as_ref().and_then(|f| f.audio_fingerprint.as_deref()),
-                            *mtime as i64,
-                            AUDIO_FEATURE_ANALYZER_VERSION,
-                        ]);
-                    }
+                pending.push(result);
+                completed = (completed + 1).min(total);
+                if pending.len() >= WRITE_BATCH {
+                    flush_audio_features(&mut conn, &mut pending);
                 }
-
-                let _ = tx.commit();
-
-                // New audio features may change the centroid; search/downloaded indexes
-                // depend on title/artist/album/genre/order, none of which features touch.
-                CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
-
-                if !is_audio_feature_generation_current(generation) {
-                    return;
-                }
-
-                completed = (completed + results.len()).min(total);
                 if let Some(progress) = &progress {
                     progress(completed, total);
                 }
             }
+            flush_audio_features(&mut conn, &mut pending);
+            let _ = analysis_thread.join();
 
             if is_audio_feature_generation_current(generation) {
                 AUDIO_FEATURE_WORKER_ACTIVE.store(false, Ordering::SeqCst);
@@ -306,10 +256,61 @@ fn spawn_audio_feature_analysis(
         });
 }
 
+/// Writes a batch of analysis results in one transaction and clears `pending`.
+/// Used by [`spawn_audio_feature_analysis`] to commit incrementally as results
+/// stream in, instead of waiting for the whole job list to finish.
+fn flush_audio_features(
+    conn: &mut Connection,
+    pending: &mut Vec<(String, u64, Option<AudioFeatures>)>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    if let Ok(tx) = conn.transaction() {
+        if let Ok(mut stmt) = tx.prepare(
+            "INSERT INTO track_audio_features
+             (file_path, bpm, loudness, energy, danceability, spectral_centroid,
+              track_key, audio_fingerprint,
+              analyzed_modified_secs, analyzer_version)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(file_path) DO UPDATE SET
+                bpm = excluded.bpm,
+                loudness = excluded.loudness,
+                energy = excluded.energy,
+                danceability = excluded.danceability,
+                spectral_centroid = excluded.spectral_centroid,
+                track_key = excluded.track_key,
+                audio_fingerprint = excluded.audio_fingerprint,
+                analyzed_modified_secs = excluded.analyzed_modified_secs,
+                analyzer_version = excluded.analyzer_version",
+        ) {
+            for (file_path, mtime, features) in pending.iter() {
+                let _ = stmt.execute(params![
+                    file_path,
+                    features.as_ref().and_then(|f| f.bpm),
+                    features.as_ref().and_then(|f| f.loudness),
+                    features.as_ref().and_then(|f| f.energy),
+                    features.as_ref().and_then(|f| f.danceability),
+                    features.as_ref().and_then(|f| f.spectral_centroid),
+                    features.as_ref().and_then(|f| f.key.as_deref()),
+                    features.as_ref().and_then(|f| f.audio_fingerprint.as_deref()),
+                    *mtime as i64,
+                    AUDIO_FEATURE_ANALYZER_VERSION,
+                ]);
+            }
+        }
+        let _ = tx.commit();
+    }
+    pending.clear();
+    // New audio features may change the centroid; search/downloaded indexes
+    // depend on title/artist/album/genre/order, none of which features touch.
+    CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+}
+
 impl MusicLibrary {
     fn scan_thread_count() -> usize {
         std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1).clamp(1, 4))
+            .map(|n| n.get().saturating_sub(1).clamp(1, 8))
             .unwrap_or(2)
     }
 
@@ -351,7 +352,8 @@ impl MusicLibrary {
                  is_lossless   INTEGER NOT NULL DEFAULT 0,
                  modified_secs INTEGER NOT NULL DEFAULT 0,
                  sort_order    INTEGER NOT NULL DEFAULT 0,
-                 accent_color  TEXT
+                 accent_color  TEXT,
+                 has_cover     INTEGER
              );
              CREATE INDEX IF NOT EXISTS idx_tracks_folder ON tracks(folder_path);
              CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
@@ -411,6 +413,14 @@ impl MusicLibrary {
              );",
         )
         .map_err(|e| format!("Ошибка создания таблиц: {}", e))?;
+
+        // tracks.has_cover was added after initial release; there's no migration
+        // system (see module docs), so a fresh CREATE TABLE already defines it but
+        // an existing DB needs it added explicitly. Errors (column already exists)
+        // are expected on every run after the first and are ignored. Existing rows
+        // land as NULL ("unknown"); MusicLibrary::has_cover resolves and caches
+        // those lazily instead of assuming "no cover" and silently losing art.
+        let _ = conn.execute("ALTER TABLE tracks ADD COLUMN has_cover INTEGER", []);
 
         statistics::create_tables(&conn)
             .map_err(|e| format!("Ошибка создания таблиц статистики: {}", e))?;
@@ -741,8 +751,9 @@ impl MusicLibrary {
             .execute(
                 "INSERT INTO tracks
                  (file_path, folder_path, title, artist, album, genre, duration_secs,
-                  format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                  format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order,
+                  has_cover)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
                  ON CONFLICT(file_path) DO UPDATE SET
                     folder_path = excluded.folder_path,
                     title = excluded.title,
@@ -758,7 +769,8 @@ impl MusicLibrary {
                     is_lossless = excluded.is_lossless,
                     modified_secs = excluded.modified_secs,
                     sort_order = excluded.sort_order,
-                    accent_color = NULL",
+                    accent_color = NULL,
+                    has_cover = excluded.has_cover",
                 params![
                     file_path,
                     folder_path,
@@ -775,6 +787,7 @@ impl MusicLibrary {
                     m.is_lossless as i32,
                     mtime as i64,
                     new_sort_order,
+                    m.has_cover as i32,
                 ],
             )
             .map_err(|e| format!("Ошибка вставки трека: {}", e))?;
@@ -1113,6 +1126,10 @@ impl MusicLibrary {
             spectral_centroid: row.get(18)?,
             key: row.get(19)?,
             audio_fingerprint: row.get(20)?,
+            // Not selected here (internal-only field, see TrackMetadata::has_cover) —
+            // this row mapper's output never feeds back into a tracks INSERT, so a
+            // placeholder is correct; use MusicLibrary::has_cover for the real value.
+            has_cover: false,
         })
     }
 
@@ -1500,8 +1517,9 @@ impl MusicLibrary {
                 let mut stmt = tx.prepare(
                     "INSERT INTO tracks
                      (file_path, folder_path, title, artist, album, genre, duration_secs,
-                      format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                      format, sample_rate, bit_depth, channels, bitrate, is_lossless, modified_secs, sort_order,
+                      has_cover)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
                      ON CONFLICT(file_path) DO UPDATE SET
                         folder_path = excluded.folder_path,
                         title = excluded.title,
@@ -1516,7 +1534,8 @@ impl MusicLibrary {
                         bitrate = excluded.bitrate,
                         is_lossless = excluded.is_lossless,
                         modified_secs = excluded.modified_secs,
-                        accent_color = NULL"
+                        accent_color = NULL,
+                        has_cover = excluded.has_cover"
                 ).map_err(|e| format!("Ошибка подготовки INSERT: {}", e))?;
 
                 for (file_path, m, mtime) in &batch {
@@ -1536,6 +1555,7 @@ impl MusicLibrary {
                         m.is_lossless as i32,
                         *mtime as i64,
                         new_sort_order,
+                        m.has_cover as i32,
                     ])
                     .map_err(|e| format!("Ошибка вставки: {}", e))?;
                 }
@@ -2279,6 +2299,56 @@ impl MusicLibrary {
     pub fn override_cover_bytes(&self, file_path: &str) -> Option<Vec<u8>> {
         let sig = self.get_override_cover_sig(file_path)?;
         crate::track_covers::read_cover(self.app_data_dir(), &sig)
+    }
+
+    /// Whether `file_path` has an embedded cover picture, from the cached
+    /// `tracks.has_cover` column instead of re-opening/re-parsing tags on every
+    /// call (the old path — see [`AudioPlayer::has_embedded_cover`], still used
+    /// as the one-time resolver here). A pre-existing row from before this
+    /// column existed reads as NULL ("unknown"); resolved once here and written
+    /// back, so later calls take the fast DB-only path.
+    pub fn has_cover(&self, file_path: &str) -> bool {
+        let cached: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT has_cover FROM tracks WHERE file_path = ?1",
+                params![file_path],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .ok();
+        match cached {
+            Some(Some(v)) => v != 0,
+            Some(None) => {
+                let has_cover = AudioPlayer::has_embedded_cover(file_path);
+                let _ = self.conn.execute(
+                    "UPDATE tracks SET has_cover = ?1 WHERE file_path = ?2",
+                    params![has_cover as i32, file_path],
+                );
+                has_cover
+            }
+            None => false,
+        }
+    }
+
+    /// Paths confirmed (cached) to have an embedded cover — for the external-prep
+    /// batch pass, which needs this per-track for many tracks at once and would
+    /// otherwise re-parse tags per group (see `external_prep_worker`). Rows still
+    /// NULL ("unknown", not yet resolved by [`Self::has_cover`]) are excluded
+    /// rather than resolved here, so this stays a cheap indexed scan; a false
+    /// negative just costs one extra (cached, rate-limited) external lookup.
+    pub fn cover_present_paths(&self) -> HashSet<String> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT file_path FROM tracks WHERE has_cover = 1")
+        {
+            Ok(s) => s,
+            Err(_) => return HashSet::new(),
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(r) => r,
+            Err(_) => return HashSet::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     pub fn set_accent_color(&self, file_path: &str, color: &str) -> Result<(), String> {
@@ -3050,6 +3120,122 @@ mod tests {
             emissions.lock().expect("emissions lock").is_empty(),
             "resume should stay silent when all tracks are already analyzed"
         );
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flush_audio_features_writes_pending_batch_and_clears_it() {
+        let dir = temp_library_dir("flush_audio_features");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/m/a.flac", 100);
+
+        let mut pending = vec![(
+            "/m/a.flac".to_string(),
+            100u64,
+            Some(AudioFeatures {
+                bpm: Some(120.0),
+                loudness: Some(-10.0),
+                energy: Some(0.5),
+                danceability: Some(0.6),
+                spectral_centroid: Some(2000.0),
+                key: Some("C major".to_string()),
+                audio_fingerprint: Some("abc123".to_string()),
+            }),
+        )];
+
+        flush_audio_features(&mut library.conn, &mut pending);
+
+        assert!(pending.is_empty(), "flush must clear the batch it just wrote");
+        let (bpm, key): (f64, String) = library
+            .conn
+            .query_row(
+                "SELECT bpm, track_key FROM track_audio_features WHERE file_path = ?1",
+                params!["/m/a.flac"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row should be written by flush");
+        assert!((bpm - 120.0).abs() < 1e-6);
+        assert_eq!(key, "C major");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flush_audio_features_second_batch_overwrites_the_first_for_the_same_track() {
+        // Regression check for the streaming rewrite: results now arrive (and get
+        // flushed) in small batches instead of one chunk per file, so a later
+        // batch for an already-written track must upsert, not error/duplicate.
+        let dir = temp_library_dir("flush_audio_features_upsert");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/m/a.flac", 100);
+
+        let mut first = vec![(
+            "/m/a.flac".to_string(),
+            100u64,
+            Some(AudioFeatures {
+                bpm: Some(90.0),
+                loudness: None,
+                energy: None,
+                danceability: None,
+                spectral_centroid: None,
+                key: None,
+                audio_fingerprint: None,
+            }),
+        )];
+        flush_audio_features(&mut library.conn, &mut first);
+
+        let mut second = vec![(
+            "/m/a.flac".to_string(),
+            100u64,
+            Some(AudioFeatures {
+                bpm: Some(140.0),
+                loudness: None,
+                energy: None,
+                danceability: None,
+                spectral_centroid: None,
+                key: None,
+                audio_fingerprint: None,
+            }),
+        )];
+        flush_audio_features(&mut library.conn, &mut second);
+
+        let row_count: i64 = library
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_audio_features WHERE file_path = ?1",
+                params!["/m/a.flac"],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(row_count, 1, "must upsert, not insert a duplicate row");
+
+        let bpm: f64 = library
+            .conn
+            .query_row(
+                "SELECT bpm FROM track_audio_features WHERE file_path = ?1",
+                params!["/m/a.flac"],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert!((bpm - 140.0).abs() < 1e-6, "second flush should win");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flush_audio_features_on_empty_pending_is_a_no_op() {
+        let dir = temp_library_dir("flush_audio_features_empty");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        let mut pending: Vec<(String, u64, Option<AudioFeatures>)> = Vec::new();
+
+        // Must not panic/error on an empty batch — spawn_audio_feature_analysis
+        // calls this unconditionally after draining the results channel.
+        flush_audio_features(&mut library.conn, &mut pending);
+        assert!(pending.is_empty());
 
         drop(library);
         let _ = fs::remove_dir_all(dir);
@@ -4365,6 +4551,86 @@ mod tests {
         let paths = library.override_cover_paths();
         assert!(paths.contains("/m/a.flac"));
         assert!(!paths.contains("/m/b.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn has_cover_reads_cached_value_without_touching_disk() {
+        let dir = temp_library_dir("has_cover_cached");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/m/missing.flac", 1);
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET has_cover = 1 WHERE file_path = ?1",
+                params!["/m/missing.flac"],
+            )
+            .expect("set has_cover");
+
+        // The path doesn't exist on disk, so a `true` result can only come from
+        // the cached column — a real tag re-parse would fail and yield `false`.
+        assert!(library.has_cover("/m/missing.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn has_cover_resolves_unknown_row_once_and_caches_the_result() {
+        let dir = temp_library_dir("has_cover_unknown");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        // insert_bare_track doesn't set has_cover, so it lands as NULL ("unknown"),
+        // matching a pre-existing row from before this column existed.
+        insert_bare_track(&library, "/m/missing.flac", 1);
+
+        assert!(
+            !library.has_cover("/m/missing.flac"),
+            "missing file has no tags to read, so the resolved answer is false"
+        );
+
+        let cached: i64 = library
+            .conn
+            .query_row(
+                "SELECT has_cover FROM tracks WHERE file_path = ?1",
+                params!["/m/missing.flac"],
+                |row| row.get(0),
+            )
+            .expect("has_cover should be resolved (non-NULL) after the first call");
+        assert_eq!(cached, 0, "resolved answer must be written back, not left NULL");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cover_present_paths_excludes_unknown_and_confirmed_absent_rows() {
+        let dir = temp_library_dir("cover_present_paths");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_bare_track(&library, "/m/has.flac", 1);
+        insert_bare_track(&library, "/m/none.flac", 2);
+        insert_bare_track(&library, "/m/unknown.flac", 3);
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET has_cover = 1 WHERE file_path = ?1",
+                params!["/m/has.flac"],
+            )
+            .expect("set has_cover true");
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET has_cover = 0 WHERE file_path = ?1",
+                params!["/m/none.flac"],
+            )
+            .expect("set has_cover false");
+        // /m/unknown.flac stays NULL.
+
+        let present = library.cover_present_paths();
+        assert!(present.contains("/m/has.flac"));
+        assert!(!present.contains("/m/none.flac"));
+        assert!(!present.contains("/m/unknown.flac"));
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

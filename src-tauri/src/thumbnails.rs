@@ -10,6 +10,7 @@
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
@@ -73,12 +74,13 @@ pub fn cover_protocol_url(file_path: &str, sig: &str) -> String {
 }
 
 /// Cover URL preferring override over embedded, or `None` if there's no cover
-/// at all (frontend falls back to a default). Doesn't decode any image.
+/// at all (frontend falls back to a default). Doesn't decode any image, and
+/// doesn't re-parse tags — presence comes from the cached `tracks.has_cover`.
 pub fn cover_url(lib: &MusicLibrary, file_path: &str) -> Option<String> {
     if let Some(sig) = lib.get_override_cover_sig(file_path) {
         return Some(cover_protocol_url(file_path, &sig));
     }
-    if AudioPlayer::has_embedded_cover(file_path) {
+    if lib.has_cover(file_path) {
         return Some(cover_protocol_url(file_path, &embedded_sig(file_path)));
     }
     None
@@ -123,10 +125,18 @@ pub fn ensure_thumbnail<R: Runtime>(
         return Some(cache_file);
     }
 
-    // Signature prefix picks the source: `e…` forces the embedded tag cover
-    // (used to preview the "original" even with an override set); anything
-    // else prefers the override, falling back to embedded.
-    let source = if sig.starts_with('e') {
+    // A smaller size (e.g. the blur background) decodes from the already-cached
+    // full-size WebP instead of re-reading and re-decoding the original embedded
+    // cover a second time — the original can be several MB, the cached WebP a
+    // few KB, and the full-size cache almost always exists already by the time
+    // a blur variant is requested (the UI loads the regular cover first).
+    let source = if size != THUMB_SIZE {
+        let full = ensure_thumbnail(app, file_path, THUMB_SIZE, sig)?;
+        fs::read(full).ok()?
+    } else if sig.starts_with('e') {
+        // Signature prefix picks the source: `e…` forces the embedded tag cover
+        // (used to preview the "original" even with an override set); anything
+        // else prefers the override, falling back to embedded.
         AudioPlayer::extract_cover_bytes(file_path)?
     } else {
         let override_bytes = {
@@ -169,18 +179,17 @@ pub fn thumbnail_bytes<R: Runtime>(
 /// Cached thumbnail path for native integrations (MPRIS); signature computed
 /// internally like `cover_url`.
 pub fn cover_file<R: Runtime>(app: &AppHandle<R>, file_path: &str, size: u32) -> Option<PathBuf> {
-    let override_sig = {
+    let sig = {
         let lib_state = app.state::<crate::LibraryState>();
         let guard = lib_state.0.lock().ok()?;
-        guard.get_override_cover_sig(file_path)
-    };
-    let sig = match override_sig {
-        Some(sig) => sig,
-        None => {
-            if !AudioPlayer::has_embedded_cover(file_path) {
-                return None;
+        match guard.get_override_cover_sig(file_path) {
+            Some(sig) => sig,
+            None => {
+                if !guard.has_cover(file_path) {
+                    return None;
+                }
+                embedded_sig(file_path)
             }
-            embedded_sig(file_path)
         }
     };
     ensure_thumbnail(app, file_path, size, &sig)
@@ -242,8 +251,38 @@ fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Res
     }
 }
 
-/// Async `lfmusic-cover` protocol handler; generation runs on its own thread
-/// so it doesn't block the webview.
+type ThumbJob = Box<dyn FnOnce() + Send>;
+
+/// Small fixed worker pool shared by every `lfmusic-cover` request. Generation
+/// used to spawn a fresh OS thread per request, which meant dozens of live
+/// threads while scrolling a large catalog; a bounded pool keeps generation
+/// off the webview thread without that per-request spawn cost.
+fn thumbnail_pool() -> &'static mpsc::Sender<ThumbJob> {
+    static POOL: OnceLock<mpsc::Sender<ThumbJob>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<ThumbJob>();
+        let rx = Arc::new(Mutex::new(rx));
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 4))
+            .unwrap_or(2);
+        for _ in 0..worker_count {
+            let rx = Arc::clone(&rx);
+            let _ = std::thread::Builder::new()
+                .name("thumbnail-worker".into())
+                .spawn(move || loop {
+                    let job = { rx.lock().unwrap_or_else(|e| e.into_inner()).recv() };
+                    match job {
+                        Ok(job) => job(),
+                        Err(_) => break,
+                    }
+                });
+        }
+        tx
+    })
+}
+
+/// Async `lfmusic-cover` protocol handler; generation runs on the shared
+/// thumbnail pool so it doesn't block the webview.
 pub fn protocol_handler<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
@@ -251,9 +290,9 @@ pub fn protocol_handler<R: Runtime>(
 ) {
     let app = ctx.app_handle().clone();
     let uri = request.uri().clone();
-    std::thread::spawn(move || {
+    let _ = thumbnail_pool().send(Box::new(move || {
         responder.respond(build_response(&app, &uri));
-    });
+    }));
 }
 
 #[cfg(test)]

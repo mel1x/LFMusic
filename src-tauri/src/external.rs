@@ -120,12 +120,16 @@ fn host_registry() -> &'static Mutex<HashMap<String, HostState>> {
 /// MusicBrainz/CAA require ≤1 req/s. iTunes Search API is hard-limited to
 /// ~20 req/min per IP, so we use 3s between requests — 300ms (≈200/min) used
 /// to hit 429s and empty "error decoding" bodies once a parallel pool kept the
-/// rate maxed out. Deezer tolerates more (kept as the main prep source).
+/// rate maxed out. Deezer's documented limit is 50 req/5s (~10 req/s); 140ms
+/// (~7 req/s) leaves headroom for bursts across the prep pool's several
+/// concurrent workers while still comfortably outrunning the old 220ms gap
+/// (kept as the main prep source, so this is the one that matters most for
+/// first-run batch prep time).
 fn host_min_gap(host: &str) -> Duration {
     match host {
         "musicbrainz.org" | "coverartarchive.org" => Duration::from_millis(1100),
         "itunes.apple.com" => Duration::from_millis(3000),
-        "api.deezer.com" => Duration::from_millis(220),
+        "api.deezer.com" => Duration::from_millis(140),
         _ => Duration::from_millis(120),
     }
 }
