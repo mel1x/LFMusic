@@ -1,4 +1,4 @@
-import { createRouter, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, type Router } from 'vue-router'
 import Main from './views/Main.vue'
 import Catalog from './views/Catalog.vue'
 import Search from './views/Search.vue'
@@ -34,7 +34,20 @@ const routes = [
   { path: '/settings/external', component: () => import('./views/settings/ExternalSources.vue') },
 ]
 
-export default createRouter({
+const router = createRouter({
   history: createWebHashHistory(),
   routes,
 })
+
+// window.history.state.back is null when there's no previous entry in this
+// session (e.g. right after launch, or a deep link) — router.back() would
+// silently no-op then, so fall back to the recommendations page instead.
+export function goBackOrHome(instance: Router = router) {
+  if (window.history.state?.back) {
+    instance.back()
+  } else {
+    instance.push('/')
+  }
+}
+
+export default router

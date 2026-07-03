@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { goBackOrHome } from '../router';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
 import PinIcon from '../components/Icons/PinIcon.vue';
@@ -332,7 +333,7 @@ function onMoveAlbumToTopFromMenu(album: AlbumEntry) {
 }
 
 function goBack() {
-    router.back();
+    goBackOrHome(router);
 }
 
 const pageRootEl = ref<HTMLElement | null>(null);

@@ -155,7 +155,7 @@ function roundedSeconds(seconds: number): number {
 
 const currentTrack = ref<TrackMetadata | null>(null);
 const playbackState = ref<"Stopped" | "Playing" | "Paused">("Stopped");
-const volume = ref(1.0);
+const volume = ref(0.5);
 const positionSecs = ref(0);
 const isLoading = ref(false);
 const errorMessage = ref("");
@@ -1196,7 +1196,7 @@ function createPlayer() {
     }
 
     try {
-      const v = Number.isFinite(saved.volume) ? Math.min(1, Math.max(0, saved.volume)) : 1;
+      const v = Number.isFinite(saved.volume) ? Math.min(1, Math.max(0, saved.volume)) : 0.5;
       volume.value = v;
       await invoke("player_set_volume", { volume: v });
     } catch (e) {

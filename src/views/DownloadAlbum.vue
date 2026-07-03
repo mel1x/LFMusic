@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { goBackOrHome } from '../router'
 
 import CoverImage from '../components/CoverImage.vue'
 import DownloadIcon from '../components/Icons/DownloadIcon.vue'
@@ -64,7 +65,7 @@ watch(queue, (items) => {
     }
 })
 
-function goBack() { router.back() }
+function goBack() { goBackOrHome(router) }
 
 function openArtist() {
     if (detail.value?.artist_id != null) router.push(`/downloads/artist/${detail.value.artist_id}`)

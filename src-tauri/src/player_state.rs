@@ -21,7 +21,7 @@ impl Default for SavedPlayerState {
         Self {
             current_track_path: None,
             position_secs: 0.0,
-            volume: 1.0,
+            volume: 0.5,
             shuffled: false,
             repeat_mode: "queue".to_string(),
             active_playlist_source: None,
@@ -62,7 +62,7 @@ mod tests {
         let s = SavedPlayerState::default();
         assert_eq!(s.current_track_path, None);
         assert_eq!(s.position_secs, 0.0);
-        assert_eq!(s.volume, 1.0);
+        assert_eq!(s.volume, 0.5);
         assert!(!s.shuffled);
         assert_eq!(s.repeat_mode, "queue");
     }
@@ -71,7 +71,7 @@ mod tests {
     fn load_missing_file_returns_default() {
         let dir = temp_dir("missing");
         let s = load(&dir);
-        assert_eq!(s.volume, 1.0);
+        assert_eq!(s.volume, 0.5);
         assert_eq!(s.repeat_mode, "queue");
     }
 
@@ -112,7 +112,7 @@ mod tests {
         std::fs::write(dir.join("player_state.json"), b"not json at all").unwrap();
 
         let s = load(&dir);
-        assert_eq!(s.volume, 1.0);
+        assert_eq!(s.volume, 0.5);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

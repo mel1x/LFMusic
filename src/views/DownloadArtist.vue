@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { goBackOrHome } from '../router'
 
 import CoverImage from '../components/CoverImage.vue'
 import DownloadIcon from '../components/Icons/DownloadIcon.vue'
@@ -74,7 +75,7 @@ watch(queue, (items) => {
     }
 })
 
-function goBack() { router.back() }
+function goBack() { goBackOrHome(router) }
 
 // Download popular: top-3 most popular tracks. Downloads whichever of the top-3
 // aren't already in the library or queued; if all three are already downloaded,

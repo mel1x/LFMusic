@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { goBackOrHome } from '../router'
 
 import MoreIcon from '../components/Icons/MoreIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
@@ -308,7 +309,7 @@ async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
 // ── Back ──
 
 function goBack() {
-    router.back()
+    goBackOrHome(router)
 }
 
 // ── Playlist context menu ──

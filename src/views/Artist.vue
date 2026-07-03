@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { goBackOrHome } from '../router'
 
 import MoreIcon from '../components/Icons/MoreIcon.vue'
 import PlayIcon from '../components/Icons/PlayIcon.vue'
@@ -367,7 +368,7 @@ function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {
 // ── Navigation ────────────────────────────────────────────────────────────
 
 function goBack() {
-    router.back()
+    goBackOrHome(router)
 }
 
 function openArtistTracks() {

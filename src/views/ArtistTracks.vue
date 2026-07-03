@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { goBackOrHome } from '../router'
 
 import PlayIcon from '../components/Icons/PlayIcon.vue'
 import PauseIcon from '../components/Icons/PauseIcon.vue'
@@ -255,7 +256,7 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 // ── Back ──
 
 function goBack() {
-    router.back()
+    goBackOrHome(router)
 }
 
 function onCoverImgClick() {

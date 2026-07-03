@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
+import { goBackOrHome } from '../router';
 import SearchIcon from '../components/Icons/SearchIcon.vue';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
@@ -313,7 +314,7 @@ watch(catalogCount, () => {
 });
 
 function goBack() {
-    router.back();
+    goBackOrHome(router);
 }
 
 const pageRootEl = ref<HTMLElement | null>(null);

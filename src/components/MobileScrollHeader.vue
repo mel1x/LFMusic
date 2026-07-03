@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
+import { goBackOrHome } from '../router'
 import ArrowUpIcon from './Icons/ArrowUpIcon.vue'
 import BackIcon from './Icons/BackIcon.vue'
 import SearchIcon from './Icons/SearchIcon.vue'
@@ -16,7 +17,7 @@ const emit = defineEmits<{
 const router = useRouter()
 
 function goBack() {
-    router.back()
+    goBackOrHome(router)
 }
 
 function openSearch() {

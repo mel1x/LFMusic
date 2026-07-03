@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
+import { goBackOrHome } from '../router';
 import PlusIcon from '../components/Icons/PlusIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
@@ -316,7 +317,7 @@ function onMoveToTopFromMenu(pl: PlaylistInfo) {
 }
 
 function goBack() {
-    router.back();
+    goBackOrHome(router);
 }
 
 const pageRootEl = ref<HTMLElement | null>(null);
