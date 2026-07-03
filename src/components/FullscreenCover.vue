@@ -4,10 +4,19 @@ import CloseIcon from './Icons/CloseIcon.vue';
 
 // Global fullscreen cover overlay, opened via the `lfmusic:show-fullscreen-cover`
 // window event (dispatched from cover cards/viewers).
-const fullscreenCoverSrc = ref<string | null>(null);
+interface FullscreenCoverDetail {
+    src: string;
+    // Set when the source is the grayscale catalog placeholder, so the
+    // fullscreen view keeps its accent-color tint instead of showing it raw.
+    tinted?: boolean;
+}
 
-function showFullscreenCover(src: string) {
+const fullscreenCoverSrc = ref<string | null>(null);
+const fullscreenCoverTinted = ref(false);
+
+function showFullscreenCover(src: string, tinted = false) {
     fullscreenCoverSrc.value = src;
+    fullscreenCoverTinted.value = tinted;
 }
 
 function hideFullscreenCover() {
@@ -15,9 +24,9 @@ function hideFullscreenCover() {
 }
 
 function handleFullscreenCoverEvent(e: Event) {
-    const detail = (e as CustomEvent<string>).detail;
-    if (detail) {
-        showFullscreenCover(detail);
+    const detail = (e as CustomEvent<FullscreenCoverDetail>).detail;
+    if (detail?.src) {
+        showFullscreenCover(detail.src, detail.tinted);
     }
 }
 
@@ -48,7 +57,7 @@ onUnmounted(() => {
                 class="fullscreenCoverBackdrop"
                 @click="hideFullscreenCover"
             >
-                <div class="fullscreenCoverContainer" @click.stop>
+                <div class="fullscreenCoverContainer" :class="{ tinted: fullscreenCoverTinted }" @click.stop>
                     <img :src="fullscreenCoverSrc" class="fullscreenCoverImage" alt="fullscreen cover" />
                     <button class="fullscreenCoverCloseBtn" @click="hideFullscreenCover">
                         <CloseIcon width="24" height="24" />
@@ -95,6 +104,18 @@ onUnmounted(() => {
     outline: none;
     user-select: none;
     pointer-events: auto;
+}
+.fullscreenCoverContainer.tinted .fullscreenCoverImage {
+    filter: grayscale(1);
+}
+.fullscreenCoverContainer.tinted::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 24px;
+    background-color: hsla(var(--accent-h), min(var(--accent-s), 45%), 50%, 1);
+    mix-blend-mode: color;
+    pointer-events: none;
 }
 .fullscreenCoverCloseBtn {
     position: fixed;

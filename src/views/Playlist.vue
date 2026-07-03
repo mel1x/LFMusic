@@ -394,7 +394,7 @@ function onNameKeydown(e: KeyboardEvent) {
 
 function onCoverImgClick() {
     if (isPhoneViewport()) return
-    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: playlistCover.value }))
+    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: { src: playlistCover.value } }))
 }
 </script>
 

@@ -326,7 +326,9 @@ function onCoverClick(track: TrackMetadata) {
 
 function onCoverImgClick() {
     if (isPhoneViewport()) return
-    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: catalogCustomCover.value || cover }))
+    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', {
+        detail: { src: catalogCustomCover.value || cover, tinted: !catalogCustomCover.value },
+    }))
 }
 
 
@@ -345,7 +347,7 @@ function onCoverImgClick() {
         </div>
         <div ref="scrollHeaderRef" class="scrollHeader">
             <div class="pageHat">
-                <div class="coverWrap cover-edit-host" @click="onCoverImgClick">
+                <div class="coverWrap cover-edit-host" :class="{ tinted: !catalogCustomCover }" @click="onCoverImgClick">
                     <AnimatedCover :src="catalogCustomCover || cover" class="cover" alt="cover" />
                     <CoverEditor kind="catalog" coverKey="catalog" size="large" />
                 </div>
@@ -555,6 +557,25 @@ function onCoverImgClick() {
     width: 204px;
     height: 204px;
     margin: -2px;
+}
+.pageHat .coverWrap.tinted .cover {
+    filter: grayscale(1);
+}
+.pageHat .coverWrap.tinted:has(.coverEditBtn:hover) .cover {
+    filter: grayscale(1) brightness(0.55);
+}
+.pageHat .coverWrap.tinted::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 18px;
+    background-color: hsla(var(--accent-h), min(var(--accent-s), 45%), 50%, 1);
+    mix-blend-mode: color;
+    pointer-events: none;
+    transition: background-color .28s ease, inset .24s ease;
+}
+.pageHat .coverWrap.tinted:hover::after {
+    inset: -2px;
 }
 .pageHat .dataZone {
     display: flex;
@@ -1159,6 +1180,14 @@ function onCoverImgClick() {
         object-fit: cover;
         filter: saturate(1.05) brightness(0.86);
         transform: none !important;
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .coverWrap.tinted .cover {
+        filter: grayscale(1) saturate(1.05) brightness(0.86);
+    }
+
+    body.lfmusic-phone .catalogPage .pageHat .coverWrap.tinted::after {
+        border-radius: 0;
     }
 
     body.lfmusic-phone .catalogPage .pageHat .coverWrap::after {

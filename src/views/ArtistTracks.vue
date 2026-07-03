@@ -261,7 +261,7 @@ function goBack() {
 
 function onCoverImgClick() {
     if (isPhoneViewport()) return
-    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: artistCover.value }))
+    window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: { src: artistCover.value } }))
 }
 </script>
 
