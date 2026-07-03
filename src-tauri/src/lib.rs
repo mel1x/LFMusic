@@ -19,7 +19,7 @@ mod tools;
 mod track_covers;
 mod window_state;
 
-use audio_player::{AudioPlayer, EqSettings, PlayerStatus, TrackMetadata};
+use audio_player::{AudioPlayer, EqSettings, PlayerStatus, SinkEndSignal, TrackMetadata};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use library::{AudioFeatureProgressEmitter, FolderInfo, GenreCount, MusicLibrary, PlaylistInfo};
 use player_state::SavedPlayerState;
@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 
 #[derive(Clone, serde::Serialize)]
@@ -301,7 +301,12 @@ fn apply_accent_color(
     }
 }
 
-#[tauri::command]
+// (async): opening the file, probing tags, and extracting/decoding the embedded
+// cover for accent-color computation can take tens to hundreds of ms on a slow
+// disk or large image — off the main/event-loop thread so window interaction
+// doesn't stutter on every track change. Tauri runs a non-`async fn` command
+// marked `(async)` via spawn_blocking; the RwLock<AudioPlayer> locking is unchanged.
+#[tauri::command(async)]
 fn player_play(
     state: State<PlayerState>,
     library: State<LibraryState>,
@@ -314,7 +319,7 @@ fn player_play(
     Ok(metadata)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn player_play_crossfade(
     state: State<PlayerState>,
     library: State<LibraryState>,
@@ -328,7 +333,7 @@ fn player_play_crossfade(
     Ok(metadata)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn player_play_paused(
     state: State<PlayerState>,
     library: State<LibraryState>,
@@ -2230,12 +2235,34 @@ async fn tools_delete(app: tauri::AppHandle, tool: String) -> Result<tools::Tool
     Ok(info)
 }
 
+/// Blocks on `signal` (near-instant wakeup on natural EOF, 500ms safety-net
+/// fallback otherwise) and emits `track_ended` with the finished file's path —
+/// replaces relying on the frontend's 500ms status poll to notice playback
+/// stopped, which added up to half a second of dead air between tracks.
+fn spawn_track_end_watcher(app: tauri::AppHandle, signal: Arc<SinkEndSignal>) {
+    std::thread::Builder::new()
+        .name("track-end-watcher".into())
+        .spawn(move || loop {
+            signal.wait(Duration::from_millis(500));
+            let player_state = app.state::<PlayerState>();
+            let finished_path = match player_state.0.write() {
+                Ok(mut player) => player.poll_finished(),
+                Err(_) => None,
+            };
+            if let Some(path) = finished_path {
+                let _ = app.emit("track_ended", path);
+            }
+        })
+        .expect("Не удалось запустить поток отслеживания окончания трека");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
     set_windows_priority_class();
 
     let player = AudioPlayer::new().expect("Не удалось инициализировать аудиоплеер");
+    let track_end_signal = player.sink_end_signal();
 
     tauri::Builder::default()
         // Serves lazily-generated, disk-cached WebP thumbnails by file_path, avoiding base64 over IPC.
@@ -2247,7 +2274,7 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("lfmusic-external", |ctx, request, responder| {
             external::protocol_handler(ctx, request, responder);
         })
-        .setup(|app| {
+        .setup(move |app| {
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -2316,6 +2343,7 @@ pub fn run() {
             app.manage(LibraryState(Mutex::new(library)));
 
             browser_bridge::start(app.handle().clone());
+            spawn_track_end_watcher(app.handle().clone(), track_end_signal.clone());
 
             Ok(())
         })

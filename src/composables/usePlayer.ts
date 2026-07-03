@@ -1,5 +1,6 @@
 import { ref, shallowRef, reactive, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
@@ -165,8 +166,14 @@ const isSeeking = ref(false);
 const seekValue = ref(0);
 let statusInterval: ReturnType<typeof setInterval> | null = null;
 let stopStatusWatcher: (() => void) | null = null;
+let stopTrackEndedListener: UnlistenFn | null = null;
 let isHandlingTrackEnd = false;
-const STATUS_POLL_MS = 500;
+// The backend also pushes a `track_ended` event near-instantly on natural EOF (see
+// spawn_track_end_watcher in lib.rs), so this poll is no longer the primary path for
+// that — just position/volume drift correction (rAF handles visual smoothness) plus
+// a safety net if an event is ever missed. Widened from 500ms now that it's not
+// gating how quickly the next track starts.
+const STATUS_POLL_MS = 1000;
 
 let lastFrameTime = performance.now();
 let animationFrameId: number | null = null;
@@ -240,7 +247,9 @@ const cacheAccessTick = new Map<string, number>();
 let cacheTick = 0;
 
 const inFlightTrackFetches = new Set<string>();
-let pendingFetchPaths: string[] = [];
+// Set (not array) so scheduleTrackFetch's membership check is O(1) — it runs on
+// every cache miss, e.g. once per row while scrolling an unmaterialized catalog window.
+let pendingFetchPaths = new Set<string>();
 let fetchTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Paths that must not be evicted: current track + a small window of queue around it. */
@@ -294,8 +303,8 @@ function cacheTracks(tracks: TrackMetadata[]) {
 function flushTrackFetches() {
   fetchTimer = null;
   const batch = pendingFetchPaths;
-  pendingFetchPaths = [];
-  const paths = batch.filter(p => !trackCache.has(p));
+  pendingFetchPaths = new Set();
+  const paths = [...batch].filter(p => !trackCache.has(p));
   if (paths.length === 0) return;
   for (const p of paths) inFlightTrackFetches.add(p);
   invoke<TrackMetadata[]>("library_get_tracks_by_paths", { paths })
@@ -306,7 +315,7 @@ function flushTrackFetches() {
 
 function scheduleTrackFetch(filePath: string) {
   if (trackCache.has(filePath) || inFlightTrackFetches.has(filePath)) return;
-  if (!pendingFetchPaths.includes(filePath)) pendingFetchPaths.push(filePath);
+  pendingFetchPaths.add(filePath);
   if (!fetchTimer) fetchTimer = setTimeout(flushTrackFetches, 16);
 }
 
@@ -1096,20 +1105,29 @@ function createPlayer() {
           }
         }
       } else if (status.state === "Stopped") {
-        if (currentTrack.value && !isHandlingTrackEnd && !isLoading.value) {
-          isHandlingTrackEnd = true;
-          try {
-            await finishCurrentStatsSession({ fullListen: true });
-            await playNext(true);
-          } finally {
-            isHandlingTrackEnd = false;
-          }
-        } else if (!currentTrack.value) {
+        if (currentTrack.value) {
+          await handleTrackNaturallyEnded(currentTrack.value.file_path);
+        } else {
           positionSecs.value = 0;
         }
       }
     } catch {
       // ignore polling errors
+    }
+  }
+
+  /** Shared by the `track_ended` event and the status-poll fallback: advances the
+   *  queue once per natural end-of-track. `finishedPath` guards against a stale
+   *  signal racing a manual track change that already moved playback elsewhere. */
+  async function handleTrackNaturallyEnded(finishedPath: string) {
+    if (isHandlingTrackEnd || isLoading.value) return;
+    if (!currentTrack.value || currentTrack.value.file_path !== finishedPath) return;
+    isHandlingTrackEnd = true;
+    try {
+      await finishCurrentStatsSession({ fullListen: true });
+      await playNext(true);
+    } finally {
+      isHandlingTrackEnd = false;
     }
   }
 
@@ -1320,6 +1338,12 @@ function createPlayer() {
     // Silent one-time rescan of active folders (fire-and-forget, doesn't delay UI readiness).
     void rescanOnStartup();
 
+    // Pushed by spawn_track_end_watcher (lib.rs) near-instantly on natural EOF —
+    // primary path for advancing the queue; the status poll above is the fallback.
+    stopTrackEndedListener = await listen<string>("track_ended", (event) => {
+      void handleTrackNaturallyEnded(event.payload);
+    });
+
     // Persist the current page on navigation (debounced). Set up after restoreState
     // so its own router.replace doesn't trigger a save.
     watch(() => router.currentRoute.value.path, () => {
@@ -1343,6 +1367,10 @@ function createPlayer() {
     if (stopStatusWatcher) {
       stopStatusWatcher();
       stopStatusWatcher = null;
+    }
+    if (stopTrackEndedListener) {
+      stopTrackEndedListener();
+      stopTrackEndedListener = null;
     }
     initialized = false;
   }

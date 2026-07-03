@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{CodecType, DecoderOptions};
@@ -588,15 +588,60 @@ impl<S: Source<Item = f32>> Source for FadeOut<S> {
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
+/// Shared between the audio thread and `AudioPlayer`: an atomic flag for cheap
+/// lock-free reads (`get_status` polling) plus a condvar so the track-end watcher
+/// thread can block instead of spin-polling, waking almost immediately when a
+/// track's samples are exhausted (`set_finished`) rather than up to 500ms late.
+pub struct SinkEndSignal {
+    empty: AtomicBool,
+    lock: Mutex<()>,
+    cvar: Condvar,
+}
+
+impl SinkEndSignal {
+    fn new(initially_empty: bool) -> Self {
+        Self {
+            empty: AtomicBool::new(initially_empty),
+            lock: Mutex::new(()),
+            cvar: Condvar::new(),
+        }
+    }
+
+    fn set_playing(&self) {
+        self.empty.store(false, Ordering::Relaxed);
+    }
+
+    /// Marks the sink empty and wakes anyone blocked in `wait`. Called both on
+    /// natural EOF (from the audio thread) and on an explicit `Stop`.
+    fn set_finished(&self) {
+        self.empty.store(true, Ordering::Relaxed);
+        let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.cvar.notify_all();
+        drop(guard);
+    }
+
+    fn is_finished(&self) -> bool {
+        self.empty.load(Ordering::Relaxed)
+    }
+
+    /// Blocks until `set_finished` notifies or `timeout` elapses (safety net against
+    /// a wakeup lost to the classic check/wait race — worst case, same latency as
+    /// the old fixed-interval poll).
+    pub fn wait(&self, timeout: Duration) {
+        let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.cvar.wait_timeout(guard, timeout);
+    }
+}
+
 /// Transparent tap: passes samples through unchanged while mixing frames to mono and
 /// feeding blocks to the shared `SpectrumAnalyzer` for FFT visualization. Placed above
 /// EQ (and fade-in) so the spectrum reflects what's actually audible.
 struct AnalyzerSource<S: Source<Item = f32>> {
     source: S,
     analyzer: Arc<SpectrumAnalyzer>,
-    /// Set to `true` on EOF; mirrored in `AudioPlayer::sink_empty` so the main thread
-    /// can poll via a plain atomic load instead of round-tripping the command channel.
-    finished: Arc<AtomicBool>,
+    /// Set on EOF; mirrored in `AudioPlayer::sink_empty` so the main thread can poll
+    /// via a plain atomic load, and so the track-end watcher thread wakes promptly.
+    finished: Arc<SinkEndSignal>,
     channels: u16,
     sample_rate: u32,
     ch_idx: u16,
@@ -609,7 +654,7 @@ impl<S: Source<Item = f32>> AnalyzerSource<S> {
     /// while staying smooth at 60fps.
     const BLOCK: usize = 256;
 
-    fn new(source: S, analyzer: Arc<SpectrumAnalyzer>, finished: Arc<AtomicBool>) -> Self {
+    fn new(source: S, analyzer: Arc<SpectrumAnalyzer>, finished: Arc<SinkEndSignal>) -> Self {
         let channels = source.channels().max(1);
         let sample_rate = source.sample_rate();
         Self {
@@ -633,7 +678,7 @@ impl<S: Source<Item = f32>> Iterator for AnalyzerSource<S> {
             Some(s) => s,
             None => {
                 // Reset to `false` when a new sink is created in the audio thread.
-                self.finished.store(true, Ordering::Relaxed);
+                self.finished.set_finished();
                 return None;
             }
         };
@@ -1056,7 +1101,7 @@ fn audio_thread_loop(
     stream_handle: OutputStreamHandle,
     eq_settings: Arc<RwLock<EqSettings>>,
     spectrum: Arc<SpectrumAnalyzer>,
-    sink_empty: Arc<AtomicBool>,
+    sink_empty: Arc<SinkEndSignal>,
 ) {
     let mut sink: Option<Sink> = None;
     // A new crossfade immediately stops the previous fade-out sink, capping
@@ -1072,7 +1117,7 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
-                    sink_empty.store(false, Ordering::Relaxed);
+                    sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()),
                         spectrum.clone(),
@@ -1101,7 +1146,7 @@ fn audio_thread_loop(
                 sink = None;
                 if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
                 spectrum.set_active(false);
-                sink_empty.store(true, Ordering::Relaxed);
+                sink_empty.set_finished();
             }
 
             AudioCmd::SetVolume(vol) => {
@@ -1115,7 +1160,7 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Не удалось создать sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
-                    sink_empty.store(false, Ordering::Relaxed);
+                    sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()),
                         spectrum.clone(),
@@ -1154,7 +1199,7 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
-                    sink_empty.store(false, Ordering::Relaxed);
+                    sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()).fade_in(dur),
                         spectrum.clone(),
@@ -1182,7 +1227,7 @@ fn audio_thread_loop(
                         .map_err(|e| format!("Ошибка нового sink: {}", e))?;
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
-                    sink_empty.store(false, Ordering::Relaxed);
+                    sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
                         EqSource::new(source, eq_settings.clone()).fade_in(dur),
                         spectrum.clone(),
@@ -1211,8 +1256,8 @@ pub struct AudioPlayer {
     spectrum: Arc<SpectrumAnalyzer>,
     /// Whether the current sink is empty (track finished/stopped). Updated
     /// asynchronously by the audio thread so the main thread can poll status
-    /// without a blocking channel round-trip.
-    sink_empty: Arc<AtomicBool>,
+    /// without a blocking channel round-trip; also wakes the track-end watcher.
+    sink_empty: Arc<SinkEndSignal>,
 }
 
 impl AudioPlayer {
@@ -1225,7 +1270,7 @@ impl AudioPlayer {
         let spectrum = Arc::new(SpectrumAnalyzer::new());
         let spectrum_for_thread = spectrum.clone();
         // true = nothing playing; set false when a track starts.
-        let sink_empty = Arc::new(AtomicBool::new(true));
+        let sink_empty = Arc::new(SinkEndSignal::new(true));
         let sink_empty_for_thread = sink_empty.clone();
 
         std::thread::Builder::new()
@@ -1293,7 +1338,13 @@ impl AudioPlayer {
     }
 
     fn is_sink_empty(&self) -> bool {
-        self.sink_empty.load(Ordering::Relaxed)
+        self.sink_empty.is_finished()
+    }
+
+    /// Arc handle for the track-end watcher thread (spawned once in `run()`), so it
+    /// can block on the condvar without needing to lock `AudioPlayer` itself.
+    pub fn sink_end_signal(&self) -> Arc<SinkEndSignal> {
+        self.sink_empty.clone()
     }
 
     /// Opens a file for tag/property reading, detecting type by content.
@@ -1637,10 +1688,22 @@ impl AudioPlayer {
         self.current_track.as_ref().map(|t| t.file_path.clone())
     }
 
-    pub fn get_status(&mut self) -> PlayerStatus {
+    /// Detects a naturally-finished sink (EOF, not a user-initiated stop) and
+    /// transitions state accordingly. Returns the path that just finished, once,
+    /// so callers (status polling, the track-end watcher thread) don't double-fire —
+    /// after the transition `current_track` is `None`, so a repeat call is a no-op.
+    pub fn poll_finished(&mut self) -> Option<String> {
         if self.state == PlaybackState::Playing && self.is_sink_empty() {
+            let path = self.current_file_path();
             self.sink_stopped();
+            path
+        } else {
+            None
         }
+    }
+
+    pub fn get_status(&mut self) -> PlayerStatus {
+        self.poll_finished();
 
         PlayerStatus {
             state: self.state,

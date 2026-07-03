@@ -8,7 +8,6 @@ import PauseIcon from '../components/Icons/PauseIcon.vue';
 import SearchIcon from '../components/Icons/SearchIcon.vue';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import EditIcon from '../components/Icons/EditIcon.vue';
-import defaultTrackCover from '../assets/trackCover.webp';
 import defaultPlaylistCover from '../assets/playlistCover.webp';
 
 import { invoke } from '@tauri-apps/api/core';
@@ -22,7 +21,7 @@ import { tracksCountText } from '../utils/format';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import ConfirmModal from '../components/ConfirmModal.vue';
-import TrackArtists from '../components/TrackArtists.vue';
+import TrackRow from '../components/TrackRow.vue';
 import { usePins } from '../composables/usePins';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
@@ -43,7 +42,6 @@ const {
     playTrack,
     togglePlayPause,
     setPlaylistSource,
-    formatTime,
     loadCoversForTracks,
     clearCoverQueue,
 } = usePlayer();
@@ -484,47 +482,17 @@ function onCoverImgClick() {
             key="gate-list"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
-            <div
+            <TrackRow
                 v-for="track in visibleTracks"
                 :key="track.file_path"
-                class="trackElem"
-                :class="{
-                    active: isPlaylistActive && currentTrack?.file_path === track.file_path,
-                    activePaused: isPlaylistActive && currentTrack?.file_path === track.file_path && !isPlaying,
-                }"
-                @click="onTrackClick($event, track)"
-            >
-                <div class="hoverIcon" @click.stop="onCoverClick(track)">
-                    <PauseIcon
-                        v-if="isPlaylistActive && currentTrack?.file_path === track.file_path && isPlaying"
-                        width="10" height="10"
-                        style="margin-left:0.5px;"
-                    />
-                    <PlayIcon
-                        v-else
-                        width="10" height="10"
-                        style="margin-left:1px;padding-top:0;"
-                    />
-                </div>
-                <div
-                    v-if="isPlaylistActive && currentTrack?.file_path === track.file_path"
-                    class="playingAnim"
-                ></div>
-                <div class="trackCover" @click.stop="onCoverClick(track)">
-                    <img
-                        :src="track.cover_art || defaultTrackCover"
-                        alt=""
-                        draggable="false"
-                        class="trackCoverImg"
-                    />
-                </div>
-                <div class="trackInfo">
-                    <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
-                    <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
-                </div>
-                <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
-            </div>
+                :track="track"
+                :active="isPlaylistActive && currentTrack?.file_path === track.file_path"
+                :activePaused="isPlaylistActive && currentTrack?.file_path === track.file_path && !isPlaying"
+                :menuOpen="trackMenu?.track.file_path === track.file_path"
+                @rowClick="onTrackClick($event, track)"
+                @coverClick="onCoverClick(track)"
+                @openMenu="openTrackMenu($event, track)"
+            />
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
         <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0" key="gate-empty-search">
@@ -881,168 +849,6 @@ function onCoverImgClick() {
 .vsPad {
     width: 100%;
 }
-.trackElem {
-    position: relative;
-    cursor: pointer;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 16px 8px 8px;
-    border-radius: 9px;
-    background-color: hsla(0, 0%, 100%, 0);
-    transition: .31s ease-in-out;
-    height: 58px;
-    box-sizing: border-box;
-    overflow: hidden;
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.03);
-    }
-}
-.trackElem :deep(.ripple) {
-    position: absolute;
-    border-radius: 50%;
-    background: hsla(0, 0%, 100%, 0.08);
-    transform: scale(0);
-    animation: ripple-expand 0.5s ease-out forwards;
-    pointer-events: none;
-}
-@keyframes ripple-expand {
-    to {
-        transform: scale(1);
-        opacity: 0;
-    }
-}
-.trackCover {
-    width: 42px;
-    height: 42px;
-    background-color: #202020;
-    border-radius: 5px;
-    transition: .31s ease;
-    overflow: hidden;
-    flex-shrink: 0;
-}
-.trackCoverImg {
-    user-select: none;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-}
-.trackElem:hover .trackCover,
-.trackElem.activePaused .trackCover {
-    opacity: 0.5;
-}
-.trackElem.active .trackCover {
-    opacity: 0.45;
-}
-.hoverIcon {
-    position: absolute;
-    top: 50%;
-    left: 18.5px;
-    transform: translateY(-50%);
-    opacity: 0;
-    padding: 5px;
-    border-radius: 9999px;
-    color: #242424;
-    background-color: hsla(0, 0%, 100%, 1.0);
-    transition: .31s ease;
-    z-index: 3;
-}
-.trackElem:hover .hoverIcon,
-.trackElem.activePaused .hoverIcon {
-    opacity: 1;
-}
-.hoverOptionsBtn {
-    position: absolute;
-    top: 50%;
-    right: 12px;
-    padding: 6px;
-    transform: translateY(-50%);
-    cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.45);
-    transition: .31s ease;
-
-    opacity: 0;
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.7);
-    }
-}
-.trackElem:hover .hoverOptionsBtn,
-.hoverOptionsBtn.menuOpen {
-    opacity: 1;
-}
-.trackTime.hidden {
-    opacity: 0 !important;
-}
-.trackInfo {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    flex: 1;
-    min-width: 0;
-}
-.trackName {
-    user-select: none;
-    font-size: 14px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.trackElem.active .trackName {
-    color: hsla(0, 0%, 100%, 1);
-}
-.trackArtist {
-    user-select: none;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.4);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    transition: .24s ease;
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
-}
-.trackTime {
-    margin-left: auto;
-    user-select: none;
-    font-size: 14px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    color: hsla(0, 0%, 100%, 0.45);
-    transition: .24s ease;
-    flex-shrink: 0;
-
-    opacity: 1;
-}
-.trackElem:hover .trackTime {
-    opacity: 0;
-}
-.playingAnim {
-    position: absolute;
-    left: 21px;
-    top: 21px;
-    width: 16px;
-    height: 16px;
-    background: #fff;
-    border-radius: 50%;
-    transform-origin: center;
-    animation: pulse 0.8s infinite ease;
-    z-index: 2;
-}
-
-@keyframes pulse {
-    0%, 100% { transform: scale(0.6); }
-    50% { transform: scale(1); }
-}
-
 .stickyHeaderAnchor {
     position: sticky;
     top: -20px;
