@@ -19,12 +19,18 @@ use tauri::{AppHandle, Manager};
 
 use crate::downloads;
 
-/// Localhost-only, fixed port the extension's popup is hardcoded to hit.
+/// Localhost-only, fixed port the extension's background worker is hardcoded to hit.
 const BRIDGE_PORT: u16 = 51823;
 
 const MANIFEST_JSON: &str = include_str!("../browser-extension/manifest.json");
-const POPUP_HTML: &str = include_str!("../browser-extension/popup.html");
-const POPUP_JS: &str = include_str!("../browser-extension/popup.js");
+const BACKGROUND_JS: &str = include_str!("../browser-extension/background.js");
+const CONTENT_JS: &str = include_str!("../browser-extension/content.js");
+const ICON_16: &[u8] = include_bytes!("../browser-extension/icons/icon16.png");
+const ICON_32: &[u8] = include_bytes!("../browser-extension/icons/icon32.png");
+const ICON_48: &[u8] = include_bytes!("../browser-extension/icons/icon48.png");
+const ICON_128: &[u8] = include_bytes!("../browser-extension/icons/icon128.png");
+const LOCALE_RU: &str = include_str!("../browser-extension/_locales/ru/messages.json");
+const LOCALE_EN: &str = include_str!("../browser-extension/_locales/en/messages.json");
 
 /// Starts the bridge server on a background thread for the app's lifetime.
 /// Binding failure (e.g. the port is already taken by a previous instance
@@ -51,7 +57,7 @@ fn run_server(app: AppHandle) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let app = app.clone();
-        // One popup click = one request; a thread per connection keeps a
+        // One "connect" click = one request; a thread per connection keeps a
         // slow/broken client from blocking the next one.
         std::thread::spawn(move || {
             let _ = handle_connection(stream, &app);
@@ -184,9 +190,20 @@ fn extension_dir(app: &AppHandle) -> PathBuf {
 /// Overwrites on every call so an app update always refreshes a stale copy.
 pub fn prepare_extension_bundle(app: &AppHandle) -> Result<String, String> {
     let dir = extension_dir(app);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let icons_dir = dir.join("icons");
+    let locales_ru_dir = dir.join("_locales").join("ru");
+    let locales_en_dir = dir.join("_locales").join("en");
+    std::fs::create_dir_all(&icons_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&locales_ru_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&locales_en_dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("manifest.json"), MANIFEST_JSON).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("popup.html"), POPUP_HTML).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("popup.js"), POPUP_JS).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("background.js"), BACKGROUND_JS).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("content.js"), CONTENT_JS).map_err(|e| e.to_string())?;
+    std::fs::write(icons_dir.join("icon16.png"), ICON_16).map_err(|e| e.to_string())?;
+    std::fs::write(icons_dir.join("icon32.png"), ICON_32).map_err(|e| e.to_string())?;
+    std::fs::write(icons_dir.join("icon48.png"), ICON_48).map_err(|e| e.to_string())?;
+    std::fs::write(icons_dir.join("icon128.png"), ICON_128).map_err(|e| e.to_string())?;
+    std::fs::write(locales_ru_dir.join("messages.json"), LOCALE_RU).map_err(|e| e.to_string())?;
+    std::fs::write(locales_en_dir.join("messages.json"), LOCALE_EN).map_err(|e| e.to_string())?;
     Ok(dir.to_string_lossy().to_string())
 }

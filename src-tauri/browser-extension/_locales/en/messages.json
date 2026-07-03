@@ -1,0 +1,47 @@
+{
+  "extDescription": {
+    "message": "Sends YouTube/YouTube Music cookies to the LFMusic app for more reliable track downloads."
+  },
+  "subtitle": {
+    "message": "YouTube cookie bridge"
+  },
+  "desc": {
+    "message": "Make sure you're signed in to YouTube in this browser, then send the current session to the LFMusic app."
+  },
+  "connectLabel": {
+    "message": "Send session to LFMusic"
+  },
+  "openMusicLabel": {
+    "message": "Open YouTube Music"
+  },
+  "footnote": {
+    "message": "Cookies are sent only to 127.0.0.1 — straight into the LFMusic app, nowhere else."
+  },
+  "statusPinging": {
+    "message": "Checking connection to LFMusic..."
+  },
+  "statusCollecting": {
+    "message": "Collecting the browser session..."
+  },
+  "statusSending": {
+    "message": "Sending the session to LFMusic..."
+  },
+  "statusSuccess": {
+    "message": "Session sent. Switch back to LFMusic."
+  },
+  "errorGeneric": {
+    "message": "Couldn't connect to LFMusic."
+  },
+  "errorNoCookies": {
+    "message": "No YouTube Music cookies found in this browser."
+  },
+  "errorNoAuthCookies": {
+    "message": "No sign-in cookies found — sign in to YouTube in this browser."
+  },
+  "errorBridgeRequest": {
+    "message": "The request to LFMusic failed."
+  },
+  "errorNoResponse": {
+    "message": "LFMusic didn't respond. Make sure the app is running."
+  }
+}

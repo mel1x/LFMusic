@@ -1,0 +1,47 @@
+{
+  "extDescription": {
+    "message": "Передаёт cookies YouTube/YouTube Music в приложение LFMusic для стабильного скачивания треков."
+  },
+  "subtitle": {
+    "message": "Мост cookies YouTube"
+  },
+  "desc": {
+    "message": "Убедитесь, что вы вошли в аккаунт YouTube в этом браузере, затем отправьте текущую сессию в приложение LFMusic."
+  },
+  "connectLabel": {
+    "message": "Отправить сессию в LFMusic"
+  },
+  "openMusicLabel": {
+    "message": "Открыть YouTube Music"
+  },
+  "footnote": {
+    "message": "Cookies уходят только на 127.0.0.1 — в само приложение LFMusic, никуда больше."
+  },
+  "statusPinging": {
+    "message": "Проверяем подключение к LFMusic..."
+  },
+  "statusCollecting": {
+    "message": "Собираем сессию браузера..."
+  },
+  "statusSending": {
+    "message": "Отправляем сессию в LFMusic..."
+  },
+  "statusSuccess": {
+    "message": "Сессия отправлена. Вернитесь в LFMusic."
+  },
+  "errorGeneric": {
+    "message": "Не удалось подключиться к LFMusic."
+  },
+  "errorNoCookies": {
+    "message": "В этом браузере не найдены cookies YouTube Music."
+  },
+  "errorNoAuthCookies": {
+    "message": "Не найдены cookies авторизации — войдите в аккаунт YouTube в этом браузере."
+  },
+  "errorBridgeRequest": {
+    "message": "Запрос к LFMusic не удался."
+  },
+  "errorNoResponse": {
+    "message": "LFMusic не ответил. Убедитесь, что приложение запущено."
+  }
+}
