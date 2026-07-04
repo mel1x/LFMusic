@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::{
-    Manager, Monitor, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent,
-};
+use tauri::{Monitor, WebviewWindow};
+// Window geometry (move/resize/fullscreen/maximize) is a desktop-only concept —
+// Android's single always-fullscreen activity has no window to manage.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent};
 
 pub const DEFAULT_WINDOW_WIDTH: u32 = 1460;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 860;
@@ -189,6 +191,7 @@ fn save_current_window_geometry(window: &WebviewWindow, app_data_dir: &Path) -> 
 /// (laggy/broken fullscreen), so maximized is cleared first, preserving
 /// position/size so the window doesn't jump on exit. Done as one Rust call to
 /// avoid several slow IPC round-trips.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn toggle_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
     let is_fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
@@ -214,6 +217,7 @@ pub fn toggle_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
 
 /// Toggle main window maximize. If in fullscreen (F11), exits it and maximizes
 /// instead of just toggling maximized.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn toggle_window_maximize(window: WebviewWindow) -> Result<(), String> {
     if window.is_fullscreen().map_err(|e| e.to_string())? {
@@ -226,6 +230,18 @@ pub fn toggle_window_maximize(window: WebviewWindow) -> Result<(), String> {
     } else {
         window.maximize().map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn toggle_window_fullscreen(_window: WebviewWindow) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn toggle_window_maximize(_window: WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 

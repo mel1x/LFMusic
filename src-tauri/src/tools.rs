@@ -452,6 +452,11 @@ fn make_executable(p: &Path) -> Result<(), String> {
 
 /// Extracts the named binaries from a zip (matched by basename, ignoring
 /// internal path) into `bin`, setting +x on Unix. Returns the path to `wanted[0]`.
+///
+/// zip-based (Windows/macOS ffmpeg, Deno on all desktop platforms, the PO-token
+/// plugin) — the `zip` crate is a desktop-only dependency (see Cargo.toml), so
+/// this doesn't exist on Android/iOS, where none of those installs apply either.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn extract_zip_binaries(zip_path: &Path, bin: &Path, wanted: &[&str]) -> Result<PathBuf, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -478,12 +483,18 @@ fn extract_zip_binaries(zip_path: &Path, bin: &Path, wanted: &[&str]) -> Result<
     }
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn extract_zip_binaries(_zip_path: &Path, _bin: &Path, _wanted: &[&str]) -> Result<PathBuf, String> {
+    Err("Не поддерживается на этой платформе".to_string())
+}
+
 /// Extracts specific entries (matched by full in-archive path, not basename)
 /// into `dest_root`, recreating their parent directories. Unlike
 /// [`extract_zip_binaries`] this preserves the archive's internal layout —
 /// needed for a Python namespace-package plugin, where the
 /// `yt_dlp_plugins/extractor/` structure must stay intact for yt-dlp's
 /// `--plugin-dirs` to discover it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn extract_zip_paths(zip_path: &Path, dest_root: &Path, wanted: &[&str]) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -509,6 +520,11 @@ fn extract_zip_paths(zip_path: &Path, dest_root: &Path, wanted: &[&str]) -> Resu
         return Err(format!("{} не найден в архиве", wanted[pos]));
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn extract_zip_paths(_zip_path: &Path, _dest_root: &Path, _wanted: &[&str]) -> Result<(), String> {
+    Err("Не поддерживается на этой платформе".to_string())
 }
 
 #[cfg(windows)]

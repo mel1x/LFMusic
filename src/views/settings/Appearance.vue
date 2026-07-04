@@ -266,6 +266,7 @@ async function selectPreset(color: string) {
                 <SettingToggle
                     :item="githubItem"
                     :checked="settings.show_github_badge"
+                    phoneHidden
                     @toggle="toggle('show_github_badge')"
                 />
 
