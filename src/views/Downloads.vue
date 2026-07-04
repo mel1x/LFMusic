@@ -29,6 +29,7 @@ const router = useRouter()
 const {
     queue,
     search,
+    resolveUrl,
     enqueue,
     refreshToolsInfo,
     checkToolUpdates,
@@ -198,7 +199,61 @@ function dedupeInto(base: ExternalSearchTrack[], extra: ExternalSearchTrack[]): 
     return [...base, ...fresh]
 }
 
-watch(query, (q) => { void runSearch(q) })
+// "Paste a link" flow: a URL in the search box downloads that exact yt-dlp
+// target instead of running a Deezer/iTunes search. Detected structurally
+// (not by hostname allowlist) so any yt-dlp-supported site works.
+function isDownloadUrl(s: string): boolean {
+    if (!/^https?:\/\/\S+$/i.test(s)) return false
+    try { return !!new URL(s).hostname } catch { return false }
+}
+const linkMode = computed(() => isDownloadUrl(query.value))
+const linkTrack = ref<ExternalSearchTrack | null>(null)
+const linkResolving = ref(false)
+const linkError = ref<string | null>(null)
+let linkReqId = 0
+
+async function resolveLinkQuery(url: string) {
+    const reqId = ++linkReqId
+    // A link result and a text-search result page are mutually exclusive —
+    // invalidate any in-flight text search and clear its results.
+    searchReqId++
+    results.value = []
+    resultAlbums.value = []
+    resultArtists.value = []
+    hasMore.value = false
+    searching.value = false
+    loadingMore.value = false
+    vsResetScroll()
+    linkTrack.value = null
+    linkError.value = null
+    linkResolving.value = true
+    try {
+        const track = await resolveUrl(url)
+        if (reqId !== linkReqId) return
+        linkTrack.value = track
+    } catch (e) {
+        if (reqId !== linkReqId) return
+        linkError.value = e instanceof Error ? e.message : String(e)
+    } finally {
+        if (reqId === linkReqId) linkResolving.value = false
+    }
+}
+
+function resetLinkState() {
+    linkReqId++
+    linkTrack.value = null
+    linkError.value = null
+    linkResolving.value = false
+}
+
+watch(query, (q) => {
+    if (isDownloadUrl(q)) {
+        void resolveLinkQuery(q)
+    } else {
+        resetLinkState()
+        void runSearch(q)
+    }
+})
 
 /** Whether the page has nothing at all (no tracks, albums, or artists). */
 function isEmptyPage(p: { tracks: unknown[]; albums?: unknown[]; artists?: unknown[] }): boolean {
@@ -356,6 +411,8 @@ watch(queue, (items) => {
     for (const r of results.value) {
         if (!r.in_library && doneKeys.has(trackKey(r.artist, r.title, r.album))) r.in_library = true
     }
+    const lt = linkTrack.value
+    if (lt && !lt.in_library && doneKeys.has(trackKey(lt.artist, lt.title, lt.album))) lt.in_library = true
 })
 
 // The download queue itself moved to the app header (DownloadQueueIndicator),
@@ -557,6 +614,32 @@ onUnmounted(() => {
         </div>
         <!-- /header -->
 
+        <!-- "Paste a link" flow: a URL in the search box resolves and downloads
+             that exact yt-dlp target instead of a text search. -->
+        <template v-if="linkMode">
+            <LoadingSpinner v-if="linkResolving" />
+
+            <section v-else-if="linkTrack" class="pageLine resultsLine">
+                <div class="lineHat">
+                    <div class="lineTitle nonClickable">{{ t('downloads.linkSectionTitle') }}</div>
+                </div>
+                <div class="tracksList">
+                    <DownloadTrackRow
+                        :track="linkTrack"
+                        @download="rememberCurrentSearch"
+                        @redownload="confirmTrack = $event"
+                    />
+                </div>
+            </section>
+
+            <div v-else-if="linkError" class="emptyState small">
+                <div class="emptyIcon"><DownloadIcon width="16" height="16" /></div>
+                <div class="emptyText">{{ t('downloads.linkErrorTitle') }}</div>
+                <div class="emptyDesc">{{ linkError }}</div>
+            </div>
+        </template>
+
+        <template v-else>
         <!-- Initial loading for a fresh query (no results of any kind yet) -->
         <LoadingSpinner v-if="hasQuery && searching && !hasAnyResults" />
 
@@ -587,6 +670,7 @@ onUnmounted(() => {
             <div class="emptyText">{{ t('downloads.emptyNothingTitle') }}</div>
             <div class="emptyDesc">{{ t('downloads.emptyNothingDesc') }}</div>
         </div>
+        </template>
 
         <!-- Idle empty state -->
         <div v-if="!hasQuery" class="emptyState">

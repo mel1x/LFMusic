@@ -1329,6 +1329,18 @@ pub struct ExternalSearchTrack {
     pub artist_id: Option<u64>,
     #[serde(default)]
     pub album_id: Option<u64>,
+    /// Genre, when the source exposes it directly (iTunes only — Deezer's
+    /// track/album search responses don't include it; for Deezer results the
+    /// download path looks it up separately via `album_id`, see
+    /// [`deezer_album_genre`]).
+    #[serde(default)]
+    pub genre: Option<String>,
+    /// Set only for the "paste a link" flow (`downloads_resolve_url`) — the
+    /// exact yt-dlp target URL, passed straight through to `downloads_enqueue`
+    /// as `DownloadRequest::direct_url` so the worker downloads it directly
+    /// instead of searching. `None` for Deezer/iTunes search results.
+    #[serde(default)]
+    pub source_url: Option<String>,
 }
 
 /// Deezer album search result for the download page, identified by Deezer id
@@ -1585,6 +1597,8 @@ fn deezer_search_tracks(
                 in_library: false,
                 artist_id,
                 album_id,
+                genre: None,
+                source_url: None,
             })
         })
         .collect();
@@ -1774,6 +1788,8 @@ pub fn album_detail(id: u64) -> Result<Option<ExternalAlbumDetail>, String> {
                     in_library: false,
                     artist_id,
                     album_id: Some(album.id),
+                    genre: None,
+                    source_url: None,
                 },
             )
         })
@@ -1789,6 +1805,42 @@ pub fn album_detail(id: u64) -> Result<Option<ExternalAlbumDetail>, String> {
         cover_url,
         tracks,
     }))
+}
+
+/// Looks up a track's genre via its Deezer album id — the track search
+/// endpoint doesn't include genre, only `/album/{id}` does. Best-effort:
+/// `None` on any network/parse error or when the album has no genre set
+/// (Deezer uses id 0 / an empty list for "All"/unclassified).
+pub fn deezer_album_genre(album_id: u64) -> Option<String> {
+    #[derive(Deserialize)]
+    struct AlbumResp {
+        genres: Option<GenresWrap>,
+    }
+    #[derive(Deserialize)]
+    struct GenresWrap {
+        #[serde(default)]
+        data: Vec<GenreHit>,
+    }
+    #[derive(Deserialize)]
+    struct GenreHit {
+        name: String,
+    }
+
+    let resp = send_throttled(
+        client().get(format!("https://api.deezer.com/album/{}", album_id)),
+        "api.deezer.com",
+    )
+    .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let album: AlbumResp = resp.json().ok()?;
+    album
+        .genres?
+        .data
+        .into_iter()
+        .map(|g| g.name)
+        .find(|n| !n.is_empty() && n != "All")
 }
 
 /// `Ok(None)` = artist not found; `Err` = network/parse error.
@@ -1901,6 +1953,8 @@ pub fn artist_detail(id: u64) -> Result<Option<ExternalArtistDetail>, String> {
                         in_library: false,
                         artist_id: Some(artist.id),
                         album_id,
+                        genre: None,
+                        source_url: None,
                     }
                 })
                 .collect()
@@ -1938,6 +1992,8 @@ fn itunes_search_tracks(
         artwork_url100: Option<String>,
         #[serde(rename = "trackTimeMillis")]
         track_time_millis: Option<u64>,
+        #[serde(rename = "primaryGenreName")]
+        primary_genre_name: Option<String>,
     }
 
     let resp: SearchResp = send_throttled_json(
@@ -1963,6 +2019,10 @@ fn itunes_search_tracks(
             let cover_url = h
                 .artwork_url100
                 .map(|u| u.replace("100x100bb", "600x600bb"));
+            // "Music" is iTunes's generic fallback bucket, not a real genre.
+            let genre = h
+                .primary_genre_name
+                .filter(|g| !g.is_empty() && g != "Music");
             Some(ExternalSearchTrack {
                 title,
                 artist,
@@ -1974,6 +2034,8 @@ fn itunes_search_tracks(
                 // iTunes doesn't expose an id, so artist/album aren't clickable.
                 artist_id: None,
                 album_id: None,
+                genre,
+                source_url: None,
             })
         })
         .collect())

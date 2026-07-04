@@ -32,10 +32,24 @@ pub struct DownloadRequest {
     pub query: Option<String>,
     #[serde(default)]
     pub cover_url: Option<String>,
+    /// Deezer album id (when known from a search result) — used to look up the
+    /// genre tag, which Deezer's track search response doesn't include.
+    #[serde(default)]
+    pub album_id: Option<u64>,
+    /// Genre, when the source already provided one directly (iTunes results —
+    /// see [`crate::external::ExternalSearchTrack::genre`]); takes priority
+    /// over an `album_id` lookup.
+    #[serde(default)]
+    pub genre: Option<String>,
     /// Force re-download even if already queued/downloaded (used by the
     /// "already in library" modal).
     #[serde(default)]
     pub force: Option<bool>,
+    /// Exact yt-dlp download target (the "paste a link" flow, see
+    /// [`resolve_url_metadata`]) — when set, this URL is downloaded directly
+    /// instead of a `ytsearch`/YouTube Music search built from title/artist.
+    #[serde(default)]
+    pub direct_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +60,9 @@ pub struct DownloadItem {
     pub album: Option<String>,
     pub query: String,
     pub cover_url: Option<String>,
+    pub album_id: Option<u64>,
+    pub genre: Option<String>,
+    pub direct_url: Option<String>,
     /// "queued" | "downloading" | "done" | "error".
     pub status: String,
     pub progress: f64,
@@ -604,6 +621,9 @@ fn insert_request(m: &mut DownloadManager, req: DownloadRequest) -> (u64, bool) 
         album: req.album,
         query,
         cover_url: req.cover_url,
+        album_id: req.album_id,
+        genre: req.genre,
+        direct_url: req.direct_url,
         status: "queued".into(),
         progress: 0.0,
         error: None,
@@ -1032,6 +1052,127 @@ fn run_youtube_cookie_check(app: &AppHandle) -> (bool, Option<String>) {
     (false, Some(extract_ytdlp_error(&stderr)))
 }
 
+/// Metadata probe for the "paste a link" download flow: a `--skip-download`
+/// yt-dlp pass that returns title/uploader/thumbnail/duration without
+/// fetching the file, so the frontend can show a normal-looking result row
+/// and hand it back to [`enqueue`] (via `DownloadRequest::direct_url`) exactly
+/// like a search hit. Uses the same client/cookies/proxy setup as a real
+/// download so a link that probes fine won't unexpectedly bot-wall later.
+pub fn resolve_url_metadata(
+    app: &AppHandle,
+    url: &str,
+) -> Result<crate::external::ExternalSearchTrack, String> {
+    let app_data_dir = app_data_dir(app);
+    let ytdlp = tools::resolve_ytdlp(&app_data_dir).ok_or_else(|| {
+        "yt-dlp не установлен — установите его в «Внешних источниках».".to_string()
+    })?;
+
+    let mut cmd = tools::silent_command(&ytdlp);
+    cmd.arg("--dump-json")
+        .arg("--no-warnings")
+        .arg("--no-playlist")
+        .arg("--skip-download")
+        .arg("--socket-timeout")
+        .arg("15");
+    let cookies = cookies_file(app);
+    if cookies.exists() {
+        cmd.arg("--cookies").arg(&cookies);
+    }
+    if let Some(deno) = tools::resolve_deno(&app_data_dir) {
+        cmd.arg("--js-runtimes").arg(tools::deno_runtime_value(&deno));
+    }
+    cmd.arg("--extractor-args")
+        .arg(format!("youtube:player_client={}", YT_PLAYER_CLIENTS[0]))
+        .arg("--user-agent")
+        .arg(YOUTUBE_UA);
+    if let Some(proxy) = proxy_arg(app) {
+        cmd.arg("--proxy").arg(proxy);
+    }
+    cmd.arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Не удалось запустить yt-dlp: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(extract_ytdlp_error(&stderr));
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Probe {
+        title: Option<String>,
+        uploader: Option<String>,
+        channel: Option<String>,
+        duration: Option<f64>,
+        thumbnail: Option<String>,
+        webpage_url: Option<String>,
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // --dump-json prints one JSON object per line; a single video always
+    // yields exactly one, but take the first non-empty line defensively
+    // rather than assume.
+    let line = stdout
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .ok_or_else(|| "yt-dlp не вернул информацию о ссылке".to_string())?;
+    let probe: Probe = serde_json::from_str(line)
+        .map_err(|e| format!("Не удалось разобрать ответ yt-dlp: {}", e))?;
+    let title = probe
+        .title
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "Не удалось получить название по ссылке".to_string())?;
+    let artist = probe
+        .uploader
+        .or(probe.channel)
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_default();
+    // YouTube video titles are conventionally "Artist - Song"; without this the
+    // tagged title/filename repeats the artist twice (e.g. "Rick Astley - Rick
+    // Astley - Never Gonna Give You Up").
+    let title = strip_artist_prefix(&title, &artist).unwrap_or(title);
+
+    Ok(crate::external::ExternalSearchTrack {
+        title,
+        artist,
+        album: None,
+        duration_secs: probe.duration.map(|d| d.round().max(0.0) as u32),
+        cover_url: probe.thumbnail,
+        source: "Ссылка".to_string(),
+        in_library: false,
+        artist_id: None,
+        album_id: None,
+        genre: None,
+        source_url: Some(probe.webpage_url.unwrap_or_else(|| url.to_string())),
+    })
+}
+
+/// Strips a leading "{artist} - " from a YouTube-style title (case-insensitive,
+/// tolerant of "-"/"–"/"—"), so a video titled "Artist - Song" with an uploader
+/// name of "Artist" is stored as just "Song". Requires an actual dash right
+/// after the artist name (not just any prefix match) so e.g. artist "Rick"
+/// doesn't eat "Rickroll Video". `None` when the title doesn't start with the
+/// artist name or nothing meaningful is left after stripping.
+fn strip_artist_prefix(title: &str, artist: &str) -> Option<String> {
+    let artist = artist.trim();
+    if artist.is_empty() {
+        return None;
+    }
+    let title_trim = title.trim_start();
+    if title_trim.len() < artist.len() || !title_trim.is_char_boundary(artist.len()) {
+        return None;
+    }
+    let (head, rest) = title_trim.split_at(artist.len());
+    if !head.eq_ignore_ascii_case(artist) {
+        return None;
+    }
+    let rest = rest.trim_start().strip_prefix(['-', '–', '—'])?.trim_start();
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
     /// "system" | "none" (direct) | "custom" (explicit URL).
@@ -1405,9 +1546,10 @@ impl DownloadAttempt for RealDownloadAttempt<'_> {
     }
 }
 
-/// Downloads one track via yt-dlp and tags it, returning the file path. Tries
-/// search targets in order ([`search_targets`]) as a hedge against an
-/// unstable music extractor.
+/// Downloads one track via yt-dlp and tags it, returning the file path. A
+/// `direct_url` job (paste-a-link flow) downloads that exact URL as its only
+/// target; otherwise tries search targets in order ([`search_targets`]) as a
+/// hedge against an unstable music extractor.
 fn download_one(
     app: &AppHandle,
     resolved: &tools::ResolvedTools,
@@ -1416,7 +1558,10 @@ fn download_one(
     child_slot: &Arc<Mutex<Option<Child>>>,
 ) -> Result<PathBuf, DownloadError> {
     let stem = unique_stem(dir, &job.artist, &job.title);
-    let targets = search_targets(&job.query);
+    let targets = match &job.direct_url {
+        Some(url) => vec![url.clone()],
+        None => search_targets(&job.query),
+    };
     let attempt = RealDownloadAttempt {
         app,
         resolved,
@@ -1589,6 +1734,12 @@ fn download_one_with_stem(
         // drops the video track (-vn) — some videos carry an embedded cover
         // as an mjpeg stream inside bestaudio, which a bare remux used to keep.
         cmd.arg("-x").arg("--audio-format").arg("m4a");
+        // Best VBR quality for the rare case where a transcode is actually
+        // needed (source isn't already m4a/AAC) — yt-dlp's own default (5,
+        // mid-range) otherwise re-encodes at a needlessly low bitrate. When
+        // the source is already AAC, yt-dlp stream-copies regardless and this
+        // is a no-op.
+        cmd.arg("--audio-quality").arg("0");
         // --ffmpeg-location only makes sense for our own downloaded binary
         // (absolute path); for a bare name from PATH, parent() == "" would
         // break the call, so rely on PATH instead.
@@ -1770,6 +1921,8 @@ fn download_one_with_stem(
         &job.artist,
         job.album.as_deref(),
         job.cover_url.as_deref(),
+        job.genre.clone(),
+        job.album_id,
     );
 
     Ok(file)
@@ -2324,6 +2477,8 @@ fn write_tags(
     artist: &str,
     album: Option<&str>,
     cover_url: Option<&str>,
+    genre_hint: Option<String>,
+    album_id: Option<u64>,
 ) {
     use lofty::config::WriteOptions;
     use lofty::picture::{Picture, PictureType};
@@ -2354,14 +2509,22 @@ fn write_tags(
         (secs > 0).then_some(secs)
     };
 
-    // Lyrics (LRCLIB) and cover (direct URL, else external providers) hit
-    // different hosts and don't depend on each other — fetched concurrently
-    // instead of paying both round-trips back to back.
-    let (lyrics, cover_bytes) = std::thread::scope(|scope| {
+    // Lyrics (LRCLIB), cover (direct URL, else external providers) and genre
+    // (Deezer album lookup, when not already known) hit different hosts and
+    // don't depend on each other — fetched concurrently instead of paying
+    // all three round-trips back to back.
+    let (lyrics, cover_bytes, genre) = std::thread::scope(|scope| {
         let lyrics_task = scope.spawn(|| fetch_lyrics(artist, title, album, duration_secs));
         let cover_task =
             scope.spawn(|| resolve_cover_bytes(cover_url, artist, album.unwrap_or(""), title));
-        (lyrics_task.join().unwrap_or(None), cover_task.join().unwrap_or(None))
+        let genre_task = scope.spawn(|| {
+            genre_hint.or_else(|| album_id.and_then(crate::external::deezer_album_genre))
+        });
+        (
+            lyrics_task.join().unwrap_or(None),
+            cover_task.join().unwrap_or(None),
+            genre_task.join().unwrap_or(None),
+        )
     });
 
     let tag_type = tagged.primary_tag_type();
@@ -2380,6 +2543,9 @@ fn write_tags(
         if !al.is_empty() {
             tag.set_album(al.to_string());
         }
+    }
+    if let Some(g) = genre {
+        tag.set_genre(g);
     }
     // Cover: try the direct URL from search results (Deezer/iTunes CDN) first;
     // if missing or the download fails, fall back to external providers by
@@ -2480,6 +2646,9 @@ mod tests {
             album: None,
             query: "A T".into(),
             cover_url: None,
+            album_id: None,
+            genre: None,
+            direct_url: None,
             status: "queued".into(),
             progress: 0.0,
             error: None,
@@ -2689,7 +2858,10 @@ mod tests {
             album: None,
             query: None,
             cover_url: None,
+            album_id: None,
+            genre: None,
             force: None,
+            direct_url: None,
         }
     }
 
@@ -3250,6 +3422,39 @@ mod tests {
         // "ё" in UTF-8 is two bytes: 0xD1 0x91.
         let encoded = percent_encode_query("ё");
         assert_eq!(encoded, "%D1%91");
+    }
+
+    #[test]
+    fn strip_artist_prefix_removes_leading_artist_and_dash() {
+        assert_eq!(
+            strip_artist_prefix("Rick Astley - Never Gonna Give You Up", "Rick Astley"),
+            Some("Never Gonna Give You Up".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_artist_prefix_is_case_insensitive_and_accepts_em_dash() {
+        assert_eq!(
+            strip_artist_prefix("RICK ASTLEY — Never Gonna Give You Up", "Rick Astley"),
+            Some("Never Gonna Give You Up".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_artist_prefix_requires_a_dash_right_after_the_artist_name() {
+        // "Rick" is a prefix of "Rickroll", but there's no separator after it.
+        assert_eq!(strip_artist_prefix("Rickroll Video", "Rick"), None);
+    }
+
+    #[test]
+    fn strip_artist_prefix_returns_none_for_empty_artist_or_no_match() {
+        assert_eq!(strip_artist_prefix("Some Video Title", ""), None);
+        assert_eq!(strip_artist_prefix("Some Video Title", "Other Artist"), None);
+    }
+
+    #[test]
+    fn strip_artist_prefix_returns_none_when_nothing_meaningful_remains() {
+        assert_eq!(strip_artist_prefix("Rick Astley -   ", "Rick Astley"), None);
     }
 
     #[test]

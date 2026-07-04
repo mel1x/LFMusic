@@ -18,6 +18,11 @@ export interface ExternalSearchTrack {
   artist_id: number | null
   /** Deezer album id; null for iTunes. */
   album_id: number | null
+  /** Genre, when the source exposes it directly (iTunes only). */
+  genre: string | null
+  /** Set only for a "paste a link" result (see `resolveUrl`) — the exact
+   *  yt-dlp target URL, passed straight through to `enqueue`. */
+  source_url: string | null
 }
 
 export interface ExternalSearchAlbum {
@@ -89,6 +94,8 @@ export interface DownloadItem {
   album: string | null
   query: string
   cover_url: string | null
+  /** Set for a "paste a link" download — the exact URL that was fetched. */
+  direct_url: string | null
   status: DownloadStatus
   progress: number
   error: string | null
@@ -405,6 +412,9 @@ export function useDownloads() {
         artist: track.artist,
         album: track.album,
         cover_url: track.cover_url,
+        album_id: track.album_id,
+        genre: track.genre,
+        direct_url: track.source_url,
         force,
       },
     })
@@ -418,9 +428,19 @@ export function useDownloads() {
         artist: t.artist,
         album: t.album,
         cover_url: t.cover_url,
+        album_id: t.album_id,
+        genre: t.genre,
+        direct_url: t.source_url,
         force,
       })),
     })
+  }
+
+  /** "Paste a link" flow: probes a yt-dlp-supported URL for title/uploader/
+   *  thumbnail without downloading, so it can be shown and enqueued like a
+   *  normal search hit (see `ExternalSearchTrack.source_url`). */
+  async function resolveUrl(url: string): Promise<ExternalSearchTrack> {
+    return await invoke<ExternalSearchTrack>('downloads_resolve_url', { url })
   }
 
   async function albumDetail(id: number): Promise<ExternalAlbumDetail | null> {
@@ -495,6 +515,7 @@ export function useDownloads() {
     cookiesValid,
     cookiesMessage,
     search,
+    resolveUrl,
     enqueue,
     enqueueMany,
     albumDetail,

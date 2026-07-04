@@ -1757,6 +1757,25 @@ async fn downloads_search(
     .map_err(|e| format!("Task error: {}", e))
 }
 
+/// Resolves metadata for a direct-link download (the "paste a link" flow —
+/// downloads a specific yt-dlp-supported URL instead of searching). The
+/// frontend shows the result like any other search hit and hands it straight
+/// back to `downloads_enqueue`, which downloads that exact URL (see
+/// `ExternalSearchTrack::source_url` / `DownloadRequest::direct_url`).
+#[tauri::command]
+async fn downloads_resolve_url(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<external::ExternalSearchTrack, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut track = downloads::resolve_url_metadata(&app, &url)?;
+        mark_tracks_in_library(&app, std::slice::from_mut(&mut track));
+        Ok(track)
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
 /// Marks `in_library` when title matches, at least one artist overlaps (multi-artist
 /// aware), and album is compatible (either side has no album tag, or album keys match) —
 /// so a same-titled track from a DIFFERENT album by the same artist isn't falsely marked.
@@ -2403,6 +2422,7 @@ pub fn run() {
             external_prepare,
             // Downloads
             downloads_search,
+            downloads_resolve_url,
             downloads_album,
             downloads_artist,
             downloads_enqueue,
