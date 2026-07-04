@@ -999,6 +999,12 @@ fn external_prep_current(generation: u64) -> bool {
 /// entries (ok/none) aren't retried. Safe to call on startup or any settings toggle.
 #[tauri::command]
 fn external_prepare(app: tauri::AppHandle) -> Result<(), String> {
+    // External sources are a desktop-only feature (no settings UI to enable
+    // them on Android) — never run the background fetch pass there.
+    if cfg!(target_os = "android") {
+        return Ok(());
+    }
+
     let generation = EXTERNAL_PREP_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     let (dir, covers_on, avatars_on, albums_on) = {

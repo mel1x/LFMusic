@@ -221,7 +221,9 @@ onMounted(() => {
         return invoke<number>('library_resume_audio_features');
     }).then(() => {
         // Fetches enabled external sources in the background; its steps report
-        // to the same progress bar as the feature analysis.
+        // to the same progress bar as the feature analysis. External sources
+        // are a desktop-only feature, unreachable from Android's settings.
+        if (isAndroidRuntime()) return;
         return invoke('external_prepare');
     }).catch(() => {
         // Background prep failing shouldn't block UI startup.

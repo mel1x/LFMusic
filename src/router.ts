@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory, type Router } from 'vue-router'
+import { isAndroidRuntime } from './composables/usePlatform'
 import Main from './views/Main.vue'
 import Catalog from './views/Catalog.vue'
 import Search from './views/Search.vue'
@@ -37,6 +38,12 @@ const routes = [
 const router = createRouter({
   history: createWebHashHistory(),
   routes,
+})
+
+// External sources settings are a desktop-only feature (no tab to reach them
+// from on Android) — redirect away from any direct/deep link too.
+router.beforeEach((to) => {
+  if (to.path === '/settings/external' && isAndroidRuntime()) return '/settings'
 })
 
 // window.history.state.back is null when there's no previous entry in this

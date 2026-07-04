@@ -1,6 +1,7 @@
 import { reactive, ref, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "./useSettings";
+import { isAndroidRuntime } from "./usePlatform";
 import type { TrackMetadata } from "./usePlayer";
 
 // Types mirror the serde structs in src-tauri/src/external.rs
@@ -186,6 +187,11 @@ export function useExternalSources() {
   async function loadCachedAvatars(): Promise<void> {
     if (cachedAvatarsLoaded) return;
     cachedAvatarsLoaded = true;
+    // External sources are a desktop-only feature — no fetching on Android.
+    if (isAndroidRuntime()) {
+      cachedAvatarsReady.value = true;
+      return;
+    }
     try {
       const list = await invoke<CachedArtistImage[]>("external_load_cached_artist_images");
       for (const e of list) {
@@ -205,6 +211,7 @@ export function useExternalSources() {
    */
   function avatarFor(artistName: string): string | null {
     if (!artistName) return null;
+    if (isAndroidRuntime()) return null;
     // The setting hides external avatars even if already cached.
     if (!settings.value.external_artist_avatars) return null;
     const key = normalizeKey(artistName);
@@ -226,6 +233,7 @@ export function useExternalSources() {
 
   /** Force a re-request of the avatar, bypassing the cache. */
   async function refreshAvatar(artistName: string): Promise<string | null> {
+    if (isAndroidRuntime()) return null;
     const key = normalizeKey(artistName);
     try {
       const res = await invoke<ArtistImageResult>("external_artist_image", {
@@ -246,6 +254,7 @@ export function useExternalSources() {
    */
   async function getAlbumLayout(albumName: string, refresh = false): Promise<AlbumLayout | null> {
     if (!albumName) return null;
+    if (isAndroidRuntime()) return null;
     if (!refresh && albumName in albumLayouts) return albumLayouts[albumName];
     // Layout is needed if external order OR supplement-missing is enabled.
     if (!settings.value.external_album_order && !settings.value.external_supplement_missing && !refresh) return null;
@@ -270,6 +279,7 @@ export function useExternalSources() {
    * requests if the setting is enabled. Safe to call repeatedly.
    */
   function fetchTrackCover(track: TrackMetadata): void {
+    if (isAndroidRuntime()) return;
     if (!settings.value.external_track_covers) return;
     if (track.cover_art) return;
     const artist = track.artist || "";

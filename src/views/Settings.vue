@@ -1,5 +1,8 @@
 <script setup lang="ts">
-const categories = [
+import { computed } from 'vue';
+import { isAndroidRuntime } from '../composables/usePlatform';
+
+const allCategories = [
     {
         id: 'appearance',
         title: 'Оформление',
@@ -26,6 +29,11 @@ const categories = [
         desc: 'Язык интерфейса и интеграции',
     },
 ] as const;
+
+// External sources (album order/covers/avatars from open services, plus the
+// yt-dlp download tooling bundled into that settings page) are a desktop-only
+// feature — not offered on Android.
+const categories = computed(() => isAndroidRuntime() ? allCategories.filter(c => c.id !== 'external') : allCategories);
 </script>
 
 <template>
