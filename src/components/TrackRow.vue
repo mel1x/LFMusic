@@ -1,17 +1,20 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { TrackMetadata } from '../composables/usePlayer'
 import { usePlayer } from '../composables/usePlayer'
+import { usePlaylists } from '../composables/usePlaylists'
 import TrackArtists from './TrackArtists.vue'
 import PlayIcon from './Icons/PlayIcon.vue'
 import PauseIcon from './Icons/PauseIcon.vue'
 import MoreIcon from './Icons/MoreIcon.vue'
+import HeartIcon from './Icons/HeartIcon.vue'
 import defaultTrackCover from '../assets/trackCover.webp'
 
 // Shared catalog-style track row, used by Album/Artist/ArtistTracks/Playlist/Search.
 // Purely presentational + event-forwarding: play/pause dispatch, ripple, phone-tap
 // routing and menu positioning all stay in the parent (each screen's queue/source
 // semantics differ), so this component only renders and re-emits raw DOM events.
-withDefaults(
+const props = withDefaults(
     defineProps<{
         track: TrackMetadata
         /** This row's file_path is the one currently loaded in the player. */
@@ -31,6 +34,14 @@ const emit = defineEmits<{
 }>()
 
 const { formatTime } = usePlayer()
+const { isFavorite, toggleFavorite, ensureFavoritesLoaded } = usePlaylists()
+void ensureFavoritesLoaded()
+
+const isFav = computed(() => isFavorite(props.track.file_path))
+
+function onToggleFav() {
+    void toggleFavorite(props.track.file_path)
+}
 
 function displayName(track: TrackMetadata): string {
     return track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || ''
@@ -68,6 +79,14 @@ function displayName(track: TrackMetadata): string {
             <div v-truncate class="trackName">{{ displayName(track) }}</div>
             <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
         </div>
+        <button
+            class="trackFavBtn"
+            :class="{ liked: isFav }"
+            @click.stop="onToggleFav"
+            @mousedown.stop
+        >
+            <HeartIcon width="15" height="15" />
+        </button>
         <div class="trackTime" :class="{ hidden: menuOpen }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
         <div class="hoverOptionsBtn" :class="{ menuOpen }" @mousedown.stop="emit('openMenu', $event)" @click.stop><MoreIcon width="26" height="26" /></div>
     </div>
@@ -166,6 +185,29 @@ function displayName(track: TrackMetadata): string {
 .trackElem:hover .hoverOptionsBtn,
 .hoverOptionsBtn.menuOpen {
     opacity: 1;
+}
+.trackFavBtn {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    margin-right: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: hsla(0, 0%, 100%, 0.35);
+    transition: color .24s ease;
+    z-index: 3;
+}
+.trackFavBtn:hover {
+    color: hsla(0, 0%, 100%, 0.85);
+}
+.trackFavBtn.liked {
+    color: hsla(0, 0%, 100%, 0.95);
+}
+.trackFavBtn.liked :deep(svg path) {
+    fill: currentColor;
 }
 .trackTime.hidden {
     opacity: 0 !important;

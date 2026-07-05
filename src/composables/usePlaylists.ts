@@ -2,7 +2,7 @@ import { ref, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
 
-export type PlaylistKind = "Album" | "Artist" | "User";
+export type PlaylistKind = "Album" | "Artist" | "User" | "Favorites";
 
 export interface PlaylistInfo {
   id: number;
@@ -14,6 +14,11 @@ export interface PlaylistInfo {
 
 const playlists = ref<PlaylistInfo[]>([]);
 const loading = ref(false);
+// Reactive membership of the "Мне нравится" playlist, keyed by file_path. Shared
+// so every heart button (context menu + all track rows) reflects the same state
+// and updates live on toggle. Vue 3 makes Set add/delete/has reactive.
+const favoritePaths = ref<Set<string>>(new Set());
+let favoritesLoadedOnce = false;
 const topOrder = ref<number[]>([]);
 const albumTopOrder = ref<string[]>([]);
 const artistTopOrder = ref<string[]>([]);
@@ -70,6 +75,8 @@ export function usePlaylists() {
 function createPlaylists() {
   const albums = computed(() => playlists.value.filter((p) => p.kind === "Album"));
   const artists = computed(() => playlists.value.filter((p) => p.kind === "Artist"));
+  // The built-in "Мне нравится" playlist (created on first launch by the backend).
+  const favoritesPlaylist = computed(() => playlists.value.find((p) => p.kind === "Favorites") ?? null);
   const userPlaylists = computed(() => {
     const all = playlists.value.filter((p) => p.kind === "User");
     const topSet = new Set(topOrder.value);
@@ -104,10 +111,54 @@ function createPlaylists() {
     try {
       loading.value = true;
       playlists.value = await invoke<PlaylistInfo[]>("playlist_get_all");
+      await loadFavorites();
     } catch (e) {
       console.error("Ошибка загрузки плейлистов:", e);
     } finally {
       loading.value = false;
+    }
+  }
+
+  async function loadFavorites() {
+    favoritesLoadedOnce = true;
+    const fav = favoritesPlaylist.value;
+    if (!fav) {
+      favoritePaths.value = new Set();
+      return;
+    }
+    try {
+      const paths = await invoke<string[]>("playlist_get_track_paths", { playlistId: fav.id });
+      favoritePaths.value = new Set(paths);
+    } catch (e) {
+      console.error("Ошибка загрузки избранного:", e);
+    }
+  }
+
+  // Guarantees favorites membership is hydrated for views that render hearts but
+  // don't otherwise call loadPlaylists (catalog, album, artist, search).
+  async function ensureFavoritesLoaded() {
+    if (favoritesLoadedOnce) return;
+    if (!playlists.value.length) await loadPlaylists();
+    else await loadFavorites();
+  }
+
+  function isFavorite(filePath: string): boolean {
+    return favoritePaths.value.has(filePath);
+  }
+
+  // Add/remove the track from the favorites playlist (optimistic; keeps the
+  // shared set and the playlist's track_count in sync).
+  async function toggleFavorite(filePath: string) {
+    await ensureFavoritesLoaded();
+    const fav = favoritesPlaylist.value;
+    if (!fav) return;
+    if (favoritePaths.value.has(filePath)) {
+      favoritePaths.value.delete(filePath);
+      await removeTrackFromPlaylist(fav.id, filePath);
+    } else {
+      favoritePaths.value.add(filePath);
+      // New likes go to the top of the favorites playlist.
+      await addTrackToPlaylist(fav.id, filePath, true);
     }
   }
 
@@ -153,9 +204,9 @@ function createPlaylists() {
     }
   }
 
-  async function addTrackToPlaylist(playlistId: number, filePath: string) {
+  async function addTrackToPlaylist(playlistId: number, filePath: string, prepend = false) {
     try {
-      await invoke("playlist_add_track", { playlistId, filePath });
+      await invoke("playlist_add_track", { playlistId, filePath, prepend });
       const idx = playlists.value.findIndex((p) => p.id === playlistId);
       if (idx !== -1) playlists.value[idx].track_count++;
     } catch (e) {
@@ -204,13 +255,19 @@ function createPlaylists() {
     albums,
     artists,
     userPlaylists,
+    favoritesPlaylist,
     loading,
     rebuildArtists,
 
     albumTopOrder,
     artistTopOrder,
 
+    favoritePaths,
     loadPlaylists,
+    loadFavorites,
+    ensureFavoritesLoaded,
+    isFavorite,
+    toggleFavorite,
     getPlaylistTracks,
     createPlaylist,
     renamePlaylist,

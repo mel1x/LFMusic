@@ -213,6 +213,8 @@
     "redownloadConfirm": "Скачать повторно"
   },
   "trackMenu": {
+    "like": "Мне нравится",
+    "unlike": "Больше не нравится",
     "delete": "Удалить трек",
     "deleteConfirmTitle": "Удалить трек?",
     "deleteConfirmMessage": "«{title}» будет удалён из библиотеки и диска. Это действие необратимо.",

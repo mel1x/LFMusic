@@ -7,6 +7,7 @@ import trackCover from '../../assets/trackCover.webp';
 import { toast } from 'vue-sonner';
 
 import MoreIcon from '../Icons/MoreIcon.vue';
+import HeartIcon from '../Icons/HeartIcon.vue';
 import TrackContextMenu from '../TrackContextMenu.vue';
 import TrackArtists from '../TrackArtists.vue';
 import ShuffleIcon from '../Icons/ShuffleIcon.vue';
@@ -28,6 +29,7 @@ import CloseIcon from '../Icons/CloseIcon.vue';
 
 import { usePlayer, type TrackMetadata } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
+import { usePlaylists } from '../../composables/usePlaylists';
 import { createRipple } from '../../composables/useRipple';
 import { isPhoneViewport } from '../../composables/usePlatform';
 
@@ -81,6 +83,12 @@ const {
     onVolumeScroll,
     onVolumeInput,
 } = usePlayerUi();
+
+const { isFavorite, toggleFavorite, ensureFavoritesLoaded } = usePlaylists();
+void ensureFavoritesLoaded();
+function onQfToggleFav(track: TrackMetadata) {
+    void toggleFavorite(track.file_path);
+}
 
 // Close overlay on page navigation.
 const route = useRoute();
@@ -411,6 +419,14 @@ function openQfCoverMenu(e: MouseEvent) {
                                         <div v-truncate class="qf-queue-title">{{ trackTitle }}</div>
                                         <div class="qf-queue-artist"><TrackArtists :artist="currentTrack.artist" /></div>
                                     </div>
+                                    <button
+                                        class="qf-queue-fav"
+                                        :class="{ liked: isFavorite(currentTrack.file_path) }"
+                                        @click.stop="onQfToggleFav(currentTrack)"
+                                        @mousedown.stop
+                                    >
+                                        <HeartIcon width="15" height="15" />
+                                    </button>
                                     <div class="qf-queue-duration" :class="{ hidden: qfTrackMenu?.track.file_path === currentTrack.file_path }">{{ durationFormatted }}</div>
                                     <div class="qf-hover-options" :class="{ menuOpen: qfTrackMenu?.track.file_path === currentTrack.file_path }" @mousedown.stop="openQfTrackMenu($event, currentTrack)">
                                         <MoreIcon width="26" height="26" />
@@ -438,6 +454,14 @@ function openQfCoverMenu(e: MouseEvent) {
                                         <div v-truncate class="qf-queue-title">{{ track.title || track.file_path.split(/[/\\]/).pop() }}</div>
                                         <div class="qf-queue-artist"><TrackArtists :artist="track.artist" /></div>
                                     </div>
+                                    <button
+                                        class="qf-queue-fav"
+                                        :class="{ liked: isFavorite(track.file_path) }"
+                                        @click.stop="onQfToggleFav(track)"
+                                        @mousedown.stop
+                                    >
+                                        <HeartIcon width="15" height="15" />
+                                    </button>
                                     <div class="qf-queue-duration" :class="{ hidden: qfTrackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '--:--' }}</div>
                                     <div class="qf-hover-options" :class="{ menuOpen: qfTrackMenu?.track.file_path === track.file_path }" @mousedown.stop="openQfTrackMenu($event, track)">
                                         <MoreIcon width="26" height="26" />
@@ -1177,6 +1201,29 @@ function openQfCoverMenu(e: MouseEvent) {
 }
 .qf-queue-duration.hidden {
     opacity: 0 !important;
+}
+.qf-queue-fav {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    margin-right: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: hsla(0, 0%, 100%, 0.35);
+    transition: color .24s ease;
+    z-index: 3;
+}
+.qf-queue-fav:hover {
+    color: hsla(0, 0%, 100%, 0.85);
+}
+.qf-queue-fav.liked {
+    color: hsla(0, 0%, 100%, 0.95);
+}
+.qf-queue-fav.liked :deep(svg path) {
+    fill: currentColor;
 }
 .qf-hover-options {
     position: absolute;

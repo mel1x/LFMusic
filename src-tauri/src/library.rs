@@ -33,7 +33,13 @@ pub enum PlaylistKind {
     Album,
     Artist,
     User,
+    /// The singleton "Мне нравится" system playlist. Accepts manual add/remove
+    /// like a user playlist, but can't be renamed or deleted.
+    Favorites,
 }
+
+/// Name of the built-in favorites playlist, created on first launch.
+pub const FAVORITES_PLAYLIST_NAME: &str = "Мне нравится";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistInfo {
@@ -1592,6 +1598,7 @@ impl MusicLibrary {
             let kind = match kind_str.as_str() {
                 "album" => PlaylistKind::Album,
                 "artist" => PlaylistKind::Artist,
+                "favorites" => PlaylistKind::Favorites,
                 _ => PlaylistKind::User,
             };
             Ok(PlaylistInfo {
@@ -1686,6 +1693,26 @@ impl MusicLibrary {
         })
     }
 
+    /// Creates the favorites ("Мне нравится") playlist if it doesn't exist yet,
+    /// returning its id either way. Called once on startup so it's present on
+    /// first launch without waiting for the user to open collections.
+    pub fn ensure_favorites_playlist(&self) -> Result<i64, String> {
+        if let Ok(id) = self.conn.query_row(
+            "SELECT id FROM playlists WHERE kind = 'favorites' LIMIT 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            return Ok(id);
+        }
+        self.conn
+            .execute(
+                "INSERT INTO playlists (name, kind) VALUES (?1, 'favorites')",
+                params![FAVORITES_PLAYLIST_NAME],
+            )
+            .map_err(|e| format!("Ошибка создания плейлиста избранного: {}", e))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     pub fn rename_playlist(&self, playlist_id: i64, name: String) -> Result<(), String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
@@ -1746,27 +1773,41 @@ impl MusicLibrary {
         Ok(())
     }
 
-    pub fn add_track_to_playlist(&self, playlist_id: i64, file_path: &str) -> Result<(), String> {
+    /// Adds a track to a playlist. `prepend` puts it at the top (used for new
+    /// likes on the favorites playlist); otherwise it's appended to the bottom.
+    pub fn add_track_to_playlist(&self, playlist_id: i64, file_path: &str, prepend: bool) -> Result<(), String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
             .map_err(|e| format!("Плейлист не найден: {}", e))?;
 
-        if kind != "user" {
+        if kind != "user" && kind != "favorites" {
             return Err("Нельзя добавлять треки в системные плейлисты".into());
         }
 
-        let max_order: i64 = self.conn
-            .query_row(
-                "SELECT COALESCE(MAX(sort_order), 0) FROM playlist_tracks WHERE playlist_id = ?1",
-                params![playlist_id],
-                |r| r.get(0),
-            )
-            .map_err(|e| format!("Ошибка чтения sort_order: {}", e))?;
+        let sort_order: i64 = if prepend {
+            let min_order: i64 = self.conn
+                .query_row(
+                    "SELECT COALESCE(MIN(sort_order), 0) FROM playlist_tracks WHERE playlist_id = ?1",
+                    params![playlist_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("Ошибка чтения sort_order: {}", e))?;
+            min_order - 1
+        } else {
+            let max_order: i64 = self.conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), 0) FROM playlist_tracks WHERE playlist_id = ?1",
+                    params![playlist_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("Ошибка чтения sort_order: {}", e))?;
+            max_order + 1
+        };
 
         let changed = self.conn
             .execute(
                 "INSERT OR IGNORE INTO playlist_tracks (playlist_id, file_path, sort_order) VALUES (?1, ?2, ?3)",
-                params![playlist_id, file_path, max_order + 1],
+                params![playlist_id, file_path, sort_order],
             )
             .map_err(|e| format!("Ошибка добавления трека: {}", e))?;
         if changed > 0 {
@@ -1784,7 +1825,7 @@ impl MusicLibrary {
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
             .map_err(|e| format!("Плейлист не найден: {}", e))?;
 
-        if kind != "user" {
+        if kind != "user" && kind != "favorites" {
             return Err("Нельзя удалять треки из системных плейлистов".into());
         }
 
@@ -1804,12 +1845,32 @@ impl MusicLibrary {
         Ok(())
     }
 
+    /// File paths of a playlist's tracks, in order. Lighter than
+    /// `get_playlist_tracks` — used to hydrate the reactive favorites set.
+    pub fn get_playlist_track_paths(&self, playlist_id: i64) -> Vec<String> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT file_path FROM playlist_tracks
+             WHERE playlist_id = ?1
+             ORDER BY sort_order ASC, rowid ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![playlist_id], |row| row.get::<_, String>(0)) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    /// Playlists (user-created and the favorites playlist) that contain the
+    /// track. Excludes album/artist playlists, which are auto-managed.
     pub fn get_user_playlist_ids_for_track(&self, file_path: &str) -> Vec<i64> {
         let mut stmt = match self.conn.prepare(
             "SELECT pt.playlist_id
              FROM playlist_tracks pt
              JOIN playlists p ON p.id = pt.playlist_id
-             WHERE pt.file_path = ?1 AND p.kind = 'user'",
+             WHERE pt.file_path = ?1 AND p.kind IN ('user', 'favorites')",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -4007,7 +4068,7 @@ mod tests {
         assert_eq!(playlist.kind, PlaylistKind::User);
         assert_eq!(playlist.track_count, 0);
 
-        library.add_track_to_playlist(playlist.id, "/m/a.flac").expect("add track");
+        library.add_track_to_playlist(playlist.id, "/m/a.flac", false).expect("add track");
         let tracks = library.get_playlist_tracks(playlist.id);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].file_path, "/m/a.flac");
@@ -4036,7 +4097,7 @@ mod tests {
         insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
         let playlist = library.create_playlist("Mix".to_string()).unwrap();
 
-        library.add_track_to_playlist(playlist.id, "/m/a.flac").unwrap();
+        library.add_track_to_playlist(playlist.id, "/m/a.flac", false).unwrap();
         let stats = library.get_track_statistics("/m/a.flac").unwrap();
         assert_eq!(stats.playlist_add_count, 1);
 
@@ -4061,9 +4122,52 @@ mod tests {
         let album_id = albums[0].id;
 
         assert!(library.rename_playlist(album_id, "Hacked".to_string()).is_err());
-        assert!(library.add_track_to_playlist(album_id, "/m/1.flac").is_err());
+        assert!(library.add_track_to_playlist(album_id, "/m/1.flac", false).is_err());
         assert!(library.remove_track_from_playlist(album_id, "/m/1.flac").is_err());
         assert!(library.delete_playlist(album_id).is_err());
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn favorites_playlist_is_manageable_but_protected() {
+        let dir = temp_library_dir("favorites_playlist");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), Some("X"), None, None, 2);
+
+        // Idempotent: two ensure calls yield the same singleton playlist.
+        let fav_id = library.ensure_favorites_playlist().expect("ensure favorites");
+        assert_eq!(fav_id, library.ensure_favorites_playlist().expect("ensure again"));
+
+        let favorites: Vec<_> = library
+            .get_playlists()
+            .into_iter()
+            .filter(|p| p.kind == PlaylistKind::Favorites)
+            .collect();
+        assert_eq!(favorites.len(), 1);
+        assert_eq!(favorites[0].name, FAVORITES_PLAYLIST_NAME);
+        // Not a "user" playlist, so it stays out of the user-playlist list.
+        assert!(library.get_user_playlists().is_empty());
+
+        // Accepts manual add/remove; new likes are prepended to the top.
+        library.add_track_to_playlist(fav_id, "/m/a.flac", false).expect("add to favorites");
+        library.add_track_to_playlist(fav_id, "/m/b.flac", true).expect("prepend to favorites");
+        assert_eq!(
+            library.get_playlist_track_paths(fav_id),
+            vec!["/m/b.flac".to_string(), "/m/a.flac".to_string()],
+            "новый лайк должен попадать в начало плейлиста"
+        );
+        assert_eq!(library.get_user_playlist_ids_for_track("/m/a.flac"), vec![fav_id]);
+        library.remove_track_from_playlist(fav_id, "/m/a.flac").expect("remove from favorites");
+        library.remove_track_from_playlist(fav_id, "/m/b.flac").expect("remove from favorites");
+        assert!(library.get_playlist_tracks(fav_id).is_empty());
+
+        // ...but can't be renamed or deleted.
+        let mut library = library;
+        assert!(library.rename_playlist(fav_id, "Hacked".to_string()).is_err());
+        assert!(library.delete_playlist(fav_id).is_err());
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

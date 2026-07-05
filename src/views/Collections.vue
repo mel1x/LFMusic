@@ -14,6 +14,7 @@ import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
 import { usePins } from '../composables/usePins';
 import AnimatedCover from '../components/AnimatedCover.vue';
+import FavoritesCover from '../components/FavoritesCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
@@ -23,6 +24,7 @@ import { useCoverGate } from '../composables/useCoverGate';
 const router = useRouter();
 const {
     userPlaylists,
+    favoritesPlaylist,
     albums: albumPlaylists,
     artists: artistPlaylists,
     albumTopOrder,
@@ -35,6 +37,17 @@ const {
     moveAlbumToTop,
     moveArtistToTop,
 } = usePlaylists();
+
+// Favorites is pinned to the front of the playlists line and rendered with its
+// own accent-tinted cover.
+const linePlaylists = computed<PlaylistInfo[]>(() => {
+    const fav = favoritesPlaylist.value;
+    return fav ? [fav, ...userPlaylists.value] : userPlaylists.value;
+});
+
+function isFavoritesPl(pl: PlaylistInfo): boolean {
+    return pl.kind === 'Favorites';
+}
 const {
     catalogCount,
     getTrackByPath,
@@ -330,7 +343,8 @@ function isPinned(id: number) {
 }
 
 function togglePinId(id: number) {
-    const pl = userPlaylists.value.find(p => p.id === id);
+    const pl = userPlaylists.value.find(p => p.id === id)
+        ?? (favoritesPlaylist.value?.id === id ? favoritesPlaylist.value : null);
     if (!pl) return;
     togglePin({ kind: 'playlist', key: id, name: pl.name });
 }
@@ -622,7 +636,7 @@ function scrollToTop() {
                 </div>
                 <TransitionGroup name="playlist">
                     <div
-                        v-for="pl in userPlaylists"
+                        v-for="pl in linePlaylists"
                         :key="pl.id"
                         class="playlistItem"
                         @click="openPlaylist(pl)"
@@ -632,7 +646,8 @@ function scrollToTop() {
                             :class="{ menuOpen: playlistMenu?.pl.id === pl.id }"
                             @contextmenu="openPlaylistMenuFromCover($event, pl)"
                         >
-                            <AnimatedCover class="cover" :src="playlistCoverFor(pl)" />
+                            <FavoritesCover v-if="isFavoritesPl(pl)" class="cover" />
+                            <AnimatedCover v-else class="cover" :src="playlistCoverFor(pl)" />
                             <button
                                 class="overlayBtn pinBtn"
                                 :class="{ active: isPinned(pl.id) }"
@@ -800,7 +815,8 @@ function scrollToTop() {
             :x="playlistMenu.x"
             :y="playlistMenu.y"
             :isPinned="isPinned(playlistMenu.pl.id)"
-            showMoveToTop
+            :showMoveToTop="!isFavoritesPl(playlistMenu.pl)"
+            :showDelete="!isFavoritesPl(playlistMenu.pl)"
             :centerX="playlistMenu.centerX"
             @close="playlistMenu = null"
             @togglePin="togglePinId(playlistMenu!.pl.id)"

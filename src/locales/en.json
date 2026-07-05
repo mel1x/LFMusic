@@ -213,6 +213,8 @@
     "redownloadConfirm": "Download again"
   },
   "trackMenu": {
+    "like": "Add to Liked",
+    "unlike": "Remove from Liked",
     "delete": "Delete track",
     "deleteConfirmTitle": "Delete track?",
     "deleteConfirmMessage": "\"{title}\" will be removed from the library and from disk. This cannot be undone.",
@@ -232,6 +234,7 @@
     "traitBalanced": "balanced"
   },
   "source": {
+    "Мне нравится": "Liked",
     "Статистика": "Statistics",
     "Ваш музыкальный профиль": "Your music profile",
     "Персональная волна": "Personal wave",

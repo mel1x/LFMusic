@@ -5,6 +5,7 @@ import ContextMenu from './ContextMenu.vue'
 import ConfirmModal from './ConfirmModal.vue'
 import AnimatedCover from './AnimatedCover.vue'
 import ArrowUpIcon from './Icons/ArrowUpIcon.vue'
+import HeartIcon from './Icons/HeartIcon.vue'
 import PlaylistIcon from './Icons/PlaylistIcon.vue'
 import PlusIcon from './Icons/PlusIcon.vue'
 import TuneIcon from './Icons/TuneIcon.vue'
@@ -34,6 +35,9 @@ const props = defineProps<{
     submenuRight?: boolean
     inPlaylist?: boolean
     canMoveToTop?: boolean
+    /** Hide "Удалить из плейлиста" (e.g. on the favorites page, where the
+     *  like toggle already removes the track). */
+    hideRemoveFromPlaylist?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -43,7 +47,7 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
-const { userPlaylists, albums, loadPlaylists, createPlaylist, addTrackToPlaylist, getPlaylistIdsForTrack } = usePlaylists()
+const { userPlaylists, albums, favoritesPlaylist, loadPlaylists, createPlaylist, addTrackToPlaylist, getPlaylistIdsForTrack, ensureFavoritesLoaded, isFavorite: isFavoriteFn, toggleFavorite } = usePlaylists()
 const { getTrackByPath, loadCoversForTracks } = usePlayer()
 const { getCustomCover } = useCustomCovers()
 const { openTrackInfo } = useTrackInfoModal()
@@ -92,9 +96,13 @@ const hasAlbum = computed(() => {
 })
 
 const trackPlaylistIds = ref<Set<number>>(new Set())
+// Whether the track is in the built-in "Мне нравится" playlist (drives the
+// like/unlike toggle label + icon). Reads from the shared reactive set.
+const isFavorite = computed(() => isFavoriteFn(props.track.file_path))
 
 onMounted(async () => {
-    if (!userPlaylists.value.length) await loadPlaylists()
+    if (!userPlaylists.value.length || !favoritesPlaylist.value) await loadPlaylists()
+    await ensureFavoritesLoaded()
     const ids = await getPlaylistIdsForTrack(props.track.file_path)
     trackPlaylistIds.value = new Set(ids)
     const coverTracks = userPlaylists.value
@@ -278,6 +286,11 @@ async function onAddToPlaylist(playlistId: number) {
     emit('close')
 }
 
+async function onToggleFavorite() {
+    await toggleFavorite(props.track.file_path)
+    emit('close')
+}
+
 function nextPlaylistName(): string {
     const base = 'Новый плейлист'
     const re = new RegExp(`^${base}\\s+(\\d+)$`)
@@ -396,7 +409,16 @@ function onAbout() {
                 </svg>
             </button>
         </div>
-        <button v-if="inPlaylist" class="ctx-item" @click="onRemoveFromPlaylist">
+        <button
+            v-if="favoritesPlaylist"
+            class="ctx-item ctx-fav-item"
+            :class="{ liked: isFavorite }"
+            @click="onToggleFavorite"
+        >
+            <HeartIcon width="16" height="16" />
+            <span>{{ isFavorite ? t('trackMenu.unlike') : t('trackMenu.like') }}</span>
+        </button>
+        <button v-if="inPlaylist && !hideRemoveFromPlaylist" class="ctx-item" @click="onRemoveFromPlaylist">
             <DeleteIcon width="16" height="16" />
             <span>Удалить из плейлиста</span>
         </button>
@@ -562,6 +584,17 @@ function onAbout() {
 }
 .ctx-item:hover svg {
     color: hsla(0, 0%, 100%, 0.8);
+}
+/* Liked state: fill the heart (mirrors the pin-active pattern). */
+.ctx-fav-item.liked,
+.ctx-fav-item.liked:hover {
+    color: hsla(0, 0%, 100%, 1);
+}
+.ctx-fav-item.liked svg {
+    color: hsla(0, 0%, 100%, 1);
+}
+.ctx-fav-item.liked :deep(svg path) {
+    fill: currentColor;
 }
 /* Destructive action (file deletion) gets a red accent. */
 .ctx-item-danger {

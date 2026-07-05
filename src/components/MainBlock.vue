@@ -11,10 +11,12 @@ import HomeIcon from './Icons/HomeIcon.vue';
 import MoreIcon from './Icons/MoreIcon.vue';
 import PlaylistContextMenu from './PlaylistContextMenu.vue';
 import AnimatedCover from './AnimatedCover.vue';
+import FavoritesCover from './FavoritesCover.vue';
 import defaultPlaylistCover from '../assets/playlistCover.webp';
 import defaultTrackCover from '../assets/trackCover.webp';
 import catalogCover from '../assets/cover.webp';
 import { usePins, type ResolvedPin } from '../composables/usePins';
+import { usePlaylists } from '../composables/usePlaylists';
 import { usePlayer } from '../composables/usePlayer';
 import { useSettings } from '../composables/useSettings';
 import { useCustomCovers } from '../composables/useCustomCovers';
@@ -27,7 +29,13 @@ const isCollectionsActive = computed(() => route.path.startsWith('/playlist') ||
 const isSettingsActive = computed(() => route.path.startsWith('/settings'));
 
 const { resolvedPins, unpin, movePinToTop, loadPins } = usePins();
+const { favoritesPlaylist } = usePlaylists();
 const { loadCoversForTracks, getTrackByPath } = usePlayer();
+
+// The favorites pin uses its own accent-tinted cover instead of a track thumbnail.
+function isFavoritesPin(p: ResolvedPin): boolean {
+    return p.kind === 'playlist' && favoritesPlaylist.value?.id === Number(p.key);
+}
 const { settings } = useSettings();
 const { getCustomCover } = useCustomCovers();
 const { avatarFor } = useExternalSources();
@@ -126,7 +134,9 @@ watch(resolvedPins, () => requestPinCovers());
             @click="openPin(p)"
             v-tooltip="p.name"
           >
+            <FavoritesCover v-if="isFavoritesPin(p)" class="pinCover" />
             <AnimatedCover
+              v-else
               class="pinCover"
               :class="{ artist: p.kind === 'artist' }"
               :src="pinCover(p)"

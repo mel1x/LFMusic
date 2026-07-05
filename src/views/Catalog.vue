@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 import MoreIcon from '../components/Icons/MoreIcon.vue';
+import HeartIcon from '../components/Icons/HeartIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
 import defaultCover from '../assets/trackCover.webp';
@@ -24,6 +25,7 @@ import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
+import { usePlaylists } from '../composables/usePlaylists';
 
 const {
     catalogCount,
@@ -43,6 +45,12 @@ const {
 
 const { getCustomCover } = useCustomCovers();
 const catalogCustomCover = computed(() => getCustomCover('catalog', 'catalog'));
+
+const { isFavorite, toggleFavorite, ensureFavoritesLoaded } = usePlaylists();
+void ensureFavoritesLoaded();
+function onToggleFav(track: TrackMetadata) {
+    void toggleFavorite(track.file_path);
+}
 
 // Genre filter
 
@@ -465,6 +473,14 @@ function onCoverImgClick() {
                     <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
                     <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
                 </div>
+                <button
+                    class="trackFavBtn"
+                    :class="{ liked: isFavorite(track.file_path) }"
+                    @click.stop="onToggleFav(track)"
+                    @mousedown.stop
+                >
+                    <HeartIcon width="15" height="15" />
+                </button>
                 <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
                 <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
             </div>
@@ -944,6 +960,29 @@ function onCoverImgClick() {
 .trackElem:hover .hoverOptionsBtn,
 .hoverOptionsBtn.menuOpen {
     opacity: 1;
+}
+.trackFavBtn {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    margin-right: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: hsla(0, 0%, 100%, 0.35);
+    transition: color .24s ease;
+    z-index: 3;
+}
+.trackFavBtn:hover {
+    color: hsla(0, 0%, 100%, 0.85);
+}
+.trackFavBtn.liked {
+    color: hsla(0, 0%, 100%, 0.95);
+}
+.trackFavBtn.liked :deep(svg path) {
+    fill: currentColor;
 }
 .trackTime.hidden {
     opacity: 0 !important;

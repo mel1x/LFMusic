@@ -105,9 +105,9 @@ const updateTooltip = computed(() => {
 
 // The three components as status cells, so the user sees what's missing.
 const depComponents = computed(() => [
-    { name: 'yt-dlp', on: toolsInfo.value.ytdlp.installed, version: toolsInfo.value.ytdlp.version },
-    { name: 'ffmpeg', on: toolsInfo.value.ffmpeg.installed, version: toolsInfo.value.ffmpeg.version },
-    { name: 'Deno', on: toolsInfo.value.deno.installed, version: toolsInfo.value.deno.version },
+    { name: 'yt-dlp', on: toolsInfo.value.ytdlp.installed, version: toolsInfo.value.ytdlp.version, update: toolsInfo.value.ytdlp.update_available },
+    { name: 'ffmpeg', on: toolsInfo.value.ffmpeg.installed, version: toolsInfo.value.ffmpeg.version, update: toolsInfo.value.ffmpeg.update_available },
+    { name: 'Deno', on: toolsInfo.value.deno.installed, version: toolsInfo.value.deno.version, update: toolsInfo.value.deno.update_available },
 ]);
 
 // Detail label under the title (install progress / version / error).
@@ -561,7 +561,7 @@ onMounted(async () => {
                 </div>
 
                 <div class="toolRail">
-                    <div v-for="c in depComponents" :key="c.name" class="toolCell" :class="{ on: c.on }">
+                    <div v-for="c in depComponents" :key="c.name" class="toolCell" :class="{ on: c.on, update: c.on && c.update }">
                         <span class="toolDot"><span class="toolDotCore"></span></span>
                         <span class="toolName">{{ c.name }}</span>
                         <span
@@ -1245,6 +1245,14 @@ onMounted(async () => {
     0% { transform: scale(0.4); }
     60% { transform: scale(1.35); }
     100% { transform: scale(1); }
+}
+/* Update available for this specific tool overrides the green "on" dot with
+   the same orange used by the overall .depState.update pill. */
+.toolCell.update .toolDot {
+    box-shadow: inset 0 0 0 1px hsla(38, 85%, 55%, 0.4);
+}
+.toolCell.update .toolDotCore {
+    background-color: hsla(38, 90%, 58%, 0.95);
 }
 .toolName {
     font-family: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;

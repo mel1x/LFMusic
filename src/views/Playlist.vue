@@ -10,6 +10,7 @@ import SearchIcon from '../components/Icons/SearchIcon.vue';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import EditIcon from '../components/Icons/EditIcon.vue';
 import defaultPlaylistCover from '../assets/playlistCover.webp';
+import favoritesCoverAsset from '../assets/favorites.webp';
 
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
@@ -21,6 +22,7 @@ import { searchRanked } from '../composables/useSearch';
 import { tracksCountText } from '../utils/format';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
+import FavoritesCover from '../components/FavoritesCover.vue';
 import ConfirmModal from '../components/ConfirmModal.vue';
 import TrackRow from '../components/TrackRow.vue';
 import { usePins } from '../composables/usePins';
@@ -47,7 +49,7 @@ const {
     clearCoverQueue,
 } = usePlayer();
 
-const { playlists, loadPlaylists, getPlaylistTracks, removeTrackFromPlaylist, deletePlaylist, renamePlaylist } = usePlaylists();
+const { playlists, loadPlaylists, getPlaylistTracks, removeTrackFromPlaylist, deletePlaylist, renamePlaylist, isFavorite } = usePlaylists();
 
 const playlistId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -57,6 +59,10 @@ const playlistId = computed(() => {
 const playlist = computed<PlaylistInfo | undefined>(() =>
     playlists.value.find(p => p.id === playlistId.value)
 )
+
+// The built-in "Мне нравится" playlist can't be renamed/deleted and uses a
+// fixed accent-tinted cover instead of a track thumbnail.
+const isFavorites = computed(() => playlist.value?.kind === 'Favorites')
 
 const playlistTrackPaths = ref<string[]>([])
 
@@ -120,11 +126,17 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
+// On the favorites playlist, drop tracks the moment they're unliked (from a row
+// heart or a context menu anywhere), instead of waiting for a reload.
+const baseTracks = computed(() =>
+    isFavorites.value ? playlistTracks.value.filter(t => isFavorite(t.file_path)) : playlistTracks.value
+)
+
 const filteredTracks = computed(() => {
     const q = debouncedSearch.value.trim()
-    if (!q) return playlistTracks.value
+    if (!q) return baseTracks.value
     return searchRanked(
-        playlistTracks.value,
+        baseTracks.value,
         q,
         (t) => {
             const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
@@ -394,6 +406,10 @@ function onNameKeydown(e: KeyboardEvent) {
 
 function onCoverImgClick() {
     if (isPhoneViewport()) return
+    if (isFavorites.value) {
+        window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: { src: favoritesCoverAsset, tinted: true } }))
+        return
+    }
     window.dispatchEvent(new CustomEvent('lfmusic:show-fullscreen-cover', { detail: { src: playlistCover.value } }))
 }
 </script>
@@ -415,15 +431,18 @@ function onCoverImgClick() {
                 <span>Назад</span>
             </button>
             <div class="pageHat">
-                <div class="coverWrap cover-edit-host" @click="onCoverImgClick">
-                    <AnimatedCover :src="playlistCover" class="cover" alt="cover" />
-                    <CoverEditor kind="playlist" :coverKey="playlistId" size="large" />
+                <div class="coverWrap" :class="{ 'cover-edit-host': !isFavorites }" @click="onCoverImgClick">
+                    <FavoritesCover v-if="isFavorites" class="cover" />
+                    <template v-else>
+                        <AnimatedCover :src="playlistCover" class="cover" alt="cover" />
+                        <CoverEditor kind="playlist" :coverKey="playlistId" size="large" />
+                    </template>
                 </div>
                 <div class="dataZone">
                     <div class="info">
                         <div class="listType">Плейлист</div>
                         <div class="listNameRow">
-                            <h2 v-if="!isEditingName" v-truncate class="listName" @dblclick="startEditName">{{ playlist?.name || '' }}</h2>
+                            <h2 v-if="!isEditingName" v-truncate class="listName" @dblclick="!isFavorites && startEditName()">{{ playlist?.name || '' }}</h2>
                             <input
                                 v-else
                                 ref="nameInputEl"
@@ -435,7 +454,7 @@ function onCoverImgClick() {
                                 @blur="commitEditName"
                                 @keydown="onNameKeydown"
                             />
-                            <button v-if="!isEditingName" class="editNameBtn" @click="startEditName" v-tooltip="'Переименовать'">
+                            <button v-if="!isEditingName && !isFavorites" class="editNameBtn" @click="startEditName" v-tooltip="'Переименовать'">
                                 <EditIcon width="16" height="16" />
                             </button>
                         </div>
@@ -515,6 +534,7 @@ function onCoverImgClick() {
             :y="trackMenu.y"
             :track="trackMenu.track"
             :canMoveToTop="canMoveToTop"
+            :hideRemoveFromPlaylist="isFavorites"
             alignRight
             centerY
             inPlaylist
@@ -527,8 +547,9 @@ function onCoverImgClick() {
             :x="playlistMenu.x"
             :y="playlistMenu.y"
             :isPinned="isPinned"
-            customCoverKind="playlist"
-            :customCoverKey="playlistId"
+            :showDelete="!isFavorites"
+            :customCoverKind="isFavorites ? undefined : 'playlist'"
+            :customCoverKey="isFavorites ? undefined : playlistId"
             centerX
             @close="playlistMenu = null"
             @togglePin="onTogglePin"

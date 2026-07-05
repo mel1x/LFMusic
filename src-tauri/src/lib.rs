@@ -749,9 +749,10 @@ fn playlist_add_track(
     state: State<LibraryState>,
     playlist_id: i64,
     file_path: String,
+    prepend: Option<bool>,
 ) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-    library.add_track_to_playlist(playlist_id, &file_path)
+    library.add_track_to_playlist(playlist_id, &file_path, prepend.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -781,6 +782,15 @@ fn playlist_get_ids_for_track(
 ) -> Result<Vec<i64>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_user_playlist_ids_for_track(&file_path))
+}
+
+#[tauri::command]
+fn playlist_get_track_paths(
+    state: State<LibraryState>,
+    playlist_id: i64,
+) -> Result<Vec<String>, String> {
+    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(library.get_playlist_track_paths(playlist_id))
 }
 
 // ── Album track order ────────────────────────────────────────────────────────
@@ -2350,6 +2360,11 @@ pub fn run() {
                 eprintln!("Ошибка инициализации плейлистов исполнителей: {}", e);
             }
 
+            // Create the built-in "Мне нравится" playlist on first launch.
+            if let Err(e) = library.ensure_favorites_playlist() {
+                eprintln!("Ошибка инициализации плейлиста избранного: {}", e);
+            }
+
             // One-time migration: clear the external-album negative cache, since old
             // "none" entries could have been cached from transient errors (no longer the case).
             {
@@ -2418,6 +2433,7 @@ pub fn run() {
             playlist_remove_track,
             playlist_move_track_to_top,
             playlist_get_ids_for_track,
+            playlist_get_track_paths,
             album_get_track_order,
             album_set_track_order,
             // External sources
