@@ -39,13 +39,19 @@ export function useVirtualScroll<T>(
         scrollTop.value = (e.target as HTMLElement).scrollTop
     }
 
-    const range = computed(() => {
+    // Returns the previous object while start/end are unchanged, so scroll events
+    // within the same row don't re-slice the list and re-render every visible row.
+    const range = computed<{ start: number; end: number }>((prev) => {
         const total = items.value.length
-        if (!containerHeight.value) return { start: 0, end: Math.min(total, 20) }
-        const offset = scrollOffset?.value ?? 0
-        const adjustedScroll = Math.max(0, scrollTop.value - offset)
-        const start = Math.max(0, Math.floor(adjustedScroll / itemHeight) - buffer)
-        const end = Math.min(total, Math.ceil((adjustedScroll + containerHeight.value) / itemHeight) + buffer)
+        let start = 0
+        let end = Math.min(total, 20)
+        if (containerHeight.value) {
+            const offset = scrollOffset?.value ?? 0
+            const adjustedScroll = Math.max(0, scrollTop.value - offset)
+            start = Math.max(0, Math.floor(adjustedScroll / itemHeight) - buffer)
+            end = Math.min(total, Math.ceil((adjustedScroll + containerHeight.value) / itemHeight) + buffer)
+        }
+        if (prev && prev.start === start && prev.end === end) return prev
         return { start, end }
     })
 

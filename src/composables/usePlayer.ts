@@ -525,8 +525,13 @@ function createPlayer() {
 
   function syncCollectionStatsSource(sourceId: string | null, paths: string[]) {
     const ref = collectionRefFromSource(sourceId);
+    // Bail before deduping: for catalog sources `paths` can be the whole library.
+    if (!ref) {
+      collectionStatsSession = null;
+      return;
+    }
     const trackPaths = Array.from(new Set(paths.filter(Boolean)));
-    if (!ref || trackPaths.length === 0) {
+    if (trackPaths.length === 0) {
       collectionStatsSession = null;
       return;
     }

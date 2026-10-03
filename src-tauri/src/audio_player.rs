@@ -1524,22 +1524,37 @@ impl AudioPlayer {
     }
 
     pub fn play(&mut self, file_path: &str) -> Result<TrackMetadata, String> {
-        self.play_from(file_path, 0.0)
+        let metadata = Self::get_metadata(file_path)?;
+        self.play_from(file_path, 0.0, metadata)
+    }
+
+    /// Like [`Self::play`], with `metadata` already read via [`Self::get_metadata`].
+    /// Lets callers do the tag/cover parsing before taking the player lock.
+    pub fn play_preloaded(&mut self, file_path: &str, metadata: TrackMetadata) -> Result<TrackMetadata, String> {
+        self.play_from(file_path, 0.0, metadata)
     }
 
     /// Loads, seeks, and immediately pauses — used to restore a saved session.
-    pub fn play_paused(&mut self, file_path: &str, position_secs: f64) -> Result<TrackMetadata, String> {
-        let metadata = self.play_from(file_path, position_secs)?;
+    pub fn play_paused_preloaded(
+        &mut self,
+        file_path: &str,
+        position_secs: f64,
+        metadata: TrackMetadata,
+    ) -> Result<TrackMetadata, String> {
+        let metadata = self.play_from(file_path, position_secs, metadata)?;
         self.pause();
         Ok(metadata)
     }
 
-    pub fn play_crossfade(&mut self, file_path: &str, crossfade_secs: f64) -> Result<TrackMetadata, String> {
+    pub fn play_crossfade_preloaded(
+        &mut self,
+        file_path: &str,
+        crossfade_secs: f64,
+        metadata: TrackMetadata,
+    ) -> Result<TrackMetadata, String> {
         if crossfade_secs <= 0.0 || self.state == PlaybackState::Stopped {
-            return self.play(file_path);
+            return self.play_from(file_path, 0.0, metadata);
         }
-
-        let metadata = Self::get_metadata(file_path)?;
 
         self.send(|resp| AudioCmd::PlayCrossfade {
             file_path: file_path.to_string(),
@@ -1557,9 +1572,12 @@ impl AudioPlayer {
         Ok(metadata)
     }
 
-    fn play_from(&mut self, file_path: &str, seek_secs: f64) -> Result<TrackMetadata, String> {
-        let metadata = Self::get_metadata(file_path)?;
-
+    fn play_from(
+        &mut self,
+        file_path: &str,
+        seek_secs: f64,
+        metadata: TrackMetadata,
+    ) -> Result<TrackMetadata, String> {
         self.send(|resp| AudioCmd::PlayFrom {
             file_path: file_path.to_string(),
             seek_secs,

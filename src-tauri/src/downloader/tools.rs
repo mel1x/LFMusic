@@ -268,14 +268,24 @@ pub fn secs_since_update_check(data_dir: &Path) -> u64 {
 
 // ── Network ─────────────────────────────────────────────────────────────────
 
+/// Built once per redirect policy: building a rustls client re-loads the root
+/// store, and reusing it keeps the connection pool across update-check requests.
 fn client(follow_redirects: bool) -> Result<reqwest::blocking::Client, String> {
+    use std::sync::OnceLock;
+    static FOLLOW: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    static NO_FOLLOW: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    let cell = if follow_redirects { &FOLLOW } else { &NO_FOLLOW };
+    if let Some(c) = cell.get() {
+        return Ok(c.clone());
+    }
     let mut b = reqwest::blocking::Client::builder()
         .user_agent("LFMusic (+https://github.com/mel1x/LFMusic)")
         .connect_timeout(Duration::from_secs(20));
     if !follow_redirects {
         b = b.redirect(reqwest::redirect::Policy::none());
     }
-    b.build().map_err(|e| e.to_string())
+    let built = b.build().map_err(|e| e.to_string())?;
+    Ok(cell.get_or_init(|| built).clone())
 }
 
 /// GitHub intermittently answers 503/429 under load; retry with backoff

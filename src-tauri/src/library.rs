@@ -337,6 +337,9 @@ impl MusicLibrary {
              PRAGMA temp_store=MEMORY;",
         )
         .map_err(|e| format!("Ошибка PRAGMA: {}", e))?;
+        // Hot single-row lookups (cover protocol, accent color, overrides) go
+        // through prepare_cached; the default capacity of 16 is too small.
+        conn.set_prepared_statement_cache_capacity(64);
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS folders (
@@ -397,7 +400,12 @@ impl MusicLibrary {
                  FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
                  FOREIGN KEY (file_path) REFERENCES tracks(file_path) ON DELETE CASCADE
              );
-             CREATE INDEX IF NOT EXISTS idx_pt_playlist ON playlist_tracks(playlist_id);
+             -- PRIMARY KEY (playlist_id, file_path) already covers lookups by
+             -- playlist_id. file_path needs its own index: the ON DELETE CASCADE
+             -- from tracks and per-track playlist lookups would otherwise scan the
+             -- whole table once per deleted/queried track.
+             DROP INDEX IF EXISTS idx_pt_playlist;
+             CREATE INDEX IF NOT EXISTS idx_pt_file ON playlist_tracks(file_path);
 
              CREATE TABLE IF NOT EXISTS track_overrides (
                  file_path     TEXT PRIMARY KEY NOT NULL,
@@ -1315,7 +1323,7 @@ impl MusicLibrary {
     pub fn get_track(&self, file_path: &str) -> Option<TrackMetadata> {
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT t.file_path,
                         COALESCE(o.title, t.title),
                         COALESCE(o.artist, t.artist),
@@ -2320,11 +2328,8 @@ impl MusicLibrary {
 
     pub fn has_override_cover(&self, file_path: &str) -> bool {
         self.conn
-            .query_row(
-                "SELECT cover_sig IS NOT NULL FROM track_overrides WHERE file_path = ?1",
-                params![file_path],
-                |row| row.get::<_, i64>(0),
-            )
+            .prepare_cached("SELECT cover_sig IS NOT NULL FROM track_overrides WHERE file_path = ?1")
+            .and_then(|mut stmt| stmt.query_row(params![file_path], |row| row.get::<_, i64>(0)))
             .map(|v| v != 0)
             .unwrap_or(false)
     }
@@ -2332,14 +2337,15 @@ impl MusicLibrary {
     /// Override accent_color wins if set, otherwise falls back to the one cached from the original cover.
     pub fn get_accent_color(&self, file_path: &str) -> Option<String> {
         self.conn
-            .query_row(
+            .prepare_cached(
                 "SELECT COALESCE(o.accent_color, t.accent_color)
                  FROM tracks t
                  LEFT JOIN track_overrides o ON o.file_path = t.file_path
                  WHERE t.file_path = ?1",
-                params![file_path],
-                |row| row.get::<_, Option<String>>(0),
             )
+            .and_then(|mut stmt| {
+                stmt.query_row(params![file_path], |row| row.get::<_, Option<String>>(0))
+            })
             .ok()
             .flatten()
     }
@@ -2347,11 +2353,10 @@ impl MusicLibrary {
     /// Short string used as both the `track_covers/` file key and the `?s=` thumbnail URL param.
     pub fn get_override_cover_sig(&self, file_path: &str) -> Option<String> {
         self.conn
-            .query_row(
-                "SELECT cover_sig FROM track_overrides WHERE file_path = ?1",
-                params![file_path],
-                |row| row.get::<_, Option<String>>(0),
-            )
+            .prepare_cached("SELECT cover_sig FROM track_overrides WHERE file_path = ?1")
+            .and_then(|mut stmt| {
+                stmt.query_row(params![file_path], |row| row.get::<_, Option<String>>(0))
+            })
             .ok()
             .flatten()
     }
@@ -2371,11 +2376,10 @@ impl MusicLibrary {
     pub fn has_cover(&self, file_path: &str) -> bool {
         let cached: Option<Option<i64>> = self
             .conn
-            .query_row(
-                "SELECT has_cover FROM tracks WHERE file_path = ?1",
-                params![file_path],
-                |row| row.get::<_, Option<i64>>(0),
-            )
+            .prepare_cached("SELECT has_cover FROM tracks WHERE file_path = ?1")
+            .and_then(|mut stmt| {
+                stmt.query_row(params![file_path], |row| row.get::<_, Option<i64>>(0))
+            })
             .ok();
         match cached {
             Some(Some(v)) => v != 0,

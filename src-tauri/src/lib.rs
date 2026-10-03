@@ -310,8 +310,11 @@ fn player_play(
     library: State<LibraryState>,
     file_path: String,
 ) -> Result<TrackMetadata, String> {
+    // Tags + cover/accent parsing happen before the write lock, so status and
+    // spectrum polls aren't blocked behind file I/O on every track change.
+    let metadata = AudioPlayer::get_metadata(&file_path)?;
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
-    let mut metadata = player.play(&file_path)?;
+    let mut metadata = player.play_preloaded(&file_path, metadata)?;
     drop(player);
     apply_accent_color(&library, &file_path, &mut metadata);
     Ok(metadata)
@@ -324,8 +327,9 @@ fn player_play_crossfade(
     file_path: String,
     crossfade_secs: f64,
 ) -> Result<TrackMetadata, String> {
+    let metadata = AudioPlayer::get_metadata(&file_path)?;
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
-    let mut metadata = player.play_crossfade(&file_path, crossfade_secs)?;
+    let mut metadata = player.play_crossfade_preloaded(&file_path, crossfade_secs, metadata)?;
     drop(player);
     apply_accent_color(&library, &file_path, &mut metadata);
     Ok(metadata)
@@ -338,8 +342,9 @@ fn player_play_paused(
     file_path: String,
     position_secs: f64,
 ) -> Result<TrackMetadata, String> {
+    let metadata = AudioPlayer::get_metadata(&file_path)?;
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
-    let mut metadata = player.play_paused(&file_path, position_secs)?;
+    let mut metadata = player.play_paused_preloaded(&file_path, position_secs, metadata)?;
     drop(player);
     apply_accent_color(&library, &file_path, &mut metadata);
     Ok(metadata)
@@ -389,14 +394,17 @@ fn player_seek_crossfade(
     player.seek_crossfade(position_secs, crossfade_secs)
 }
 
-#[tauri::command]
+// Polled reads are `(async)`: on the main thread they would stall the window
+// whenever player_play holds the write lock while opening/probing a file.
+// Control commands (pause/volume/seek) stay sync so they keep their call order.
+#[tauri::command(async)]
 fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> {
     let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
     Ok(player.get_status())
 }
 
 /// Spectrum bars (0..1) for the visualizer; polled by the frontend on rAF frames.
-#[tauri::command]
+#[tauri::command(async)]
 fn player_get_spectrum(state: State<PlayerState>, bars: usize) -> Result<Vec<f32>, String> {
     let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
     Ok(player.spectrum_bars(bars))
@@ -468,8 +476,12 @@ fn get_original_track(
 }
 
 // ── Library commands ─────────────────────────────────────────────────────────
+//
+// Every command that takes the library lock is `(async)`: a plain `#[command]`
+// runs on the main thread, and the lock can be held for seconds by a rescan or
+// folder add, which would freeze the whole window while the call waits.
 
-#[tauri::command]
+#[tauri::command(async)]
 fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_folders())
@@ -631,7 +643,7 @@ fn library_search(
     Ok(library.search_tracks(q, limit))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn library_resume_audio_features(
     app: tauri::AppHandle,
     state: State<LibraryState>,
@@ -640,7 +652,7 @@ fn library_resume_audio_features(
     library.resume_pending_audio_feature_analysis(Some(audio_feature_progress_emitter(app)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn library_audio_features_status(
     state: State<LibraryState>,
 ) -> Result<AudioFeatureProgress, String> {
@@ -660,7 +672,7 @@ fn library_audio_features_status(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn library_move_track_to_top(file_path: String, state: State<LibraryState>) -> Result<(), String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.move_track_to_top(&file_path)
@@ -705,7 +717,7 @@ fn library_rebuild_artists(
 
 // ── Playlist commands ────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_get_all(state: State<LibraryState>) -> Result<Vec<PlaylistInfo>, String> {
     let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(library.get_playlists())
@@ -720,13 +732,13 @@ fn playlist_get_tracks(
     Ok(library.get_playlist_tracks(playlist_id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_create(state: State<LibraryState>, name: String) -> Result<PlaylistInfo, String> {
     let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.create_playlist(name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_rename(
     state: State<LibraryState>,
     playlist_id: i64,
@@ -736,13 +748,13 @@ fn playlist_rename(
     library.rename_playlist(playlist_id, name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_delete(state: State<LibraryState>, playlist_id: i64) -> Result<(), String> {
     let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     library.delete_playlist(playlist_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_add_track(
     state: State<LibraryState>,
     playlist_id: i64,
@@ -753,7 +765,7 @@ fn playlist_add_track(
     library.add_track_to_playlist(playlist_id, &file_path, prepend.unwrap_or(false))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_remove_track(
     state: State<LibraryState>,
     playlist_id: i64,
@@ -763,7 +775,7 @@ fn playlist_remove_track(
     library.remove_track_from_playlist(playlist_id, &file_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_move_track_to_top(
     state: State<LibraryState>,
     playlist_id: i64,
@@ -773,7 +785,7 @@ fn playlist_move_track_to_top(
     library.move_playlist_track_to_top(playlist_id, &file_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_get_ids_for_track(
     state: State<LibraryState>,
     file_path: String,
@@ -782,7 +794,7 @@ fn playlist_get_ids_for_track(
     Ok(library.get_user_playlist_ids_for_track(&file_path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn playlist_get_track_paths(
     state: State<LibraryState>,
     playlist_id: i64,
@@ -793,7 +805,7 @@ fn playlist_get_track_paths(
 
 // ── Album track order ────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 fn album_get_track_order(
     state: State<LibraryState>,
     album_name: String,
@@ -802,7 +814,7 @@ fn album_get_track_order(
     library.get_album_track_order(&album_name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn album_set_track_order(
     state: State<LibraryState>,
     album_name: String,
@@ -1313,7 +1325,7 @@ fn run_external_preparation(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_add_track_delta(
     state: State<LibraryState>,
     delta: statistics::TrackStatisticsDelta,
@@ -1322,7 +1334,7 @@ fn statistics_add_track_delta(
     library.add_track_statistics_delta(delta)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_get_track(
     state: State<LibraryState>,
     file_path: String,
@@ -1340,7 +1352,7 @@ fn statistics_sum_listen_count(
     library.sum_track_listen_count(&file_paths)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_add_collection_full_listen(
     state: State<LibraryState>,
     kind: statistics::CollectionKind,
@@ -1566,7 +1578,7 @@ fn read_cover_as_data_url(source_path: &str) -> Result<(String, Option<String>),
 
 /// title/artist: empty string means "revert to original". cover: None leaves the
 /// current cover untouched; `reset: true` reverts to the file's tagged cover.
-#[tauri::command]
+#[tauri::command(async)]
 fn track_set_override(
     library: State<LibraryState>,
     file_path: String,
@@ -1598,14 +1610,14 @@ fn track_set_override(
     fetch_track_with_override(&library, &file_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn read_image_as_data_url(source_path: String) -> Result<String, String> {
     let (data_url, _) = read_cover_as_data_url(&source_path)?;
     Ok(data_url)
 }
 
 /// Clears all track overrides at once ("Reset edits" button in settings).
-#[tauri::command]
+#[tauri::command(async)]
 fn track_clear_all_overrides(library: State<LibraryState>) -> Result<usize, String> {
     let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     lib.clear_all_track_overrides()
@@ -1647,7 +1659,7 @@ fn fetch_track_with_override(
 
 // ── Custom cover commands ─────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cover_set_custom(
     state: State<SettingsState>,
     kind: String,
@@ -1658,7 +1670,7 @@ fn cover_set_custom(
     covers::set_custom_cover(&settings.1, &kind, &key, &source_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cover_remove_custom(
     state: State<SettingsState>,
     kind: String,
@@ -1668,7 +1680,7 @@ fn cover_remove_custom(
     covers::remove_custom_cover(&settings.1, &kind, &key)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cover_load_all(state: State<SettingsState>) -> Result<Vec<covers::CustomCoverEntry>, String> {
     let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
     Ok(covers::load_all(&settings.1))
