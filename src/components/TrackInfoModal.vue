@@ -79,7 +79,7 @@ const fileFolder = computed(() => {
 })
 
 function formatDuration(secs: number | null): string {
-    if (secs == null) return '—'
+    if (secs == null) return '-'
     const h = Math.floor(secs / 3600)
     const m = Math.floor((secs % 3600) / 60)
     const s = Math.floor(secs % 60)
@@ -88,17 +88,17 @@ function formatDuration(secs: number | null): string {
 }
 
 function formatSampleRate(hz: number | null): string {
-    if (hz == null) return '—'
+    if (hz == null) return '-'
     return `${(hz / 1000).toFixed(1)} кГц`
 }
 
 function formatBitrate(br: number | null): string {
-    if (br == null) return '—'
+    if (br == null) return '-'
     return `${Math.round(br / 1000)} кбит/с`
 }
 
 function formatChannels(ch: number | null): string {
-    if (ch == null) return '—'
+    if (ch == null) return '-'
     if (ch === 1) return 'Моно'
     if (ch === 2) return 'Стерео'
     return `${ch} каналов`
@@ -108,7 +108,7 @@ const generalFields = computed(() => {
     const t = currentTrack.value
     if (!t) return []
     return [
-        { label: 'Жанр', value: t.genre || '—' },
+        { label: 'Жанр', value: t.genre || '-' },
         { label: 'Длительность', value: formatDuration(t.duration_secs) },
         { label: 'Прослушано', value: timesCountText(listenCount.value) },
     ]
@@ -119,7 +119,7 @@ const audioFields = computed(() => {
     if (!t) return []
     return [
         { label: 'Частота', value: formatSampleRate(t.sample_rate) },
-        { label: 'Разрядность', value: t.bit_depth ? `${t.bit_depth} бит` : '—' },
+        { label: 'Разрядность', value: t.bit_depth ? `${t.bit_depth} бит` : '-' },
         { label: 'Битрейт', value: formatBitrate(t.bitrate) },
         { label: 'Каналы', value: formatChannels(t.channels) },
     ]
@@ -232,8 +232,8 @@ onUnmounted(() => {
                             <div class="trackTitle">{{ currentTrack.title || fileName }}</div>
                             <div class="trackArtist">{{ currentTrack.artist || 'Неизвестный исполнитель' }}</div>
                         <div class="badges">
-                            <span class="chip chipFormat" v-tooltip:bottom="'Аудио формат файла — определяет тип сжатия и совместимость'">{{ (currentTrack.format || '—').toUpperCase() }}</span>
-                            <span class="chip" :class="currentTrack.is_lossless ? 'chipLossless' : 'chipLossy'" v-tooltip:bottom="currentTrack.is_lossless ? 'Lossless — сжатие без потери качества (FLAC, ALAC, WAV)' : 'Lossy — меньший размер файла с некоторой потерей качества (MP3, AAC)'">
+                            <span class="chip chipFormat" v-tooltip:bottom="'Аудио формат файла - определяет тип сжатия и совместимость'">{{ (currentTrack.format || '-').toUpperCase() }}</span>
+                            <span class="chip" :class="currentTrack.is_lossless ? 'chipLossless' : 'chipLossy'" v-tooltip:bottom="currentTrack.is_lossless ? 'Lossless - сжатие без потери качества (FLAC, ALAC, WAV)' : 'Lossy - меньший размер файла с некоторой потерей качества (MP3, AAC)'">
                                 {{ currentTrack.is_lossless ? 'Lossless' : 'Lossy' }}
                             </span>
                         </div>

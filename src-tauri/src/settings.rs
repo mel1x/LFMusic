@@ -25,24 +25,80 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<String>,
 
-    /// yt-dlp proxy mode: "system" (default/None), "none" (`--proxy ""`),
-    /// "custom" (uses `proxy_url`). Separate field for the same reason as
-    /// `download_dir`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy proxy fields from the previous downloader; read once to seed
+    /// `downloader` and then dropped on the next save.
+    #[serde(default, skip_serializing)]
     pub proxy_mode: Option<String>,
-
-    /// Proxy URL for `"custom"` mode (e.g. `socks5://127.0.0.1:1080` for
-    /// ByeDPI/ByeByeDPI). Empty/None makes `custom` behave like `system`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub proxy_url: Option<String>,
+
+    /// Track downloader options. Own field for the same reason as `download_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloader: Option<DownloaderSettings>,
+}
+
+/// Network/auth options for yt-dlp, edited on the "External sources" page.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DownloaderSettings {
+    /// "system" (yt-dlp picks up system/env proxy) | "none" | "custom".
+    pub proxy_mode: String,
+    /// Used for "custom", e.g. `socks5://127.0.0.1:1080`.
+    pub proxy_url: String,
+    /// "none" | "browser" (`--cookies-from-browser`) | "file" (`--cookies`).
+    pub cookies_mode: String,
+    /// yt-dlp browser name: firefox, chrome, edge, brave, opera, vivaldi, chromium, safari.
+    pub cookies_browser: String,
+    /// Netscape-format cookies.txt path.
+    pub cookies_file: String,
+    /// Keep the app-managed yt-dlp/Deno current (checked at most once a day,
+    /// right before a download batch starts).
+    pub auto_update: bool,
+}
+
+impl Default for DownloaderSettings {
+    fn default() -> Self {
+        Self {
+            proxy_mode: "system".into(),
+            proxy_url: String::new(),
+            cookies_mode: "none".into(),
+            cookies_browser: "firefox".into(),
+            cookies_file: String::new(),
+            auto_update: true,
+        }
+    }
+}
+
+impl AppSettings {
+    /// Downloader options, seeded from the legacy proxy fields when the new
+    /// block has never been saved.
+    pub fn downloader(&self) -> DownloaderSettings {
+        if let Some(d) = &self.downloader {
+            return d.clone();
+        }
+        let mut d = DownloaderSettings::default();
+        if let Some(mode) = self.proxy_mode.as_deref().filter(|m| !m.is_empty()) {
+            d.proxy_mode = mode.to_string();
+        }
+        if let Some(url) = &self.proxy_url {
+            d.proxy_url = url.clone();
+        }
+        d
+    }
 }
 
 pub fn load(app_data_dir: &PathBuf) -> AppSettings {
     let path = app_data_dir.join("settings.json");
-    std::fs::read_to_string(&path)
+    let mut settings: AppSettings = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Legacy proxy fields aren't written back, so fold them into the
+    // downloader block now or they'd be lost on the next save.
+    if settings.downloader.is_none() && settings.proxy_mode.is_some() {
+        settings.downloader = Some(settings.downloader());
+    }
+    settings
 }
 
 pub fn save(app_data_dir: &PathBuf, settings: &AppSettings) -> Result<(), String> {
@@ -200,17 +256,49 @@ mod tests {
             .options
             .insert("show_github_badge".to_string(), serde_json::Value::Bool(false));
         original.download_dir = Some("D:/Music/Downloads".to_string());
-        original.proxy_mode = Some("none".to_string());
+        original.downloader = Some(DownloaderSettings {
+            proxy_mode: "none".into(),
+            ..Default::default()
+        });
 
         save(&dir, &original).expect("save settings");
         let loaded = load(&dir);
 
         assert_eq!(loaded.download_dir, original.download_dir);
-        assert_eq!(loaded.proxy_mode, original.proxy_mode);
+        assert_eq!(loaded.downloader().proxy_mode, "none");
         assert_eq!(
             loaded.options.get("show_github_badge"),
             Some(&serde_json::Value::Bool(false))
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_proxy_fields_migrate_into_downloader_block() {
+        let dir = std::env::temp_dir().join(format!(
+            "lfmusic_settings_legacy_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"proxy_mode":"custom","proxy_url":"socks5://127.0.0.1:1080"}"#,
+        )
+        .expect("write legacy settings");
+
+        let loaded = load(&dir);
+        let d = loaded.downloader();
+        assert_eq!(d.proxy_mode, "custom");
+        assert_eq!(d.proxy_url, "socks5://127.0.0.1:1080");
+        assert!(d.auto_update);
+
+        // Survives a save/load cycle even though the legacy fields aren't written back.
+        save(&dir, &loaded).expect("save");
+        assert_eq!(load(&dir).downloader().proxy_url, "socks5://127.0.0.1:1080");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

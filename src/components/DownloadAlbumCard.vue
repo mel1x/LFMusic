@@ -8,22 +8,20 @@ import defaultCover from '../assets/cover.webp'
 
 import { useDownloads, type ExternalSearchAlbum } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
+import { tracksCountText } from '../utils/format'
 
-// External-results album card (mirrors regular search card style): cover opens
-// the album download page, the circle button queues the whole album (fetching
-// its tracklist by Deezer id). Width comes from the parent .lineList's --card-w.
+// Catalog album card: the cover opens the album page, the floating button
+// queues every track not already in the library. Width comes from the parent
+// (grid cell, or `--card-w` in a horizontal row).
 const props = defineProps<{ album: ExternalSearchAlbum }>()
-
-// open/download: "card was used" signals for search suggestions (listened to on
-// the search page; not on the artist page).
 const emit = defineEmits<{ (e: 'open'): void; (e: 'download'): void }>()
 
 const { t } = useI18n()
 const router = useRouter()
-const { albumDetail, enqueueMany, queue, trackKey, ytdlpMissing } = useDownloads()
+const { albumDetail, enqueue, ytdlpMissing } = useDownloads()
 
 const busy = ref(false)
-const done = ref(false)
+const queued = ref(false)
 
 function openAlbum() {
     emit('open')
@@ -33,22 +31,15 @@ function openArtist() {
     if (props.album.artist_id != null) router.push(`/downloads/artist/${props.album.artist_id}`)
 }
 
-async function downloadAll(e: MouseEvent) {
-    e.stopPropagation()
-    if (busy.value || done.value || ytdlpMissing.value) return
+async function downloadAlbum() {
+    if (busy.value || queued.value || ytdlpMissing.value) return
     emit('download')
     busy.value = true
     try {
         const detail = await albumDetail(props.album.id)
-        if (!detail) return
-        const queued = new Set(
-            queue.value.filter(i => i.status !== 'error').map(i => trackKey(i.artist, i.title, i.album)),
-        )
-        const pending = detail.tracks.filter(
-            tr => !tr.in_library && !queued.has(trackKey(tr.artist, tr.title, tr.album)),
-        )
-        if (pending.length > 0) await enqueueMany(pending)
-        done.value = true
+        const pending = detail?.tracks.filter(tr => !tr.in_library) ?? []
+        if (pending.length > 0) await enqueue(pending)
+        queued.value = true
     } catch (err) {
         console.error('Ошибка скачивания альбома:', err)
     } finally {
@@ -58,134 +49,121 @@ async function downloadAll(e: MouseEvent) {
 </script>
 
 <template>
-    <div class="playlistItem albumItem" @click="openAlbum">
+    <div class="albumCard" @click="openAlbum">
         <div class="coverWrap">
             <CoverImage class="cover" :src="album.cover_url" :fallback="defaultCover" />
+            <div class="coverShade"></div>
             <button
-                class="overlayBtn dlBtn"
-                :class="{ busy, done }"
-                :disabled="busy || done || ytdlpMissing"
-                @click="downloadAll"
-                v-tooltip="done ? t('downloads.albumQueued') : t('downloads.downloadAll')"
+                class="fab"
+                :class="{ busy, queued }"
+                :disabled="busy || queued || ytdlpMissing"
+                v-tooltip="queued ? t('downloads.albumQueued') : t('downloads.downloadAll')"
+                @click.stop="downloadAlbum"
             >
-                <span v-if="busy" class="cardSpinner"></span>
-                <svg v-else-if="done" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                <DownloadIcon v-else width="16" height="16" />
+                <span v-if="busy" class="fabSpinner"></span>
+                <svg v-else-if="queued" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                <DownloadIcon v-else width="18" height="18" />
             </button>
         </div>
-        <div v-truncate class="title">{{ album.title }}</div>
-        <div
-            v-truncate
-            class="subtitle"
-            :class="{ clickable: album.artist_id != null }"
-            @click.stop="album.artist_id != null && openArtist()"
-        >{{ album.artist }}</div>
+        <div v-truncate class="cardTitle">{{ album.title }}</div>
+        <div class="cardSub">
+            <span v-truncate class="subArtist" :class="{ clickable: album.artist_id != null }" @click.stop="openArtist">{{ album.artist }}</span>
+            <span v-if="album.nb_tracks" class="subCount">· {{ tracksCountText(album.nb_tracks) }}</span>
+        </div>
     </div>
 </template>
 
 <style scoped>
-.playlistItem {
+.albumCard {
+    width: var(--card-w, 100%);
     flex-shrink: 0;
-    cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 2px;
+    padding: 8px;
+    margin: -8px;
+    border-radius: 16px;
+    cursor: pointer;
+    user-select: none;
+    box-sizing: content-box;
+    transition: background-color .22s ease;
 }
-.playlistItem .coverWrap {
+.albumCard:hover { background-color: hsla(0, 0%, 100%, 0.04); }
+.coverWrap {
     position: relative;
-    width: var(--card-w, 190px);
-    height: var(--card-w, 190px);
-    border-radius: 18px;
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 12px;
     overflow: hidden;
     background-color: #202020;
+    margin-bottom: 8px;
+    box-shadow: 0 8px 24px hsla(0, 0%, 0%, 0.25);
 }
-.playlistItem .cover {
-    display: block;
-    width: var(--card-w, 190px);
-    height: var(--card-w, 190px);
-    border-radius: 18px;
-    object-fit: cover;
-    transition: filter .24s ease;
-    user-select: none;
-}
-.playlistItem:hover .cover {
-    filter: brightness(0.6);
-}
-.playlistItem .overlayBtn {
+.cover { width: 100%; height: 100%; }
+.coverShade {
     position: absolute;
+    inset: 0;
+    background: linear-gradient(to top, hsla(0, 0%, 0%, 0.45), transparent 45%);
+    opacity: 0;
+    transition: opacity .22s ease;
+}
+.albumCard:hover .coverShade { opacity: 1; }
+.fab {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    border-radius: 9999px;
-    color: hsla(0, 0%, 100%, 0.95);
-    background-color: hsla(0, 0%, 0%, 0.45);
-    backdrop-filter: blur(8px);
-    opacity: 0;
-    transform: translateY(4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
-    z-index: 2;
-}
-.playlistItem:hover .overlayBtn,
-.playlistItem .overlayBtn.busy,
-.playlistItem .overlayBtn.done {
-    opacity: 1;
-    transform: translateY(0);
-}
-.playlistItem .dlBtn {
-    right: 12px;
-    bottom: 12px;
-    padding: 12px;
-    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
-    background-color: hsla(0, 0%, 100%, 0.95);
-}
-.playlistItem .dlBtn:hover {
     color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
-    background-color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 100%, 0.95);
+    box-shadow: 0 6px 18px hsla(0, 0%, 0%, 0.35);
+    opacity: 0;
+    transform: translateY(8px) scale(0.92);
+    transition: opacity .2s ease, transform .22s cubic-bezier(0.22, 1, 0.36, 1), background-color .2s ease;
 }
-.playlistItem .dlBtn:disabled {
-    cursor: default;
+.albumCard:hover .fab,
+.fab.busy,
+.fab.queued {
+    opacity: 1;
+    transform: translateY(0) scale(1);
 }
-.playlistItem .dlBtn.done {
-    color: hsla(0, 0%, 100%, 0.85);
-    background-color: hsla(0, 0%, 0%, 0.55);
+.fab:hover:not(:disabled) { background-color: #fff; transform: scale(1.07); }
+.fab:disabled { cursor: default; }
+.fab.queued {
+    color: hsla(145, 55%, 32%, 1);
 }
-.cardSpinner {
+.fabSpinner {
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    border: 2px solid hsla(var(--accent-h), var(--accent-s), 20%, 0.3);
+    border: 2px solid hsla(var(--accent-h), var(--accent-s), 20%, 0.25);
     border-top-color: hsla(var(--accent-h), var(--accent-s), 20%, 0.9);
-    animation: cardSpin 0.8s linear infinite;
+    animation: spin .8s linear infinite;
 }
-@keyframes cardSpin {
-    to { transform: rotate(360deg); }
-}
-.playlistItem .title {
-    color: hsla(0, 0%, 100%, 0.85);
-    font-weight: 500;
+@keyframes spin { to { transform: rotate(360deg); } }
+.cardTitle {
     font-size: 14px;
-    margin-left: 4px;
-    max-width: var(--card-w, 190px);
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.92);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.playlistItem .subtitle {
-    color: hsla(0, 0%, 100%, 0.4);
+.cardSub {
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+    font-size: 12.5px;
     font-weight: 500;
-    font-size: 12px;
-    margin-left: 4px;
-    margin-top: -4px;
-    max-width: var(--card-w, 190px);
+    color: hsla(0, 0%, 100%, 0.45);
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
-.playlistItem .subtitle.clickable {
-    cursor: pointer;
-}
-.playlistItem .subtitle.clickable:hover {
-    color: hsla(0, 0%, 100%, 0.75);
-}
+.subArtist { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.subArtist.clickable:hover { color: hsla(0, 0%, 100%, 0.9); }
+.subCount { flex-shrink: 0; }
 </style>

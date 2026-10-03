@@ -19,7 +19,7 @@ import { useScrollLine } from '../composables/useScrollLine'
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
-const { artistDetail, enqueue, enqueueMany, queue, trackKey, ytdlpMissing } = useDownloads()
+const { artistDetail, enqueue, queue, trackKey, ytdlpMissing } = useDownloads()
 
 const artistId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -67,7 +67,7 @@ onUnmounted(() => { albumsLine.unobserve() })
 // snapshot from the initial artistDetail() fetch, never refreshed on its own).
 watch(queue, (items) => {
     const doneKeys = new Set(
-        items.filter(i => i.status === 'done').map(i => trackKey(i.artist, i.title, i.album)),
+        items.filter(i => i.stage === 'done').map(i => trackKey(i.artist, i.title, i.album)),
     )
     if (doneKeys.size === 0 || !detail.value) return
     for (const tr of detail.value.top_tracks) {
@@ -95,13 +95,13 @@ async function downloadPopular() {
     const tracks = top3()
     if (tracks.length === 0) return
     const queued = new Set(
-        queue.value.filter(i => i.status !== 'error').map(i => trackKey(i.artist, i.title, i.album)),
+        queue.value.filter(i => i.stage !== 'error').map(i => trackKey(i.artist, i.title, i.album)),
     )
     const missing = tracks.filter(tr => !tr.in_library && !queued.has(trackKey(tr.artist, tr.title, tr.album)))
     if (missing.length > 0) {
         busyPopular.value = true
         try {
-            await enqueueMany(missing)
+            await enqueue(missing)
             donePopular.value = true
         } catch (e) {
             console.error('Ошибка скачивания популярных треков:', e)
@@ -125,7 +125,7 @@ async function confirmPopularRedownload() {
     if (tracks.length === 0) return
     busyPopular.value = true
     try {
-        await enqueueMany(tracks, true)
+        await enqueue(tracks, true)
         donePopular.value = true
     } catch (e) {
         console.error('Ошибка повторного скачивания популярных:', e)
@@ -502,5 +502,10 @@ async function confirmRedownload() {
     font-size: 14px;
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.7);
+}
+/* Album cards bleed 8px for their hover background — give them room. */
+.lineList {
+    padding: 8px;
+    margin: -8px;
 }
 </style>

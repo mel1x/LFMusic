@@ -3,9 +3,12 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { usePlayer } from './usePlayer'
 import { useFolders } from './useFolders'
+import { useI18n } from './useI18n'
+import { isAndroidRuntime } from './usePlatform'
 
-// Types mirroring serde structs from src-tauri/src/{external,downloads}.rs
+// Types mirroring the serde structs in src-tauri/src/{external.rs, downloader/}
 
+/** Catalog search hit (Deezer/iTunes) or a pasted-link entry. */
 export interface ExternalSearchTrack {
   title: string
   artist: string
@@ -14,15 +17,14 @@ export interface ExternalSearchTrack {
   cover_url: string | null
   source: string
   in_library: boolean
-  /** Deezer artist id; null for iTunes. */
+  /** Deezer ids (null for iTunes / links). */
   artist_id: number | null
-  /** Deezer album id; null for iTunes. */
   album_id: number | null
-  /** Genre, when the source exposes it directly (iTunes only). */
   genre: string | null
-  /** Set only for a "paste a link" result (see `resolveUrl`) — the exact
-   *  yt-dlp target URL, passed straight through to `enqueue`. */
+  /** Set for pasted links: download exactly this URL instead of searching. */
   source_url: string | null
+  /** Video thumbnail for link entries (used as cover fallback). */
+  thumbnail_url?: string | null
 }
 
 export interface ExternalSearchAlbum {
@@ -60,30 +62,47 @@ export interface ExternalArtistDetail {
   top_tracks: ExternalSearchTrack[]
 }
 
-/** Search results page with an explicit pagination cursor (Deezer-based). */
 export interface ExternalSearchPage {
   tracks: ExternalSearchTrack[]
-  /** Only populated on the first page (index === 0). */
+  /** Only on the first page. */
   albums: ExternalSearchAlbum[]
-  /** Only populated on the first page (index === 0). */
   artists: ExternalSearchArtist[]
   next_index: number
   has_more: boolean
 }
 
-export type DownloadStatus = 'queued' | 'downloading' | 'done' | 'error'
+interface LinkTrack {
+  title: string
+  artist: string
+  album: string | null
+  duration_secs: number | null
+  source_url: string
+  thumbnail_url: string | null
+  in_library: boolean
+}
 
-/**
- * Mirrors `downloads.rs::DownloadErrorKind`. UI distinguishes causes by type, not
- * text: `bot_wall_network` (IP/VPN block, not an expired login) vs `cookies_expired`
- * (actually needs re-login).
- */
+export interface LinkResult {
+  /** Playlist/album title when the link had several entries. */
+  collection: string | null
+  tracks: ExternalSearchTrack[]
+}
+
+export type DownloadStage = 'queued' | 'searching' | 'downloading' | 'processing' | 'done' | 'error'
+
+/** Mirrors `downloader::ErrorKind`. */
 export type DownloadErrorKind =
-  | 'bot_wall_network'
-  | 'cookies_expired'
-  | 'network_timeout'
-  | 'no_format'
   | 'tool_missing'
+  | 'not_found'
+  | 'bot_check'
+  | 'cookies'
+  | 'auth_required'
+  | 'unavailable'
+  | 'rate_limited'
+  | 'network'
+  | 'format'
+  | 'outdated'
+  | 'disk'
+  | 'import'
   | 'cancelled'
   | 'unknown'
 
@@ -92,273 +111,101 @@ export interface DownloadItem {
   title: string
   artist: string
   album: string | null
-  query: string
+  duration_secs: number | null
   cover_url: string | null
-  /** Set for a "paste a link" download — the exact URL that was fetched. */
-  direct_url: string | null
-  status: DownloadStatus
+  album_id: number | null
+  genre: string | null
+  source_url: string | null
+  thumbnail_url: string | null
+  stage: DownloadStage
+  /** 0..1 within the download step. */
   progress: number
-  error: string | null
-  /** null when not an error. */
-  error_kind: DownloadErrorKind | null
+  speed_bps: number | null
+  eta_secs: number | null
+  /** "YouTube" / "SoundCloud" / link host. */
+  source: string | null
+  media_url: string | null
+  error: { kind: DownloadErrorKind; message: string } | null
   file_path: string | null
 }
 
-/** Mirrors `downloads.rs::ProxyConfig`. */
-export type ProxyMode = 'system' | 'none' | 'custom'
-export interface ProxyConfig {
-  mode: ProxyMode
-  url: string
-}
-
-/** Mirrors `downloads.rs::ToolsStatus`. */
-export interface ToolsStatus {
-  ytdlp: boolean
-  ffmpeg: boolean
-  /** Installed/removed alongside yt-dlp. */
-  deno: boolean
-  /** PO-token provider for YouTube's bot-wall — optional, installed separately. */
-  pot: boolean
-  preparing: boolean
-  message: string | null
-  cookies_authorized: boolean
-  /** Cookies passed validation — downloading is unlocked. */
-  cookies_valid: boolean
-  cookies_checking: boolean
-  cookies_message: string | null
-}
-
-interface DownloadSnapshot {
-  items: DownloadItem[]
-  tools: ToolsStatus
-}
+export type ToolKey = 'ytdlp' | 'deno' | 'ffmpeg'
 
 export interface ToolInfo {
-  /** In the app's bin folder or on system PATH. */
   installed: boolean
-  /** Installed by the app (bin folder) — can be updated/removed. */
+  /** App-managed copy (can be updated/removed). */
   managed: boolean
   version: string | null
-  /** For yt-dlp this also covers the system (PATH) case: updating installs an
-   *  app-managed copy. For ffmpeg only the managed case applies. */
+  latest: string | null
   update_available: boolean
 }
 
-export interface ToolsInfo {
-  ytdlp: ToolInfo
-  ffmpeg: ToolInfo
-  /** UI checks `managed` to allow removing an app-managed Deno install. */
-  deno: ToolInfo
-  /** PO-token provider — desktop-only, installed independently (not part of "install all"). */
-  pot: ToolInfo
+export interface ToolsState {
+  info: { ytdlp: ToolInfo; deno: ToolInfo; ffmpeg: ToolInfo; unsupported: boolean }
+  busy: boolean
+  progress: { tool: ToolKey; message: string; fraction: number | null } | null
+  error: string | null
 }
 
-export type ToolKey = 'ytdlp' | 'ffmpeg' | 'pot'
-
-interface ToolsProgressEvent {
-  tool: ToolKey
-  message: string | null
-  active: boolean
+/** Mirrors `settings::DownloaderSettings`. */
+export type ProxyMode = 'system' | 'none' | 'custom'
+export type CookiesMode = 'none' | 'browser' | 'file'
+export interface DownloaderSettings {
+  proxy_mode: ProxyMode
+  proxy_url: string
+  cookies_mode: CookiesMode
+  cookies_browser: string
+  cookies_file: string
+  auto_update: boolean
 }
 
-// Singleton state
+// ── Singleton state ─────────────────────────────────────────────────────────
+
+const emptyTool = (): ToolInfo => ({ installed: false, managed: false, version: null, latest: null, update_available: false })
 
 const queue = ref<DownloadItem[]>([])
-const tools = ref<ToolsStatus>({
-  ytdlp: false, ffmpeg: false, deno: false, pot: false, preparing: false, message: null,
-  cookies_authorized: false, cookies_valid: false, cookies_checking: false, cookies_message: null,
+const tools = ref<ToolsState>({
+  info: { ytdlp: emptyTool(), deno: emptyTool(), ffmpeg: emptyTool(), unsupported: false },
+  busy: false,
+  progress: null,
+  error: null,
+})
+// Optimistic until the first local check, so the page doesn't flash a setup card.
+const toolsLoaded = ref(false)
+const dlSettings = ref<DownloaderSettings>({
+  proxy_mode: 'system',
+  proxy_url: '',
+  cookies_mode: 'none',
+  cookies_browser: 'firefox',
+  cookies_file: '',
+  auto_update: true,
 })
 
-const emptyTool = (): ToolInfo => ({ installed: false, managed: false, version: null, update_available: false })
-const toolsInfo = ref<ToolsInfo>({ ytdlp: emptyTool(), ffmpeg: emptyTool(), deno: emptyTool(), pot: emptyTool() })
-// Used to detect app-downloaded tracks (for "Delete track" in the context menu) and
-// to display the folder in settings. Seeded synchronously from the last-known value
-// (cached on every resolve/change below) so the settings page never needs a loading
-// shimmer for it — refreshed from the backend in the background in init().
+// Seeded from the last known value so settings render without a shimmer.
 const DOWNLOADS_DIR_CACHE_KEY = 'lfmusic:downloads-dir'
 const downloadsDir = ref<string>(localStorage.getItem(DOWNLOADS_DIR_CACHE_KEY) ?? '')
-watch(downloadsDir, (dir) => {
-  if (dir) localStorage.setItem(DOWNLOADS_DIR_CACHE_KEY, dir)
-})
-const proxyConfig = ref<ProxyConfig>({ mode: 'system', url: '' })
-const toolsProgress = ref<Record<ToolKey, string | null>>({ ytdlp: null, ffmpeg: null, pot: null })
-// Optimistic default (as if everything's installed) until the first local check
-// completes, to avoid a false banner/search-block flash on startup.
-const toolsLoaded = ref(false)
+watch(downloadsDir, (dir) => { if (dir) localStorage.setItem(DOWNLOADS_DIR_CACHE_KEY, dir) })
 
-// yt-dlp is a hard dependency: search/download don't work without it.
-const ytdlpMissing = computed(() => toolsLoaded.value && !toolsInfo.value.ytdlp.installed)
-// ffmpeg is recommended (better quality) but not required.
-const ffmpegMissing = computed(() => toolsLoaded.value && !toolsInfo.value.ffmpeg.installed)
-// yt-dlp present but Deno missing — happens for installs predating the Deno pairing.
-const denoMissing = computed(() => toolsLoaded.value && toolsInfo.value.ytdlp.installed && !toolsInfo.value.deno.installed)
-const depsMissing = ytdlpMissing
-const depsUpdateAvailable = computed(() => toolsLoaded.value && (toolsInfo.value.ytdlp.update_available || toolsInfo.value.ffmpeg.update_available))
-// POT provider is fully optional (opt-in bot-wall mitigation) — not folded into depsMissing/depsUpdateAvailable.
-const potMissing = computed(() => toolsLoaded.value && !toolsInfo.value.pot.installed)
-const potUpdateAvailable = computed(() => toolsLoaded.value && toolsInfo.value.pot.update_available)
-
-// YouTube cookies are imported via a companion browser extension (see
-// browser_bridge.rs): its popup reads the browser's live cookie jar and POSTs
-// it to a local bridge server this app runs, which writes cookies.txt for
-// yt-dlp. Status arrives via the `download_queue` snapshot into `tools`.
-async function validateCookies(): Promise<void> {
-  await invoke('downloads_validate_cookies')
-}
-async function clearYoutubeCookies(): Promise<void> {
-  await invoke('downloads_clear_youtube_cookies')
-}
-/** Stages the bundled extension source to disk and returns the folder path (for "Load unpacked"). */
-async function prepareBrowserExtension(): Promise<string> {
-  return await invoke<string>('browser_bridge_prepare_extension')
-}
-const cookiesAuthorized = computed(() => tools.value.cookies_authorized)
-const cookiesChecking = computed(() => tools.value.cookies_checking)
-const cookiesValid = computed(() => tools.value.cookies_valid)
-const cookiesMessage = computed(() => tools.value.cookies_message)
-
-async function refreshToolsInfo(): Promise<ToolsInfo> {
-  const info = await invoke<ToolsInfo>('tools_info')
-  // `tools_info` is a local (offline) check that always reports update_available=false.
-  // Carry over the flag from the last network check (checkToolUpdates) as long as the
-  // version hasn't changed, otherwise the banner would flicker off until the TTL cache
-  // re-checks. If the version changed, the old flag is stale so we drop it.
-  const prev = toolsInfo.value
-  for (const key of ['ytdlp', 'ffmpeg', 'deno', 'pot'] as const) {
-    if (info[key].version === prev[key].version && prev[key].update_available) {
-      info[key].update_available = true
-    }
-  }
-  toolsInfo.value = info
-  toolsLoaded.value = true
-  return info
-}
-
-// Update check hits the network (GitHub). Both the Downloads page and External
-// Sources settings call this on every mount, so cache on a TTL to avoid duplicate
-// requests. The timestamp is only set on success (retry next visit if offline).
-const TOOL_UPDATE_TTL_MS = 15 * 60 * 1000
-let lastToolUpdateCheck = 0
-
-/** `force` bypasses the TTL cache (used right after install/update). */
-async function checkToolUpdates(force = false): Promise<ToolsInfo> {
-  if (!force && lastToolUpdateCheck && Date.now() - lastToolUpdateCheck < TOOL_UPDATE_TTL_MS) {
-    return toolsInfo.value
-  }
-  const info = await invoke<ToolsInfo>('tools_check_updates')
-  toolsInfo.value = info
-  toolsLoaded.value = true
-  lastToolUpdateCheck = Date.now()
-  return info
-}
-
-let initialized = false
-
-// Debounced: `downloads_library_updated` fires per track during a batch download,
-// so without this an N-track queue would trigger N full catalog reloads.
-let libraryRefreshTimer: ReturnType<typeof setTimeout> | null = null
-function scheduleLibraryRefresh(): void {
-  if (libraryRefreshTimer) clearTimeout(libraryRefreshTimer)
-  libraryRefreshTimer = setTimeout(() => {
-    libraryRefreshTimer = null
-    void usePlayer().refreshLibrary()
-  }, 400)
-}
-
-async function init(): Promise<void> {
-  if (initialized) return
-  initialized = true
-  try {
-    // Singleton composable lives for the app's lifetime — never unsubscribed.
-    await listen<DownloadSnapshot>('download_queue', (e) => {
-      queue.value = e.payload.items
-      tools.value = e.payload.tools
-    })
-    await listen('downloads_library_updated', () => {
-      scheduleLibraryRefresh()
-    })
-    await listen('tools_changed', () => {
-      void refreshToolsInfo()
-    })
-    await listen<ToolsProgressEvent>('tools_progress', (e) => {
-      toolsProgress.value = {
-        ...toolsProgress.value,
-        [e.payload.tool]: e.payload.active ? e.payload.message : null,
-      }
-    })
-  } catch (e) {
-    console.error('Ошибка подписки на очередь скачивания:', e)
-  }
-  try {
-    const snap = await invoke<DownloadSnapshot>('downloads_snapshot')
-    queue.value = snap.items
-    tools.value = snap.tools
-  } catch (e) {
-    console.error('Ошибка загрузки очереди скачивания:', e)
-  }
-  try {
-    await refreshToolsInfo()
-  } catch (e) {
-    console.error('Ошибка загрузки статуса утилит:', e)
-  }
-  // Fire-and-forget so startup isn't delayed; TTL cache avoids duplicate requests
-  // from later page visits.
-  void checkToolUpdates().catch(() => { /* offline — skip update banner */ })
-  try {
-    downloadsDir.value = await invoke<string>('downloads_dir_path')
-  } catch (e) {
-    console.error('Ошибка получения папки скачиваний:', e)
-  }
-  try {
-    proxyConfig.value = await invoke<ProxyConfig>('downloads_get_proxy')
-  } catch (e) {
-    console.error('Ошибка получения настроек прокси:', e)
-  }
-}
-
-function isDownloadedTrack(filePath: string): boolean {
-  const dir = downloadsDir.value
-  if (!dir || !filePath) return false
-  const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase()
-  // Require a separator boundary so a sibling folder sharing the same prefix
-  // (e.g. "…/LFMusic Downloads-old/…") isn't mistaken for the downloads folder.
-  let d = norm(dir)
-  if (!d.endsWith('/')) d += '/'
-  return norm(filePath).startsWith(d)
-}
-
-async function deleteDownloadedTrack(filePath: string): Promise<void> {
-  await invoke('downloads_delete_track', { filePath })
-}
+// The downloader needs yt-dlp as a subprocess — never available on Android.
+const ytdlpMissing = computed(() => isAndroidRuntime() || (toolsLoaded.value && !tools.value.info.ytdlp.installed))
+/** Without Deno, YouTube's signature challenge can't be solved. */
+const denoMissing = computed(() => toolsLoaded.value && tools.value.info.ytdlp.installed && !tools.value.info.deno.installed)
+const ffmpegMissing = computed(() => toolsLoaded.value && !tools.value.info.ffmpeg.installed)
+const toolsUpdateAvailable = computed(() =>
+  tools.value.info.ytdlp.update_available || tools.value.info.deno.update_available,
+)
+const activeCount = computed(() =>
+  queue.value.filter(i => i.stage !== 'done' && i.stage !== 'error').length,
+)
 
 /**
- * `folderPath` null/undefined resets to the default "LFMusic Downloads" folder.
- * Backend falls back to the default on any error and returns the path actually
- * applied. Old folder is unscanned, new one added, so refresh folders + catalog.
- */
-async function setDownloadsDir(folderPath?: string | null): Promise<string> {
-  const resolved = await invoke<string>('downloads_set_dir', { folderPath: folderPath ?? null })
-  downloadsDir.value = resolved
-  try { await useFolders().refreshFolders() } catch { /* folder list not yet initialized */ }
-  try { await usePlayer().refreshLibrary() } catch { /* catalog will refresh via event */ }
-  return resolved
-}
-
-/** `url` only applies to `mode: 'custom'` (e.g. socks5://127.0.0.1:1080 for ByeDPI). */
-async function setProxy(mode: ProxyMode, url = ''): Promise<void> {
-  await invoke('downloads_set_proxy', { mode, url })
-  proxyConfig.value = { mode, url: mode === 'custom' ? url.trim() : '' }
-}
-
-/**
- * Port of Rust `external::normalize`. Kept identical to the backend so queue
- * dedup matches it exactly.
+ * Port of Rust `external::normalize` / `track_identity_key` — must stay
+ * identical so queue lookups agree with the backend's dedup.
  */
 const ALNUM_RE = /[\p{L}\p{N}]/u
-
 function normalizeKey(s: string): string {
   let out = ''
-  let prevSpace = true // collapse leading spaces too
+  let prevSpace = true
   for (const ch of s.toLowerCase()) {
     if (ALNUM_RE.test(ch)) {
       out += ch
@@ -371,171 +218,249 @@ function normalizeKey(s: string): string {
   return out.replace(/ +$/, '')
 }
 
-/**
- * Mirrors Rust `external::track_identity_key`. Includes album so same-titled
- * tracks from different albums by the same artist aren't collapsed together.
- */
 export function trackKey(artist: string, title: string, album?: string | null): string {
   return normalizeKey(`${artist || ''} ${title || ''} ${album || ''}`)
 }
 
+function keyOf(t: { artist: string; title: string; album: string | null; source_url?: string | null }): string {
+  return t.source_url ? `url:${t.source_url.trim()}` : trackKey(t.artist, t.title, t.album)
+}
+
+/** Queue item per track key (latest wins), for row status lookups. */
+const queueIndex = computed(() => {
+  const map = new Map<string, DownloadItem>()
+  for (const item of queue.value) map.set(keyOf(item), item)
+  return map
+})
+
+// ── Init ────────────────────────────────────────────────────────────────────
+
+let initialized = false
+let libraryRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+// `downloads_library_updated` fires per finished track; one catalog reload per burst.
+function scheduleLibraryRefresh(): void {
+  if (libraryRefreshTimer) clearTimeout(libraryRefreshTimer)
+  libraryRefreshTimer = setTimeout(() => {
+    libraryRefreshTimer = null
+    void usePlayer().refreshLibrary()
+  }, 400)
+}
+
+async function refreshTools(): Promise<ToolsState> {
+  const state = await invoke<ToolsState>('tools_status')
+  tools.value = state
+  toolsLoaded.value = true
+  return state
+}
+
+// Update checks hit GitHub — at most once per TTL from page visits.
+const UPDATE_CHECK_TTL_MS = 30 * 60 * 1000
+let lastUpdateCheck = 0
+async function checkUpdates(force = false): Promise<void> {
+  if (!force && Date.now() - lastUpdateCheck < UPDATE_CHECK_TTL_MS) return
+  if (!tools.value.info.ytdlp.installed && !force) return
+  lastUpdateCheck = Date.now()
+  try {
+    tools.value = await invoke<ToolsState>('tools_check_updates')
+  } catch {
+    lastUpdateCheck = 0
+  }
+}
+
+async function init(): Promise<void> {
+  if (initialized || isAndroidRuntime()) return
+  initialized = true
+  try {
+    // App-lifetime singleton — never unsubscribed.
+    await listen<{ items: DownloadItem[] }>('downloads_queue', (e) => { queue.value = e.payload.items })
+    await listen<ToolsState>('downloads_tools', (e) => {
+      tools.value = e.payload
+      toolsLoaded.value = true
+    })
+    await listen('downloads_library_updated', () => scheduleLibraryRefresh())
+  } catch (e) {
+    console.error('Ошибка подписки на события загрузок:', e)
+  }
+  try {
+    queue.value = (await invoke<{ items: DownloadItem[] }>('downloads_snapshot')).items
+  } catch (e) {
+    console.error('Ошибка загрузки очереди:', e)
+  }
+  try { await refreshTools() } catch (e) { console.error('Ошибка проверки компонентов:', e) }
+  try { downloadsDir.value = await invoke<string>('downloads_dir_path') } catch { /* keep cached */ }
+  try { dlSettings.value = await invoke<DownloaderSettings>('downloads_get_settings') } catch { /* defaults */ }
+}
+
+// ── Operations ──────────────────────────────────────────────────────────────
+
+function toRequest(t: ExternalSearchTrack, force: boolean) {
+  return {
+    title: t.title,
+    artist: t.artist,
+    album: t.album,
+    duration_secs: t.duration_secs,
+    cover_url: t.cover_url,
+    album_id: t.album_id,
+    genre: t.genre,
+    source_url: t.source_url,
+    thumbnail_url: t.thumbnail_url ?? null,
+    force,
+  }
+}
+
+async function enqueue(tracks: ExternalSearchTrack | ExternalSearchTrack[], force = false): Promise<number[]> {
+  const list = Array.isArray(tracks) ? tracks : [tracks]
+  if (list.length === 0) return []
+  return await invoke<number[]>('downloads_enqueue', { requests: list.map(t => toRequest(t, force)) })
+}
+
+async function search(
+  query: string,
+  index = 0,
+  limit = 30,
+  exact?: { artist: string; title: string },
+): Promise<ExternalSearchPage> {
+  const q = query.trim()
+  if (!q) return { tracks: [], albums: [], artists: [], next_index: index, has_more: false }
+  return await invoke<ExternalSearchPage>('downloads_search', {
+    query: q,
+    index,
+    limit,
+    artist: exact?.artist || undefined,
+    title: exact?.title || undefined,
+  })
+}
+
+async function resolveLink(url: string): Promise<LinkResult> {
+  const r = await invoke<{ collection: string | null; tracks: LinkTrack[] }>('downloads_resolve_link', { url })
+  return {
+    collection: r.collection,
+    tracks: r.tracks.map(t => ({
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
+      duration_secs: t.duration_secs,
+      cover_url: t.thumbnail_url,
+      source: 'link',
+      in_library: t.in_library,
+      artist_id: null,
+      album_id: null,
+      genre: null,
+      source_url: t.source_url,
+      thumbnail_url: t.thumbnail_url,
+    })),
+  }
+}
+
+async function installTools(which?: ToolKey[]): Promise<void> {
+  tools.value = await invoke<ToolsState>('tools_install', { tools: which })
+  lastUpdateCheck = Date.now()
+}
+
+async function removeTools(): Promise<void> {
+  tools.value = await invoke<ToolsState>('tools_remove')
+}
+
+async function saveSettings(patch: Partial<DownloaderSettings>): Promise<void> {
+  const next = { ...dlSettings.value, ...patch }
+  await invoke('downloads_set_settings', { settings: next })
+  dlSettings.value = next
+}
+
+function isDownloadedTrack(filePath: string): boolean {
+  const dir = downloadsDir.value
+  if (!dir || !filePath) return false
+  const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase()
+  let d = norm(dir)
+  if (!d.endsWith('/')) d += '/'
+  return norm(filePath).startsWith(d)
+}
+
+async function deleteDownloadedTrack(filePath: string): Promise<void> {
+  await invoke('downloads_delete_track', { filePath })
+}
+
+/** `folderPath` null resets to the default "LFMusic Downloads" folder. */
+async function setDownloadsDir(folderPath?: string | null): Promise<string> {
+  const resolved = await invoke<string>('downloads_set_dir', { folderPath: folderPath ?? null })
+  downloadsDir.value = resolved
+  try { await useFolders().refreshFolders() } catch { /* not initialized yet */ }
+  try { await usePlayer().refreshLibrary() } catch { /* refreshes via event */ }
+  return resolved
+}
+
+/** Queue entry for a catalog/link track, if any. */
+function itemFor(t: ExternalSearchTrack): DownloadItem | undefined {
+  return queueIndex.value.get(keyOf(t))
+}
+
+// ── Display helpers ─────────────────────────────────────────────────────────
+
+function formatBytes(bps: number): string {
+  if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} МБ/с`
+  return `${Math.max(1, Math.round(bps / 1024))} КБ/с`
+}
+
 export function useDownloads() {
   void init()
+  const { t } = useI18n()
 
-  /**
-   * `exact` is passed when the artist/title are already known (e.g. clicking a
-   * phantom album track) so the backend adds a precise Deezer field search —
-   * otherwise a niche track with a generic title (e.g. "Intro") gets lost in
-   * free-text results.
-   */
-  async function search(
-    query: string,
-    index = 0,
-    limit = 30,
-    exact?: { artist: string; title: string },
-  ): Promise<ExternalSearchPage> {
-    const q = query.trim()
-    if (!q) return { tracks: [], albums: [], artists: [], next_index: index, has_more: false }
-    return await invoke<ExternalSearchPage>('downloads_search', {
-      query: q,
-      index,
-      limit,
-      artist: exact?.artist || undefined,
-      title: exact?.title || undefined,
-    })
+  function errorText(item: Pick<DownloadItem, 'error'>): string {
+    const kind = item.error?.kind ?? 'unknown'
+    const key = `downloads.errors.${kind}`
+    const text = t(key)
+    return text && text !== key ? text : (item.error?.message || t('downloads.errors.unknown'))
   }
 
-  async function enqueue(track: ExternalSearchTrack, force = false): Promise<number> {
-    return await invoke<number>('downloads_enqueue', {
-      request: {
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        cover_url: track.cover_url,
-        album_id: track.album_id,
-        genre: track.genre,
-        direct_url: track.source_url,
-        force,
-      },
-    })
-  }
-
-  async function enqueueMany(tracks: ExternalSearchTrack[], force = false): Promise<number[]> {
-    if (tracks.length === 0) return []
-    return await invoke<number[]>('downloads_enqueue_many', {
-      requests: tracks.map(t => ({
-        title: t.title,
-        artist: t.artist,
-        album: t.album,
-        cover_url: t.cover_url,
-        album_id: t.album_id,
-        genre: t.genre,
-        direct_url: t.source_url,
-        force,
-      })),
-    })
-  }
-
-  /** "Paste a link" flow: probes a yt-dlp-supported URL for title/uploader/
-   *  thumbnail without downloading, so it can be shown and enqueued like a
-   *  normal search hit (see `ExternalSearchTrack.source_url`). */
-  async function resolveUrl(url: string): Promise<ExternalSearchTrack> {
-    return await invoke<ExternalSearchTrack>('downloads_resolve_url', { url })
-  }
-
-  async function albumDetail(id: number): Promise<ExternalAlbumDetail | null> {
-    return await invoke<ExternalAlbumDetail | null>('downloads_album', { albumId: id })
-  }
-
-  async function artistDetail(id: number): Promise<ExternalArtistDetail | null> {
-    return await invoke<ExternalArtistDetail | null>('downloads_artist', { artistId: id })
-  }
-
-  async function remove(id: number): Promise<void> {
-    await invoke('downloads_remove', { id })
-  }
-
-  /** error -> queued */
-  async function retry(id: number): Promise<void> {
-    await invoke('downloads_retry', { id })
-  }
-
-  async function clearFinished(): Promise<void> {
-    await invoke('downloads_clear_finished')
-  }
-
-  async function checkTools(): Promise<ToolsStatus> {
-    const s = await invoke<ToolsStatus>('downloads_check_tools')
-    tools.value = s
-    return s
-  }
-
-  async function installTool(tool: ToolKey): Promise<void> {
-    const info = await invoke<ToolsInfo>('tools_install', { tool })
-    toolsInfo.value = info
-    // Version changed — force the next update check to hit the network.
-    lastToolUpdateCheck = 0
-  }
-
-  async function installDeno(): Promise<void> {
-    const info = await invoke<ToolsInfo>('tools_install_deno')
-    toolsInfo.value = info
-  }
-
-  async function installAll(): Promise<void> {
-    const info = await invoke<ToolsInfo>('tools_install_all')
-    toolsInfo.value = info
-    // Versions changed — force the next update check to hit the network.
-    lastToolUpdateCheck = 0
-  }
-
-  async function deleteTool(tool: ToolKey): Promise<void> {
-    const info = await invoke<ToolsInfo>('tools_delete', { tool })
-    toolsInfo.value = info
+  /** One-line status for an active/finished queue item. */
+  function stageText(item: DownloadItem): string {
+    switch (item.stage) {
+      case 'queued': return t('downloads.stage.queued')
+      case 'searching': return item.source
+        ? t('downloads.stage.searchingOn', { source: item.source })
+        : t('downloads.stage.searching')
+      case 'downloading': {
+        const pct = `${Math.round(item.progress * 100)}%`
+        return item.speed_bps ? `${pct} · ${formatBytes(item.speed_bps)}` : pct
+      }
+      case 'processing': return t('downloads.stage.processing')
+      case 'done': return item.source ? t('downloads.stage.doneFrom', { source: item.source }) : t('downloads.stage.done')
+      case 'error': return errorText(item)
+    }
   }
 
   return {
     queue,
     tools,
-    toolsInfo,
-    toolsProgress,
     toolsLoaded,
-    depsMissing,
-    depsUpdateAvailable,
+    dlSettings,
+    downloadsDir,
     ytdlpMissing,
-    ffmpegMissing,
     denoMissing,
-    potMissing,
-    potUpdateAvailable,
-    validateCookies,
-    clearYoutubeCookies,
-    prepareBrowserExtension,
-    cookiesAuthorized,
-    cookiesChecking,
-    cookiesValid,
-    cookiesMessage,
+    ffmpegMissing,
+    toolsUpdateAvailable,
+    activeCount,
     search,
-    resolveUrl,
+    resolveLink,
+    albumDetail: (id: number) => invoke<ExternalAlbumDetail | null>('downloads_album', { albumId: id }),
+    artistDetail: (id: number) => invoke<ExternalArtistDetail | null>('downloads_artist', { artistId: id }),
     enqueue,
-    enqueueMany,
-    albumDetail,
-    artistDetail,
-    remove,
-    retry,
-    clearFinished,
-    checkTools,
-    refreshToolsInfo,
-    checkToolUpdates,
-    installTool,
-    installDeno,
-    installAll,
-    deleteTool,
+    cancel: (id: number) => invoke('downloads_cancel', { id }),
+    cancelAll: () => invoke('downloads_cancel_all'),
+    retry: (ids?: number[]) => invoke('downloads_retry', { ids }),
+    clearFinished: () => invoke('downloads_clear_finished'),
+    refreshTools,
+    checkUpdates,
+    installTools,
+    removeTools,
+    saveSettings,
     isDownloadedTrack,
     deleteDownloadedTrack,
-    downloadsDir,
     setDownloadsDir,
-    proxyConfig,
-    setProxy,
+    itemFor,
     trackKey,
+    errorText,
+    stageText,
   }
 }

@@ -10,211 +10,314 @@ import { usePlayer } from '../composables/usePlayer'
 import { useDownloads, type ExternalSearchTrack } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 
-// Candidate track row, shared by the search page and album/artist download pages.
-// Artist and album are clickable (to their download pages) when the track has
-// a matching Deezer id.
+// One downloadable track: search results, album/artist pages, link results.
+// The action button doubles as live status — queued → progress ring → check.
 const props = withDefaults(
     defineProps<{
         track: ExternalSearchTrack
-        /** Whether to show "· album" (redundant on the album's own page). */
+        /** Position number instead of the cover (album page). */
+        index?: number | null
         showAlbum?: boolean
     }>(),
-    { showAlbum: true },
+    { index: null, showAlbum: true },
 )
 
-// redownload: request to redownload (track already in library); parent shows
-// the confirm modal (one dialog per list). download: normal enqueue; parent
-// uses it as a "query was useful" signal for search suggestions.
 const emit = defineEmits<{
+    /** Already in the library — parent confirms before re-downloading. */
     (e: 'redownload', track: ExternalSearchTrack): void
+    /** Queued; parents use it as a "this search was useful" signal. */
     (e: 'download', track: ExternalSearchTrack): void
 }>()
 
 const { t } = useI18n()
 const router = useRouter()
 const { formatTime } = usePlayer()
-const { queue, enqueue, trackKey, ytdlpMissing } = useDownloads()
+const { itemFor, enqueue, cancel, retry, ytdlpMissing, stageText } = useDownloads()
 
-const isQueued = computed(() => {
-    const key = trackKey(props.track.artist, props.track.title, props.track.album)
-    return queue.value.some(i => i.status !== 'error' && trackKey(i.artist, i.title, i.album) === key)
+const item = computed(() => itemFor(props.track))
+const stage = computed(() => item.value?.stage ?? null)
+const active = computed(() => stage.value !== null && stage.value !== 'done' && stage.value !== 'error')
+const inLibrary = computed(() => props.track.in_library || stage.value === 'done')
+
+// Progress ring geometry (r = 15 → circumference ≈ 94.25).
+const RING = 2 * Math.PI * 15
+const ringOffset = computed(() => RING * (1 - Math.min(1, Math.max(0, item.value?.progress ?? 0))))
+
+const statusLine = computed(() => (item.value && stage.value !== 'done' ? stageText(item.value) : ''))
+
+const buttonTooltip = computed(() => {
+    if (stage.value === 'error') return t('downloads.action.retry')
+    if (active.value) return t('downloads.action.cancel')
+    if (inLibrary.value) return t('downloads.action.redownload')
+    return t('downloads.action.download')
 })
 
-const artistClickable = computed(() => props.track.artist_id != null)
-const albumClickable = computed(() => props.showAlbum && props.track.album != null && props.track.album_id != null)
-
-function onButton() {
-    if (isQueued.value || ytdlpMissing.value) return
-    if (props.track.in_library) { emit('redownload', props.track); return }
-    emit('download', props.track)
-    void doDownload()
-}
-
-async function doDownload() {
+async function onAction() {
+    const it = item.value
     try {
+        if (it && stage.value === 'error') { await retry([it.id]); return }
+        if (it && active.value) { await cancel(it.id); return }
+        if (ytdlpMissing.value) return
+        if (inLibrary.value) { emit('redownload', props.track); return }
+        emit('download', props.track)
         await enqueue(props.track)
     } catch (e) {
-        console.error('Ошибка добавления в очередь:', e)
+        console.error('Ошибка действия скачивания:', e)
     }
 }
 
+const artistClickable = computed(() => props.track.artist_id != null)
+const albumClickable = computed(() => props.showAlbum && !!props.track.album && props.track.album_id != null)
 function openArtist() {
-    if (props.track.artist_id != null) router.push(`/downloads/artist/${props.track.artist_id}`)
+    if (artistClickable.value) router.push(`/downloads/artist/${props.track.artist_id}`)
 }
 function openAlbum() {
-    if (props.track.album_id != null) router.push(`/downloads/album/${props.track.album_id}`)
+    if (albumClickable.value) router.push(`/downloads/album/${props.track.album_id}`)
 }
 </script>
 
 <template>
-    <div class="trackElem">
-        <div class="trackCover">
+    <div class="dlRow" :class="{ active, failed: stage === 'error', owned: inLibrary && !active }" @dblclick="onAction">
+        <div v-if="index != null" class="rowIndex">{{ index }}</div>
+        <div v-else class="rowCover">
             <CoverImage :src="track.cover_url" :fallback="defaultTrackCover" />
         </div>
-        <div class="trackInfo">
-            <div v-truncate class="trackName">{{ track.title }}</div>
-            <div v-truncate class="trackMeta">
-                <span
-                    class="metaPart"
-                    :class="{ clickable: artistClickable }"
-                    @click.stop="artistClickable && openArtist()"
-                >{{ track.artist }}</span>
-                <template v-if="showAlbum && track.album"> · <span
-                    class="metaPart"
-                    :class="{ clickable: albumClickable }"
-                    @click.stop="albumClickable && openAlbum()"
-                >{{ track.album }}</span></template>
+
+        <div class="rowInfo">
+            <div v-truncate class="rowTitle">{{ track.title }}</div>
+            <div class="rowMeta">
+                <Transition name="statusSwap" mode="out-in">
+                    <span v-if="statusLine" :key="'s'" class="rowStatus" :class="{ error: stage === 'error' }" v-truncate>{{ statusLine }}</span>
+                    <span v-else :key="'m'" class="rowMetaText" v-truncate>
+                        <span class="metaLink" :class="{ clickable: artistClickable }" @click.stop="openArtist">{{ track.artist }}</span>
+                        <template v-if="showAlbum && track.album"><span class="metaDot">·</span><span class="metaLink" :class="{ clickable: albumClickable }" @click.stop="openAlbum">{{ track.album }}</span></template>
+                    </span>
+                </Transition>
             </div>
         </div>
-        <div class="trackTime">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
+
+        <span v-if="inLibrary && !active && stage !== 'error'" class="ownedTag">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            {{ t('downloads.inLibrary') }}
+        </span>
+        <div class="rowTime">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
+
         <button
-            class="dlBtn"
-            :class="{ done: track.in_library && !isQueued, added: isQueued }"
-            :disabled="isQueued || ytdlpMissing"
-            @click="onButton"
+            class="actionBtn"
+            :class="[stage ?? 'idle', { owned: inLibrary && !active && stage !== 'error' }]"
+            :disabled="!item && ytdlpMissing"
+            v-tooltip:left="buttonTooltip"
+            @click.stop="onAction"
+            @dblclick.stop
         >
-            <template v-if="isQueued">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                <span>{{ t('downloads.btnAdded') }}</span>
-            </template>
-            <template v-else-if="track.in_library">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                <span>{{ t('downloads.btnDownloaded') }}</span>
-            </template>
-            <template v-else>
-                <DownloadIcon width="16" height="16" />
-                <span>{{ t('downloads.btnDownload') }}</span>
-            </template>
+            <!-- Progress ring (downloading) / spinning arc (searching, processing) -->
+            <svg v-if="active && stage !== 'queued'" class="ring" :class="{ spin: stage !== 'downloading' }" viewBox="0 0 36 36">
+                <circle class="ringTrack" cx="18" cy="18" r="15" />
+                <circle
+                    class="ringFill"
+                    cx="18" cy="18" r="15"
+                    :stroke-dasharray="RING"
+                    :stroke-dashoffset="stage === 'downloading' ? ringOffset : RING * 0.72"
+                />
+            </svg>
+            <span v-if="stage === 'queued'" class="queuedDots"><i></i><i></i><i></i></span>
+
+            <span class="glyph">
+                <svg v-if="active" class="cancelGlyph" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                <svg v-else-if="stage === 'error'" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.08 8A8 8 0 1 0 20 12"/><polyline points="20 4 20 8 16 8"/></svg>
+                <svg v-else-if="inLibrary" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                <DownloadIcon v-else width="17" height="17" />
+            </span>
         </button>
     </div>
 </template>
 
 <style scoped>
-.trackElem {
+.dlRow {
     position: relative;
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 10px;
-    padding: 8px;
-    border-radius: 9px;
-    height: 58px;
+    gap: 12px;
+    height: 60px;
+    padding: 0 8px 0 8px;
+    border-radius: 12px;
     box-sizing: border-box;
-    transition: background-color .24s ease;
+    transition: background-color .2s ease;
 }
-.trackElem:hover {
-    background-color: hsla(0, 0%, 100%, 0.03);
+.dlRow:hover {
+    background-color: hsla(0, 0%, 100%, 0.04);
 }
-.trackCover {
-    width: 42px;
-    height: 42px;
-    background-color: #202020;
-    border-radius: 5px;
+.dlRow.active {
+    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.07);
+}
+.rowCover {
+    width: 44px;
+    height: 44px;
+    border-radius: 8px;
     overflow: hidden;
     flex-shrink: 0;
+    background-color: #202020;
 }
-.trackInfo {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+.rowIndex {
+    width: 28px;
+    flex-shrink: 0;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.35);
+    user-select: none;
+}
+.rowInfo {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
 }
-.trackName {
-    user-select: none;
+.rowTitle {
     font-size: 14px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.92);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+}
+.rowMeta {
+    height: 16px;
+    font-size: 12.5px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.9);
+    user-select: none;
+    min-width: 0;
+}
+.rowMetaText,
+.rowStatus {
+    display: block;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.trackMeta {
-    user-select: none;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.4);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.metaPart.clickable {
-    cursor: pointer;
-    transition: color .18s ease;
-}
-.metaPart.clickable:hover {
-    color: hsla(0, 0%, 100%, 0.85);
-}
-.trackTime {
-    user-select: none;
-    font-size: 14px;
-    font-weight: 500;
+.rowMetaText { color: hsla(0, 0%, 100%, 0.45); }
+.metaDot { margin: 0 5px; opacity: 0.6; }
+.metaLink.clickable { cursor: pointer; transition: color .18s ease; }
+.metaLink.clickable:hover { color: hsla(0, 0%, 100%, 0.9); }
+.rowStatus {
     font-variant-numeric: tabular-nums;
-    color: hsla(0, 0%, 100%, 0.4);
-    flex-shrink: 0;
+    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15%), 100%), 78%, 0.95);
 }
-.dlBtn {
-    cursor: pointer;
+.rowStatus.error { color: hsla(2, 78%, 70%, 0.95); }
+
+.statusSwap-enter-active, .statusSwap-leave-active { transition: opacity .16s ease, transform .16s ease; }
+.statusSwap-enter-from { opacity: 0; transform: translateY(3px); }
+.statusSwap-leave-to { opacity: 0; transform: translateY(-3px); }
+
+.ownedTag {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    height: 34px;
-    padding: 0 16px;
+    gap: 4px;
+    padding: 3px 8px;
     border-radius: 999px;
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 700;
-    white-space: nowrap;
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 12%), 100%), 78%, 1);
+    color: hsla(145, 50%, 66%, 0.95);
+    background-color: hsla(145, 45%, 50%, 0.1);
+    user-select: none;
+}
+.rowTime {
+    width: 44px;
+    flex-shrink: 0;
+    text-align: right;
+    font-size: 13px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.4);
+    user-select: none;
+}
+
+/* Action button: one circle that morphs between states */
+.actionBtn {
+    position: relative;
+    flex-shrink: 0;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15%), 100%), 82%, 1);
     background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.16);
     transition: background-color .2s ease, color .2s ease, transform .2s ease;
 }
-.dlBtn svg {
-    flex-shrink: 0;
+.actionBtn:hover:not(:disabled) {
+    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.3);
+    color: #fff;
+    transform: scale(1.06);
 }
-.dlBtn:hover {
-    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.26);
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 12%), 100%), 86%, 1);
+.actionBtn:disabled { cursor: not-allowed; opacity: 0.4; }
+.actionBtn.owned {
+    color: hsla(145, 50%, 66%, 0.95);
+    background-color: hsla(145, 45%, 50%, 0.1);
 }
-.dlBtn:disabled {
-    cursor: default;
+.actionBtn.owned:hover:not(:disabled) { background-color: hsla(145, 45%, 50%, 0.2); color: hsla(145, 60%, 78%, 1); }
+.actionBtn.error {
+    color: hsla(2, 80%, 72%, 1);
+    background-color: hsla(2, 70%, 55%, 0.14);
 }
-/* Already queued: neutral pill. */
-.dlBtn.added {
-    cursor: default;
-    color: hsla(0, 0%, 100%, 0.55);
-    background-color: hsla(0, 0%, 100%, 0.06);
+.actionBtn.error:hover:not(:disabled) { background-color: hsla(2, 70%, 55%, 0.26); color: #fff; }
+.actionBtn.queued,
+.actionBtn.searching,
+.actionBtn.downloading,
+.actionBtn.processing {
+    background-color: hsla(0, 0%, 100%, 0.05);
 }
-.dlBtn.added:hover {
-    background-color: hsla(0, 0%, 100%, 0.06);
+.glyph { position: relative; display: flex; align-items: center; justify-content: center; }
+.cancelGlyph { opacity: 0; transition: opacity .15s ease; color: hsla(0, 0%, 100%, 0.9); }
+.actionBtn:hover .cancelGlyph { opacity: 1; }
+.actionBtn:hover .queuedDots { opacity: 0; }
+
+.ring {
+    position: absolute;
+    inset: 1px;
+    width: 36px;
+    height: 36px;
+    transform: rotate(-90deg);
 }
-/* Already in library: green pill, clickable for redownload. */
-.dlBtn.done {
-    cursor: pointer;
-    color: hsla(145, 50%, 64%, 0.95);
-    background-color: hsla(145, 45%, 50%, 0.12);
+.ring.spin { animation: ringSpin 1s linear infinite; }
+.ringTrack { fill: none; stroke: hsla(0, 0%, 100%, 0.1); stroke-width: 2.5; }
+.ringFill {
+    fill: none;
+    stroke: hsla(var(--accent-h), min(calc(var(--accent-s) + 20%), 100%), 70%, 1);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    transition: stroke-dashoffset .3s ease;
 }
-.dlBtn.done:hover {
-    background-color: hsla(145, 45%, 50%, 0.2);
+.actionBtn.processing .ringFill { stroke: hsla(145, 55%, 62%, 0.9); }
+@keyframes ringSpin { to { transform: rotate(270deg); } }
+
+.queuedDots {
+    position: absolute;
+    display: flex;
+    gap: 3px;
+    transition: opacity .15s ease;
+}
+.queuedDots i {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: hsla(0, 0%, 100%, 0.55);
+    animation: dotPulse 1.2s ease-in-out infinite;
+}
+.queuedDots i:nth-child(2) { animation-delay: .15s; }
+.queuedDots i:nth-child(3) { animation-delay: .3s; }
+@keyframes dotPulse {
+    0%, 100% { opacity: 0.25; transform: translateY(0); }
+    50% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
+    .ownedTag { display: none; }
 }
 </style>

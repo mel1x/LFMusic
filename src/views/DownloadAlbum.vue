@@ -18,7 +18,7 @@ import { tracksCountText } from '../utils/format'
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
-const { albumDetail, enqueueMany, enqueue, queue, trackKey, ytdlpMissing } = useDownloads()
+const { albumDetail, enqueue, queue, trackKey, ytdlpMissing } = useDownloads()
 
 const albumId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -57,7 +57,7 @@ onMounted(() => { void load(albumId.value) })
 // the initial albumDetail() fetch, never refreshed on its own).
 watch(queue, (items) => {
     const doneKeys = new Set(
-        items.filter(i => i.status === 'done').map(i => trackKey(i.artist, i.title, i.album)),
+        items.filter(i => i.stage === 'done').map(i => trackKey(i.artist, i.title, i.album)),
     )
     if (doneKeys.size === 0 || !detail.value) return
     for (const tr of detail.value.tracks) {
@@ -81,12 +81,12 @@ async function downloadAll() {
     busyAll.value = true
     try {
         const queued = new Set(
-            queue.value.filter(i => i.status !== 'error').map(i => trackKey(i.artist, i.title, i.album)),
+            queue.value.filter(i => i.stage !== 'error').map(i => trackKey(i.artist, i.title, i.album)),
         )
         const pending = d.tracks.filter(
             tr => !tr.in_library && !queued.has(trackKey(tr.artist, tr.title, tr.album)),
         )
-        if (pending.length > 0) await enqueueMany(pending)
+        if (pending.length > 0) await enqueue(pending)
         doneAll.value = true
     } catch (e) {
         console.error('Ошибка скачивания альбома:', e)
@@ -165,6 +165,7 @@ async function confirmRedownload() {
                         v-for="(track, i) in detail.tracks"
                         :key="i"
                         :track="track"
+                        :index="i + 1"
                         :show-album="false"
                         @redownload="confirmTrack = $event"
                     />

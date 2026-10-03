@@ -1,10 +1,9 @@
 mod audio_features;
 mod audio_player;
-mod browser_bridge;
 mod catalog_search;
 mod covers;
 mod discord_rpc;
-mod downloads;
+mod downloader;
 mod external;
 mod library;
 mod mpris;
@@ -15,7 +14,6 @@ mod spectrum;
 pub mod statistics;
 mod taskbar;
 mod thumbnails;
-mod tools;
 mod track_covers;
 mod window_state;
 
@@ -1746,7 +1744,7 @@ fn discord_clear_presence() {
 
 // ── Track downloads ("Downloads" page) ───────────────────────────────────────
 
-/// Paginated search for downloadable tracks; marks `in_library` for tracks already present locally.
+/// Paginated catalog search (Deezer, iTunes fill-in); marks `in_library`.
 #[tauri::command]
 async fn downloads_search(
     app: tauri::AppHandle,
@@ -1766,39 +1764,47 @@ async fn downloads_search(
             index.unwrap_or(0),
             limit.unwrap_or(30),
         );
-        mark_tracks_in_library(&app, &mut page.tracks);
+        mark_in_library(
+            &app,
+            page.tracks
+                .iter_mut()
+                .map(|t| (t.artist.as_str(), t.title.as_str(), t.album.as_deref(), &mut t.in_library)),
+        );
         page
     })
     .await
     .map_err(|e| format!("Task error: {}", e))
 }
 
-/// Resolves metadata for a direct-link download (the "paste a link" flow —
-/// downloads a specific yt-dlp-supported URL instead of searching). The
-/// frontend shows the result like any other search hit and hands it straight
-/// back to `downloads_enqueue`, which downloads that exact URL (see
-/// `ExternalSearchTrack::source_url` / `DownloadRequest::direct_url`).
+/// "Paste a link": probes a yt-dlp-supported URL (single video or playlist)
+/// without downloading; the tracks are then queued with their `source_url`.
 #[tauri::command]
-async fn downloads_resolve_url(
+async fn downloads_resolve_link(
     app: tauri::AppHandle,
     url: String,
-) -> Result<external::ExternalSearchTrack, String> {
+) -> Result<downloader::LinkResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut track = downloads::resolve_url_metadata(&app, &url)?;
-        mark_tracks_in_library(&app, std::slice::from_mut(&mut track));
-        Ok(track)
+        let mut result = downloader::resolve_link(&app, &url)?;
+        mark_in_library(
+            &app,
+            result
+                .tracks
+                .iter_mut()
+                .map(|t| (t.artist.as_str(), t.title.as_str(), t.album.as_deref(), &mut t.in_library)),
+        );
+        Ok(result)
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Marks `in_library` when title matches, at least one artist overlaps (multi-artist
-/// aware), and album is compatible (either side has no album tag, or album keys match) —
-/// so a same-titled track from a DIFFERENT album by the same artist isn't falsely marked.
-fn mark_tracks_in_library(app: &tauri::AppHandle, tracks: &mut [external::ExternalSearchTrack]) {
-    if tracks.is_empty() {
-        return;
-    }
+/// Sets `in_library` when the title matches, at least one artist overlaps
+/// (multi-artist aware) and albums are compatible (either side untagged, or
+/// equal) — a same-titled track from a different album isn't a match.
+fn mark_in_library<'a>(
+    app: &tauri::AppHandle,
+    tracks: impl Iterator<Item = (&'a str, &'a str, Option<&'a str>, &'a mut bool)>,
+) {
     let separators = settings::get_artist_separators(&app.state::<SettingsState>());
     let lib_index = app
         .state::<LibraryState>()
@@ -1806,30 +1812,20 @@ fn mark_tracks_in_library(app: &tauri::AppHandle, tracks: &mut [external::Extern
         .lock()
         .map(|lib| lib.catalog_artist_title_index(&separators))
         .unwrap_or_default();
-
-    // Prepare separators once outside the loop (avoids realloc/sort per track).
+    if lib_index.is_empty() {
+        return;
+    }
     let prepared_seps = external::prepare_artist_separators(&separators);
-
-    for t in tracks.iter_mut() {
-        let tkey = external::title_match_key(&t.title);
-        let Some(local_versions) = lib_index.get(&tkey) else {
+    for (artist, title, album, in_library) in tracks {
+        let Some(local_versions) = lib_index.get(&external::title_match_key(title)) else {
             continue;
         };
-        let track_artists = external::split_artists_for_match_prepared(&t.artist, &prepared_seps);
-        let ext_album_key = t
-            .album
-            .as_deref()
-            .map(external::album_match_key)
-            .unwrap_or_default();
-        let matched = local_versions.iter().any(|v| {
-            let artist_match = track_artists.iter().any(|a| v.artists.contains(a));
-            let album_match =
-                ext_album_key.is_empty() || v.album_key.is_empty() || v.album_key == ext_album_key;
-            artist_match && album_match
+        let artists = external::split_artists_for_match_prepared(artist, &prepared_seps);
+        let album_key = album.map(external::album_match_key).unwrap_or_default();
+        *in_library = local_versions.iter().any(|v| {
+            artists.iter().any(|a| v.artists.contains(a))
+                && (album_key.is_empty() || v.album_key.is_empty() || v.album_key == album_key)
         });
-        if matched {
-            t.in_library = true;
-        }
     }
 }
 
@@ -1841,7 +1837,12 @@ async fn downloads_album(
     tauri::async_runtime::spawn_blocking(move || {
         let mut detail = external::album_detail(album_id)?;
         if let Some(d) = detail.as_mut() {
-            mark_tracks_in_library(&app, &mut d.tracks);
+            mark_in_library(
+                &app,
+                d.tracks
+                    .iter_mut()
+                    .map(|t| (t.artist.as_str(), t.title.as_str(), t.album.as_deref(), &mut t.in_library)),
+            );
         }
         Ok(detail)
     })
@@ -1857,7 +1858,12 @@ async fn downloads_artist(
     tauri::async_runtime::spawn_blocking(move || {
         let mut detail = external::artist_detail(artist_id)?;
         if let Some(d) = detail.as_mut() {
-            mark_tracks_in_library(&app, &mut d.top_tracks);
+            mark_in_library(
+                &app,
+                d.top_tracks
+                    .iter_mut()
+                    .map(|t| (t.artist.as_str(), t.title.as_str(), t.album.as_deref(), &mut t.in_library)),
+            );
         }
         Ok(detail)
     })
@@ -1866,72 +1872,62 @@ async fn downloads_artist(
 }
 
 #[tauri::command]
-fn downloads_enqueue(
-    app: tauri::AppHandle,
-    request: downloads::DownloadRequest,
-) -> Result<u64, String> {
-    Ok(downloads::enqueue(&app, request))
+fn downloads_enqueue(app: tauri::AppHandle, requests: Vec<downloader::DownloadRequest>) -> Vec<u64> {
+    downloader::enqueue(&app, requests)
 }
 
 #[tauri::command]
-fn downloads_enqueue_many(
-    app: tauri::AppHandle,
-    requests: Vec<downloads::DownloadRequest>,
-) -> Result<Vec<u64>, String> {
-    Ok(downloads::enqueue_many(&app, requests))
+fn downloads_snapshot(app: tauri::AppHandle) -> downloader::QueueSnapshot {
+    downloader::snapshot(&app)
 }
 
+/// Cancels an active job or removes a finished one.
+#[tauri::command(async)]
+fn downloads_cancel(app: tauri::AppHandle, id: u64) {
+    downloader::cancel(&app, id);
+}
+
+#[tauri::command(async)]
+fn downloads_cancel_all(app: tauri::AppHandle) {
+    downloader::cancel_all(&app);
+}
+
+/// `ids` omitted = retry every failed job.
 #[tauri::command]
-fn downloads_snapshot(app: tauri::AppHandle) -> downloads::DownloadSnapshot {
-    downloads::snapshot(&app)
-}
-
-/// Removes a queued item, cancelling it first if active.
-#[tauri::command(async)]
-fn downloads_remove(app: tauri::AppHandle, id: u64) {
-    downloads::remove(&app, id);
-}
-
-#[tauri::command(async)]
-fn downloads_retry(app: tauri::AppHandle, id: u64) {
-    downloads::retry(&app, id);
+fn downloads_retry(app: tauri::AppHandle, ids: Option<Vec<u64>>) {
+    downloader::retry(&app, ids);
 }
 
 #[tauri::command]
 fn downloads_clear_finished(app: tauri::AppHandle) {
-    downloads::clear_finished(&app);
+    downloader::clear_finished(&app);
 }
 
 /// Frontend uses this path to tell whether a track was downloaded by the app.
 #[tauri::command]
 fn downloads_dir_path(app: tauri::AppHandle) -> String {
-    downloads::downloads_dir_path(&app)
+    downloader::downloads_dir(&app).to_string_lossy().into_owned()
 }
 
 /// `folder_path` = None/empty resets to the default "LFMusic Downloads" folder.
-/// If the new folder is already nested inside a scanned folder, it's not added
-/// separately (avoids double-scanning). Any prep error falls back to the default.
-/// Returns the path actually applied.
+/// The old folder is unregistered from the library (unless it was nested in a
+/// user folder) and the new one scanned, unless already covered. Returns the
+/// path actually applied (the default if the chosen one couldn't be created).
 #[tauri::command]
 async fn downloads_set_dir(
     app: tauri::AppHandle,
     folder_path: Option<String>,
 ) -> Result<String, String> {
-    // Scanning the new folder can be slow, so this runs on the blocking pool like library_add_folder.
     tauri::async_runtime::spawn_blocking(move || {
-        let (old_dir, new_dir) = downloads::apply_downloads_dir(&app, folder_path);
+        let (old_dir, new_dir) = downloader::set_downloads_dir(&app, folder_path);
 
-        if !downloads::same_path(&old_dir, &new_dir) {
+        if !downloader::same_path(&old_dir, &new_dir) {
             let separators = settings::get_artist_separators(&app.state::<SettingsState>());
             let old = old_dir.to_string_lossy().to_string();
             let new = new_dir.to_string_lossy().to_string();
 
-            // Registration happens under one library lock so the nesting check + mutation are atomic.
             let state = app.state::<LibraryState>();
             let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-
-            // Only remove the old folder if it had its own DB entry — if it was
-            // nested inside a user folder, removing it would delete the user's tracks too.
             if library.covering_folder(&old).as_deref() == Some(old.as_str()) {
                 library.remove_folder(
                     old,
@@ -1939,8 +1935,6 @@ async fn downloads_set_dir(
                     Some(audio_feature_progress_emitter(app.clone())),
                 )?;
             }
-
-            // Skip adding if nested inside an already-scanned folder (avoids double-scanning).
             if library.covering_folder(&new).is_none() {
                 library.add_folder(
                     new,
@@ -1950,7 +1944,6 @@ async fn downloads_set_dir(
                 )?;
             }
             drop(library);
-
             let _ = app.emit("downloads_library_updated", ());
         }
 
@@ -2005,269 +1998,57 @@ fn open_folder_in_explorer(path: String) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn downloads_delete_track(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
-    downloads::delete_downloaded_track(&app, &file_path)
+    downloader::delete_downloaded_track(&app, &file_path)
 }
 
 #[tauri::command]
-async fn downloads_check_tools(app: tauri::AppHandle) -> Result<downloads::ToolsStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || downloads::refresh_tools_status(&app))
+fn downloads_get_settings(app: tauri::AppHandle) -> settings::DownloaderSettings {
+    downloader::get_settings(&app)
+}
+
+#[tauri::command]
+fn downloads_set_settings(
+    app: tauri::AppHandle,
+    settings: settings::DownloaderSettings,
+) -> Result<(), String> {
+    downloader::set_settings(&app, settings)
+}
+
+// ── Download tools (yt-dlp / Deno / ffmpeg) ──────────────────────────────────
+
+/// Local status, no network.
+#[tauri::command]
+async fn tools_status(app: tauri::AppHandle) -> Result<downloader::ToolsState, String> {
+    tauri::async_runtime::spawn_blocking(move || downloader::tools_state(&app))
         .await
         .map_err(|e| format!("Task error: {}", e))
 }
 
-/// Background network check of the imported YouTube cookies; result arrives via `download_queue` snapshot.
 #[tauri::command]
-fn downloads_validate_cookies(app: tauri::AppHandle) {
-    downloads::validate_youtube_cookies(&app);
-}
-
-/// Forgets the imported session (cookies.txt + status), e.g. to sign out.
-#[tauri::command]
-fn downloads_clear_youtube_cookies(app: tauri::AppHandle) {
-    downloads::clear_bridge_cookies(&app);
-}
-
-/// Writes the bundled browser-extension source to `<app_data_dir>/browser-extension/`
-/// (on demand, not at startup) and returns that folder's path so the UI can
-/// open it for "Load unpacked".
-#[tauri::command]
-fn browser_bridge_prepare_extension(app: tauri::AppHandle) -> Result<String, String> {
-    browser_bridge::prepare_extension_bundle(&app)
-}
-
-#[tauri::command]
-fn downloads_get_proxy(app: tauri::AppHandle) -> downloads::ProxyConfig {
-    downloads::get_proxy(&app)
-}
-
-/// `mode`: "system" | "none" | "custom"; `url` only used for "custom" (e.g. socks5://127.0.0.1:1080).
-#[tauri::command]
-fn downloads_set_proxy(app: tauri::AppHandle, mode: String, url: String) {
-    downloads::set_proxy(&app, mode, url);
-}
-
-// ── Tool management (yt-dlp/ffmpeg) — Settings "External sources" page ───────
-
-fn tools_app_data_dir(app: &tauri::AppHandle) -> PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-}
-
-#[derive(Clone, serde::Serialize)]
-struct ToolsProgress {
-    /// "ytdlp" | "ffmpeg".
-    tool: String,
-    message: Option<String>,
-    active: bool,
-}
-
-/// Local-only info (versions/managed); no network access.
-#[tauri::command]
-async fn tools_info(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || tools::info(&tools_app_data_dir(&app)))
+async fn tools_check_updates(app: tauri::AppHandle) -> Result<downloader::ToolsState, String> {
+    tauri::async_runtime::spawn_blocking(move || downloader::check_updates(&app))
         .await
-        .map_err(|e| format!("Task error: {}", e))
+        .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Checks GitHub for updates; same shape as [`tools_info`] with `update_available` filled in.
+/// `tools` omitted = install everything missing and update what's outdated.
+/// Progress arrives on the `downloads_tools` event.
 #[tauri::command]
-async fn tools_check_updates(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || tools::check_updates(&tools_app_data_dir(&app)))
+async fn tools_install(
+    app: tauri::AppHandle,
+    tools: Option<Vec<downloader::tools::Tool>>,
+) -> Result<downloader::ToolsState, String> {
+    tauri::async_runtime::spawn_blocking(move || downloader::install(&app, tools))
         .await
-        .map_err(|e| format!("Task error: {}", e))
+        .map_err(|e| format!("Task error: {}", e))?
 }
 
-/// Progress streams via `tools_progress`; `tools_changed` emits on completion.
+/// Removes the app-managed copies (system ones on PATH are left alone).
 #[tauri::command]
-async fn tools_install(app: tauri::AppHandle, tool: String) -> Result<tools::ToolsInfo, String> {
-    let app_for_task = app.clone();
-    let info = tauri::async_runtime::spawn_blocking(move || {
-        let dir = tools_app_data_dir(&app_for_task);
-        let app_for_report = app_for_task.clone();
-        let tool_for_report = tool.clone();
-        let report = move |msg: String| {
-            let _ = app_for_report.emit(
-                "tools_progress",
-                ToolsProgress {
-                    tool: tool_for_report.clone(),
-                    message: Some(msg),
-                    active: true,
-                },
-            );
-        };
-        let result = match tool.as_str() {
-            // Deno installs alongside yt-dlp, best-effort: a Deno failure doesn't roll
-            // back yt-dlp (it still works, degraded) — just reported in progress.
-            "ytdlp" => {
-                let r = tools::install_ytdlp(&dir, &report);
-                if r.is_ok() {
-                    if let Err(e) = tools::install_deno(&dir, &report) {
-                        report(format!("yt-dlp установлен; Deno не установлен: {}", e));
-                    }
-                }
-                r
-            }
-            "ffmpeg" => tools::install_ffmpeg(&dir, &report),
-            "pot" => tools::install_pot(&dir, &report),
-            _ => Err("Неизвестная утилита".to_string()),
-        };
-        let _ = app_for_task.emit(
-            "tools_progress",
-            ToolsProgress {
-                tool: tool.clone(),
-                message: None,
-                active: false,
-            },
-        );
-        result?;
-        Ok::<_, String>(tools::info(&dir))
-    })
-    .await;
-    // Emit tools_changed unconditionally (even on error/panic) and before
-    // inspecting the join result, so the UI never stays stale.
-    let _ = app.emit("tools_changed", ());
-    info.map_err(|e| format!("Task error: {}", e))?
-}
-
-/// Installs Deno if missing, for users who installed yt-dlp before the Deno
-/// pairing existed. Progress reports under the "ytdlp" key.
-#[tauri::command]
-async fn tools_install_deno(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
-    let app_for_task = app.clone();
-    let info = tauri::async_runtime::spawn_blocking(move || {
-        let dir = tools_app_data_dir(&app_for_task);
-        let app_for_report = app_for_task.clone();
-        let report = move |msg: String| {
-            let _ = app_for_report.emit(
-                "tools_progress",
-                ToolsProgress {
-                    tool: "ytdlp".to_string(),
-                    message: Some(msg),
-                    active: true,
-                },
-            );
-        };
-        let result = tools::install_deno(&dir, &report);
-        let _ = app_for_task.emit(
-            "tools_progress",
-            ToolsProgress {
-                tool: "ytdlp".to_string(),
-                message: None,
-                active: false,
-            },
-        );
-        result?;
-        Ok::<_, String>(tools::info(&dir))
-    })
-    .await;
-    let _ = app.emit("tools_changed", ());
-    info.map_err(|e| format!("Task error: {}", e))?
-}
-
-/// Installs everything in one go: yt-dlp (+ Deno) is required and fails the
-/// call on error; ffmpeg is optional (its failure isn't fatal — downloads still work).
-#[tauri::command]
-async fn tools_install_all(app: tauri::AppHandle) -> Result<tools::ToolsInfo, String> {
-    let app_for_task = app.clone();
-    let info = tauri::async_runtime::spawn_blocking(move || {
-        fn make_report(app: tauri::AppHandle, tool: &'static str) -> impl Fn(String) {
-            move |msg: String| {
-                let _ = app.emit(
-                    "tools_progress",
-                    ToolsProgress {
-                        tool: tool.to_string(),
-                        message: Some(msg),
-                        active: true,
-                    },
-                );
-            }
-        }
-        fn clear_progress(app: &tauri::AppHandle, tool: &'static str) {
-            let _ = app.emit(
-                "tools_progress",
-                ToolsProgress {
-                    tool: tool.to_string(),
-                    message: None,
-                    active: false,
-                },
-            );
-        }
-
-        let dir = tools_app_data_dir(&app_for_task);
-
-        // yt-dlp+Deno and ffmpeg are independent downloads from different hosts;
-        // installing them on separate threads instead of back-to-back bounds
-        // first-run setup time by the larger of the two instead of their sum.
-        // Only installs what's missing — updating is a separate button.
-        let ffmpeg_app = app_for_task.clone();
-        let ffmpeg_dir = dir.clone();
-        let ytdlp_result = std::thread::scope(|scope| {
-            let ffmpeg_handle = scope.spawn(move || {
-                let report_ffmpeg = make_report(ffmpeg_app.clone(), "ffmpeg");
-                if tools::resolve_ffmpeg(&ffmpeg_dir).is_none() {
-                    if let Err(e) = tools::install_ffmpeg(&ffmpeg_dir, &report_ffmpeg) {
-                        report_ffmpeg(format!("ffmpeg не установлен: {}", e));
-                    }
-                }
-                clear_progress(&ffmpeg_app, "ffmpeg");
-            });
-
-            // install_deno is idempotent (Ok if Deno already present).
-            let report_ytdlp = make_report(app_for_task.clone(), "ytdlp");
-            let ytdlp_result: Result<(), String> = if tools::resolve_ytdlp(&dir).is_some() {
-                Ok(())
-            } else {
-                tools::install_ytdlp(&dir, &report_ytdlp).map(|_| ())
-            };
-            if ytdlp_result.is_ok() {
-                if let Err(e) = tools::install_deno(&dir, &report_ytdlp) {
-                    report_ytdlp(format!("Deno не установлен: {}", e));
-                }
-            }
-            clear_progress(&app_for_task, "ytdlp");
-
-            let _ = ffmpeg_handle.join();
-            ytdlp_result
-        });
-
-        ytdlp_result?;
-        Ok::<_, String>(tools::info(&dir))
-    })
-    .await;
-    let _ = app.emit("tools_changed", ());
-    info.map_err(|e| format!("Task error: {}", e))?
-}
-
-#[tauri::command]
-async fn tools_delete(app: tauri::AppHandle, tool: String) -> Result<tools::ToolsInfo, String> {
-    // Refuse while a download job may be actively using the resolved binary —
-    // deleting it out from under an active worker would break the job.
-    if downloads::has_active_jobs(&app) {
-        return Err(
-            "Нельзя удалить, пока есть треки в очереди скачивания. Дождитесь завершения или очистите очередь."
-                .to_string(),
-        );
-    }
-    let app_for_task = app.clone();
-    let info = tauri::async_runtime::spawn_blocking(move || {
-        let dir = tools_app_data_dir(&app_for_task);
-        match tool.as_str() {
-            // Deno is removed together with yt-dlp (installed as a pair).
-            "ytdlp" => {
-                tools::delete_ytdlp(&dir)?;
-                tools::delete_deno(&dir)?;
-            }
-            "ffmpeg" => tools::delete_ffmpeg(&dir)?,
-            "pot" => tools::delete_pot(&dir)?,
-            _ => return Err("Неизвестная утилита".to_string()),
-        }
-        Ok::<_, String>(tools::info(&dir))
-    })
-    .await
-    .map_err(|e| format!("Task error: {}", e))??;
-    let _ = app.emit("tools_changed", ());
-    Ok(info)
+async fn tools_remove(app: tauri::AppHandle) -> Result<downloader::ToolsState, String> {
+    tauri::async_runtime::spawn_blocking(move || downloader::remove_tools(&app))
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
 }
 
 /// Blocks on `signal` (near-instant wakeup on natural EOF, 500ms safety-net
@@ -2382,13 +2163,12 @@ pub fn run() {
 
             app.manage(LibraryState(Mutex::new(library)));
 
-            browser_bridge::start(app.handle().clone());
             spawn_track_end_watcher(app.handle().clone(), track_end_signal.clone());
 
             Ok(())
         })
         .manage(PlayerState(RwLock::new(player)))
-        .manage(downloads::DownloadsState::default())
+        .manage(downloader::DownloaderState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -2444,30 +2224,24 @@ pub fn run() {
             external_prepare,
             // Downloads
             downloads_search,
-            downloads_resolve_url,
+            downloads_resolve_link,
             downloads_album,
             downloads_artist,
             downloads_enqueue,
-            downloads_enqueue_many,
             downloads_snapshot,
-            downloads_remove,
+            downloads_cancel,
+            downloads_cancel_all,
             downloads_retry,
             downloads_clear_finished,
             downloads_dir_path,
             downloads_set_dir,
             downloads_delete_track,
-            downloads_check_tools,
-            downloads_validate_cookies,
-            downloads_clear_youtube_cookies,
-            browser_bridge_prepare_extension,
-            downloads_get_proxy,
-            downloads_set_proxy,
-            tools_info,
+            downloads_get_settings,
+            downloads_set_settings,
+            tools_status,
             tools_check_updates,
             tools_install,
-            tools_install_deno,
-            tools_install_all,
-            tools_delete,
+            tools_remove,
             statistics_add_track_delta,
             statistics_get_track,
             statistics_sum_listen_count,
@@ -2521,8 +2295,8 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                // Kill any active yt-dlp first, or it'd linger as a zombie process.
-                downloads::cleanup_on_exit(app_handle);
+                // Kill any running yt-dlp/ffmpeg, or they'd outlive the app.
+                downloader::shutdown(app_handle);
                 if let Some(state) = app_handle.try_state::<LibraryState>() {
                     if let Ok(library) = state.0.lock() {
                         if let Err(e) = library.shutdown() {

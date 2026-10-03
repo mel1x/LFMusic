@@ -605,7 +605,7 @@ function onCoverImgClick() {
                             <div class="badge" v-tooltip="'Количество треков в альбоме'">{{ tracksCountText(albumTracks.length) }}</div>
                         </div>
                         <div class="badges" v-else>
-                            <div class="badge" v-tooltip="'Альбом пуст — добавте треки'">Пусто</div>
+                            <div class="badge" v-tooltip="'Альбом пуст - добавте треки'">Пусто</div>
                         </div>
                     </div>
                     <div class="controls">

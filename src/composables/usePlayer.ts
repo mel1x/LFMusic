@@ -780,7 +780,7 @@ function createPlayer() {
 
   function getTrackDisplayName(track: TrackMetadata): string {
     if (track.title) {
-      return track.artist ? `${track.artist} — ${track.title}` : track.title;
+      return track.artist ? `${track.artist} - ${track.title}` : track.title;
     }
     return extractFileName(track.file_path);
   }
