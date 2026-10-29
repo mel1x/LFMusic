@@ -414,7 +414,7 @@ function onCoverImgClick() {
 </script>
 
 <template>
-    <div class="pageRoot" ref="trackListEl" @scroll="handleScroll">
+    <div class="pageRoot mobileHeroPage" ref="trackListEl" @scroll="handleScroll">
         <div class="stickyHeaderAnchor hasMobileScrollHeader">
             <MobileScrollHeader :title="playlist?.name || 'Плейлист'" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
@@ -465,7 +465,7 @@ function onCoverImgClick() {
                         <button class="playListBtn" :disabled="playlistTracks.length === 0" @click="onPlayPlaylist">
                             <PauseIcon v-if="isPlaylistActive && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                            Слушать
+                            <span class="playListText">Слушать</span>
                         </button>
                         <button class="moreBtn" :class="{ menuOpen: !!playlistMenu }" @mousedown.stop="openPlaylistMenu($event)">
                             <MoreIcon width="22" height="22" />

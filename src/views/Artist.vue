@@ -22,6 +22,7 @@ import TrackRow from '../components/TrackRow.vue'
 import { usePins } from '../composables/usePins'
 import CoverEditor from '../components/CoverEditor.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
+import MobileScrollHeader from '../components/MobileScrollHeader.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
 import { useExternalSources } from '../composables/useExternalSources'
 import { menuAnchorBelow } from '../utils/menu'
@@ -359,6 +360,17 @@ function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {
 
 // ── Navigation ────────────────────────────────────────────────────────────
 
+const pageRootEl = ref<HTMLElement | null>(null)
+const scrollY = ref(0)
+
+function onPageScroll(e: Event) {
+    scrollY.value = (e.target as HTMLElement).scrollTop
+}
+
+function scrollToTop() {
+    pageRootEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
 function goBack() {
     goBackOrHome(router)
 }
@@ -396,7 +408,11 @@ function onCoverImgClick() {
 </script>
 
 <template>
-    <div class="pageRoot">
+    <div class="pageRoot mobileHeroPage" ref="pageRootEl" @scroll="onPageScroll">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader :title="artistName || 'Исполнитель'" :scrolled="scrollY > 16" @top="scrollToTop" />
+        </div>
+        <div class="scrollHeader">
         <button class="backBtn" @click="goBack">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
             <span>Назад</span>
@@ -421,13 +437,14 @@ function onCoverImgClick() {
                     <button class="playListBtn" :disabled="artistTracks.length === 0" @click="onPlayArtist">
                         <PauseIcon v-if="isArtistActive && isPlaying" width="14" height="14" />
                         <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                        Слушать
+                        <span class="playListText">Слушать</span>
                     </button>
                     <button class="moreBtn" :class="{ menuOpen: !!artistMenu }" @mousedown.stop="openArtistMenu($event)">
                         <MoreIcon width="22" height="22" />
                     </button>
                 </div>
             </div>
+        </div>
         </div>
 
         <div class="pageLine">
@@ -583,6 +600,11 @@ function onCoverImgClick() {
     border-radius: 3px;
 }
 
+.scrollHeader {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+}
 .backBtn {
     display: flex;
     flex-direction: row;

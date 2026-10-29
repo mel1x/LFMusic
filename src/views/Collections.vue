@@ -484,7 +484,7 @@ function scrollToTop() {
 </script>
 
 <template>
-    <div class="pageRoot" ref="pageRootEl" @scroll="handleScroll">
+    <div class="pageRoot mobilePage" ref="pageRootEl" @scroll="handleScroll">
         <div class="stickyHeaderAnchor hasMobileScrollHeader">
             <MobileScrollHeader title="Коллекция" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">

@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { ref } from 'vue';
 import { useRouter } from 'vue-router';
+import MobileScrollHeader from './MobileScrollHeader.vue';
 
 defineProps<{ title: string; description?: string }>();
 
@@ -7,10 +9,24 @@ const router = useRouter();
 function goBack() {
     router.push('/settings');
 }
+
+const pageRootEl = ref<HTMLElement | null>(null);
+const scrollY = ref(0);
+
+function onPageScroll(e: Event) {
+    scrollY.value = (e.target as HTMLElement).scrollTop;
+}
+
+function scrollToTop() {
+    pageRootEl.value?.scrollTo({ top: 0, behavior: 'smooth' });
+}
 </script>
 
 <template>
-    <div class="pageRoot">
+    <div class="pageRoot mobilePage" ref="pageRootEl" @scroll="onPageScroll">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader :title="title" :scrolled="scrollY > 16" @top="scrollToTop" />
+        </div>
         <button type="button" class="backBtn" @click="goBack">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
                 <path d="m15 18-6-6 6-6" />

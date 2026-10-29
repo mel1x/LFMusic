@@ -24,6 +24,7 @@ import TrackRow from '../components/TrackRow.vue';
 import TrackArtists from '../components/TrackArtists.vue';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
+import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
@@ -598,8 +599,9 @@ function onCoverImgClick() {
 </script>
 
 <template>
-    <div class="pageRoot" ref="trackListEl" @scroll="handleScroll">
-        <div class="stickyHeaderAnchor">
+    <div class="pageRoot mobileHeroPage" ref="trackListEl" @scroll="handleScroll">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader :title="albumName || 'Альбом'" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
                     <div>{{ albumName || 'Альбом' }}</div>
@@ -635,7 +637,7 @@ function onCoverImgClick() {
                         <button class="playListBtn" :disabled="albumTracks.length === 0" @click="onPlayAlbum">
                             <PauseIcon v-if="isAlbumActive && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                            Слушать
+                            <span class="playListText">Слушать</span>
                         </button>
                         <button class="moreBtn" :class="{ menuOpen: !!albumMenu }" @mousedown.stop="openAlbumMenu($event)">
                             <MoreIcon width="22" height="22" />

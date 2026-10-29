@@ -20,6 +20,7 @@ import TrackContextMenu from '../components/TrackContextMenu.vue'
 import TrackRow from '../components/TrackRow.vue'
 import CoverEditor from '../components/CoverEditor.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
+import MobileScrollHeader from '../components/MobileScrollHeader.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
 import { useExternalSources } from '../composables/useExternalSources'
 
@@ -266,8 +267,9 @@ function onCoverImgClick() {
 </script>
 
 <template>
-    <div class="pageRoot" ref="trackListEl" @scroll="handleScroll">
-        <div class="stickyHeaderAnchor">
+    <div class="pageRoot mobileHeroPage" ref="trackListEl" @scroll="handleScroll">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader :title="artistName || 'Исполнитель'" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
                     <div>{{ artistName || 'Исполнитель' }}</div>
@@ -299,7 +301,7 @@ function onCoverImgClick() {
                         <button class="playListBtn" :disabled="artistTracks.length === 0" @click="onPlayArtist">
                             <PauseIcon v-if="isArtistActive && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                            Слушать
+                            <span class="playListText">Слушать</span>
                         </button>
                     </div>
                 </div>

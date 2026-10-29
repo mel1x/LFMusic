@@ -21,6 +21,7 @@ import TrackRow from '../components/TrackRow.vue'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
+import MobileScrollHeader from '../components/MobileScrollHeader.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
 import { useExternalSources } from '../composables/useExternalSources'
 import { useCoverGate } from '../composables/useCoverGate'
@@ -493,8 +494,9 @@ function scrollToTop() {
 </script>
 
 <template>
-    <div class="pageRoot searchPage" ref="pageRootEl" @scroll="handleScroll">
-        <div class="stickyHeaderAnchor">
+    <div class="pageRoot searchPage mobilePage" ref="pageRootEl" @scroll="handleScroll">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader title="Поиск" :search="false" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
                     <div>Поиск</div>
@@ -1230,7 +1232,7 @@ function scrollToTop() {
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .pageTitle {
         display: block !important;
-        margin-top: 12px;
+        margin-top: 4px;
         margin-bottom: 22px !important;
         font-size: 30px !important;
         line-height: 1.08 !important;
@@ -1240,7 +1242,7 @@ function scrollToTop() {
     }
 
     .searchPage.pageRoot {
-        padding: 0 16px 80px !important;
+        padding: 56px 14px 80px !important;
     }
 
     .searchZone {
@@ -1284,9 +1286,9 @@ function scrollToTop() {
 
     .lineList {
         width: 100vw !important;
-        margin-left: -16px !important;
-        margin-right: -16px !important;
-        padding: 0 16px 12px !important;
+        margin-left: -14px !important;
+        margin-right: -14px !important;
+        padding: 0 14px 12px !important;
         --card-w: 132px !important;
     }
 

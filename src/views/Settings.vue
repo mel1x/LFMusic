@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { isAndroidRuntime } from '../composables/usePlatform';
+import { computed, ref } from 'vue';
+import { isAndroidRuntime, isPhoneViewport } from '../composables/usePlatform';
+import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 
 const allCategories = [
     {
@@ -32,12 +33,26 @@ const allCategories = [
 
 // External sources (album order/covers/avatars from open services, plus the
 // yt-dlp download tooling bundled into that settings page) are a desktop-only
-// feature — not offered on Android.
-const categories = computed(() => isAndroidRuntime() ? allCategories.filter(c => c.id !== 'external') : allCategories);
+// feature — not offered on Android or in the phone layout.
+const categories = computed(() => isAndroidRuntime() || isPhoneViewport() ? allCategories.filter(c => c.id !== 'external') : allCategories);
+
+const pageRootEl = ref<HTMLElement | null>(null);
+const scrollY = ref(0);
+
+function onPageScroll(e: Event) {
+    scrollY.value = (e.target as HTMLElement).scrollTop;
+}
+
+function scrollToTop() {
+    pageRootEl.value?.scrollTo({ top: 0, behavior: 'smooth' });
+}
 </script>
 
 <template>
-    <div class="pageRoot">
+    <div class="pageRoot mobilePage" ref="pageRootEl" @scroll="onPageScroll">
+        <div class="stickyHeaderAnchor hasMobileScrollHeader">
+            <MobileScrollHeader title="Настройки" :scrolled="scrollY > 16" @top="scrollToTop" />
+        </div>
         <h1 class="pageTitle">Настройки</h1>
         <p class="pageSubtitle">Выберите категорию настроек</p>
 
@@ -158,6 +173,7 @@ const categories = computed(() => isAndroidRuntime() ? allCategories.filter(c =>
     .categoryRow {
         gap: 14px;
         padding: 18px 12px;
+        border-radius: 16px;
         min-height: 64px;
     }
     .rowTitle {
