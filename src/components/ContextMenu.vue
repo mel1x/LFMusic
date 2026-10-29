@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { isPhoneViewport } from '../composables/usePlatform'
+import { currentUiScale } from '../composables/useUiScale'
 
 let scrollLockCount = 0
 
@@ -56,7 +57,7 @@ function adjustPosition() {
     }
 
     compactMobileSheet.value = false
-    const scale = (window as any).__uiScale || 1
+    const scale = currentUiScale()
     const rect = el.getBoundingClientRect()
     const pad = 8
 

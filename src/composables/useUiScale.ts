@@ -10,6 +10,16 @@ const BASE_H = 860;
 const MIN_SCALE = 0.78;
 const MAX_SCALE = 2.0;
 
+/** Current body zoom set by `useUiScale` (1 on phones or before the first apply). */
+export function currentUiScale(): number {
+    const scale = Number((window as any).__uiScale);
+    if (Number.isFinite(scale) && scale > 0) return scale;
+    const cssScale = Number(getComputedStyle(document.documentElement)
+        .getPropertyValue("--ui-scale")
+        .trim());
+    return Number.isFinite(cssScale) && cssScale > 0 ? cssScale : 1;
+}
+
 export function useUiScale() {
     let resizeRaf: number | null = null;
 

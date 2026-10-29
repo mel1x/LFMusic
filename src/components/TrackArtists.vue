@@ -3,6 +3,7 @@ import { computed, ref, nextTick, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettings } from '../composables/useSettings'
 import { splitArtistsWithSeparators } from '../utils/format'
+import { currentUiScale } from '../composables/useUiScale'
 
 const props = withDefaults(defineProps<{
     artist: string | null | undefined
@@ -115,7 +116,7 @@ async function tryShowTooltip() {
         top = above
         if (top < margin) top = below
     }
-    const scale = Number((window as any).__uiScale) || 1
+    const scale = currentUiScale()
     tooltipLeft.value = left / scale
     tooltipTop.value = top / scale
 }

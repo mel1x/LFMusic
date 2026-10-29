@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use crate::json_store;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomCoverEntry {
@@ -12,13 +14,13 @@ pub struct CustomCoverEntry {
     pub data_url: String,
 }
 
-fn covers_dir(app_data_dir: &PathBuf) -> PathBuf {
+fn covers_dir(app_data_dir: &Path) -> PathBuf {
     let dir = app_data_dir.join("custom_covers");
     let _ = fs::create_dir_all(&dir);
     dir
 }
 
-fn manifest_path(app_data_dir: &PathBuf) -> PathBuf {
+fn manifest_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("custom_covers.json")
 }
 
@@ -62,19 +64,15 @@ fn mime_for_ext(ext: &str) -> &'static str {
     }
 }
 
-fn load_manifest(app_data_dir: &PathBuf) -> HashMap<String, String> {
-    fs::read_to_string(manifest_path(app_data_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn load_manifest(app_data_dir: &Path) -> HashMap<String, String> {
+    json_store::load_or_default(&manifest_path(app_data_dir))
 }
 
-fn save_manifest(app_data_dir: &PathBuf, manifest: &HashMap<String, String>) -> Result<(), String> {
-    let content = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
-    fs::write(manifest_path(app_data_dir), content).map_err(|e| e.to_string())
+fn save_manifest(app_data_dir: &Path, manifest: &HashMap<String, String>) -> Result<(), String> {
+    json_store::save_pretty(&manifest_path(app_data_dir), manifest)
 }
 
-fn read_as_data_url(file_path: &PathBuf) -> Option<String> {
+fn read_as_data_url(file_path: &Path) -> Option<String> {
     let data = fs::read(file_path).ok()?;
     let ext = file_path
         .extension()
@@ -86,25 +84,26 @@ fn read_as_data_url(file_path: &PathBuf) -> Option<String> {
 }
 
 pub fn set_custom_cover(
-    app_data_dir: &PathBuf,
+    app_data_dir: &Path,
     kind: &str,
     key: &str,
     source_path: &str,
 ) -> Result<String, String> {
+    // Read the source first so a failed read leaves the current cover intact.
+    let data = fs::read(source_path).map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
+
     let dir = covers_dir(app_data_dir);
     let mut manifest = load_manifest(app_data_dir);
     let id = entry_id(kind, key);
-
-    // Remove previous file (if any) to avoid orphans.
-    if let Some(prev) = manifest.get(&id) {
-        let _ = fs::remove_file(dir.join(prev));
-    }
-
     let ext = detect_ext_from_path(source_path);
     let filename = format!("{:016x}.{}", key_hash(kind, key), ext);
     let target = dir.join(&filename);
 
-    let data = fs::read(source_path).map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
+    // Remove previous file (if any, with another extension) to avoid orphans.
+    if let Some(prev) = manifest.get(&id).filter(|prev| **prev != filename) {
+        let _ = fs::remove_file(dir.join(prev));
+    }
+
     fs::write(&target, &data).map_err(|e| format!("Не удалось сохранить обложку: {}", e))?;
 
     manifest.insert(id, filename);
@@ -114,7 +113,7 @@ pub fn set_custom_cover(
     Ok(format!("data:{};base64,{}", mime, STANDARD.encode(&data)))
 }
 
-pub fn remove_custom_cover(app_data_dir: &PathBuf, kind: &str, key: &str) -> Result<(), String> {
+pub fn remove_custom_cover(app_data_dir: &Path, kind: &str, key: &str) -> Result<(), String> {
     let dir = covers_dir(app_data_dir);
     let mut manifest = load_manifest(app_data_dir);
     let id = entry_id(kind, key);
@@ -123,6 +122,25 @@ pub fn remove_custom_cover(app_data_dir: &PathBuf, kind: &str, key: &str) -> Res
         save_manifest(app_data_dir, &manifest)?;
     }
     Ok(())
+}
+
+pub fn load_all(app_data_dir: &Path) -> Vec<CustomCoverEntry> {
+    let dir = covers_dir(app_data_dir);
+    let manifest = load_manifest(app_data_dir);
+    let mut out = Vec::with_capacity(manifest.len());
+    for (id, filename) in manifest.iter() {
+        let Some((kind, key)) = id.split_once(':') else {
+            continue;
+        };
+        if let Some(data_url) = read_as_data_url(&dir.join(filename)) {
+            out.push(CustomCoverEntry {
+                kind: kind.to_string(),
+                key: key.to_string(),
+                data_url,
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -246,25 +264,4 @@ mod tests {
         assert!(load_all(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-pub fn load_all(app_data_dir: &PathBuf) -> Vec<CustomCoverEntry> {
-    let dir = covers_dir(app_data_dir);
-    let manifest = load_manifest(app_data_dir);
-    let mut out = Vec::with_capacity(manifest.len());
-    for (id, filename) in manifest.iter() {
-        let parts: Vec<&str> = id.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let path = dir.join(filename);
-        if let Some(data_url) = read_as_data_url(&path) {
-            out.push(CustomCoverEntry {
-                kind: parts[0].to_string(),
-                key: parts[1].to_string(),
-                data_url,
-            });
-        }
-    }
-    out
 }

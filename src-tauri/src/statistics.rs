@@ -222,8 +222,7 @@ pub fn sum_listen_count(conn: &Connection, file_paths: &[String]) -> rusqlite::R
 
     let mut total = 0;
     for chunk in file_paths.chunks(500) {
-        let placeholders = std::iter::repeat("?")
-            .take(chunk.len())
+        let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(

@@ -12,14 +12,14 @@ import DownloadAlbumCard from '../components/DownloadAlbumCard.vue'
 
 import defaultCover from '../assets/cover.webp'
 
-import { useDownloads, type ExternalArtistDetail, type ExternalSearchTrack } from '../composables/useDownloads'
+import { useDownloads, useKeepDownloadedInLibrary, useRedownloadConfirm, type ExternalArtistDetail, type ExternalSearchTrack } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 import { useScrollLine } from '../composables/useScrollLine'
 
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
-const { artistDetail, enqueue, queue, trackKey, ytdlpMissing } = useDownloads()
+const { artistDetail, enqueue, notQueued, ytdlpMissing } = useDownloads()
 
 const artistId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -61,21 +61,18 @@ watch(artistId, (id) => { void load(id) })
 onMounted(() => { void load(artistId.value) })
 onUnmounted(() => { albumsLine.unobserve() })
 
-// Once a track finishes downloading, mark the matching top track as "in
-// library" so its button stays "Downloaded" after the queue's "done" entry is
-// cleared, instead of reverting to "Download" (in_library is a one-shot
-// snapshot from the initial artistDetail() fetch, never refreshed on its own).
-watch(queue, (items) => {
-    const doneKeys = new Set(
-        items.filter(i => i.stage === 'done').map(i => trackKey(i.artist, i.title, i.album)),
-    )
-    if (doneKeys.size === 0 || !detail.value) return
-    for (const tr of detail.value.top_tracks) {
-        if (!tr.in_library && doneKeys.has(trackKey(tr.artist, tr.title, tr.album))) tr.in_library = true
-    }
-})
+useKeepDownloadedInLibrary(() => (detail.value ? [detail.value.top_tracks] : []))
 
 function goBack() { goBackOrHome(router) }
+
+const PREVIEW_COUNT = 5
+const previewTracks = computed(() => detail.value?.top_tracks.slice(0, PREVIEW_COUNT) ?? [])
+
+function openAllTracks() {
+    const d = detail.value
+    if (!d) return
+    router.push({ path: `/downloads/artist/${d.id}/tracks`, query: { name: d.name } })
+}
 
 // Download popular: top-3 most popular tracks. Downloads whichever of the top-3
 // aren't already in the library or queued; if all three are already downloaded,
@@ -94,10 +91,7 @@ async function downloadPopular() {
     if (!d || busyPopular.value || donePopular.value || ytdlpMissing.value) return
     const tracks = top3()
     if (tracks.length === 0) return
-    const queued = new Set(
-        queue.value.filter(i => i.stage !== 'error').map(i => trackKey(i.artist, i.title, i.album)),
-    )
-    const missing = tracks.filter(tr => !tr.in_library && !queued.has(trackKey(tr.artist, tr.title, tr.album)))
+    const missing = notQueued(tracks)
     if (missing.length > 0) {
         busyPopular.value = true
         try {
@@ -135,16 +129,7 @@ async function confirmPopularRedownload() {
 }
 
 // Redownload confirmation (track already in library)
-const confirmTrack = ref<ExternalSearchTrack | null>(null)
-const confirmMessage = computed(() =>
-    confirmTrack.value ? t('downloads.redownloadText', { title: confirmTrack.value.title }) : '',
-)
-async function confirmRedownload() {
-    const track = confirmTrack.value
-    confirmTrack.value = null
-    if (!track) return
-    try { await enqueue(track, true) } catch (e) { console.error('Ошибка повторного скачивания:', e) }
-}
+const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm()
 </script>
 
 <template>
@@ -174,7 +159,6 @@ async function confirmRedownload() {
                         </div>
                         <div class="badges">
                             <div v-if="detail.albums.length" class="badge">{{ t('downloads.artistAlbumsCount', { count: detail.albums.length }) }}</div>
-                            <div v-if="detail.top_tracks.length" class="badge">{{ t('downloads.artistTopCount', { count: detail.top_tracks.length }) }}</div>
                         </div>
                     </div>
                     <div class="controls" v-if="detail.top_tracks.length">
@@ -196,16 +180,20 @@ async function confirmRedownload() {
             <!-- Popular tracks -->
             <div v-if="detail.top_tracks.length" class="pageLine">
                 <div class="lineHat">
-                    <div class="lineTitle nonClickable">{{ t('downloads.popularTracks') }}</div>
+                    <div class="lineTitle" @click="openAllTracks">
+                        {{ t('downloads.popularTracks') }}
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                    </div>
                 </div>
                 <div class="tracksList">
                     <DownloadTrackRow
-                        v-for="(track, i) in detail.top_tracks"
+                        v-for="(track, i) in previewTracks"
                         :key="i"
                         :track="track"
                         @redownload="confirmTrack = $event"
                     />
                 </div>
+                <button class="showMoreBtn" @click="openAllTracks">{{ t('downloads.showMore') }}</button>
             </div>
 
             <!-- Albums (section hidden if none) -->
@@ -431,7 +419,33 @@ async function confirmRedownload() {
     font-weight: 800;
     font-size: 24px;
 }
+.lineTitle {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    transition: .24s ease;
+}
+.lineTitle svg { color: hsla(0, 0%, 100%, 0.5); transition: .24s ease; }
+.lineTitle:hover { color: hsla(0, 0%, 100%, 1); }
+.lineTitle:hover svg { color: hsla(0, 0%, 100%, 0.9); transform: translateX(2px); }
 .lineTitle.nonClickable { cursor: default; }
+.showMoreBtn {
+    align-self: flex-start;
+    cursor: pointer;
+    user-select: none;
+    padding: 8px 16px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.75);
+    font-size: 13px;
+    font-weight: 600;
+    transition: .24s ease;
+}
+.showMoreBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.1);
+    color: hsla(0, 0%, 100%, 1);
+}
 .lineControls {
     display: flex;
     flex-direction: row;
@@ -476,6 +490,7 @@ async function confirmRedownload() {
 .tracksList {
     display: flex;
     flex-direction: column;
+    gap: 3px;
 }
 
 .emptyAlbums {

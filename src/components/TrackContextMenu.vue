@@ -23,6 +23,7 @@ import { useTrackInfoModal } from '../composables/useTrackInfoModal'
 import { useTrackEditModal } from '../composables/useTrackEditModal'
 import { useDownloads } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
+import { currentUiScale } from '../composables/useUiScale'
 
 const props = defineProps<{
     x: number
@@ -47,7 +48,7 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
-const { userPlaylists, albums, favoritesPlaylist, loadPlaylists, createPlaylist, addTrackToPlaylist, getPlaylistIdsForTrack, ensureFavoritesLoaded, isFavorite: isFavoriteFn, toggleFavorite } = usePlaylists()
+const { userPlaylists, albums, favoritesPlaylist, loadPlaylists, createPlaylist, nextPlaylistName, addTrackToPlaylist, getPlaylistIdsForTrack, ensureFavoritesLoaded, isFavorite: isFavoriteFn, toggleFavorite } = usePlaylists()
 const { getTrackByPath, loadCoversForTracks } = usePlayer()
 const { getCustomCover } = useCustomCovers()
 const { openTrackInfo } = useTrackInfoModal()
@@ -126,7 +127,7 @@ let playlistSheetDragging = false
 function positionSubmenu() {
     const trigger = subTriggerEl.value
     if (!trigger) return
-    const scale = (window as any).__uiScale || 1
+    const scale = currentUiScale()
     const tr = trigger.getBoundingClientRect()
     const gap = 4
 
@@ -149,7 +150,7 @@ async function clampSubmenu() {
     await nextTick()
     const el = subMenuEl.value
     if (!el) return
-    const scale = (window as any).__uiScale || 1
+    const scale = currentUiScale()
     const rect = el.getBoundingClientRect()
     const pad = 8
     const trigger = subTriggerEl.value
@@ -289,19 +290,6 @@ async function onAddToPlaylist(playlistId: number) {
 async function onToggleFavorite() {
     await toggleFavorite(props.track.file_path)
     emit('close')
-}
-
-function nextPlaylistName(): string {
-    const base = 'Новый плейлист'
-    const re = new RegExp(`^${base}\\s+(\\d+)$`)
-    let maxN = 0
-    for (const pl of userPlaylists.value) {
-        const m = pl.name.match(re)
-        if (!m) continue
-        const n = parseInt(m[1], 10)
-        if (n > maxN) maxN = n
-    }
-    return `${base} ${maxN + 1}`
 }
 
 async function onCreatePlaylistAndAdd() {

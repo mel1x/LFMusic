@@ -184,11 +184,8 @@ fn compute_bars_from_samples(samples: &[f32], sample_rate: u32, bars: usize) -> 
         let bin_lo = ((lo / bin_hz).floor() as usize).max(1);
         let bin_hi = ((hi / bin_hz).ceil() as usize).clamp(bin_lo + 1, half);
 
-        let mut sum = 0.0f32;
-        for bin in bin_lo..bin_hi {
-            // Normalize by window size so scale doesn't depend on FFT_SIZE.
-            sum += buffer[bin].norm() / n as f32;
-        }
+        // Normalize by window size so scale doesn't depend on FFT_SIZE.
+        let sum = buffer[bin_lo..bin_hi].iter().map(|c| c.norm()).sum::<f32>() / n as f32;
         let avg = sum / (bin_hi - bin_lo) as f32;
 
         let db = 20.0 * (avg + 1e-7).log10();

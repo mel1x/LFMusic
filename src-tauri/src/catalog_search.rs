@@ -5,6 +5,8 @@
 // Operates on the in-memory index (see library.rs), built in the same order
 // as `get_all_tracks`, so per-tier result order matches the old frontend.
 
+use crate::util::levenshtein;
+
 /// Lossless formats for the format-keyword filter (mirrors useSearch.ts).
 pub const LOSSLESS_FORMATS: &[&str] =
     &["flac", "wav", "alac", "ape", "dsd", "dsf", "aiff", "aif", "wv", "tak"];
@@ -132,31 +134,6 @@ fn matches_format(ext: &str, query: &str) -> bool {
     false
 }
 
-fn levenshtein(a: &[char], b: &[char]) -> usize {
-    if a == b {
-        return 0;
-    }
-    if a.is_empty() {
-        return b.len();
-    }
-    if b.is_empty() {
-        return a.len();
-    }
-    let n = b.len();
-    let mut prev: Vec<usize> = (0..=n).collect();
-    let mut curr: Vec<usize> = vec![0; n + 1];
-    for i in 1..=a.len() {
-        curr[0] = i;
-        let ca = a[i - 1];
-        for j in 1..=n {
-            let cost = if ca == b[j - 1] { 0 } else { 1 };
-            curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[n]
-}
-
 /// Minimum edit distance from query to any substring of target.
 fn approx_substring_distance(query: &[char], target: &[char]) -> usize {
     let m = query.len();
@@ -197,7 +174,7 @@ fn fuzzy_match(target: &str, query_chars: &[char]) -> bool {
     for w in target.split_whitespace() {
         let wchars: Vec<char> = w.chars().collect();
         let wl = wchars.len();
-        let diff = if wl > qn { wl - qn } else { qn - wl };
+        let diff = wl.abs_diff(qn);
         if diff > max_edits {
             continue;
         }
@@ -301,7 +278,7 @@ mod tests {
         )
     }
 
-    fn paths<'a>(res: Vec<&'a SearchEntry>) -> Vec<&'a str> {
+    fn paths(res: Vec<&SearchEntry>) -> Vec<&str> {
         res.iter().map(|e| e.path.as_str()).collect()
     }
 
@@ -490,13 +467,5 @@ mod tests {
         ];
         let res = paths(rank(&entries, "track", Some("Rock")));
         assert_eq!(res, vec!["/m/2.mp3"]);
-    }
-
-    #[test]
-    fn levenshtein_distance_basic_cases() {
-        assert_eq!(levenshtein(&[], &[]), 0);
-        let a: Vec<char> = "kitten".chars().collect();
-        let b: Vec<char> = "sitting".chars().collect();
-        assert_eq!(levenshtein(&a, &b), 3);
     }
 }

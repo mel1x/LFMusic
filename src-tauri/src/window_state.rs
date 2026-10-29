@@ -65,8 +65,8 @@ pub fn resolve_window_geometry(
     default_height: u32,
 ) -> Option<ResolvedWindowGeometry> {
     if let Some(saved) = saved {
-        if is_geometry_valid(saved.x, saved.y, saved.width, saved.height) {
-            if monitors
+        if is_geometry_valid(saved.x, saved.y, saved.width, saved.height)
+            && monitors
                 .iter()
                 .any(|monitor| monitors_match(&saved.monitor, monitor))
             {
@@ -77,7 +77,6 @@ pub fn resolve_window_geometry(
                     height: saved.height,
                 });
             }
-        }
     }
 
     let first = monitors.first()?;

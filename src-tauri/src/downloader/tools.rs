@@ -234,16 +234,11 @@ impl Meta {
         bin_dir(data_dir).join("tools.json")
     }
     fn load(data_dir: &Path) -> Meta {
-        std::fs::read_to_string(Self::path(data_dir))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        crate::json_store::load_or_default(&Self::path(data_dir))
     }
     fn save(&self, data_dir: &Path) {
         let _ = std::fs::create_dir_all(bin_dir(data_dir));
-        if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(Self::path(data_dir), s);
-        }
+        let _ = crate::json_store::save_pretty(&Self::path(data_dir), self);
     }
     fn latest(&self, tool: Tool) -> Option<&str> {
         match tool {
@@ -254,16 +249,9 @@ impl Meta {
     }
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Seconds since the last successful update check.
 pub fn secs_since_update_check(data_dir: &Path) -> u64 {
-    now_secs().saturating_sub(Meta::load(data_dir).checked_at)
+    crate::util::unix_secs().saturating_sub(Meta::load(data_dir).checked_at)
 }
 
 // ── Network ─────────────────────────────────────────────────────────────────
@@ -694,7 +682,7 @@ pub fn check_updates(data_dir: &Path) -> Result<ToolsInfo, String> {
     if deno.is_some() {
         meta.deno_latest = deno;
     }
-    meta.checked_at = now_secs();
+    meta.checked_at = crate::util::unix_secs();
     meta.save(data_dir);
     Ok(info(data_dir))
 }

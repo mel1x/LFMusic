@@ -11,14 +11,14 @@ import DownloadTrackRow from '../components/DownloadTrackRow.vue'
 
 import defaultCover from '../assets/cover.webp'
 
-import { useDownloads, type ExternalAlbumDetail, type ExternalSearchTrack } from '../composables/useDownloads'
+import { useDownloads, useKeepDownloadedInLibrary, useRedownloadConfirm, type ExternalAlbumDetail } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 import { tracksCountText } from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
-const { albumDetail, enqueue, queue, trackKey, ytdlpMissing } = useDownloads()
+const { albumDetail, enqueue, notQueued, ytdlpMissing } = useDownloads()
 
 const albumId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -51,19 +51,7 @@ async function load(id: number) {
 watch(albumId, (id) => { void load(id) })
 onMounted(() => { void load(albumId.value) })
 
-// Once a track finishes downloading, mark the matching track as "in library" so
-// its button stays "Downloaded" after the queue's "done" entry is cleared,
-// instead of reverting to "Download" (in_library is a one-shot snapshot from
-// the initial albumDetail() fetch, never refreshed on its own).
-watch(queue, (items) => {
-    const doneKeys = new Set(
-        items.filter(i => i.stage === 'done').map(i => trackKey(i.artist, i.title, i.album)),
-    )
-    if (doneKeys.size === 0 || !detail.value) return
-    for (const tr of detail.value.tracks) {
-        if (!tr.in_library && doneKeys.has(trackKey(tr.artist, tr.title, tr.album))) tr.in_library = true
-    }
-})
+useKeepDownloadedInLibrary(() => (detail.value ? [detail.value.tracks] : []))
 
 function goBack() { goBackOrHome(router) }
 
@@ -80,12 +68,7 @@ async function downloadAll() {
     if (!d || busyAll.value || doneAll.value || ytdlpMissing.value) return
     busyAll.value = true
     try {
-        const queued = new Set(
-            queue.value.filter(i => i.stage !== 'error').map(i => trackKey(i.artist, i.title, i.album)),
-        )
-        const pending = d.tracks.filter(
-            tr => !tr.in_library && !queued.has(trackKey(tr.artist, tr.title, tr.album)),
-        )
+        const pending = notQueued(d.tracks)
         if (pending.length > 0) await enqueue(pending)
         doneAll.value = true
     } catch (e) {
@@ -96,16 +79,7 @@ async function downloadAll() {
 }
 
 // Redownload confirmation (track already in library)
-const confirmTrack = ref<ExternalSearchTrack | null>(null)
-const confirmMessage = computed(() =>
-    confirmTrack.value ? t('downloads.redownloadText', { title: confirmTrack.value.title }) : '',
-)
-async function confirmRedownload() {
-    const track = confirmTrack.value
-    confirmTrack.value = null
-    if (!track) return
-    try { await enqueue(track, true) } catch (e) { console.error('Ошибка повторного скачивания:', e) }
-}
+const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm()
 </script>
 
 <template>
@@ -368,6 +342,7 @@ async function confirmRedownload() {
 .tracksList {
     display: flex;
     flex-direction: column;
+    gap: 3px;
 }
 
 .emptyAlbums {

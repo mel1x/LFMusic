@@ -12,6 +12,7 @@ import defaultCover from '../assets/playlistCover.webp';
 import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
+import { sortByTopOrder, usePlaySource } from '../composables/usePlaySource';
 import { usePins } from '../composables/usePins';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import FavoritesCover from '../components/FavoritesCover.vue';
@@ -20,6 +21,8 @@ import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 import { useExternalSources } from '../composables/useExternalSources';
 import { useCoverGate } from '../composables/useCoverGate';
+import { useScrollLine } from '../composables/useScrollLine';
+import { menuAnchorBelow } from '../utils/menu';
 
 const router = useRouter();
 const {
@@ -31,7 +34,7 @@ const {
     artistTopOrder,
     loadPlaylists,
     createPlaylist,
-    getPlaylistTracks,
+    nextPlaylistName,
     deletePlaylist,
     movePlaylistToTop,
     moveAlbumToTop,
@@ -54,10 +57,8 @@ const {
     loadCoversForTracks,
     isPlaying,
     activePlaylistSource,
-    playTrack,
-    togglePlayPause,
-    setPlaylistSource,
 } = usePlayer();
+const { playSource } = usePlaySource();
 
 const playlistCovers = ref<Record<number, string>>({});
 
@@ -82,55 +83,6 @@ function artistCoverFor(artist: ArtistEntry): string {
     const external = avatarFor(artist.name);
     if (external) return external;
     return artist.cover || defaultTrackCover;
-}
-
-function useScrollLine(baseItemWidth = 240, gap = 16) {
-    const el = ref<HTMLElement | null>(null);
-    const scrollLeft = ref(0);
-    const scrollMax = ref(0);
-    const itemWidth = ref(baseItemWidth);
-    const measured = ref(false);
-    let ro: ResizeObserver | null = null;
-
-    async function update() {
-        const node = el.value;
-        if (!node) return;
-        const cw = node.clientWidth;
-        if (cw > 0) {
-            const n = Math.max(1, Math.floor((cw + gap) / (baseItemWidth + gap)));
-            itemWidth.value = (cw - (n - 1) * gap) / n;
-            measured.value = true;
-        }
-        await nextTick();
-        scrollLeft.value = node.scrollLeft;
-        scrollMax.value = Math.max(0, node.scrollWidth - node.clientWidth);
-    }
-    function onScroll() {
-        const node = el.value;
-        if (!node) return;
-        scrollLeft.value = node.scrollLeft;
-        scrollMax.value = Math.max(0, node.scrollWidth - node.clientWidth);
-    }
-    function scrollByPage(dir: 1 | -1) {
-        const node = el.value;
-        if (!node) return;
-        node.scrollBy({ left: dir * node.clientWidth * 0.9, behavior: 'smooth' });
-    }
-    function observe() {
-        const node = el.value;
-        if (!node) return;
-        update();
-        if (!ro) {
-            ro = new ResizeObserver(() => update());
-            ro.observe(node);
-        }
-    }
-    function unobserve() { ro?.disconnect(); ro = null; }
-
-    const canPrev = computed(() => scrollLeft.value > 1);
-    const canNext = computed(() => scrollLeft.value < scrollMax.value - 1);
-
-    return { el, canPrev, canNext, itemWidth, measured, onScroll, scrollByPage, observe, unobserve, update };
 }
 
 const playlistsLine = useScrollLine(210, 16);
@@ -300,19 +252,6 @@ watch(
     },
 );
 
-function nextPlaylistName(): string {
-    const re = /^Новый плейлист\s+(\d+)$/;
-    let maxN = 0;
-    for (const pl of userPlaylists.value) {
-        const m = pl.name.match(re);
-        if (m) {
-            const n = parseInt(m[1], 10);
-            if (n > maxN) maxN = n;
-        }
-    }
-    return `Новый плейлист ${maxN + 1}`;
-}
-
 const createModalOpen = ref(false);
 
 function onCreatePlaylist() {
@@ -355,15 +294,7 @@ function isPlaylistActive(pl: PlaylistInfo) {
 
 async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     e.stopPropagation();
-    if (isPlaylistActive(pl)) {
-        togglePlayPause();
-        return;
-    }
-    const tracks = await getPlaylistTracks(pl.id);
-    if (tracks.length === 0) return;
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
-    setPlaylistSource(`playlist:${pl.id}`, merged);
-    await playTrack(merged[0]);
+    await playSource(`playlist:${pl.id}`, pl.id);
 }
 
 function onTogglePinClick(e: MouseEvent, pl: PlaylistInfo) {
@@ -379,9 +310,7 @@ function openPlaylistMenu(e: MouseEvent, pl: PlaylistInfo) {
         playlistMenu.value = null;
         return;
     }
-    const btn = e.currentTarget as HTMLElement;
-    const rect = btn.getBoundingClientRect();
-    playlistMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, pl, centerX: true };
+    playlistMenu.value = { ...menuAnchorBelow(e), pl, centerX: true };
 }
 
 function openPlaylistMenuFromCover(e: MouseEvent, pl: PlaylistInfo) {
@@ -427,43 +356,12 @@ function isAlbumActive(album: AlbumEntry) {
 
 async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
     e.stopPropagation();
-    if (isAlbumActive(album)) {
-        togglePlayPause();
-        return;
-    }
-    if (album.trackCount === 0) return;
-    const tracks = await getPlaylistTracks(album.id);
-    if (tracks.length === 0) return;
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
-    setPlaylistSource(`album:${album.name}`, merged);
-    await playTrack(merged[0]);
+    await playSource(`album:${album.name}`, album.id);
 }
 
-const sortedAlbums = computed(() => {
-    const all = albums.value;
-    const byName = new Map(all.map(a => [a.name, a]));
-    const topSet = new Set(albumTopOrder.value);
-    const top: AlbumEntry[] = [];
-    for (const name of albumTopOrder.value) {
-        const a = byName.get(name);
-        if (a) top.push(a);
-    }
-    const rest = all.filter(a => !topSet.has(a.name));
-    return [...top, ...rest];
-});
+const sortedAlbums = computed(() => sortByTopOrder(albums.value, albumTopOrder.value));
 
-const sortedArtists = computed(() => {
-    const all = artists.value;
-    const byName = new Map(all.map(a => [a.name, a]));
-    const topSet = new Set(artistTopOrder.value);
-    const top: ArtistEntry[] = [];
-    for (const name of artistTopOrder.value) {
-        const a = byName.get(name);
-        if (a) top.push(a);
-    }
-    const rest = all.filter(a => !topSet.has(a.name));
-    return [...top, ...rest];
-});
+const sortedArtists = computed(() => sortByTopOrder(artists.value, artistTopOrder.value));
 
 const visibleSortedAlbums = computed(() => sortedAlbums.value.slice(0, visibleAlbumsCount.value));
 const visibleArtists = computed(() => sortedArtists.value.slice(0, visibleArtistsCount.value));
@@ -512,9 +410,7 @@ function openAlbumMenu(e: MouseEvent, album: AlbumEntry) {
         albumMenu.value = null;
         return;
     }
-    const btn = e.currentTarget as HTMLElement;
-    const rect = btn.getBoundingClientRect();
-    albumMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, album, centerX: true };
+    albumMenu.value = { ...menuAnchorBelow(e), album, centerX: true };
 }
 
 function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {
@@ -546,16 +442,7 @@ function isArtistActive(artist: ArtistEntry) {
 
 async function onPlayArtist(e: MouseEvent, artist: ArtistEntry) {
     e.stopPropagation();
-    if (isArtistActive(artist)) {
-        togglePlayPause();
-        return;
-    }
-    if (artist.trackCount === 0) return;
-    const tracks = await getPlaylistTracks(artist.id);
-    if (tracks.length === 0) return;
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
-    setPlaylistSource(`artist:${artist.name}`, merged);
-    await playTrack(merged[0]);
+    await playSource(`artist:${artist.name}`, artist.id);
 }
 
 const artistMenu = ref<{ x: number; y: number; artist: ArtistEntry; centerX: boolean } | null>(null);
@@ -566,9 +453,7 @@ function openArtistMenu(e: MouseEvent, artist: ArtistEntry) {
         artistMenu.value = null;
         return;
     }
-    const btn = e.currentTarget as HTMLElement;
-    const rect = btn.getBoundingClientRect();
-    artistMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, artist, centerX: true };
+    artistMenu.value = { ...menuAnchorBelow(e), artist, centerX: true };
 }
 
 function openArtistMenuFromCover(e: MouseEvent, artist: ArtistEntry) {

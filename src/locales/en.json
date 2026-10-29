@@ -166,6 +166,9 @@
     "popularRedownloadText": "The most popular tracks are already in your library. Download them again?",
     "artistAlbumsCount": "Albums: {count}",
     "artistTopCount": "Popular tracks: {count}",
+    "showMore": "Show more",
+    "artistAllTracks": "All tracks",
+    "artistTracksEmpty": "No tracks found",
     "folder": {
       "sectionTitle": "Download folder",
       "desc": "Downloaded tracks are saved here; the folder is added to the library automatically.",

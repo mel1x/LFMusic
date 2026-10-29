@@ -109,9 +109,11 @@ pub struct MusicLibrary {
     search_index: RefCell<Option<Vec<crate::catalog_search::SearchEntry>>>,
     /// "Already downloaded" index cache for the Downloads page (title -> local matches).
     /// Keyed by the separators it was built with since debounced search re-queries it per keystroke.
-    catalog_index_cache:
-        RefCell<Option<(Vec<String>, Arc<HashMap<String, Vec<LibraryTrackMatch>>>)>>,
+    catalog_index_cache: RefCell<Option<(Vec<String>, CatalogIndex)>>,
 }
+
+/// Title key -> local matches, see `catalog_index_cache`.
+type CatalogIndex = Arc<HashMap<String, Vec<LibraryTrackMatch>>>;
 
 /// One local file's identity for album-aware "already downloaded" matching on the
 /// Downloads page: normalized artists + normalized album key (empty if untagged).
@@ -311,6 +313,23 @@ fn flush_audio_features(
     // New audio features may change the centroid; search/downloaded indexes
     // depend on title/artist/album/genre/order, none of which features touch.
     CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+}
+
+/// SELECT list read by [`MusicLibrary::row_to_metadata_with_override`] over tracks `t`,
+/// overrides `o` and audio features `af`. `$cover` is the cover-signature column:
+/// `"o.cover_sig"`, or `"NULL"` when the caller doesn't need it.
+macro_rules! track_select {
+    ($cover:literal) => {
+        concat!(
+            "SELECT t.file_path, COALESCE(o.title, t.title), COALESCE(o.artist, t.artist), ",
+            "t.album, t.genre, t.duration_secs, ",
+            "t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless, ",
+            "COALESCE(o.accent_color, t.accent_color), ",
+            $cover,
+            ", af.bpm, af.loudness, af.energy, af.danceability, ",
+            "af.spectral_centroid, af.track_key, af.audio_fingerprint",
+        )
+    };
 }
 
 impl MusicLibrary {
@@ -993,7 +1012,7 @@ impl MusicLibrary {
     pub fn catalog_artist_title_index(
         &self,
         separators: &[String],
-    ) -> Arc<HashMap<String, Vec<LibraryTrackMatch>>> {
+    ) -> CatalogIndex {
         // Cached: debounced search on the Downloads page re-queries this per keystroke.
         if DOWNLOADS_INDEX_DIRTY.swap(false, Ordering::SeqCst) {
             self.catalog_index_cache.borrow_mut().take();
@@ -1058,16 +1077,9 @@ impl MusicLibrary {
 
     fn get_all_tracks_inner(&self, light: bool) -> Vec<TrackMetadata> {
         let sql = if light {
-            "SELECT t.file_path,
-                    COALESCE(o.title, t.title),
-                    COALESCE(o.artist, t.artist),
-                    t.album, t.genre, t.duration_secs,
-                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                    COALESCE(o.accent_color, t.accent_color),
-                    NULL,
-                    af.bpm, af.loudness, af.energy, af.danceability,
-                    af.spectral_centroid, af.track_key, af.audio_fingerprint
-             FROM tracks t
+            concat!(
+                track_select!("NULL"),
+                " FROM tracks t
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
              LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              ORDER BY
@@ -1075,18 +1087,12 @@ impl MusicLibrary {
                  CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
                  LOWER(COALESCE(o.artist, t.artist)),
                  LOWER(COALESCE(t.album, '')),
-                 LOWER(COALESCE(o.title, t.title, t.file_path))"
+                 LOWER(COALESCE(o.title, t.title, t.file_path))",
+            )
         } else {
-            "SELECT t.file_path,
-                    COALESCE(o.title, t.title),
-                    COALESCE(o.artist, t.artist),
-                    t.album, t.genre, t.duration_secs,
-                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                    COALESCE(o.accent_color, t.accent_color),
-                    o.cover_sig,
-                    af.bpm, af.loudness, af.energy, af.danceability,
-                    af.spectral_centroid, af.track_key, af.audio_fingerprint
-             FROM tracks t
+            concat!(
+                track_select!("o.cover_sig"),
+                " FROM tracks t
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
              LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              ORDER BY
@@ -1094,7 +1100,8 @@ impl MusicLibrary {
                  CASE WHEN COALESCE(o.artist, t.artist) IS NULL THEN 1 ELSE 0 END,
                  LOWER(COALESCE(o.artist, t.artist)),
                  LOWER(COALESCE(t.album, '')),
-                 LOWER(COALESCE(o.title, t.title, t.file_path))"
+                 LOWER(COALESCE(o.title, t.title, t.file_path))",
+            )
         };
 
         let mut stmt = match self.conn.prepare(sql) {
@@ -1102,7 +1109,7 @@ impl MusicLibrary {
             Err(_) => return Vec::new(),
         };
 
-        let rows = match stmt.query_map([], |row| Self::row_to_metadata_with_override(row)) {
+        let rows = match stmt.query_map([], Self::row_to_metadata_with_override) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
@@ -1252,24 +1259,17 @@ impl MusicLibrary {
         }
         let mut by_path: HashMap<String, TrackMetadata> = HashMap::new();
         for chunk in paths.chunks(900) {
-            let placeholders = std::iter::repeat("?")
-                .take(chunk.len())
+            let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT t.file_path,
-                        COALESCE(o.title, t.title),
-                        COALESCE(o.artist, t.artist),
-                        t.album, t.genre, t.duration_secs,
-                        t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                        COALESCE(o.accent_color, t.accent_color),
-                        o.cover_sig,
-                        af.bpm, af.loudness, af.energy, af.danceability,
-                        af.spectral_centroid, af.track_key, af.audio_fingerprint
-                 FROM tracks t
+                concat!(
+                    track_select!("o.cover_sig"),
+                    " FROM tracks t
                  LEFT JOIN track_overrides o ON o.file_path = t.file_path
                  LEFT JOIN track_audio_features af ON af.file_path = t.file_path
                  WHERE t.file_path IN ({})",
+                ),
                 placeholders
             );
             let mut stmt = match self.conn.prepare(&sql) {
@@ -1324,22 +1324,16 @@ impl MusicLibrary {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT t.file_path,
-                        COALESCE(o.title, t.title),
-                        COALESCE(o.artist, t.artist),
-                        t.album, t.genre, t.duration_secs,
-                        t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                        COALESCE(o.accent_color, t.accent_color),
-                        o.cover_sig,
-                        af.bpm, af.loudness, af.energy, af.danceability,
-                        af.spectral_centroid, af.track_key, af.audio_fingerprint
-                 FROM tracks t
+                concat!(
+                    track_select!("o.cover_sig"),
+                    " FROM tracks t
                  LEFT JOIN track_overrides o ON o.file_path = t.file_path
                  LEFT JOIN track_audio_features af ON af.file_path = t.file_path
                  WHERE t.file_path = ?1",
+                ),
             )
             .ok()?;
-        stmt.query_row(params![file_path], |row| Self::row_to_metadata_with_override(row))
+        stmt.query_row(params![file_path], Self::row_to_metadata_with_override)
             .ok()
     }
 
@@ -1502,7 +1496,7 @@ impl MusicLibrary {
                 .filter_map(|(path_str, mtime)| {
                     let result = AudioPlayer::get_metadata_light(path_str).ok()?;
                     let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    if done % 10 == 0 || done == total {
+                    if done.is_multiple_of(10) || done == total {
                         progress(done, total);
                     }
                     Some((path_str.clone(), result, *mtime))
@@ -1635,39 +1629,27 @@ impl MusicLibrary {
 
     fn get_playlist_tracks_inner(&self, playlist_id: i64, light: bool) -> Vec<TrackMetadata> {
         let sql = if light {
-            "SELECT t.file_path,
-                    COALESCE(o.title, t.title),
-                    COALESCE(o.artist, t.artist),
-                    t.album, t.genre, t.duration_secs,
-                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                    COALESCE(o.accent_color, t.accent_color),
-                    NULL,
-                    af.bpm, af.loudness, af.energy, af.danceability,
-                    af.spectral_centroid, af.track_key, af.audio_fingerprint
-             FROM playlist_tracks pt
+            concat!(
+                track_select!("NULL"),
+                " FROM playlist_tracks pt
              JOIN tracks t ON t.file_path = pt.file_path
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
              LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              WHERE pt.playlist_id = ?1
              ORDER BY pt.sort_order ASC,
-                      pt.rowid ASC"
+                      pt.rowid ASC",
+            )
         } else {
-            "SELECT t.file_path,
-                    COALESCE(o.title, t.title),
-                    COALESCE(o.artist, t.artist),
-                    t.album, t.genre, t.duration_secs,
-                    t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                    COALESCE(o.accent_color, t.accent_color),
-                    o.cover_sig,
-                    af.bpm, af.loudness, af.energy, af.danceability,
-                    af.spectral_centroid, af.track_key, af.audio_fingerprint
-             FROM playlist_tracks pt
+            concat!(
+                track_select!("o.cover_sig"),
+                " FROM playlist_tracks pt
              JOIN tracks t ON t.file_path = pt.file_path
              LEFT JOIN track_overrides o ON o.file_path = t.file_path
              LEFT JOIN track_audio_features af ON af.file_path = t.file_path
              WHERE pt.playlist_id = ?1
              ORDER BY pt.sort_order ASC,
-                      pt.rowid ASC"
+                      pt.rowid ASC",
+            )
         };
 
         let mut stmt = match self.conn.prepare(sql) {
@@ -1675,7 +1657,7 @@ impl MusicLibrary {
             Err(_) => return Vec::new(),
         };
 
-        let rows = match stmt.query_map(params![playlist_id], |row| Self::row_to_metadata_with_override(row)) {
+        let rows = match stmt.query_map(params![playlist_id], Self::row_to_metadata_with_override) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
@@ -2231,8 +2213,8 @@ impl MusicLibrary {
     ) -> Result<(), String> {
         mark_track_indexes_dirty();
         // Empty string means "use the original".
-        let title = title.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
-        let artist = artist.and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
+        let title = title.filter(|&s| !s.trim().is_empty());
+        let artist = artist.filter(|&s| !s.trim().is_empty());
 
         let existing: Option<(Option<String>, Option<String>)> = self
             .conn
@@ -2448,27 +2430,21 @@ impl MusicLibrary {
     }
 
     pub fn get_recently_played(&self, limit: usize) -> Vec<TrackMetadata> {
-        let sql = "SELECT t.file_path,
-                          COALESCE(o.title, t.title),
-                          COALESCE(o.artist, t.artist),
-                          t.album, t.genre, t.duration_secs,
-                          t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                          COALESCE(o.accent_color, t.accent_color),
-                          o.cover_sig,
-                          af.bpm, af.loudness, af.energy, af.danceability,
-                          af.spectral_centroid, af.track_key, af.audio_fingerprint
-                   FROM tracks t
+        let sql = concat!(
+     track_select!("o.cover_sig"),
+     " FROM tracks t
                    JOIN track_statistics s ON s.file_path = t.file_path
                    LEFT JOIN track_overrides o ON o.file_path = t.file_path
                    LEFT JOIN track_audio_features af ON af.file_path = t.file_path
                    WHERE s.updated_at > 0
                    ORDER BY s.updated_at DESC
-                   LIMIT ?1";
+                   LIMIT ?1",
+ );
         let mut stmt = match self.conn.prepare(sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = match stmt.query_map(params![limit as i64], |row| Self::row_to_metadata_with_override(row)) {
+        let rows = match stmt.query_map(params![limit as i64], Self::row_to_metadata_with_override) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
@@ -2476,27 +2452,21 @@ impl MusicLibrary {
     }
 
     pub fn get_most_played(&self, limit: usize) -> Vec<TrackMetadata> {
-        let sql = "SELECT t.file_path,
-                          COALESCE(o.title, t.title),
-                          COALESCE(o.artist, t.artist),
-                          t.album, t.genre, t.duration_secs,
-                          t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                          COALESCE(o.accent_color, t.accent_color),
-                          o.cover_sig,
-                          af.bpm, af.loudness, af.energy, af.danceability,
-                          af.spectral_centroid, af.track_key, af.audio_fingerprint
-                   FROM tracks t
+        let sql = concat!(
+     track_select!("o.cover_sig"),
+     " FROM tracks t
                    JOIN track_statistics s ON s.file_path = t.file_path
                    LEFT JOIN track_overrides o ON o.file_path = t.file_path
                    LEFT JOIN track_audio_features af ON af.file_path = t.file_path
                    WHERE s.listen_count > 0
                    ORDER BY s.listen_count DESC, s.total_listened_secs DESC
-                   LIMIT ?1";
+                   LIMIT ?1",
+ );
         let mut stmt = match self.conn.prepare(sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = match stmt.query_map(params![limit as i64], |row| Self::row_to_metadata_with_override(row)) {
+        let rows = match stmt.query_map(params![limit as i64], Self::row_to_metadata_with_override) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
@@ -2833,22 +2803,16 @@ impl MusicLibrary {
         };
 
         let sql = format!(
-            "SELECT t.file_path,
-                     COALESCE(o.title, t.title),
-                     COALESCE(o.artist, t.artist),
-                     t.album, t.genre, t.duration_secs,
-                     t.format, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.is_lossless,
-                     COALESCE(o.accent_color, t.accent_color),
-                     o.cover_sig,
-                     af.bpm, af.loudness, af.energy, af.danceability,
-                     af.spectral_centroid, af.track_key, af.audio_fingerprint
-              FROM tracks t
+            concat!(
+                track_select!("o.cover_sig"),
+                " FROM tracks t
               LEFT JOIN track_overrides o ON o.file_path = t.file_path
               LEFT JOIN track_audio_features af ON af.file_path = t.file_path
               LEFT JOIN track_statistics s ON s.file_path = t.file_path
               WHERE {}
               ORDER BY {}
               LIMIT ?1",
+            ),
             where_clause, order_by
         );
 
@@ -2856,7 +2820,7 @@ impl MusicLibrary {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = match stmt.query_map(params![limit as i64], |row| Self::row_to_metadata_with_override(row)) {
+        let rows = match stmt.query_map(params![limit as i64], Self::row_to_metadata_with_override) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };

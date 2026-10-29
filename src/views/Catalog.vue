@@ -102,6 +102,7 @@ function scrollToActiveGenre() {
 }
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
+import { menuAnchorBelow } from '../utils/menu';
 const searchInput = ref<HTMLInputElement | null>(null)
 useTypeToSearch(searchInput)
 const rawSearch = ref('')
@@ -294,9 +295,7 @@ function openCatalogMenu(e: MouseEvent) {
         catalogMenu.value = null
         return
     }
-    const btn = (e.currentTarget as HTMLElement)
-    const rect = btn.getBoundingClientRect()
-    catalogMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6 }
+    catalogMenu.value = { ...menuAnchorBelow(e) }
 }
 
 function openTrackMenu(e: MouseEvent, track: TrackMetadata) {

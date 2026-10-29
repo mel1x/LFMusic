@@ -1,5 +1,6 @@
 import type { Directive, DirectiveBinding } from 'vue'
 import { translateText } from '../composables/useI18n'
+import { currentUiScale } from '../composables/useUiScale'
 
 let tooltipEl: HTMLElement | null = null
 let styleInjected = false
@@ -64,16 +65,6 @@ function getTooltip(): HTMLElement {
     return tooltipEl
 }
 
-function getUiScale(): number {
-    const scale = Number((window as any).__uiScale)
-    if (Number.isFinite(scale) && scale > 0) return scale
-
-    const cssScale = Number(getComputedStyle(document.documentElement)
-        .getPropertyValue('--ui-scale')
-        .trim())
-    return Number.isFinite(cssScale) && cssScale > 0 ? cssScale : 1
-}
-
 function position(el: HTMLElement, tt: HTMLElement, placement: TooltipPlacement = 'top') {
     const rect = el.getBoundingClientRect()
     const ttRect = tt.getBoundingClientRect()
@@ -90,7 +81,7 @@ function position(el: HTMLElement, tt: HTMLElement, placement: TooltipPlacement 
     } else if (placement === 'bottom' && top + ttRect.height > window.innerHeight - margin) {
         top = Math.max(margin, rect.top - ttRect.height - margin)
     }
-    const scale = getUiScale()
+    const scale = currentUiScale()
     tt.style.left = `${left / scale}px`
     tt.style.top = `${top / scale}px`
 }

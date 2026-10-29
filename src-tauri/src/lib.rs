@@ -5,6 +5,7 @@ mod covers;
 mod discord_rpc;
 mod downloader;
 mod external;
+mod json_store;
 mod library;
 mod mpris;
 mod pins;
@@ -15,6 +16,7 @@ pub mod statistics;
 mod taskbar;
 mod thumbnails;
 mod track_covers;
+mod util;
 mod window_state;
 
 use audio_player::{AudioPlayer, EqSettings, PlayerStatus, SinkEndSignal, TrackMetadata};
@@ -25,7 +27,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 
@@ -253,6 +255,43 @@ pub struct PlayerState(pub RwLock<AudioPlayer>);
 pub struct LibraryState(pub Mutex<MusicLibrary>);
 pub struct SettingsState(pub Mutex<(settings::AppSettings, PathBuf)>);
 
+fn lock_err(e: impl std::fmt::Display) -> String {
+    format!("Lock error: {}", e)
+}
+
+impl PlayerState {
+    fn read(&self) -> Result<RwLockReadGuard<'_, AudioPlayer>, String> {
+        self.0.read().map_err(lock_err)
+    }
+    fn write(&self) -> Result<RwLockWriteGuard<'_, AudioPlayer>, String> {
+        self.0.write().map_err(lock_err)
+    }
+}
+
+impl LibraryState {
+    fn lock(&self) -> Result<MutexGuard<'_, MusicLibrary>, String> {
+        self.0.lock().map_err(lock_err)
+    }
+}
+
+impl SettingsState {
+    fn lock(&self) -> Result<MutexGuard<'_, (settings::AppSettings, PathBuf)>, String> {
+        self.0.lock().map_err(lock_err)
+    }
+    fn data_dir(&self) -> Result<PathBuf, String> {
+        Ok(self.lock()?.1.clone())
+    }
+}
+
+/// Runs blocking work off the async runtime, flattening the join error.
+async fn run_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
+}
+
 // ── Player commands ──────────────────────────────────────────────────────────
 
 /// Apply cached accent_color (or save a newly computed one) and overlay user
@@ -313,7 +352,7 @@ fn player_play(
     // Tags + cover/accent parsing happen before the write lock, so status and
     // spectrum polls aren't blocked behind file I/O on every track change.
     let metadata = AudioPlayer::get_metadata(&file_path)?;
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     let mut metadata = player.play_preloaded(&file_path, metadata)?;
     drop(player);
     apply_accent_color(&library, &file_path, &mut metadata);
@@ -328,7 +367,7 @@ fn player_play_crossfade(
     crossfade_secs: f64,
 ) -> Result<TrackMetadata, String> {
     let metadata = AudioPlayer::get_metadata(&file_path)?;
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     let mut metadata = player.play_crossfade_preloaded(&file_path, crossfade_secs, metadata)?;
     drop(player);
     apply_accent_color(&library, &file_path, &mut metadata);
@@ -343,7 +382,7 @@ fn player_play_paused(
     position_secs: f64,
 ) -> Result<TrackMetadata, String> {
     let metadata = AudioPlayer::get_metadata(&file_path)?;
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     let mut metadata = player.play_paused_preloaded(&file_path, position_secs, metadata)?;
     drop(player);
     apply_accent_color(&library, &file_path, &mut metadata);
@@ -352,35 +391,35 @@ fn player_play_paused(
 
 #[tauri::command]
 fn player_pause(state: State<PlayerState>) -> Result<(), String> {
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     player.pause();
     Ok(())
 }
 
 #[tauri::command]
 fn player_resume(state: State<PlayerState>) -> Result<(), String> {
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     player.resume();
     Ok(())
 }
 
 #[tauri::command]
 fn player_stop(state: State<PlayerState>) -> Result<(), String> {
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     player.stop();
     Ok(())
 }
 
 #[tauri::command]
 fn player_set_volume(state: State<PlayerState>, volume: f32) -> Result<(), String> {
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     player.set_volume(volume);
     Ok(())
 }
 
 #[tauri::command]
 fn player_seek(state: State<PlayerState>, position_secs: f64) -> Result<(), String> {
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     player.seek(position_secs)
 }
 
@@ -390,7 +429,7 @@ fn player_seek_crossfade(
     position_secs: f64,
     crossfade_secs: f64,
 ) -> Result<(), String> {
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     player.seek_crossfade(position_secs, crossfade_secs)
 }
 
@@ -399,21 +438,21 @@ fn player_seek_crossfade(
 // Control commands (pause/volume/seek) stay sync so they keep their call order.
 #[tauri::command(async)]
 fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> {
-    let mut player = state.0.write().map_err(|e| format!("Lock error: {}", e))?;
+    let mut player = state.write()?;
     Ok(player.get_status())
 }
 
 /// Spectrum bars (0..1) for the visualizer; polled by the frontend on rAF frames.
 #[tauri::command(async)]
 fn player_get_spectrum(state: State<PlayerState>, bars: usize) -> Result<Vec<f32>, String> {
-    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    let player = state.read()?;
     Ok(player.spectrum_bars(bars))
 }
 
 /// Frontend toggles this with visualizer visibility to skip unnecessary FFT work when hidden.
 #[tauri::command]
 fn player_set_spectrum_enabled(state: State<PlayerState>, enabled: bool) -> Result<(), String> {
-    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    let player = state.read()?;
     player.set_spectrum_enabled(enabled);
     Ok(())
 }
@@ -436,7 +475,7 @@ fn get_cover_art(
     library: State<LibraryState>,
     file_path: String,
 ) -> Result<Option<String>, String> {
-    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let lib = library.lock()?;
     Ok(thumbnails::cover_url(&lib, &file_path))
 }
 
@@ -483,16 +522,16 @@ fn get_original_track(
 
 #[tauri::command(async)]
 fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_folders())
 }
 
 #[tauri::command]
 async fn library_add_folder(app: tauri::AppHandle, folder_path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
-        let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut library = state.lock()?;
         library.add_folder(
             folder_path,
             &separators,
@@ -502,7 +541,6 @@ async fn library_add_folder(app: tauri::AppHandle, folder_path: String) -> Resul
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 fn android_music_folder_candidates() -> Vec<String> {
@@ -542,7 +580,7 @@ fn android_music_folder_candidates() -> Vec<String> {
 
 #[tauri::command]
 async fn library_add_android_music_folders(app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let candidates = android_music_folder_candidates();
         if candidates.is_empty() {
             return Err("Не удалось найти стандартные папки с аудио. Разрешите доступ к аудио и проверьте, что на устройстве есть музыкальные файлы.".to_string());
@@ -550,7 +588,7 @@ async fn library_add_android_music_folders(app: tauri::AppHandle) -> Result<(), 
 
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
-        let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut library = state.lock()?;
         let mut added = 0usize;
         let mut last_error: Option<String> = None;
 
@@ -577,7 +615,6 @@ async fn library_add_android_music_folders(app: tauri::AppHandle) -> Result<(), 
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 #[tauri::command(async)]
@@ -589,9 +626,7 @@ fn library_remove_folder(
 ) -> Result<(), String> {
     let separators = settings::get_artist_separators(&settings_state);
     let mut library = library_state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .lock()?;
     library.remove_folder(
         folder_path,
         &separators,
@@ -607,7 +642,7 @@ fn library_get_catalog_paths(
     genre: Option<String>,
     search: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_catalog_paths(genre.as_deref(), search.as_deref()))
 }
 
@@ -618,13 +653,13 @@ fn library_get_tracks_by_paths(
     state: State<LibraryState>,
     paths: Vec<String>,
 ) -> Result<Vec<TrackMetadata>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_tracks_by_paths(&paths))
 }
 
 #[tauri::command(async)]
 fn library_list_genres(state: State<LibraryState>) -> Result<Vec<GenreCount>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.list_genres())
 }
 
@@ -639,7 +674,7 @@ fn library_search(
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.search_tracks(q, limit))
 }
 
@@ -648,7 +683,7 @@ fn library_resume_audio_features(
     app: tauri::AppHandle,
     state: State<LibraryState>,
 ) -> Result<usize, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.resume_pending_audio_feature_analysis(Some(audio_feature_progress_emitter(app)))
 }
 
@@ -656,7 +691,7 @@ fn library_resume_audio_features(
 fn library_audio_features_status(
     state: State<LibraryState>,
 ) -> Result<AudioFeatureProgress, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     let (current, total, active) = library.audio_feature_status()?;
     let percent = if total > 0 {
         (current as f64 / total as f64) * 100.0
@@ -674,22 +709,22 @@ fn library_audio_features_status(
 
 #[tauri::command(async)]
 fn library_move_track_to_top(file_path: String, state: State<LibraryState>) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.move_track_to_top(&file_path)
 }
 
 #[tauri::command(async)]
 fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
-    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut library = state.lock()?;
     library.cleanup_missing_tracks()
 }
 
 #[tauri::command]
 async fn library_rescan(app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
-        let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut library = state.lock()?;
         library.rescan_all(
             &separators,
             Some(audio_feature_progress_emitter(app.clone())),
@@ -698,7 +733,6 @@ async fn library_rescan(app: tauri::AppHandle) -> Result<(), String> {
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 /// Rebuild artist playlists (call after changing artist separators).
@@ -709,9 +743,7 @@ fn library_rebuild_artists(
 ) -> Result<(), String> {
     let separators = settings::get_artist_separators(&settings_state);
     let mut library = library_state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .lock()?;
     library.rebuild_artist_playlists(&separators)
 }
 
@@ -719,7 +751,7 @@ fn library_rebuild_artists(
 
 #[tauri::command(async)]
 fn playlist_get_all(state: State<LibraryState>) -> Result<Vec<PlaylistInfo>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_playlists())
 }
 
@@ -728,13 +760,13 @@ fn playlist_get_tracks(
     state: State<LibraryState>,
     playlist_id: i64,
 ) -> Result<Vec<TrackMetadata>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_playlist_tracks(playlist_id))
 }
 
 #[tauri::command(async)]
 fn playlist_create(state: State<LibraryState>, name: String) -> Result<PlaylistInfo, String> {
-    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut library = state.lock()?;
     library.create_playlist(name)
 }
 
@@ -744,13 +776,13 @@ fn playlist_rename(
     playlist_id: i64,
     name: String,
 ) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.rename_playlist(playlist_id, name)
 }
 
 #[tauri::command(async)]
 fn playlist_delete(state: State<LibraryState>, playlist_id: i64) -> Result<(), String> {
-    let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut library = state.lock()?;
     library.delete_playlist(playlist_id)
 }
 
@@ -761,7 +793,7 @@ fn playlist_add_track(
     file_path: String,
     prepend: Option<bool>,
 ) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.add_track_to_playlist(playlist_id, &file_path, prepend.unwrap_or(false))
 }
 
@@ -771,7 +803,7 @@ fn playlist_remove_track(
     playlist_id: i64,
     file_path: String,
 ) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.remove_track_from_playlist(playlist_id, &file_path)
 }
 
@@ -781,7 +813,7 @@ fn playlist_move_track_to_top(
     playlist_id: i64,
     file_path: String,
 ) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.move_playlist_track_to_top(playlist_id, &file_path)
 }
 
@@ -790,7 +822,7 @@ fn playlist_get_ids_for_track(
     state: State<LibraryState>,
     file_path: String,
 ) -> Result<Vec<i64>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_user_playlist_ids_for_track(&file_path))
 }
 
@@ -799,7 +831,7 @@ fn playlist_get_track_paths(
     state: State<LibraryState>,
     playlist_id: i64,
 ) -> Result<Vec<String>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_playlist_track_paths(playlist_id))
 }
 
@@ -810,7 +842,7 @@ fn album_get_track_order(
     state: State<LibraryState>,
     album_name: String,
 ) -> Result<Option<Vec<String>>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.get_album_track_order(&album_name)
 }
 
@@ -820,7 +852,7 @@ fn album_set_track_order(
     album_name: String,
     track_paths: Vec<String>,
 ) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.set_album_track_order(&album_name, &track_paths)
 }
 
@@ -834,9 +866,7 @@ async fn external_album_layout(
     album_name: String,
     refresh: bool,
 ) -> Result<external::AlbumLayout, String> {
-    tauri::async_runtime::spawn_blocking(move || run_album_layout(&app, &album_name, refresh))
-        .await
-        .map_err(|e| format!("Task error: {}", e))?
+    run_blocking(move || run_album_layout(&app, &album_name, refresh)).await
 }
 
 /// Sync core of [`external_album_layout`], shared with the batch prep pass.
@@ -854,11 +884,11 @@ fn run_album_layout(
         entries: Vec::new(),
     };
 
-    let now = external::unix_secs();
+    let now = util::unix_secs();
 
     // Phase 1 (locked): read local tracks + cache, decide whether the network is needed.
     let (local, query_artist, album_key, decision) = {
-        let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let library = state.lock()?;
         let local = library.get_album_local_tracks(album_name);
         if local.is_empty() {
             return Ok(none_layout());
@@ -915,7 +945,7 @@ fn run_album_layout(
     let fetched = external::fetch_album_tracklist(&query_artist, album_name);
 
     // Phase 3 (locked): persist result to cache.
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     match fetched {
         external::FetchOutcome::Found(album) if !album.tracks.is_empty() => {
             let _ = library.set_external_album(
@@ -949,20 +979,11 @@ async fn external_artist_image(
     artist_name: String,
     refresh: bool,
 ) -> Result<external::ArtistImageResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = {
-            let state = app.state::<SettingsState>();
-            let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-            settings.1.clone()
-        };
-        Ok(external::get_or_fetch_artist_image(
-            &dir,
-            &artist_name,
-            refresh,
-        ))
+    run_blocking(move || {
+        let dir = app.state::<SettingsState>().data_dir()?;
+        Ok(external::get_or_fetch_artist_image(&dir, &artist_name, refresh))
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 #[tauri::command]
@@ -973,18 +994,11 @@ async fn external_track_cover(
     title: String,
     refresh: bool,
 ) -> Result<external::ArtistImageResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = {
-            let state = app.state::<SettingsState>();
-            let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-            settings.1.clone()
-        };
-        Ok(external::get_or_fetch_track_cover(
-            &dir, &artist, &album, &title, refresh,
-        ))
+    run_blocking(move || {
+        let dir = app.state::<SettingsState>().data_dir()?;
+        Ok(external::get_or_fetch_track_cover(&dir, &artist, &album, &title, refresh))
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 /// Loads all already-cached artist images for fast render on startup (no network).
@@ -992,16 +1006,11 @@ async fn external_track_cover(
 async fn external_load_cached_artist_images(
     app: tauri::AppHandle,
 ) -> Result<Vec<external::CachedArtistImage>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = {
-            let state = app.state::<SettingsState>();
-            let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-            settings.1.clone()
-        };
+    run_blocking(move || {
+        let dir = app.state::<SettingsState>().data_dir()?;
         Ok(external::load_cached_artist_images(&dir))
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 // ── Batch prep of external sources (one pass, permanent cache) ──────────────
@@ -1029,7 +1038,7 @@ fn external_prepare(app: tauri::AppHandle) -> Result<(), String> {
 
     let (dir, covers_on, avatars_on, albums_on) = {
         let state = app.state::<SettingsState>();
-        let s = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let s = state.lock()?;
         (
             s.1.clone(),
             settings::option_bool(&s.0, "external_track_covers", false),
@@ -1330,7 +1339,7 @@ fn statistics_add_track_delta(
     state: State<LibraryState>,
     delta: statistics::TrackStatisticsDelta,
 ) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.add_track_statistics_delta(delta)
 }
 
@@ -1339,7 +1348,7 @@ fn statistics_get_track(
     state: State<LibraryState>,
     file_path: String,
 ) -> Result<statistics::TrackStatistics, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.get_track_statistics(&file_path)
 }
 
@@ -1348,7 +1357,7 @@ fn statistics_sum_listen_count(
     state: State<LibraryState>,
     file_paths: Vec<String>,
 ) -> Result<i64, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.sum_track_listen_count(&file_paths)
 }
 
@@ -1358,7 +1367,7 @@ fn statistics_add_collection_full_listen(
     kind: statistics::CollectionKind,
     key: String,
 ) -> Result<(), String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     library.add_collection_full_listen(kind, &key)
 }
 
@@ -1367,7 +1376,7 @@ fn statistics_get_recently_played(
     state: State<LibraryState>,
     limit: usize,
 ) -> Result<Vec<audio_player::TrackMetadata>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_recently_played(limit))
 }
 
@@ -1376,7 +1385,7 @@ fn statistics_get_most_played(
     state: State<LibraryState>,
     limit: usize,
 ) -> Result<Vec<audio_player::TrackMetadata>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_most_played(limit))
 }
 
@@ -1385,7 +1394,7 @@ fn statistics_get_top_artists(
     state: State<LibraryState>,
     limit: usize,
 ) -> Result<Vec<library::TopArtist>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_top_artists(limit))
 }
 
@@ -1394,7 +1403,7 @@ fn statistics_get_top_albums(
     state: State<LibraryState>,
     limit: usize,
 ) -> Result<Vec<library::TopAlbum>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_top_albums(limit))
 }
 
@@ -1402,7 +1411,7 @@ fn statistics_get_top_albums(
 fn statistics_get_summary_stats(
     state: State<LibraryState>,
 ) -> Result<library::SummaryStats, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_summary_stats())
 }
 
@@ -1414,7 +1423,7 @@ fn statistics_get_recommendations(
     lossless_only: Option<bool>,
     limit: usize,
 ) -> Result<Vec<audio_player::TrackMetadata>, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.get_recommendations_by_mood(
         &mood,
         familiarity.as_deref().unwrap_or("balanced"),
@@ -1427,7 +1436,7 @@ fn statistics_get_recommendations(
 fn statistics_get_taste_profile(
     state: State<LibraryState>,
 ) -> Result<library::TasteProfile, String> {
-    let library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let library = state.lock()?;
     Ok(library.taste_profile())
 }
 
@@ -1435,9 +1444,7 @@ fn statistics_get_taste_profile(
 
 fn eq_persist(settings_state: &State<SettingsState>, eq: &EqSettings) -> Result<(), String> {
     let mut state = settings_state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .lock()?;
     state.0.eq_settings = eq.clone();
     settings::save(&state.1, &state.0)
 }
@@ -1449,9 +1456,7 @@ fn eq_set_bands(
     bands: Vec<f32>,
 ) -> Result<(), String> {
     let player = player_state
-        .0
-        .read()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .read()?;
     player.set_eq_bands(bands);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
@@ -1464,9 +1469,7 @@ fn eq_set_gain(
     gain: f32,
 ) -> Result<(), String> {
     let player = player_state
-        .0
-        .read()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .read()?;
     player.set_eq_gain(gain);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
@@ -1479,9 +1482,7 @@ fn eq_set_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let player = player_state
-        .0
-        .read()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .read()?;
     player.set_eq_enabled(enabled);
     let eq = player.get_eq_settings();
     eq_persist(&settings_state, &eq)
@@ -1489,7 +1490,7 @@ fn eq_set_enabled(
 
 #[tauri::command]
 fn eq_get_settings(state: State<PlayerState>) -> Result<EqSettings, String> {
-    let player = state.0.read().map_err(|e| format!("Lock error: {}", e))?;
+    let player = state.read()?;
     Ok(player.get_eq_settings())
 }
 
@@ -1500,7 +1501,7 @@ fn eq_get_settings(state: State<PlayerState>) -> Result<EqSettings, String> {
 fn get_settings(
     state: State<SettingsState>,
 ) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
-    let state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let state = state.lock()?;
     Ok(state.0.options.clone())
 }
 
@@ -1509,7 +1510,7 @@ fn save_settings(
     state: State<SettingsState>,
     settings: std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let mut state = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut state = state.lock()?;
     state.0.options = settings;
     settings::save(&state.1, &state.0)
 }
@@ -1521,13 +1522,13 @@ fn save_player_state(
     state: State<SettingsState>,
     player_state: SavedPlayerState,
 ) -> Result<(), String> {
-    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let settings = state.lock()?;
     player_state::save(&settings.1, &player_state)
 }
 
 #[tauri::command]
 fn load_player_state(state: State<SettingsState>) -> Result<SavedPlayerState, String> {
-    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let settings = state.lock()?;
     Ok(player_state::load(&settings.1))
 }
 
@@ -1535,13 +1536,13 @@ fn load_player_state(state: State<SettingsState>) -> Result<SavedPlayerState, St
 
 #[tauri::command]
 fn pins_load(state: State<SettingsState>) -> Result<pins::PinsState, String> {
-    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let settings = state.lock()?;
     Ok(pins::load(&settings.1))
 }
 
 #[tauri::command]
 fn pins_save(state: State<SettingsState>, pins_state: pins::PinsState) -> Result<(), String> {
-    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let settings = state.lock()?;
     pins::save(&settings.1, &pins_state)
 }
 
@@ -1586,7 +1587,7 @@ fn track_set_override(
     artist: Option<String>,
     cover: Option<CoverInput>,
 ) -> Result<TrackMetadata, String> {
-    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let lib = library.lock()?;
 
     let (cover_data, accent_color, keep_existing_cover) = match cover {
         Some(c) if c.reset.unwrap_or(false) => (None, None, false),
@@ -1619,7 +1620,7 @@ fn read_image_as_data_url(source_path: String) -> Result<String, String> {
 /// Clears all track overrides at once ("Reset edits" button in settings).
 #[tauri::command(async)]
 fn track_clear_all_overrides(library: State<LibraryState>) -> Result<usize, String> {
-    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let lib = library.lock()?;
     lib.clear_all_track_overrides()
 }
 
@@ -1630,7 +1631,7 @@ fn fetch_track_with_override(
     // Prefer the library row (overrides already applied); fall back to reading
     // tags from disk if the track isn't in the library (e.g. playing an unsaved file).
     let from_lib = {
-        let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let lib = library.lock()?;
         lib.get_track(file_path).map(|mut t| {
             // Mapper only fills cover_art for override covers; backfill embedded cover URL.
             if t.cover_art.is_none() && lib.has_cover(file_path) {
@@ -1647,7 +1648,7 @@ fn fetch_track_with_override(
     }
 
     let mut metadata = AudioPlayer::get_metadata(file_path)?;
-    let lib = library.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let lib = library.lock()?;
     if let Some(sig) = lib.get_override_cover_sig(file_path) {
         metadata.cover_art = Some(thumbnails::cover_protocol_url(file_path, &sig));
     }
@@ -1666,7 +1667,7 @@ fn cover_set_custom(
     key: String,
     source_path: String,
 ) -> Result<String, String> {
-    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let settings = state.lock()?;
     covers::set_custom_cover(&settings.1, &kind, &key, &source_path)
 }
 
@@ -1676,13 +1677,13 @@ fn cover_remove_custom(
     kind: String,
     key: String,
 ) -> Result<(), String> {
-    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let settings = state.lock()?;
     covers::remove_custom_cover(&settings.1, &kind, &key)
 }
 
 #[tauri::command(async)]
 fn cover_load_all(state: State<SettingsState>) -> Result<Vec<covers::CustomCoverEntry>, String> {
-    let settings = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let settings = state.lock()?;
     Ok(covers::load_all(&settings.1))
 }
 
@@ -1768,7 +1769,7 @@ async fn downloads_search(
     index: Option<u32>,
     limit: Option<u32>,
 ) -> Result<external::ExternalSearchPage, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let mut page = external::search_tracks(
             &query,
             artist.as_deref(),
@@ -1782,10 +1783,9 @@ async fn downloads_search(
                 .iter_mut()
                 .map(|t| (t.artist.as_str(), t.title.as_str(), t.album.as_deref(), &mut t.in_library)),
         );
-        page
+        Ok(page)
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))
 }
 
 /// "Paste a link": probes a yt-dlp-supported URL (single video or playlist)
@@ -1795,7 +1795,7 @@ async fn downloads_resolve_link(
     app: tauri::AppHandle,
     url: String,
 ) -> Result<downloader::LinkResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let mut result = downloader::resolve_link(&app, &url)?;
         mark_in_library(
             &app,
@@ -1807,7 +1807,6 @@ async fn downloads_resolve_link(
         Ok(result)
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 /// Sets `in_library` when the title matches, at least one artist overlaps
@@ -1846,7 +1845,7 @@ async fn downloads_album(
     app: tauri::AppHandle,
     album_id: u64,
 ) -> Result<Option<external::ExternalAlbumDetail>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let mut detail = external::album_detail(album_id)?;
         if let Some(d) = detail.as_mut() {
             mark_in_library(
@@ -1859,7 +1858,6 @@ async fn downloads_album(
         Ok(detail)
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 #[tauri::command]
@@ -1867,7 +1865,7 @@ async fn downloads_artist(
     app: tauri::AppHandle,
     artist_id: u64,
 ) -> Result<Option<external::ExternalArtistDetail>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let mut detail = external::artist_detail(artist_id)?;
         if let Some(d) = detail.as_mut() {
             mark_in_library(
@@ -1880,7 +1878,28 @@ async fn downloads_artist(
         Ok(detail)
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Paginated artist tracks for the "all tracks" list (infinite scroll).
+#[tauri::command]
+async fn downloads_artist_tracks(
+    app: tauri::AppHandle,
+    artist_id: u64,
+    artist_name: Option<String>,
+    index: u32,
+    limit: u32,
+) -> Result<external::ExternalSearchPage, String> {
+    run_blocking(move || {
+        let mut page = external::artist_tracks(artist_id, artist_name.as_deref(), index, limit)?;
+        mark_in_library(
+            &app,
+            page.tracks
+                .iter_mut()
+                .map(|t| (t.artist.as_str(), t.title.as_str(), t.album.as_deref(), &mut t.in_library)),
+        );
+        Ok(page)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1930,7 +1949,7 @@ async fn downloads_set_dir(
     app: tauri::AppHandle,
     folder_path: Option<String>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(move || {
         let (old_dir, new_dir) = downloader::set_downloads_dir(&app, folder_path);
 
         if !downloader::same_path(&old_dir, &new_dir) {
@@ -1939,7 +1958,7 @@ async fn downloads_set_dir(
             let new = new_dir.to_string_lossy().to_string();
 
             let state = app.state::<LibraryState>();
-            let mut library = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let mut library = state.lock()?;
             if library.covering_folder(&old).as_deref() == Some(old.as_str()) {
                 library.remove_folder(
                     old,
@@ -1962,7 +1981,6 @@ async fn downloads_set_dir(
         Ok(new_dir.to_string_lossy().to_string())
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
 }
 
 /// Windows: opens via `ShellExecuteW` (verb "open") rather than calling `explorer.exe`
@@ -1993,7 +2011,7 @@ fn open_folder_in_explorer(path: String) -> Result<(), String> {
         if hinst.0 as isize <= 32 {
             return Err("Не удалось открыть папку".to_string());
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -2031,16 +2049,12 @@ fn downloads_set_settings(
 /// Local status, no network.
 #[tauri::command]
 async fn tools_status(app: tauri::AppHandle) -> Result<downloader::ToolsState, String> {
-    tauri::async_runtime::spawn_blocking(move || downloader::tools_state(&app))
-        .await
-        .map_err(|e| format!("Task error: {}", e))
+    run_blocking(move || Ok(downloader::tools_state(&app))).await
 }
 
 #[tauri::command]
 async fn tools_check_updates(app: tauri::AppHandle) -> Result<downloader::ToolsState, String> {
-    tauri::async_runtime::spawn_blocking(move || downloader::check_updates(&app))
-        .await
-        .map_err(|e| format!("Task error: {}", e))?
+    run_blocking(move || downloader::check_updates(&app)).await
 }
 
 /// `tools` omitted = install everything missing and update what's outdated.
@@ -2050,17 +2064,13 @@ async fn tools_install(
     app: tauri::AppHandle,
     tools: Option<Vec<downloader::tools::Tool>>,
 ) -> Result<downloader::ToolsState, String> {
-    tauri::async_runtime::spawn_blocking(move || downloader::install(&app, tools))
-        .await
-        .map_err(|e| format!("Task error: {}", e))?
+    run_blocking(move || downloader::install(&app, tools)).await
 }
 
 /// Removes the app-managed copies (system ones on PATH are left alone).
 #[tauri::command]
 async fn tools_remove(app: tauri::AppHandle) -> Result<downloader::ToolsState, String> {
-    tauri::async_runtime::spawn_blocking(move || downloader::remove_tools(&app))
-        .await
-        .map_err(|e| format!("Task error: {}", e))?
+    run_blocking(move || downloader::remove_tools(&app)).await
 }
 
 /// Blocks on `signal` (near-instant wakeup on natural EOF, 500ms safety-net
@@ -2239,6 +2249,7 @@ pub fn run() {
             downloads_resolve_link,
             downloads_album,
             downloads_artist,
+            downloads_artist_tracks,
             downloads_enqueue,
             downloads_snapshot,
             downloads_cancel,

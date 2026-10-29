@@ -395,6 +395,52 @@ function itemFor(t: ExternalSearchTrack): DownloadItem | undefined {
   return queueIndex.value.get(keyOf(t))
 }
 
+// ── Page helpers ────────────────────────────────────────────────────────────
+
+type KeyedTrack = { artist: string; title: string; album: string | null }
+
+function trackKeyOf(t: KeyedTrack): string {
+  return trackKey(t.artist, t.title, t.album)
+}
+
+/** Tracks that are neither in the library nor queued (failed items don't count as queued). */
+function notQueued(tracks: ExternalSearchTrack[]): ExternalSearchTrack[] {
+  const queued = new Set(queue.value.filter(i => i.stage !== 'error').map(trackKeyOf))
+  return tracks.filter(tr => !tr.in_library && !queued.has(trackKeyOf(tr)))
+}
+
+/**
+ * Marks tracks as "in library" once their download finishes, so a row stays
+ * "Downloaded" after the queue's "done" entry is cleared (`in_library` is a
+ * one-shot snapshot from the initial fetch, never refreshed on its own).
+ */
+export function useKeepDownloadedInLibrary(lists: () => ExternalSearchTrack[][]) {
+  watch(queue, (items) => {
+    const done = new Set(items.filter(i => i.stage === 'done').map(trackKeyOf))
+    if (!done.size) return
+    for (const list of lists()) {
+      for (const tr of list) if (!tr.in_library && done.has(trackKeyOf(tr))) tr.in_library = true
+    }
+  })
+}
+
+/** "Already in library, download again?" confirmation for a single track. */
+export function useRedownloadConfirm(beforeEnqueue?: () => void) {
+  const { t } = useI18n()
+  const confirmTrack = ref<ExternalSearchTrack | null>(null)
+  const confirmMessage = computed(() =>
+    confirmTrack.value ? t('downloads.redownloadText', { title: confirmTrack.value.title }) : '',
+  )
+  async function confirmRedownload() {
+    const track = confirmTrack.value
+    confirmTrack.value = null
+    if (!track) return
+    beforeEnqueue?.()
+    try { await enqueue(track, true) } catch (e) { console.error('Ошибка повторного скачивания:', e) }
+  }
+  return { confirmTrack, confirmMessage, confirmRedownload }
+}
+
 // ── Display helpers ─────────────────────────────────────────────────────────
 
 function formatBytes(bps: number): string {
@@ -445,7 +491,10 @@ export function useDownloads() {
     resolveLink,
     albumDetail: (id: number) => invoke<ExternalAlbumDetail | null>('downloads_album', { albumId: id }),
     artistDetail: (id: number) => invoke<ExternalArtistDetail | null>('downloads_artist', { artistId: id }),
+    artistTracks: (id: number, index: number, limit: number, name?: string) =>
+      invoke<ExternalSearchPage>('downloads_artist_tracks', { artistId: id, artistName: name || undefined, index, limit }),
     enqueue,
+    notQueued,
     cancel: (id: number) => invoke('downloads_cancel', { id }),
     cancelAll: () => invoke('downloads_cancel_all'),
     retry: (ids?: number[]) => invoke('downloads_retry', { ids }),

@@ -344,7 +344,7 @@ fn spectral_stats(samples: &[f32], sample_rate: u32) -> SpectralStats {
     let mut frame_index = 0usize;
     let mut pos = 0usize;
     while pos + FFT_SIZE <= samples.len() {
-        if frame_index % SPECTRAL_FRAME_STEP == 0 {
+        if frame_index.is_multiple_of(SPECTRAL_FRAME_STEP) {
             for i in 0..FFT_SIZE {
                 fft_buffer[i] = Complex::new(samples[pos + i] * window[i], 0.0);
             }
@@ -671,13 +671,13 @@ mod tests {
         assert!(fa.len() >= 16);
     }
 
-    #[test]
-    fn file_analysis_budget_stays_small_for_scanning() {
+    // File analysis budget stays small for scanning (checked at compile time).
+    const _: () = {
         assert!(ANALYSIS_WINDOW_SECS >= 8.0);
         assert!(ANALYSIS_WINDOW_SECS <= 12.0);
         assert!(TARGET_SAMPLE_RATE <= 8_000);
         assert!(FFT_SIZE <= 512);
-    }
+    };
 
     #[test]
     fn analyze_samples_below_fft_size_returns_all_none() {

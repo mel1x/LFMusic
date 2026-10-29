@@ -7,6 +7,7 @@ import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
 import SearchIcon from '../components/Icons/SearchIcon.vue';
 import EmptyIcon from '../components/Icons/EmptyIcon.vue';
+import MoreIcon from '../components/Icons/MoreIcon.vue';
 import defaultTrackCover from '../assets/trackCover.webp';
 
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
@@ -17,6 +18,8 @@ import { useVirtualScroll } from '../composables/useVirtualScroll';
 import { searchRanked } from '../composables/useSearch';
 import { tracksCountText } from '../utils/format';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
+import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
+import { usePins } from '../composables/usePins';
 import TrackRow from '../components/TrackRow.vue';
 import TrackArtists from '../components/TrackArtists.vue';
 import CoverEditor from '../components/CoverEditor.vue';
@@ -370,6 +373,7 @@ onMounted(() => {
 // ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
+import { menuAnchorBelow } from '../utils/menu'
 const searchInput = ref<HTMLInputElement | null>(null)
 useTypeToSearch(searchInput)
 const rawSearch = ref('')
@@ -547,6 +551,25 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
 
+// ── Album page context menu (more button) ──
+
+const { isPinned: isPinnedFn, togglePin } = usePins()
+const isPinned = computed(() => isPinnedFn('album', albumName.value))
+const albumMenu = ref<{ x: number; y: number } | null>(null)
+
+function openAlbumMenu(e: MouseEvent) {
+    e.stopPropagation()
+    if (albumMenu.value) {
+        albumMenu.value = null
+        return
+    }
+    albumMenu.value = { ...menuAnchorBelow(e) }
+}
+
+function onTogglePin() {
+    togglePin({ kind: 'album', key: albumName.value, name: albumName.value })
+}
+
 // ── Move track to top of album ──
 
 async function moveTrackToTopOfAlbum(track: TrackMetadata) {
@@ -613,6 +636,9 @@ function onCoverImgClick() {
                             <PauseIcon v-if="isAlbumActive && isPlaying" width="14" height="14" />
                             <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
                             Слушать
+                        </button>
+                        <button class="moreBtn" :class="{ menuOpen: !!albumMenu }" @mousedown.stop="openAlbumMenu($event)">
+                            <MoreIcon width="22" height="22" />
                         </button>
                     </div>
                 </div>
@@ -705,6 +731,18 @@ function onCoverImgClick() {
             centerY
             @close="trackMenu = null"
             @moveToTop="moveTrackToTopOfAlbum"
+        />
+        <PlaylistContextMenu
+            v-if="albumMenu"
+            :x="albumMenu.x"
+            :y="albumMenu.y"
+            :isPinned="isPinned"
+            :showDelete="false"
+            customCoverKind="album"
+            :customCoverKey="albumName"
+            centerX
+            @close="albumMenu = null"
+            @togglePin="onTogglePin"
         />
     </div>
 </template>
@@ -895,6 +933,22 @@ function onCoverImgClick() {
 }
 .playListBtn svg {
     width: 16px;
+}
+.moreBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+    border-radius: 999px;
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.6);
+    cursor: pointer;
+    transition: .24s ease;
+}
+.moreBtn:hover,
+.moreBtn.menuOpen {
+    background-color: hsla(0, 0%, 100%, 0.08);
+    color: hsla(0, 0%, 100%, 1);
 }
 .searchZone {
     position: relative;

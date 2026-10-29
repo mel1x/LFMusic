@@ -131,11 +131,8 @@ fn base_command(tools: &Resolved, net: &NetOptions) -> std::process::Command {
         cmd.arg("--js-runtimes")
             .arg(format!("deno:{}", tools::path_arg(deno)));
     }
-    match &net.proxy {
-        Some(p) => {
-            cmd.arg("--proxy").arg(p);
-        }
-        None => {}
+    if let Some(p) = &net.proxy {
+        cmd.arg("--proxy").arg(p);
     }
     match &net.cookies {
         Some(Cookies::Browser(name)) => {
@@ -312,7 +309,7 @@ pub fn strip_video_noise(title: &str) -> String {
     ];
     let mut out = String::new();
     let mut rest = title;
-    while let Some(start) = rest.find(|c| c == '(' || c == '[') {
+    while let Some(start) = rest.find(['(', '[']) {
         let close = if rest[start..].starts_with('(') { ')' } else { ']' };
         let Some(len) = rest[start..].find(close) else { break };
         let inner = rest[start + 1..start + len].to_lowercase();

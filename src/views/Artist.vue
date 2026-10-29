@@ -11,6 +11,7 @@ import EmptyIcon from '../components/Icons/EmptyIcon.vue'
 import defaultTrackCover from '../assets/trackCover.webp'
 
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
+import { usePlaySource } from '../composables/usePlaySource'
 import { usePlaylists } from '../composables/usePlaylists'
 import { createRipple } from '../composables/useRipple'
 import { isPhoneViewport } from '../composables/usePlatform'
@@ -23,6 +24,7 @@ import CoverEditor from '../components/CoverEditor.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import { useCustomCovers } from '../composables/useCustomCovers'
 import { useExternalSources } from '../composables/useExternalSources'
+import { menuAnchorBelow } from '../utils/menu'
 import {
     TRACK_STATISTICS_UPDATED_EVENT,
     sumListenCount,
@@ -43,6 +45,7 @@ const {
     getTrackByPath,
     cacheTracks,
 } = usePlayer()
+const { playSource } = usePlaySource()
 
 const { albums: albumPlaylists, artists: artistPlaylists, loadPlaylists, getPlaylistTracks } = usePlaylists()
 
@@ -330,16 +333,7 @@ function isAlbumActive(album: AlbumEntry) {
 
 async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
     e.stopPropagation()
-    if (isAlbumActive(album)) {
-        togglePlayPause()
-        return
-    }
-    if (album.trackCount === 0) return
-    const tracks = await getPlaylistTracks(album.id)
-    if (tracks.length === 0) return
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t)
-    setPlaylistSource(`album:${album.name}`, merged)
-    await playTrack(merged[0])
+    await playSource(`album:${album.name}`, album.id)
 }
 
 function openAlbum(album: AlbumEntry) {
@@ -354,9 +348,7 @@ function openAlbumMenu(e: MouseEvent, album: AlbumEntry) {
         albumMenu.value = null
         return
     }
-    const btn = e.currentTarget as HTMLElement
-    const rect = btn.getBoundingClientRect()
-    albumMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, album, centerX: true }
+    albumMenu.value = { ...menuAnchorBelow(e), album, centerX: true }
 }
 
 function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {
@@ -390,9 +382,7 @@ function openArtistMenu(e: MouseEvent) {
         artistMenu.value = null
         return
     }
-    const btn = e.currentTarget as HTMLElement
-    const rect = btn.getBoundingClientRect()
-    artistMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6 }
+    artistMenu.value = { ...menuAnchorBelow(e) }
 }
 
 function onTogglePin() {

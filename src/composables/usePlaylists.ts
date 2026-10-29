@@ -89,6 +89,17 @@ function createPlaylists() {
     return [...top, ...rest];
   });
 
+  /** First free "Новый плейлист N" name. */
+  function nextPlaylistName(): string {
+    const re = /^Новый плейлист\s+(\d+)$/;
+    let maxN = 0;
+    for (const pl of userPlaylists.value) {
+      const m = pl.name.match(re);
+      if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+    }
+    return `Новый плейлист ${maxN + 1}`;
+  }
+
   function movePlaylistToTop(playlistId: number) {
     const idx = topOrder.value.indexOf(playlistId);
     if (idx >= 0) topOrder.value.splice(idx, 1);
@@ -270,6 +281,7 @@ function createPlaylists() {
     toggleFavorite,
     getPlaylistTracks,
     createPlaylist,
+    nextPlaylistName,
     renamePlaylist,
     deletePlaylist,
     addTrackToPlaylist,

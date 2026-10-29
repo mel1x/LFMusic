@@ -365,7 +365,7 @@ mod imp {
             // Alpha from brightness (white text on black bg); color dimmed by
             // `level`, premultiplied.
             let px = std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize);
-            for chunk in px.chunks_exact_mut(4) {
+            for chunk in px.as_chunks_mut::<4>().0 {
                 let a = chunk[0].max(chunk[1]).max(chunk[2]); // BGRA
                 let c = (a as u16 * level as u16 / 255) as u8;
                 chunk[0] = c;
@@ -671,9 +671,7 @@ mod imp {
         match kind {
             Anim::SlideFwd | Anim::SlideBack => {
                 let new = COVERS.lock().ok()?;
-                if new.current.is_none() {
-                    return None;
-                }
+                new.current.as_ref()?;
                 let old = OLD_COVERS.lock().ok()?;
                 let forward = kind == Anim::SlideFwd;
                 let img = compose_slide(&old, &new, forward, t, cw, ch, ps);
@@ -681,9 +679,7 @@ mod imp {
             }
             Anim::Fade => {
                 let new = COVERS.lock().ok()?;
-                if new.current.is_none() {
-                    return None;
-                }
+                new.current.as_ref()?;
                 let ni = compose(&new, cw, ch, ps);
                 let old = OLD_COVERS.lock().ok()?;
                 let oi = if old.current.is_some() {
@@ -695,9 +691,7 @@ mod imp {
             }
             Anim::None => {
                 let new = COVERS.lock().ok()?;
-                if new.current.is_none() {
-                    return None;
-                }
+                new.current.as_ref()?;
                 let img = compose(&new, cw, ch, ps);
                 unsafe { blend_to_hbitmap(&img, None, 1.0) }
             }
@@ -817,7 +811,7 @@ mod imp {
             }
             // GDI doesn't set alpha — force opaque or DWM may show a transparent/black frame.
             let px = std::slice::from_raw_parts_mut(bits as *mut u8, (w * ht * 4) as usize);
-            for chunk in px.chunks_exact_mut(4) {
+            for chunk in px.as_chunks_mut::<4>().0 {
                 chunk[3] = 255;
             }
             Some(hbm)
@@ -1107,7 +1101,7 @@ mod imp {
                 let mut bright_opaque = 0usize;
                 let mut translucent = 0usize;
 
-                for px in pixels.chunks_exact(4) {
+                for px in pixels.as_chunks::<4>().0 {
                     let alpha = px[3];
                     if alpha == 255 {
                         opaque += 1;

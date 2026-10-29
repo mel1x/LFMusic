@@ -16,6 +16,8 @@ import defaultTrackCover from '../assets/trackCover.webp'
 
 import {
     useDownloads,
+    useKeepDownloadedInLibrary,
+    useRedownloadConfirm,
     type ExternalSearchTrack,
     type ExternalSearchAlbum,
     type ExternalSearchArtist,
@@ -316,24 +318,9 @@ async function downloadBest() {
 
 // ── Redownload confirm ──────────────────────────────────────────────────────
 
-const confirmTrack = ref<ExternalSearchTrack | null>(null)
-async function confirmRedownload() {
-    const tr = confirmTrack.value
-    confirmTrack.value = null
-    if (!tr) return
-    remember()
-    await enqueue(tr, true).catch(e => console.error(e))
-}
+const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm(remember)
 
-// Finished downloads flip results to "in library" so the state survives
-// clearing the queue.
-watch(queue, (items) => {
-    const done = new Set(items.filter(i => i.stage === 'done').map(i => trackKey(i.artist, i.title, i.album)))
-    if (!done.size) return
-    for (const list of [tracks.value, link.value?.tracks ?? []]) {
-        for (const tr of list) if (!tr.in_library && done.has(trackKey(tr.artist, tr.title, tr.album))) tr.in_library = true
-    }
-})
+useKeepDownloadedInLibrary(() => [tracks.value, link.value?.tracks ?? []])
 
 // ── Idle page: recent downloads ─────────────────────────────────────────────
 
@@ -427,7 +414,7 @@ onUnmounted(() => {
         <div class="searchDock" :class="{ stuck }">
             <div class="searchBox" :class="{ link: typingLink, disabled: locked, filled: !!rawSearch }">
                 <span class="searchLead" @click="searchInput?.focus()">
-                    <svg v-if="typingLink" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                    <svg v-if="typingLink" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                     <SearchIcon v-else />
                 </span>
                 <input
@@ -447,7 +434,9 @@ onUnmounted(() => {
                     <span v-if="typingLink" class="modeTag">{{ t('downloads.linkTag') }}</span>
                 </Transition>
                 <span v-if="searching || linkResolving" class="searchSpinner"></span>
-                <button v-if="rawSearch && !locked" class="searchClear" @click="clearSearch"><CloseIcon width="14" height="14" /></button>
+                <button v-if="rawSearch && !locked" class="searchClear" @click="clearSearch">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
             </div>
 
             <nav v-if="hasQuery && !linkMode && anyResults" class="tabs" role="tablist">
@@ -695,7 +684,7 @@ onUnmounted(() => {
         <ConfirmModal
             :open="confirmTrack !== null"
             :title="t('downloads.redownloadTitle')"
-            :message="confirmTrack ? t('downloads.redownloadText', { title: confirmTrack.title }) : ''"
+            :message="confirmMessage"
             :cancel-text="t('downloads.redownloadCancel')"
             :confirm-text="t('downloads.redownloadConfirm')"
             @cancel="confirmTrack = null"
@@ -719,13 +708,11 @@ onUnmounted(() => {
     width: 100%;
     height: 100%;
     overflow-y: auto;
-    padding: 0 32px 40px;
+    padding: 0 28px 40px;
     display: flex;
     flex-direction: column;
     background-color: var(--light-bg);
-    background-image:
-        radial-gradient(120% 340px at 0% 0%, hsla(var(--accent-h), 55%, 62%, 0.16), transparent 70%),
-        radial-gradient(80% 300px at 100% 0%, hsla(calc(var(--accent-h) + 40), 50%, 60%, 0.08), transparent 70%);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 }
@@ -735,7 +722,7 @@ onUnmounted(() => {
 
 /* ── Hero ─────────────────────────────────────────────────────────── */
 .hero {
-    padding: 28px 0 4px;
+    padding: 20px 0 4px;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -761,8 +748,8 @@ onUnmounted(() => {
     position: sticky;
     top: 0;
     z-index: 5;
-    margin: 0 -32px;
-    padding: 14px 32px 12px;
+    margin: 0 -28px;
+    padding: 14px 28px 12px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -776,46 +763,39 @@ onUnmounted(() => {
     position: relative;
     display: flex;
     align-items: center;
-    height: 54px;
-    border-radius: 18px;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
-    transition: background-color .2s ease, box-shadow .2s ease;
+    height: 46px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.04);
+    transition: background-color .24s ease, box-shadow .24s ease;
 }
-.searchBox:hover { background-color: hsla(0, 0%, 100%, 0.08); }
-.searchBox:focus-within {
-    background-color: hsla(0, 0%, 100%, 0.09);
-    box-shadow: inset 0 0 0 1.5px hsla(var(--accent-h), min(calc(var(--accent-s) + 15%), 100%), 70%, 0.55),
-                0 10px 30px hsla(var(--accent-h), var(--accent-s), 10%, 0.35);
-}
-.searchBox.link:focus-within,
 .searchBox.link {
-    box-shadow: inset 0 0 0 1.5px hsla(145, 50%, 60%, 0.5);
+    box-shadow: inset 0 0 0 1.5px hsla(145, 50%, 60%, 0.45);
 }
 .searchBox.disabled { opacity: 0.5; }
 .searchLead {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 52px;
+    width: 42px;
+    padding-left: 4px;
     height: 100%;
     flex-shrink: 0;
     cursor: text;
-    color: hsla(var(--accent-h), var(--accent-s), 82%, 0.55);
-    transition: color .2s ease;
+    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
+    transition: color .24s ease;
 }
-.searchBox:focus-within .searchLead { color: hsla(var(--accent-h), var(--accent-s), 85%, 0.95); }
+.searchBox:hover .searchLead { color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8); }
 .searchBox.link .searchLead { color: hsla(145, 55%, 68%, 0.95); }
 .searchInput {
     flex: 1;
     min-width: 0;
     height: 100%;
     background: transparent;
-    font-size: 15px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.95);
+    font-size: 14px;
+    font-weight: 400;
+    color: hsla(0, 0%, 100%, 0.9);
 }
-.searchInput::placeholder { color: hsla(0, 0%, 100%, 0.32); font-weight: 600; }
+.searchInput::placeholder { user-select: none; color: hsla(0, 0%, 100%, 0.3); font-size: 14px; font-weight: 600; }
 .searchInput:disabled { cursor: not-allowed; }
 .modeTag {
     flex-shrink: 0;
@@ -841,19 +821,18 @@ onUnmounted(() => {
 }
 .searchClear {
     flex-shrink: 0;
-    margin-right: 10px;
-    width: 30px;
-    height: 30px;
+    margin-right: 5px;
+    padding: 6px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.45);
+    color: hsla(0, 0%, 100%, 0.3);
     background: transparent;
-    transition: .18s ease;
+    transition: .24s ease;
 }
-.searchClear:hover { color: #fff; background-color: hsla(0, 0%, 100%, 0.08); }
+.searchClear:hover { color: hsla(0, 0%, 100%, 0.6); }
 
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tab {
@@ -895,7 +874,6 @@ onUnmounted(() => {
     background:
         radial-gradient(140% 120% at 0% 0%, hsla(var(--accent-h), var(--accent-s), 50%, 0.28), transparent 60%),
         hsla(var(--accent-h), min(var(--accent-s), 40%), 16%, 0.75);
-    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.07);
 }
 .setupIcon {
     flex-shrink: 0;
@@ -1021,7 +999,7 @@ onUnmounted(() => {
     transition: color .18s ease;
 }
 .textBtn:hover { color: #fff; }
-.trackList { display: flex; flex-direction: column; margin: 0 -8px; }
+.trackList { display: flex; flex-direction: column; gap: 3px; margin: 0 -8px; }
 .eyebrow {
     font-size: 11px;
     font-weight: 800;
@@ -1039,7 +1017,7 @@ onUnmounted(() => {
     gap: 8px;
     max-width: 280px;
     height: 36px;
-    padding: 0 6px 0 13px;
+    padding: 0 7px 0 13px;
     border-radius: 999px;
     cursor: pointer;
     font-size: 13px;
@@ -1061,12 +1039,11 @@ onUnmounted(() => {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.4);
+    color: hsla(0, 0%, 100%, 0.3);
     background: transparent;
-    opacity: 0;
     transition: .18s ease;
 }
-.recentChip:hover .recentRemove { opacity: 1; }
+.recentChip:hover .recentRemove { color: hsla(0, 0%, 100%, 0.6); }
 .recentRemove:hover { color: #fff; background: hsla(0, 0%, 100%, 0.12); }
 
 /* Tips */
@@ -1082,8 +1059,7 @@ onUnmounted(() => {
     gap: 6px;
     padding: 18px;
     border-radius: 18px;
-    background: hsla(0, 0%, 100%, 0.035);
-    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.05);
+    background: hsla(0, 0%, 100%, 0.04);
     font-size: 12.5px;
     line-height: 1.45;
     color: hsla(0, 0%, 100%, 0.45);
@@ -1124,7 +1100,6 @@ onUnmounted(() => {
     background:
         radial-gradient(120% 100% at 0% 0%, hsla(var(--accent-h), var(--accent-s), 55%, 0.2), transparent 65%),
         hsla(0, 0%, 100%, 0.045);
-    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
     transition: background-color .2s ease, transform .25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .bestCard:hover { background-color: hsla(0, 0%, 100%, 0.075); transform: translateY(-2px); }
@@ -1340,6 +1315,7 @@ onUnmounted(() => {
     .dlPage { padding: 0 16px 80px; }
     .hero { padding-top: 16px; }
     .searchDock { margin: 0 -16px; padding: 12px 16px; }
+    .searchBox { height: 48px; border-radius: 14px; }
     .heroTitle { font-size: 30px; }
     .heroSub { display: none; }
     .setupCard { flex-direction: column; align-items: flex-start; }

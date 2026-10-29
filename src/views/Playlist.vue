@@ -100,6 +100,7 @@ const playlistCover = computed(() => {
 // ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
+import { menuAnchorBelow } from '../utils/menu'
 const searchInput = ref<HTMLInputElement | null>(null)
 useTypeToSearch(searchInput)
 const rawSearch = ref('')
@@ -336,9 +337,7 @@ function openPlaylistMenu(e: MouseEvent) {
         playlistMenu.value = null
         return
     }
-    const btn = e.currentTarget as HTMLElement
-    const rect = btn.getBoundingClientRect()
-    playlistMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6 }
+    playlistMenu.value = { ...menuAnchorBelow(e) }
 }
 
 function onTogglePin() {

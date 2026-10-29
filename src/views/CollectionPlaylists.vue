@@ -14,6 +14,7 @@ import ConfirmModal from '../components/ConfirmModal.vue';
 import defaultCover from '../assets/playlistCover.webp';
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
+import { usePlaySource } from '../composables/usePlaySource';
 import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
 import AnimatedCover from '../components/AnimatedCover.vue';
@@ -24,17 +25,15 @@ import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
 
 const router = useRouter();
-const { userPlaylists, favoritesPlaylist, loadPlaylists, createPlaylist, getPlaylistTracks, deletePlaylist, movePlaylistToTop } = usePlaylists();
+const { userPlaylists, favoritesPlaylist, loadPlaylists, createPlaylist, nextPlaylistName, deletePlaylist, movePlaylistToTop } = usePlaylists();
 const {
     catalogCount,
     getTrackByPath,
     loadCoversForTracks,
     isPlaying,
     activePlaylistSource,
-    playTrack,
-    togglePlayPause,
-    setPlaylistSource,
 } = usePlayer();
+const { playSource } = usePlaySource();
 
 const { getCustomCover } = useCustomCovers();
 
@@ -59,6 +58,7 @@ onMounted(async () => {
 });
 
 import { useTypeToSearch } from '../composables/useTypeToSearch';
+import { menuAnchorBelow } from '../utils/menu';
 const searchInput = ref<HTMLInputElement | null>(null);
 useTypeToSearch(searchInput);
 const rawSearch = ref('');
@@ -226,19 +226,6 @@ watch(catalogCount, () => {
     }
 });
 
-function nextPlaylistName(): string {
-    const re = /^Новый плейлист\s+(\d+)$/;
-    let maxN = 0;
-    for (const pl of userPlaylists.value) {
-        const m = pl.name.match(re);
-        if (m) {
-            const n = parseInt(m[1], 10);
-            if (n > maxN) maxN = n;
-        }
-    }
-    return `Новый плейлист ${maxN + 1}`;
-}
-
 const createModalOpen = ref(false);
 
 function onCreatePlaylist() {
@@ -277,15 +264,7 @@ function isPlaylistActive(pl: PlaylistInfo) {
 
 async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     e.stopPropagation();
-    if (isPlaylistActive(pl)) {
-        togglePlayPause();
-        return;
-    }
-    const tracks = await getPlaylistTracks(pl.id);
-    if (tracks.length === 0) return;
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
-    setPlaylistSource(`playlist:${pl.id}`, merged);
-    await playTrack(merged[0]);
+    await playSource(`playlist:${pl.id}`, pl.id);
 }
 
 function onTogglePinClick(e: MouseEvent, pl: PlaylistInfo) {
@@ -301,9 +280,7 @@ function openPlaylistMenu(e: MouseEvent, pl: PlaylistInfo) {
         playlistMenu.value = null;
         return;
     }
-    const btn = e.currentTarget as HTMLElement;
-    const rect = btn.getBoundingClientRect();
-    playlistMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, pl, centerX: true };
+    playlistMenu.value = { ...menuAnchorBelow(e), pl, centerX: true };
 }
 
 function openPlaylistMenuFromCover(e: MouseEvent, pl: PlaylistInfo) {

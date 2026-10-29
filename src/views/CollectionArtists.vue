@@ -11,6 +11,7 @@ import MoreIcon from '../components/Icons/MoreIcon.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
+import { sortByTopOrder, usePlaySource } from '../composables/usePlaySource';
 import { usePlaylists } from '../composables/usePlaylists';
 import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
@@ -28,11 +29,9 @@ const {
     loadCoversForTracks,
     isPlaying,
     activePlaylistSource,
-    playTrack,
-    togglePlayPause,
-    setPlaylistSource,
 } = usePlayer();
-const { artists: artistPlaylists, artistTopOrder, loadPlaylists, getPlaylistTracks, moveArtistToTop } = usePlaylists();
+const { playSource } = usePlaySource();
+const { artists: artistPlaylists, artistTopOrder, loadPlaylists, moveArtistToTop } = usePlaylists();
 
 interface ArtistEntry {
     id: number;
@@ -81,6 +80,7 @@ onMounted(async () => {
 });
 
 import { useTypeToSearch } from '../composables/useTypeToSearch';
+import { menuAnchorBelow } from '../utils/menu';
 const searchInput = ref<HTMLInputElement | null>(null);
 useTypeToSearch(searchInput);
 const rawSearch = ref('');
@@ -107,17 +107,7 @@ function clearSearch() {
     searchInput.value?.focus();
 }
 
-const sortedArtists = computed(() => {
-    const all = artists.value;
-    const topSet = new Set(artistTopOrder.value);
-    const top: ArtistEntry[] = [];
-    for (const name of artistTopOrder.value) {
-        const a = all.find(ar => ar.name === name);
-        if (a) top.push(a);
-    }
-    const rest = all.filter(a => !topSet.has(a.name));
-    return [...top, ...rest];
-});
+const sortedArtists = computed(() => sortByTopOrder(artists.value, artistTopOrder.value));
 
 const filteredArtists = computed(() => {
     const q = debouncedSearch.value.trim();
@@ -155,16 +145,7 @@ function isArtistActive(artist: ArtistEntry) {
 
 async function onPlayArtist(e: MouseEvent, artist: ArtistEntry) {
     e.stopPropagation();
-    if (isArtistActive(artist)) {
-        togglePlayPause();
-        return;
-    }
-    if (artist.trackCount === 0) return;
-    const tracks = await getPlaylistTracks(artist.id);
-    if (tracks.length === 0) return;
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
-    setPlaylistSource(`artist:${artist.name}`, merged);
-    await playTrack(merged[0]);
+    await playSource(`artist:${artist.name}`, artist.id);
 }
 
 const artistMenu = ref<{ x: number; y: number; artist: ArtistEntry; centerX: boolean } | null>(null);
@@ -175,9 +156,7 @@ function openArtistMenu(e: MouseEvent, artist: ArtistEntry) {
         artistMenu.value = null;
         return;
     }
-    const btn = e.currentTarget as HTMLElement;
-    const rect = btn.getBoundingClientRect();
-    artistMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, artist, centerX: true };
+    artistMenu.value = { ...menuAnchorBelow(e), artist, centerX: true };
 }
 
 function openArtistMenuFromCover(e: MouseEvent, artist: ArtistEntry) {

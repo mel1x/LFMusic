@@ -70,19 +70,6 @@ export function splitArtistsList(input: string, separators: string[]): string[] 
         .map(p => p.text)
 }
 
-/**
- * Проверяет, относится ли тег исполнителя трека к артисту `target`.
- * Сравнение регистронезависимое, чтобы «MZLFF» и «mzlff» считались одним
- * артистом (см. группировку плейлистов исполнителей в бэкенде).
- */
-export function artistTagMatches(artistTag: string | null | undefined, target: string, separators: string[]): boolean {
-    const a = (artistTag || '').trim()
-    if (!a) return false
-    const t = target.toLowerCase()
-    if (a.toLowerCase() === t) return true
-    return splitArtistsList(a, separators).some(name => name.toLowerCase() === t)
-}
-
 export function formatTotalDuration(secs: number): string {
     const total = Math.max(0, Math.floor(secs))
     const h = Math.floor(total / 3600)

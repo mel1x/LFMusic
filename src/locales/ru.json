@@ -166,6 +166,9 @@
     "popularRedownloadText": "Самые популярные треки уже есть в вашей библиотеке. Скачать их заново?",
     "artistAlbumsCount": "Альбомов: {count}",
     "artistTopCount": "Популярных треков: {count}",
+    "showMore": "Смотреть больше",
+    "artistAllTracks": "Все треки",
+    "artistTracksEmpty": "Треков не найдено",
     "folder": {
       "sectionTitle": "Папка для скачивания",
       "desc": "Сюда сохраняются скачанные треки, папка сама добавляется в библиотеку.",

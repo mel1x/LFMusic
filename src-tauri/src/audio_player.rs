@@ -438,11 +438,10 @@ impl Iterator for SymphoniaSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        if self.current_pos >= self.current_samples.len() {
-            if !self.decode_next_packet() {
+        if self.current_pos >= self.current_samples.len()
+            && !self.decode_next_packet() {
                 return None;
             }
-        }
         if self.current_pos < self.current_samples.len() {
             let sample = self.current_samples[self.current_pos];
             self.current_pos += 1;

@@ -11,6 +11,7 @@ import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import defaultTrackCover from '../assets/trackCover.webp';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
+import { sortByTopOrder, usePlaySource } from '../composables/usePlaySource';
 import { usePlaylists } from '../composables/usePlaylists';
 import { usePins } from '../composables/usePins';
 import { searchRanked } from '../composables/useSearch';
@@ -28,12 +29,10 @@ const {
     loadCoversForTracks,
     isPlaying,
     activePlaylistSource,
-    playTrack,
-    togglePlayPause,
-    setPlaylistSource,
 } = usePlayer();
+const { playSource } = usePlaySource();
 
-const { albums: albumPlaylists, albumTopOrder, loadPlaylists, getPlaylistTracks, moveAlbumToTop } = usePlaylists();
+const { albums: albumPlaylists, albumTopOrder, loadPlaylists, moveAlbumToTop } = usePlaylists();
 
 interface AlbumEntry {
     id: number;
@@ -95,6 +94,7 @@ watch(() => route.query.q, (q) => {
 });
 
 import { useTypeToSearch } from '../composables/useTypeToSearch';
+import { menuAnchorBelow } from '../utils/menu';
 const searchInput = ref<HTMLInputElement | null>(null);
 useTypeToSearch(searchInput);
 const rawSearch = ref('');
@@ -136,17 +136,7 @@ function onToggleAlbumPinClick(e: MouseEvent, album: AlbumEntry) {
     toggleAlbumPin(album.name);
 }
 
-const sortedAlbums = computed(() => {
-    const all = albums.value;
-    const topSet = new Set(albumTopOrder.value);
-    const top: AlbumEntry[] = [];
-    for (const name of albumTopOrder.value) {
-        const a = all.find(al => al.name === name);
-        if (a) top.push(a);
-    }
-    const rest = all.filter(a => !topSet.has(a.name));
-    return [...top, ...rest];
-});
+const sortedAlbums = computed(() => sortByTopOrder(albums.value, albumTopOrder.value));
 
 const filteredAlbums = computed(() => {
     const q = debouncedSearch.value.trim();
@@ -293,16 +283,7 @@ function isAlbumActive(album: AlbumEntry) {
 
 async function onPlayAlbum(e: MouseEvent, album: AlbumEntry) {
     e.stopPropagation();
-    if (isAlbumActive(album)) {
-        togglePlayPause();
-        return;
-    }
-    if (album.trackCount === 0) return;
-    const tracks = await getPlaylistTracks(album.id);
-    if (tracks.length === 0) return;
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t);
-    setPlaylistSource(`album:${album.name}`, merged);
-    await playTrack(merged[0]);
+    await playSource(`album:${album.name}`, album.id);
 }
 
 function openAlbum(album: AlbumEntry) {
@@ -317,9 +298,7 @@ function openAlbumMenu(e: MouseEvent, album: AlbumEntry) {
         albumMenu.value = null;
         return;
     }
-    const btn = e.currentTarget as HTMLElement;
-    const rect = btn.getBoundingClientRect();
-    albumMenu.value = { x: rect.left + rect.width / 2, y: rect.bottom + 6, album, centerX: true };
+    albumMenu.value = { ...menuAnchorBelow(e), album, centerX: true };
 }
 
 function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {

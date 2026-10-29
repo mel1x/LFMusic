@@ -10,13 +10,15 @@
 //! URL (see [`protocol_handler`]), same pattern as `lfmusic-cover`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::json_store;
+use crate::util::{levenshtein, unix_secs};
 use tauri::http::{header, Response, StatusCode};
 use tauri::{AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
@@ -296,28 +298,6 @@ fn normalize_title(s: &str) -> String {
         .replace("original mix", " ")
         .replace("explicit", " ");
     normalize(&cleaned)
-}
-
-fn levenshtein(a: &[char], b: &[char]) -> usize {
-    let n = a.len();
-    let m = b.len();
-    if n == 0 {
-        return m;
-    }
-    if m == 0 {
-        return n;
-    }
-    let mut prev: Vec<usize> = (0..=m).collect();
-    let mut cur = vec![0usize; m + 1];
-    for i in 1..=n {
-        cur[0] = i;
-        for j in 1..=m {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[m]
 }
 
 /// Similarity in 0.0..=1.0 (1.0 = identical after normalization).
@@ -1481,7 +1461,7 @@ pub fn prepare_artist_separators(separators: &[String]) -> Vec<String> {
     ] {
         seps.push(extra.to_string());
     }
-    seps.sort_by(|a, b| b.len().cmp(&a.len()));
+    seps.sort_by_key(|s| std::cmp::Reverse(s.len()));
     seps.retain(|s| !s.is_empty());
     seps
 }
@@ -1904,62 +1884,12 @@ pub fn artist_detail(id: u64) -> Result<Option<ExternalArtistDetail>, String> {
         _ => Vec::new(),
     };
 
-    #[derive(Deserialize)]
-    struct TopResp {
-        #[serde(default)]
-        data: Vec<TopHit>,
-    }
-    #[derive(Deserialize)]
-    struct TopHit {
-        title: String,
-        duration: Option<u32>,
-        album: Option<AlbumRef>,
-    }
-    #[derive(Deserialize)]
-    struct AlbumRef {
-        id: Option<u64>,
-        title: Option<String>,
-        cover_xl: Option<String>,
-        cover_big: Option<String>,
-        cover_medium: Option<String>,
-    }
-    let top_tracks = match send_throttled(
-        client
-            .get(format!("https://api.deezer.com/artist/{}/top", id))
-            .query(&[("limit", "20")]),
-        "api.deezer.com",
-    ) {
-        Ok(r) if r.status().is_success() => {
-            let parsed: TopResp = r.json().map_err(|e| e.to_string())?;
-            parsed
-                .data
-                .into_iter()
-                .map(|t| {
-                    let (album, album_id, cover_url) = match t.album {
-                        Some(a) => (
-                            a.title.filter(|t| !t.is_empty()),
-                            a.id,
-                            pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
-                        ),
-                        None => (None, None, None),
-                    };
-                    ExternalSearchTrack {
-                        title: t.title,
-                        artist: artist.name.clone(),
-                        album,
-                        duration_secs: t.duration,
-                        cover_url,
-                        source: "Deezer".to_string(),
-                        in_library: false,
-                        artist_id: Some(artist.id),
-                        album_id,
-                        genre: None,
-                        source_url: None,
-                    }
-                })
-                .collect()
+    let top_tracks = match artist_tracks(id, Some(&artist.name), 0, 20) {
+        Ok(page) => page.tracks,
+        Err(e) => {
+            eprintln!("[external] deezer artist tracks error: {}", e);
+            Vec::new()
         }
-        _ => Vec::new(),
     };
 
     Ok(Some(ExternalArtistDetail {
@@ -1969,6 +1899,162 @@ pub fn artist_detail(id: u64) -> Result<Option<ExternalArtistDetail>, String> {
         albums,
         top_tracks,
     }))
+}
+
+/// Artist ids whose `/artist/{id}/top` came back empty. Deezer geo-restricts
+/// that endpoint in some regions (it answers `{"data":[],"total":0}` for every
+/// artist), so those artists page through name search instead — remembered
+/// to skip the dead request on every subsequent page.
+fn top_unavailable() -> &'static Mutex<std::collections::HashSet<u64>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// One page of an artist's tracks, most popular first. Uses Deezer's
+/// `/artist/{id}/top`; when that's empty, falls back to free-text search by
+/// the artist's name filtered to tracks whose main artist is `id`.
+/// `name` is fetched from `/artist/{id}` when not supplied. `albums`/`artists`
+/// of the returned page are always empty.
+pub fn artist_tracks(
+    id: u64,
+    name: Option<&str>,
+    index: u32,
+    limit: u32,
+) -> Result<ExternalSearchPage, String> {
+    let client = client();
+    let limit = limit.clamp(1, 100);
+    let use_top = !top_unavailable().lock().map(|s| s.contains(&id)).unwrap_or(false);
+
+    if use_top {
+        #[derive(Deserialize)]
+        struct TopResp {
+            #[serde(default)]
+            data: Vec<TopHit>,
+            #[serde(default)]
+            total: u32,
+            next: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct TopHit {
+            title: String,
+            duration: Option<u32>,
+            artist: Option<ArtistRef>,
+            album: Option<AlbumRef>,
+        }
+        #[derive(Deserialize)]
+        struct ArtistRef {
+            id: Option<u64>,
+            name: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct AlbumRef {
+            id: Option<u64>,
+            title: Option<String>,
+            cover_xl: Option<String>,
+            cover_big: Option<String>,
+            cover_medium: Option<String>,
+        }
+        let resp = send_throttled(
+            client
+                .get(format!("https://api.deezer.com/artist/{}/top", id))
+                .query(&[("index", index.to_string()), ("limit", limit.to_string())]),
+            "api.deezer.com",
+        )?;
+        if resp.status().is_success() {
+            let parsed: TopResp = resp.json().map_err(|e| e.to_string())?;
+            if parsed.total > 0 || !parsed.data.is_empty() {
+                let raw = parsed.data.len() as u32;
+                let tracks = parsed
+                    .data
+                    .into_iter()
+                    .map(|t| {
+                        let (album, album_id, cover_url) = match t.album {
+                            Some(a) => (
+                                a.title.filter(|t| !t.is_empty()),
+                                a.id,
+                                pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
+                            ),
+                            None => (None, None, None),
+                        };
+                        let artist = t
+                            .artist
+                            .and_then(|a| a.name.filter(|n| !n.is_empty()).map(|n| (n, a.id)));
+                        let (artist, artist_id) = match artist {
+                            Some((n, aid)) => (n, aid.or(Some(id))),
+                            None => (name.unwrap_or_default().to_string(), Some(id)),
+                        };
+                        ExternalSearchTrack {
+                            title: t.title,
+                            artist,
+                            album,
+                            duration_secs: t.duration,
+                            cover_url,
+                            source: "Deezer".to_string(),
+                            in_library: false,
+                            artist_id,
+                            album_id,
+                            genre: None,
+                            source_url: None,
+                        }
+                    })
+                    .collect();
+                return Ok(ExternalSearchPage {
+                    tracks,
+                    albums: Vec::new(),
+                    artists: Vec::new(),
+                    next_index: index + raw,
+                    has_more: parsed.next.is_some() && raw > 0,
+                });
+            }
+        }
+        if let Ok(mut s) = top_unavailable().lock() {
+            s.insert(id);
+        }
+    }
+
+    // Name-search fallback.
+    let name = match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n.to_string(),
+        None => {
+            #[derive(Deserialize)]
+            struct ArtistResp {
+                name: String,
+            }
+            let resp = send_throttled(
+                client.get(format!("https://api.deezer.com/artist/{}", id)),
+                "api.deezer.com",
+            )?;
+            if !resp.status().is_success() {
+                return Err(format!("artist {} not found", id));
+            }
+            resp.json::<ArtistResp>().map_err(|e| e.to_string())?.name
+        }
+    };
+
+    // Search hits by other artists are filtered out, so a single page may
+    // yield only a handful — keep pulling pages (bounded) until there's enough
+    // to fill the screen, otherwise infinite scroll never gets a scroll event.
+    const MAX_REQUESTS: u32 = 4;
+    let batch = limit.max(50);
+    let mut tracks: Vec<ExternalSearchTrack> = Vec::new();
+    let mut cursor = index;
+    let mut has_more = true;
+    for _ in 0..MAX_REQUESTS {
+        let (hits, raw) = deezer_search_tracks(client, &name, cursor, batch)?;
+        cursor += raw;
+        has_more = raw >= batch;
+        tracks.extend(hits.into_iter().filter(|t| t.artist_id == Some(id)));
+        if !has_more || tracks.len() as u32 >= limit / 2 {
+            break;
+        }
+    }
+    Ok(ExternalSearchPage {
+        tracks,
+        albums: Vec::new(),
+        artists: Vec::new(),
+        next_index: cursor,
+        has_more,
+    })
 }
 
 fn itunes_search_tracks(
@@ -2226,21 +2312,51 @@ fn external_protocol_url(kind: &str, hex: &str, version: u64) -> String {
     format!("{}/{}/{}?v={}", scheme_origin(), kind, hex, version)
 }
 
-fn artist_image_url(key: &str, version: u64) -> String {
-    external_protocol_url("artist", &format!("{:016x}", key_hash(key)), version)
+/// On-disk cache of downloaded images (artist avatars or track/album covers):
+/// a dir of WebP files plus a JSON manifest with the fetch result per key.
+struct ImageCache {
+    /// URL path segment of the `lfmusic-external://` protocol.
+    kind: &'static str,
+    /// Base name of the files dir, `<name>.json` manifest and `<name>.version`.
+    name: &'static str,
+    /// Bumping this wipes the disk cache once (e.g. on storage format changes).
+    version: u32,
+    /// Distinguishes cover files from artist avatar files.
+    file_prefix: &'static str,
+    max_dim: u32,
+    /// Placeholder-size threshold, see [`download_validate_encode`].
+    min_real_bytes: Option<usize>,
+    label: &'static str,
+    /// Serializes read-modify-write of the manifest across parallel prep threads,
+    /// so concurrent "load -> insert -> save" cycles don't clobber each other.
+    /// Network downloads happen outside this lock - only the disk merge is serialized.
+    lock: Mutex<()>,
 }
 
-fn cover_image_url(key: &str, version: u64) -> String {
-    external_protocol_url("cover", &format!("{:016x}", key_hash(key)), version)
-}
+static ARTIST_IMAGES: ImageCache = ImageCache {
+    kind: "artist",
+    name: "external_artists",
+    version: 5,
+    file_prefix: "",
+    max_dim: ARTIST_IMAGE_MAX_DIM,
+    min_real_bytes: Some(MIN_REAL_IMAGE_BYTES),
+    label: "artist image",
+    lock: Mutex::new(()),
+};
 
-fn artist_file_name(key: &str) -> String {
-    format!("{:016x}.webp", key_hash(key))
-}
+static TRACK_COVERS: ImageCache = ImageCache {
+    kind: "cover",
+    name: "external_covers",
+    version: 1,
+    file_prefix: "c",
+    max_dim: COVER_IMAGE_MAX_DIM,
+    min_real_bytes: None,
+    label: "cover",
+    lock: Mutex::new(()),
+};
 
-/// `c` prefix distinguishes cover files from artist avatar files.
-fn cover_file_name(key: &str) -> String {
-    format!("c{:016x}.webp", key_hash(key))
+fn key_hex(key: &str) -> String {
+    format!("{:016x}", key_hash(key))
 }
 
 fn not_found() -> Response<Vec<u8>> {
@@ -2265,11 +2381,12 @@ fn build_external_response<R: Runtime>(
     let Ok(app_data_dir) = app.path().app_data_dir() else {
         return not_found();
     };
-    let path = match kind {
-        "artist" => artists_dir(&app_data_dir).join(format!("{}.webp", hex)),
-        "cover" => covers_dir(&app_data_dir).join(format!("c{}.webp", hex)),
+    let cache = match kind {
+        "artist" => &ARTIST_IMAGES,
+        "cover" => &TRACK_COVERS,
         _ => return not_found(),
     };
+    let path = cache.dir(&app_data_dir).join(cache.file_name_for_hex(hex));
     match fs::read(&path) {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
@@ -2308,7 +2425,7 @@ enum ImageDownload {
 /// threshold for avatars; `None` for covers since small legitimate art exists.
 fn download_validate_encode(
     url: &str,
-    target: &PathBuf,
+    target: &Path,
     max_dim: u32,
     min_real_bytes: Option<usize>,
 ) -> ImageDownload {
@@ -2397,70 +2514,150 @@ fn none_result() -> ArtistImageResult {
     }
 }
 
-fn artists_dir(app_data_dir: &PathBuf) -> PathBuf {
-    let dir = app_data_dir.join("external_artists");
-    let _ = fs::create_dir_all(&dir);
-    dir
-}
-
-/// Bumping this wipes the disk cache once (e.g. on storage format changes).
-const ARTIST_IMAGE_CACHE_VERSION: u32 = 5;
-
-fn ensure_artist_cache_version(app_data_dir: &PathBuf) {
-    let path = app_data_dir.join("external_artists.version");
-    let current = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    if current != ARTIST_IMAGE_CACHE_VERSION {
-        let _ = fs::remove_dir_all(app_data_dir.join("external_artists"));
-        let _ = fs::remove_file(artists_manifest_path(app_data_dir));
-        let _ = fs::write(&path, ARTIST_IMAGE_CACHE_VERSION.to_string());
+impl ImageCache {
+    fn url(&self, key: &str, version: u64) -> String {
+        external_protocol_url(self.kind, &key_hex(key), version)
     }
-}
 
-fn artists_manifest_path(app_data_dir: &PathBuf) -> PathBuf {
-    app_data_dir.join("external_artists.json")
-}
+    fn file_name_for_hex(&self, hex: &str) -> String {
+        format!("{}{}.webp", self.file_prefix, hex)
+    }
 
-fn load_artists_manifest(app_data_dir: &PathBuf) -> HashMap<String, ArtistImageRecord> {
-    fs::read_to_string(artists_manifest_path(app_data_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
+    fn file_name(&self, key: &str) -> String {
+        self.file_name_for_hex(&key_hex(key))
+    }
 
-fn save_artists_manifest(
-    app_data_dir: &PathBuf,
-    manifest: &HashMap<String, ArtistImageRecord>,
-) -> Result<(), String> {
-    let content = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
-    write_manifest_atomic(&artists_manifest_path(app_data_dir), content.as_bytes())
-}
+    fn dir(&self, app_data_dir: &Path) -> PathBuf {
+        let dir = app_data_dir.join(self.name);
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
 
-/// Atomic write (temp -> rename) so concurrent readers never see a partial file.
-fn write_manifest_atomic(target: &PathBuf, data: &[u8]) -> Result<(), String> {
-    let tmp = target.with_extension("json.tmp");
-    fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, target).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        e.to_string()
-    })
-}
+    fn manifest_path(&self, app_data_dir: &Path) -> PathBuf {
+        app_data_dir.join(format!("{}.json", self.name))
+    }
 
-/// Serializes read-modify-write of the manifest across parallel prep threads,
-/// so concurrent "load -> insert -> save" cycles don't clobber each other.
-/// Network downloads happen outside this lock — only the disk merge is serialized.
-fn artists_manifest_lock() -> &'static Mutex<()> {
-    static L: OnceLock<Mutex<()>> = OnceLock::new();
-    L.get_or_init(|| Mutex::new(()))
-}
+    fn ensure_version(&self, app_data_dir: &Path) {
+        let path = app_data_dir.join(format!("{}.version", self.name));
+        let current = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        if current != self.version {
+            let _ = fs::remove_dir_all(app_data_dir.join(self.name));
+            let _ = fs::remove_file(self.manifest_path(app_data_dir));
+            let _ = fs::write(&path, self.version.to_string());
+        }
+    }
 
-fn store_artist_record(app_data_dir: &PathBuf, key: String, rec: ArtistImageRecord) {
-    let _guard = artists_manifest_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let mut manifest = load_artists_manifest(app_data_dir);
-    manifest.insert(key, rec);
-    let _ = save_artists_manifest(app_data_dir, &manifest);
+    /// No lock needed for reads: manifest writes are atomic, so any read sees a whole file.
+    fn load_manifest(&self, app_data_dir: &Path) -> HashMap<String, ArtistImageRecord> {
+        json_store::load_or_default(&self.manifest_path(app_data_dir))
+    }
+
+    fn update_manifest(
+        &self,
+        app_data_dir: &Path,
+        f: impl FnOnce(&mut HashMap<String, ArtistImageRecord>),
+    ) {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut manifest = self.load_manifest(app_data_dir);
+        f(&mut manifest);
+        let _ = json_store::save_pretty(&self.manifest_path(app_data_dir), &manifest);
+    }
+
+    fn store(&self, app_data_dir: &Path, key: String, rec: ArtistImageRecord) {
+        self.update_manifest(app_data_dir, |m| {
+            m.insert(key, rec);
+        });
+    }
+
+    /// Cache-first lookup; `refresh` forces a re-fetch from network.
+    fn get_or_fetch(
+        &self,
+        app_data_dir: &Path,
+        key: String,
+        refresh: bool,
+        fetch: impl FnOnce() -> FetchOutcome<ExternalImage>,
+    ) -> ArtistImageResult {
+        if key.is_empty() {
+            return none_result();
+        }
+
+        self.ensure_version(app_data_dir);
+        if !refresh {
+            if let Some(rec) = self.load_manifest(app_data_dir).get(&key) {
+                if rec.status == "ok" {
+                    if let Some(file) = &rec.file {
+                        if self.dir(app_data_dir).join(file).exists() {
+                            return ArtistImageResult {
+                                status: "ok".into(),
+                                source: rec.source.clone(),
+                                url: Some(self.url(&key, rec.fetched_secs)),
+                            };
+                        }
+                    }
+                } else if rec.status == "none" {
+                    return none_result();
+                }
+            }
+        }
+
+        // Network fetch stays outside the manifest lock so parallel prep threads
+        // can download concurrently.
+        let now = unix_secs();
+        let filename = self.file_name(&key);
+        let target = self.dir(app_data_dir).join(&filename);
+
+        match fetch() {
+            FetchOutcome::Found(img) => {
+                match download_validate_encode(&img.url, &target, self.max_dim, self.min_real_bytes)
+                {
+                    ImageDownload::Saved => {
+                        let url = self.url(&key, now);
+                        self.store(
+                            app_data_dir,
+                            key,
+                            ArtistImageRecord {
+                                file: Some(filename),
+                                source: Some(img.source.clone()),
+                                status: "ok".into(),
+                                fetched_secs: now,
+                            },
+                        );
+                        ArtistImageResult {
+                            status: "ok".into(),
+                            source: Some(img.source),
+                            url: Some(url),
+                        }
+                    }
+                    ImageDownload::Placeholder => {
+                        self.store(app_data_dir, key, none_image_record(now));
+                        none_result()
+                    }
+                    ImageDownload::Error(e) => {
+                        eprintln!("[external] download {} failed: {}", self.label, e);
+                        none_result()
+                    }
+                }
+            }
+            FetchOutcome::NotFound => {
+                self.store(app_data_dir, key, none_image_record(now));
+                none_result()
+            }
+            FetchOutcome::TemporaryError => none_result(),
+        }
+    }
+
+    /// Keys with a settled (ok/none) result, which the batch pass can skip.
+    fn settled_keys(&self, app_data_dir: &Path) -> HashSet<String> {
+        self.ensure_version(app_data_dir);
+        self.load_manifest(app_data_dir)
+            .into_iter()
+            .filter(|(_, r)| r.status == "ok" || r.status == "none")
+            .map(|(k, _)| k)
+            .collect()
+    }
 }
 
 fn artist_key(name: &str) -> String {
@@ -2471,13 +2668,6 @@ fn key_hash(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 fn none_image_record(now: u64) -> ArtistImageRecord {
@@ -2491,83 +2681,13 @@ fn none_image_record(now: u64) -> ArtistImageRecord {
 
 /// Cache-first artist avatar lookup; `refresh` forces a re-fetch from network.
 pub fn get_or_fetch_artist_image(
-    app_data_dir: &PathBuf,
+    app_data_dir: &Path,
     artist_name: &str,
     refresh: bool,
 ) -> ArtistImageResult {
-    let key = artist_key(artist_name);
-    if key.is_empty() {
-        return none_result();
-    }
-
-    ensure_artist_cache_version(app_data_dir);
-    // No lock needed for reads: manifest writes are atomic, so any read sees a whole file.
-    if !refresh {
-        let manifest = load_artists_manifest(app_data_dir);
-        if let Some(rec) = manifest.get(&key) {
-            if rec.status == "ok" {
-                if let Some(file) = &rec.file {
-                    if artists_dir(app_data_dir).join(file).exists() {
-                        return ArtistImageResult {
-                            status: "ok".into(),
-                            source: rec.source.clone(),
-                            url: Some(artist_image_url(&key, rec.fetched_secs)),
-                        };
-                    }
-                }
-            } else if rec.status == "none" {
-                return none_result();
-            }
-        }
-    }
-
-    // Network fetch stays outside the manifest lock so parallel prep threads
-    // can download concurrently.
-    let now = now_secs();
-    let filename = artist_file_name(&key);
-    let target = artists_dir(app_data_dir).join(&filename);
-
-    match fetch_artist_image(artist_name) {
-        FetchOutcome::Found(img) => {
-            match download_validate_encode(
-                &img.url,
-                &target,
-                ARTIST_IMAGE_MAX_DIM,
-                Some(MIN_REAL_IMAGE_BYTES),
-            ) {
-                ImageDownload::Saved => {
-                    store_artist_record(
-                        app_data_dir,
-                        key.clone(),
-                        ArtistImageRecord {
-                            file: Some(filename),
-                            source: Some(img.source.clone()),
-                            status: "ok".into(),
-                            fetched_secs: now,
-                        },
-                    );
-                    ArtistImageResult {
-                        status: "ok".into(),
-                        source: Some(img.source),
-                        url: Some(artist_image_url(&key, now)),
-                    }
-                }
-                ImageDownload::Placeholder => {
-                    store_artist_record(app_data_dir, key, none_image_record(now));
-                    none_result()
-                }
-                ImageDownload::Error(e) => {
-                    eprintln!("[external] download artist image failed: {}", e);
-                    none_result()
-                }
-            }
-        }
-        FetchOutcome::NotFound => {
-            store_artist_record(app_data_dir, key, none_image_record(now));
-            none_result()
-        }
-        FetchOutcome::TemporaryError => none_result(),
-    }
+    ARTIST_IMAGES.get_or_fetch(app_data_dir, artist_key(artist_name), refresh, || {
+        fetch_artist_image(artist_name)
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2576,78 +2696,19 @@ pub struct CachedArtistImage {
     pub url: String,
 }
 
-pub fn load_cached_artist_images(app_data_dir: &PathBuf) -> Vec<CachedArtistImage> {
-    ensure_artist_cache_version(app_data_dir);
-    let manifest = load_artists_manifest(app_data_dir);
-    let dir = artists_dir(app_data_dir);
-    let mut out = Vec::new();
-    for (key, rec) in manifest.iter() {
-        if rec.status != "ok" {
-            continue;
-        }
-        if let Some(file) = &rec.file {
-            if dir.join(file).exists() {
-                out.push(CachedArtistImage {
-                    artist_key: key.clone(),
-                    url: artist_image_url(key, rec.fetched_secs),
-                });
-            }
-        }
-    }
-    out
-}
-
-fn covers_dir(app_data_dir: &PathBuf) -> PathBuf {
-    let dir = app_data_dir.join("external_covers");
-    let _ = fs::create_dir_all(&dir);
-    dir
-}
-
-fn covers_manifest_path(app_data_dir: &PathBuf) -> PathBuf {
-    app_data_dir.join("external_covers.json")
-}
-
-const COVERS_CACHE_VERSION: u32 = 1;
-
-fn ensure_covers_cache_version(app_data_dir: &PathBuf) {
-    let path = app_data_dir.join("external_covers.version");
-    let current = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    if current != COVERS_CACHE_VERSION {
-        let _ = fs::remove_dir_all(app_data_dir.join("external_covers"));
-        let _ = fs::remove_file(covers_manifest_path(app_data_dir));
-        let _ = fs::write(&path, COVERS_CACHE_VERSION.to_string());
-    }
-}
-
-fn load_covers_manifest(app_data_dir: &PathBuf) -> HashMap<String, ArtistImageRecord> {
-    fs::read_to_string(covers_manifest_path(app_data_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_covers_manifest(
-    app_data_dir: &PathBuf,
-    manifest: &HashMap<String, ArtistImageRecord>,
-) -> Result<(), String> {
-    let content = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
-    write_manifest_atomic(&covers_manifest_path(app_data_dir), content.as_bytes())
-}
-
-/// See [`artists_manifest_lock`].
-fn covers_manifest_lock() -> &'static Mutex<()> {
-    static L: OnceLock<Mutex<()>> = OnceLock::new();
-    L.get_or_init(|| Mutex::new(()))
-}
-
-fn store_cover_record(app_data_dir: &PathBuf, key: String, rec: ArtistImageRecord) {
-    let _guard = covers_manifest_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let mut manifest = load_covers_manifest(app_data_dir);
-    manifest.insert(key, rec);
-    let _ = save_covers_manifest(app_data_dir, &manifest);
+pub fn load_cached_artist_images(app_data_dir: &Path) -> Vec<CachedArtistImage> {
+    ARTIST_IMAGES.ensure_version(app_data_dir);
+    let manifest = ARTIST_IMAGES.load_manifest(app_data_dir);
+    let dir = ARTIST_IMAGES.dir(app_data_dir);
+    manifest
+        .iter()
+        .filter(|(_, rec)| rec.status == "ok")
+        .filter(|(_, rec)| rec.file.as_ref().is_some_and(|f| dir.join(f).exists()))
+        .map(|(key, rec)| CachedArtistImage {
+            artist_key: key.clone(),
+            url: ARTIST_IMAGES.url(key, rec.fetched_secs),
+        })
+        .collect()
 }
 
 /// Artist+album (one cover per album), or artist+title when album is empty.
@@ -2660,77 +2721,16 @@ fn cover_cache_key(artist: &str, album: &str, title: &str) -> String {
 }
 
 pub fn get_or_fetch_track_cover(
-    app_data_dir: &PathBuf,
+    app_data_dir: &Path,
     artist: &str,
     album: &str,
     title: &str,
     refresh: bool,
 ) -> ArtistImageResult {
     let key = cover_cache_key(artist, album, title);
-    if key.is_empty() {
-        return none_result();
-    }
-
-    ensure_covers_cache_version(app_data_dir);
-    if !refresh {
-        let manifest = load_covers_manifest(app_data_dir);
-        if let Some(rec) = manifest.get(&key) {
-            if rec.status == "ok" {
-                if let Some(file) = &rec.file {
-                    if covers_dir(app_data_dir).join(file).exists() {
-                        return ArtistImageResult {
-                            status: "ok".into(),
-                            source: rec.source.clone(),
-                            url: Some(cover_image_url(&key, rec.fetched_secs)),
-                        };
-                    }
-                }
-            } else if rec.status == "none" {
-                return none_result();
-            }
-        }
-    }
-
-    let now = now_secs();
-    let filename = cover_file_name(&key);
-    let target = covers_dir(app_data_dir).join(&filename);
-
-    match fetch_track_cover(artist, album, title) {
-        FetchOutcome::Found(img) => {
-            match download_validate_encode(&img.url, &target, COVER_IMAGE_MAX_DIM, None) {
-                ImageDownload::Saved => {
-                    store_cover_record(
-                        app_data_dir,
-                        key.clone(),
-                        ArtistImageRecord {
-                            file: Some(filename),
-                            source: Some(img.source.clone()),
-                            status: "ok".into(),
-                            fetched_secs: now,
-                        },
-                    );
-                    ArtistImageResult {
-                        status: "ok".into(),
-                        source: Some(img.source),
-                        url: Some(cover_image_url(&key, now)),
-                    }
-                }
-                ImageDownload::Placeholder => {
-                    store_cover_record(app_data_dir, key, none_image_record(now));
-                    none_result()
-                }
-                ImageDownload::Error(e) => {
-                    eprintln!("[external] download cover failed: {}", e);
-                    none_result()
-                }
-            }
-        }
-        FetchOutcome::NotFound => {
-            store_cover_record(app_data_dir, key, none_image_record(now));
-            none_result()
-        }
-        FetchOutcome::TemporaryError => none_result(),
-    }
+    TRACK_COVERS.get_or_fetch(app_data_dir, key, refresh, || {
+        fetch_track_cover(artist, album, title)
+    })
 }
 
 /// Includes artist so two same-titled albums by different artists don't share a cache entry.
@@ -2746,51 +2746,29 @@ pub fn artist_image_key(name: &str) -> String {
     artist_key(name)
 }
 
-/// Keys with a settled (ok/none) result, which the batch pass can skip.
-pub fn cover_settled_keys(app_data_dir: &PathBuf) -> std::collections::HashSet<String> {
-    ensure_covers_cache_version(app_data_dir);
-    load_covers_manifest(app_data_dir)
-        .into_iter()
-        .filter(|(_, r)| r.status == "ok" || r.status == "none")
-        .map(|(k, _)| k)
-        .collect()
+pub fn cover_settled_keys(app_data_dir: &Path) -> HashSet<String> {
+    TRACK_COVERS.settled_keys(app_data_dir)
 }
 
-pub fn artist_settled_keys(app_data_dir: &PathBuf) -> std::collections::HashSet<String> {
-    ensure_artist_cache_version(app_data_dir);
-    load_artists_manifest(app_data_dir)
-        .into_iter()
-        .filter(|(_, r)| r.status == "ok" || r.status == "none")
-        .map(|(k, _)| k)
-        .collect()
+pub fn artist_settled_keys(app_data_dir: &Path) -> HashSet<String> {
+    ARTIST_IMAGES.settled_keys(app_data_dir)
 }
 
 /// Bulk-marks cover keys as "none" without network calls, for tracks that
-/// already have a local cover — avoids re-reading their tags on next startup.
-pub fn mark_track_covers_none(app_data_dir: &PathBuf, keys: &[String]) {
+/// already have a local cover - avoids re-reading their tags on next startup.
+pub fn mark_track_covers_none(app_data_dir: &Path, keys: &[String]) {
     if keys.is_empty() {
         return;
     }
-    ensure_covers_cache_version(app_data_dir);
-    let _guard = covers_manifest_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let mut manifest = load_covers_manifest(app_data_dir);
-    let now = now_secs();
-    for key in keys {
-        if key.is_empty() {
-            continue;
+    TRACK_COVERS.ensure_version(app_data_dir);
+    let now = unix_secs();
+    TRACK_COVERS.update_manifest(app_data_dir, |manifest| {
+        for key in keys.iter().filter(|k| !k.is_empty()) {
+            manifest
+                .entry(key.clone())
+                .or_insert_with(|| none_image_record(now));
         }
-        manifest.entry(key.clone()).or_insert_with(|| ArtistImageRecord {
-            file: None,
-            source: None,
-            status: "none".into(),
-            fetched_secs: now,
-        });
-    }
-    let _ = save_covers_manifest(app_data_dir, &manifest);
-}
-
-pub fn unix_secs() -> u64 {
-    now_secs()
+    });
 }
 
 #[cfg(test)]
@@ -2824,17 +2802,6 @@ mod tests {
             normalize_title("Song Title (feat. Artist X) [Remastered 2011]"),
             normalize("Song Title")
         );
-    }
-
-    #[test]
-    fn levenshtein_matches_known_distances() {
-        assert_eq!(levenshtein(&[], &[]), 0);
-        let empty: Vec<char> = vec![];
-        let abc: Vec<char> = "abc".chars().collect();
-        assert_eq!(levenshtein(&empty, &abc), 3);
-        let kitten: Vec<char> = "kitten".chars().collect();
-        let sitting: Vec<char> = "sitting".chars().collect();
-        assert_eq!(levenshtein(&kitten, &sitting), 3);
     }
 
     #[test]
@@ -3079,8 +3046,8 @@ mod tests {
     fn artist_image_url_and_cover_image_url_differ_for_same_key() {
         // Same logical key must not yield the same URL for an artist avatar vs.
         // an album cover, or the protocol handler would serve the wrong image.
-        let artist_url = artist_image_url("queen", 1);
-        let cover_url = cover_image_url("queen", 1);
+        let artist_url = ARTIST_IMAGES.url("queen", 1);
+        let cover_url = TRACK_COVERS.url("queen", 1);
         assert_ne!(artist_url, cover_url);
         assert!(artist_url.contains("/artist/"));
         assert!(cover_url.contains("/cover/"));
@@ -3088,25 +3055,20 @@ mod tests {
 
     #[test]
     fn image_urls_change_with_version_for_cache_busting() {
-        let v1 = artist_image_url("queen", 1);
-        let v2 = artist_image_url("queen", 2);
+        let v1 = ARTIST_IMAGES.url("queen", 1);
+        let v2 = ARTIST_IMAGES.url("queen", 2);
         assert_ne!(v1, v2);
     }
 
     #[test]
     fn artist_file_name_and_cover_file_name_use_distinct_prefixes() {
         let key = "queen";
-        let artist_file = artist_file_name(key);
-        let cover_file = cover_file_name(key);
+        let artist_file = ARTIST_IMAGES.file_name(key);
+        let cover_file = TRACK_COVERS.file_name(key);
         assert!(artist_file.ends_with(".webp"));
         assert!(cover_file.ends_with(".webp"));
         assert!(cover_file.starts_with('c'));
         assert_ne!(artist_file, cover_file);
     }
 
-    #[test]
-    fn unix_secs_returns_a_plausible_current_timestamp() {
-        let secs = unix_secs();
-        assert!(secs > 1_700_000_000, "secs={secs}");
-    }
 }

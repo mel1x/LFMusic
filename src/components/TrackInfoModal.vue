@@ -10,16 +10,15 @@ import {
 } from '../composables/useStatistics'
 import { timesCountText } from '../utils/format'
 import CloseIcon from './Icons/CloseIcon.vue'
-import { isPhoneViewport } from '../composables/usePlatform'
+import { useSheetModal } from '../composables/useSheetModal'
 
 const router = useRouter()
 const { isOpen, currentTrack, closeTrackInfo } = useTrackInfoModal()
 const { albums, loadPlaylists } = usePlaylists()
 const listenCount = ref(0)
 const modalCardEl = ref<HTMLElement | null>(null)
+const { onBackdropMousedown, onSheetDragStart } = useSheetModal(modalCardEl, closeTrackInfo)
 let listenCountRequestId = 0
-let sheetDragStartY = 0
-let sheetDragging = false
 
 const trackAlbumName = computed(() => (currentTrack.value?.album || '').trim())
 const hasAlbum = computed(() => {
@@ -139,47 +138,6 @@ async function copyPath() {
     }
 }
 
-function onBackdropMousedown(e: MouseEvent) {
-    if (isPhoneViewport()) return
-    if (e.target === e.currentTarget) closeTrackInfo()
-}
-
-function onSheetDragStart(e: PointerEvent) {
-    if (!isPhoneViewport()) return
-    e.preventDefault()
-    sheetDragging = true
-    sheetDragStartY = e.clientY
-    if (modalCardEl.value) modalCardEl.value.style.transition = 'none'
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-    window.addEventListener('pointermove', onSheetDragMove)
-    window.addEventListener('pointerup', onSheetDragEnd)
-    window.addEventListener('pointercancel', onSheetDragEnd)
-}
-
-function onSheetDragMove(e: PointerEvent) {
-    if (!sheetDragging || !modalCardEl.value) return
-    e.preventDefault()
-    const delta = Math.max(0, e.clientY - sheetDragStartY)
-    modalCardEl.value.style.transform = `translateY(${delta}px)`
-}
-
-function onSheetDragEnd(e: PointerEvent) {
-    if (!sheetDragging) return
-    sheetDragging = false
-    window.removeEventListener('pointermove', onSheetDragMove)
-    window.removeEventListener('pointerup', onSheetDragEnd)
-    window.removeEventListener('pointercancel', onSheetDragEnd)
-    const delta = Math.max(0, e.clientY - sheetDragStartY)
-    if (delta > 76) {
-        closeTrackInfo()
-        return
-    }
-    if (modalCardEl.value) {
-        modalCardEl.value.style.transition = ''
-        modalCardEl.value.style.transform = ''
-    }
-}
-
 function onKeydown(e: KeyboardEvent) {
     if (!isOpen.value) return
     if (e.key === 'Escape') {
@@ -196,9 +154,6 @@ onMounted(() => {
 onUnmounted(() => {
     document.removeEventListener('keydown', onKeydown)
     window.removeEventListener(TRACK_STATISTICS_UPDATED_EVENT, onTrackStatisticsUpdated)
-    window.removeEventListener('pointermove', onSheetDragMove)
-    window.removeEventListener('pointerup', onSheetDragEnd)
-    window.removeEventListener('pointercancel', onSheetDragEnd)
     if (copyTimer) clearTimeout(copyTimer)
 })
 </script>

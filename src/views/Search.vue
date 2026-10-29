@@ -11,6 +11,7 @@ import defaultPlaylistCover from '../assets/playlistCover.webp'
 
 import { invoke } from '@tauri-apps/api/core'
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
+import { usePlaySource } from '../composables/usePlaySource'
 import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists'
 import { searchRanked } from '../composables/useSearch'
 import { createRipple } from '../composables/useRipple'
@@ -136,6 +137,7 @@ const {
     getTrackByPath,
     cacheTracks,
 } = usePlayer()
+const { playSource } = usePlaySource()
 
 const {
     userPlaylists,
@@ -274,18 +276,7 @@ function isAlbumActive(a: AlbumResult) {
 
 async function onPlayAlbum(e: MouseEvent, a: AlbumResult) {
     e.stopPropagation()
-    const sourceId = `album:${a.name}`
-    if (activePlaylistSource.value === sourceId) {
-        togglePlayPause()
-        return
-    }
-    if (a.trackCount === 0) return
-    const tracks = await getPlaylistTracks(a.id)
-    if (tracks.length === 0) return
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t)
-    setPlaylistSource(sourceId, merged)
-    rememberCurrentSearch()
-    await playTrack(merged[0], { searchStart: true })
+    await playSource(`album:${a.name}`, a.id, { searchStart: true }, rememberCurrentSearch)
 }
 
 // Track search runs on the backend (same ranking logic, ported to Rust).
@@ -455,18 +446,7 @@ function isPlaylistActive(pl: PlaylistInfo) {
 
 async function onPlayPlaylist(e: MouseEvent, pl: PlaylistInfo) {
     e.stopPropagation()
-    const sourceId = `playlist:${pl.id}`
-    if (activePlaylistSource.value === sourceId) {
-        togglePlayPause()
-        return
-    }
-    if (pl.track_count === 0) return
-    const tracks = await getPlaylistTracks(pl.id)
-    if (tracks.length === 0) return
-    const merged = tracks.map(t => getTrackByPath(t.file_path) ?? t)
-    setPlaylistSource(sourceId, merged)
-    rememberCurrentSearch()
-    await playTrack(merged[0], { searchStart: true })
+    await playSource(`playlist:${pl.id}`, pl.id, { searchStart: true }, rememberCurrentSearch)
 }
 
 const albumsLine = useScrollLine(190, 16)

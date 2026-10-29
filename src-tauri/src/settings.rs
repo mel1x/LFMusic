@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 
 use tauri::State;
 
 use crate::audio_player::EqSettings;
+use crate::json_store;
 use crate::SettingsState;
 
 pub const DEFAULT_ARTIST_SEPARATORS: &[&str] = &["; ", ", "];
@@ -87,12 +88,8 @@ impl AppSettings {
     }
 }
 
-pub fn load(app_data_dir: &PathBuf) -> AppSettings {
-    let path = app_data_dir.join("settings.json");
-    let mut settings: AppSettings = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+pub fn load(app_data_dir: &Path) -> AppSettings {
+    let mut settings: AppSettings = json_store::load_or_default(&app_data_dir.join("settings.json"));
     // Legacy proxy fields aren't written back, so fold them into the
     // downloader block now or they'd be lost on the next save.
     if settings.downloader.is_none() && settings.proxy_mode.is_some() {
@@ -101,10 +98,8 @@ pub fn load(app_data_dir: &PathBuf) -> AppSettings {
     settings
 }
 
-pub fn save(app_data_dir: &PathBuf, settings: &AppSettings) -> Result<(), String> {
-    let path = app_data_dir.join("settings.json");
-    let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+pub fn save(app_data_dir: &Path, settings: &AppSettings) -> Result<(), String> {
+    json_store::save_pretty(&app_data_dir.join("settings.json"), settings)
 }
 
 pub fn option_bool(settings: &AppSettings, key: &str, default: bool) -> bool {

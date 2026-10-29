@@ -1,4 +1,5 @@
 import type { Directive } from 'vue'
+import { currentUiScale } from '../composables/useUiScale'
 
 let tooltipEl: HTMLElement | null = null
 let styleInjected = false
@@ -71,16 +72,6 @@ const placementMap = new WeakMap<HTMLElement, Placement>()
 // In Chromium (WebView2), body is scaled via `zoom` and getBoundingClientRect returns
 // visual (zoomed) coordinates. The tooltip lives in that zoomed body, so its left/top
 // (CSS px) must be divided by scale or it drifts under zoom (e.g. downward when forced to top).
-function getUiScale(): number {
-    const scale = Number((window as any).__uiScale)
-    if (Number.isFinite(scale) && scale > 0) return scale
-    const cssScale = Number(getComputedStyle(document.documentElement)
-        .getPropertyValue('--ui-scale')
-        .trim())
-    return Number.isFinite(cssScale) && cssScale > 0 ? cssScale : 1
-}
-
-
 function position(el: HTMLElement, tt: HTMLElement) {
     const rect = el.getBoundingClientRect()
     const ttRect = tt.getBoundingClientRect()
@@ -105,7 +96,7 @@ function position(el: HTMLElement, tt: HTMLElement) {
         top = above
         if (top < margin) top = below
     }
-    const scale = getUiScale()
+    const scale = currentUiScale()
     tt.style.left = (left / scale) + 'px'
     tt.style.top = (top / scale) + 'px'
 }
