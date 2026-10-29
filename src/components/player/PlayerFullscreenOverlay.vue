@@ -267,7 +267,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                     <RepeatIcon v-else />
                                 </button>
                                 <div class="qf-center-controls">
-                                    <button class="qf-center-btn" :disabled="!currentTrack" @click="playPrev">
+                                    <button class="qf-center-btn" :disabled="!currentTrack" @click="playPrev()">
                                         <PrevIcon />
                                     </button>
                                     <button class="qf-center-play" @click="togglePlayPause" :disabled="isStopped && !isLoading">
@@ -361,7 +361,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                 >
                                     <ShuffleIcon />
                                 </button>
-                                <button class="qf-mobile-playback-btn" :disabled="!currentTrack" @click="playPrev">
+                                <button class="qf-mobile-playback-btn" :disabled="!currentTrack" @click="playPrev()">
                                     <PrevIcon />
                                 </button>
                                 <button class="qf-mobile-playback-play" @click="togglePlayPause" :disabled="isStopped && !isLoading">

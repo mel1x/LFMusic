@@ -140,18 +140,6 @@ function onPlayMix() {
     void startMix(selectedMood.value);
 }
 
-// Background sine lines, shown while a track plays: the path is twice the
-// 1200-wide viewBox and its period (200) divides 1200, so sliding by -1200 loops seamlessly.
-function wavePath(amp: number): string {
-    let d = `M0 50 Q 50 ${50 - amp} 100 50`;
-    for (let x = 200; x <= 2400; x += 100) d += ` T ${x} 50`;
-    return d;
-}
-const waveLines = [
-    { d: wavePath(30), cls: 'w1' },
-    { d: wavePath(18), cls: 'w2' },
-];
-
 /** Shuffle — new recommendation queue and new current track. */
 function onShuffleMix() {
     void startMix(selectedMood.value);
@@ -300,9 +288,6 @@ onUnmounted(() => {
 
             <template v-if="hasLibrary">
                 <div class="stageArea">
-                    <svg class="waves" :class="{ live: isPlaying }" viewBox="0 0 1200 100" preserveAspectRatio="none" aria-hidden="true">
-                        <path v-for="w in waveLines" :key="w.cls" :d="w.d" :class="['waveLine', w.cls]" />
-                    </svg>
                     <div class="mixStage">
                         <div class="mixHeader">
                             <div class="mixType">Персональная волна</div>
@@ -567,35 +552,6 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-}
-
-/* Two slow sine lines running behind the play controls, fading in while a track plays. */
-.waves {
-    position: absolute;
-    top: calc(50% + 52px);
-    left: -28px;
-    width: calc(100% + 56px);
-    height: 150px;
-    transform: translateY(-50%);
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity .8s ease;
-    -webkit-mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
-    mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
-}
-.waves.live { opacity: 1; }
-.waveLine {
-    fill: none;
-    vector-effect: non-scaling-stroke;
-    animation: waveSlide 12s linear infinite;
-    animation-play-state: paused;
-}
-.waves.live .waveLine { animation-play-state: running; }
-.waveLine.w1 { stroke: hsla(var(--accent-h), var(--accent-s), 65%, 0.22); stroke-width: 1.5; }
-.waveLine.w2 { stroke: hsla(var(--accent-h), var(--accent-s), 75%, 0.13); stroke-width: 1; animation-duration: 8s; animation-direction: reverse; }
-@keyframes waveSlide {
-    from { transform: translateX(0); }
-    to { transform: translateX(-1200px); }
 }
 
 .statsBtn {

@@ -1207,7 +1207,8 @@ function onCoverImgClick() {
         height: calc(var(--catalog-mobile-cover-height) + var(--catalog-mobile-header-overlap)) !important;
         overflow: hidden;
         border-radius: 0 !important;
-        box-shadow: 0 18px 48px hsla(var(--accent-h), min(var(--accent-s), 48%), 6%, 0.34);
+        -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 72%, transparent 100%);
+        mask-image: linear-gradient(to bottom, #000 0%, #000 72%, transparent 100%);
     }
 
     body.lfmusic-phone .catalogPage .pageHat .cover,
@@ -1220,30 +1221,34 @@ function onCoverImgClick() {
         transform: none !important;
     }
 
+    /* Tint through filters only: the mix-blend-mode overlay breaks on the large masked layer
+       in WebView (only the top part gets colored). */
     body.lfmusic-phone .catalogPage .pageHat .coverWrap.tinted .cover {
-        filter: grayscale(1) saturate(1.05) brightness(0.86);
+        filter: grayscale(1) sepia(1) hue-rotate(calc((var(--accent-h) - 45) * 1deg)) saturate(2.8) brightness(0.74);
     }
 
     body.lfmusic-phone .catalogPage .pageHat .coverWrap.tinted::after {
-        border-radius: 0;
+        display: none;
     }
 
-    body.lfmusic-phone .catalogPage .pageHat .coverWrap::after {
+    body.lfmusic-phone .catalogPage .pageHat .coverWrap::before {
         content: "";
         position: absolute;
         left: 0;
         right: 0;
+        top: 0;
+        bottom: 0;
         z-index: 2;
-        height: 74%;
         pointer-events: none;
         background:
-            radial-gradient(circle at 50% 78%, hsla(var(--accent-h), min(var(--accent-s), 70%), 58%, 0.24), transparent 48%),
+            radial-gradient(circle 180px at 50% 84%, hsla(var(--accent-h), min(var(--accent-s), 70%), 58%, 0.24), transparent),
             linear-gradient(
                 to bottom,
                 hsla(var(--accent-h), min(var(--accent-s), 50%), 10%, 0) 0%,
-                hsla(var(--accent-h), min(var(--accent-s), 58%), 14%, 0.34) 38%,
-                hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.86) 74%,
-                var(--light-bg) 100%
+                hsla(var(--accent-h), min(var(--accent-s), 50%), 10%, 0) 26%,
+                hsla(var(--accent-h), min(var(--accent-s), 58%), 14%, 0.12) 54%,
+                hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.38) 81%,
+                hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.5) 100%
             );
     }
 

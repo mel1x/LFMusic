@@ -1011,9 +1011,11 @@ function createPlayer() {
     }
   }
 
-  async function playPrev() {
+  /** `skipRestart`: always go to the previous track (mini player swipe) instead of
+   *  rewinding the current one after 3 seconds. */
+  async function playPrev(opts?: { skipRestart?: boolean }) {
     if (playbackOrder.value.length === 0) return;
-    if (positionSecs.value > 3) {
+    if (!opts?.skipRestart && positionSecs.value > 3) {
       await seekTo(0);
       return;
     }

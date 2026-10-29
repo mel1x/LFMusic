@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import trackCover from '../../assets/trackCover.webp';
 import { toast } from 'vue-sonner';
 
@@ -22,6 +22,7 @@ import FullscreenIcon from '../Icons/FullscreenIcon.vue';
 import { usePlayer, type TrackMetadata } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
 import { isWebKitRuntime } from '../../composables/usePlatform';
+import { accentPreview, hexToHSL } from '../../composables/useAccentTheme';
 
 // WebKitGTK (Linux) can't render the vertical volume popup, so we render a
 // separate horizontal one there instead (see template / .volumeSliderPopupLinux).
@@ -52,6 +53,10 @@ const {
     onSeekStart,
     onSeekInput,
     onSeekEnd,
+    playbackOrder,
+    currentTrackIndex,
+    getTrackByPath,
+    loadCoversForTracks,
 } = usePlayer();
 
 const {
@@ -95,6 +100,115 @@ function onPlayerRipple(e: MouseEvent) {
     ripple.addEventListener('animationend', () => ripple.remove());
 }
 
+// Mobile mini player: neighbours of the current track peek from the sides and a
+// horizontal swipe switches to them (the queue wraps like the prev/next buttons).
+const wrapperEl = ref<HTMLElement | null>(null);
+const swipeX = ref(0);
+const swipeAnimating = ref(false);
+// Side gap between the bar and a peeking card; the bar inset is 28px (see mobile CSS).
+const PEEK_GAP = 6;
+const BAR_INSET = 28;
+
+function peekTrack(offset: 1 | -1): TrackMetadata | null {
+    const order = playbackOrder.value;
+    const idx = currentTrackIndex.value;
+    if (!currentTrack.value || order.length < 2 || idx < 0) return null;
+    const path = order[(idx + offset + order.length) % order.length];
+    return getTrackByPath(path) ?? null;
+}
+const prevPeek = computed(() => peekTrack(-1));
+const nextPeek = computed(() => peekTrack(1));
+
+/** Card background from the track's own accent color, so each card keeps its color while sliding. */
+function cardBackground(track: TrackMetadata | null): string {
+    if (!track?.accent_color) return 'hsl(0, 0%, 7%)';
+    const { h, s } = hexToHSL(track.accent_color);
+    return `hsl(${h}, ${Math.min(s, 40)}%, 8%)`;
+}
+const currentCardBg = computed(() => cardBackground(currentTrack.value));
+
+watch([prevPeek, nextPeek], (tracks) => {
+    const missing = tracks.filter((t): t is TrackMetadata => !!t && !t.cover_art);
+    if (missing.length && isMobilePlayerLayout()) loadCoversForTracks(missing);
+});
+
+let swipeStart: { x: number; y: number; id: number } | null = null;
+let swipeDragging = false;
+let suppressClickUntil = 0;
+
+function onSwipeDown(e: PointerEvent) {
+    if (!isMobilePlayerLayout() || swipeAnimating.value || !currentTrack.value) return;
+    swipeStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    swipeDragging = false;
+}
+
+function onSwipeMove(e: PointerEvent) {
+    if (!swipeStart || e.pointerId !== swipeStart.id) return;
+    const dx = e.clientX - swipeStart.x;
+    const dy = e.clientY - swipeStart.y;
+    if (!swipeDragging) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        if (Math.abs(dy) > Math.abs(dx)) {
+            swipeStart = null;
+            return;
+        }
+        swipeDragging = true;
+        wrapperEl.value?.setPointerCapture(e.pointerId);
+    }
+    const hasTarget = dx < 0 ? !!nextPeek.value : !!prevPeek.value;
+    swipeX.value = hasTarget ? dx : dx * 0.25;
+}
+
+function wait(ms: number) {
+    return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
+
+async function onSwipeUp(e: PointerEvent) {
+    if (!swipeStart || e.pointerId !== swipeStart.id) return;
+    swipeStart = null;
+    if (!swipeDragging) return;
+    swipeDragging = false;
+    // The click that follows a drag must not open the fullscreen player or hit a button.
+    suppressClickUntil = performance.now() + 400;
+
+    const width = wrapperEl.value?.clientWidth ?? 0;
+    const dx = swipeX.value;
+    const dir = dx < 0 ? 1 : -1;
+    const target = dir > 0 ? nextPeek.value : prevPeek.value;
+    swipeAnimating.value = true;
+    if (!target || Math.abs(dx) < width * 0.22) {
+        swipeX.value = 0;
+        await wait(220);
+        swipeAnimating.value = false;
+        return;
+    }
+    swipeX.value = -dir * (width - BAR_INSET * 2 + PEEK_GAP);
+    // Start the theme change together with the slide, not after playback starts.
+    accentPreview.value = target.accent_color ?? '#1a1a1a';
+    await wait(220);
+    const action = (dir > 0 ? playNext() : playPrev({ skipRestart: true }))
+        .finally(() => { accentPreview.value = null; });
+    // Hold the slid position until the new track is in, then jump back without animation.
+    await Promise.race([action, wait(800)]);
+    swipeAnimating.value = false;
+    swipeX.value = 0;
+}
+
+function onSwipeCancel() {
+    if (!swipeStart) return;
+    swipeStart = null;
+    swipeDragging = false;
+    swipeAnimating.value = true;
+    swipeX.value = 0;
+    setTimeout(() => { swipeAnimating.value = false; }, 220);
+}
+
+function onWrapperClickCapture(e: MouseEvent) {
+    if (performance.now() > suppressClickUntil) return;
+    e.stopPropagation();
+    e.preventDefault();
+}
+
 function onPlayerSurfaceClick(e: MouseEvent) {
     if (isMobilePlayerLayout()) {
         openFullscreen();
@@ -124,7 +238,31 @@ function onMoveToTop(track: TrackMetadata) {
 </script>
 
 <template>
-    <div class="playerControlsWrapper">
+    <div
+        ref="wrapperEl"
+        class="playerControlsWrapper"
+        :class="{ swipeAnimating }"
+        :style="{ '--swipe-x': swipeX + 'px' }"
+        @pointerdown="onSwipeDown"
+        @pointermove="onSwipeMove"
+        @pointerup="onSwipeUp"
+        @pointercancel="onSwipeCancel"
+        @click.capture="onWrapperClickCapture"
+    >
+        <div v-if="prevPeek" class="peekCard prev" :style="{ backgroundColor: cardBackground(prevPeek) }" aria-hidden="true">
+            <img :src="prevPeek.cover_art || trackCover" class="peekCover" draggable="false" />
+            <div class="peekText">
+                <div class="peekName">{{ prevPeek.title || prevPeek.file_path.split(/[\\/]/).pop() }}</div>
+                <div class="peekArtist">{{ prevPeek.artist }}</div>
+            </div>
+        </div>
+        <div v-if="nextPeek" class="peekCard next" :style="{ backgroundColor: cardBackground(nextPeek) }" aria-hidden="true">
+            <img :src="nextPeek.cover_art || trackCover" class="peekCover" draggable="false" />
+            <div class="peekText">
+                <div class="peekName">{{ nextPeek.title || nextPeek.file_path.split(/[\\/]/).pop() }}</div>
+                <div class="peekArtist">{{ nextPeek.artist }}</div>
+            </div>
+        </div>
         <input
             type="range"
             class="progress-slider"
@@ -139,7 +277,7 @@ function onMoveToTop(track: TrackMetadata) {
             @touchend="onSeekEnd"
             :disabled="!currentTrack"
         />
-        <div ref="playerControlsEl" class="playerControls" :class="{ seeking: isSeeking }" >
+        <div ref="playerControlsEl" class="playerControls" :class="{ seeking: isSeeking }" :style="{ '--mobile-card-bg': currentCardBg }">
             <div class="progress-bar-bg"></div>
             <div class="progress-bar-fill" :style="{ width: progressFillPercent + '%' }"></div>
             <div class="progress-bg" :style="{ width: progressFillPercent + '%' }"></div>
@@ -185,7 +323,7 @@ function onMoveToTop(track: TrackMetadata) {
                 <button
                     class="prevBtn"
                     :disabled="!currentTrack"
-                    @click="playPrev"
+                    @click="playPrev()"
                 >
                     <PrevIcon />
                 </button>
@@ -861,11 +999,87 @@ function onMoveToTop(track: TrackMetadata) {
     }
 }
 
+.peekCard {
+    display: none;
+}
+
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    /* The bar is inset 28px so the neighbour cards peek 22px from the sides (6px gap). */
     .playerControlsWrapper {
         width: 100%;
         height: var(--mobile-player-height);
-        padding: 8px 14px;
+        padding: 8px 28px;
+        overflow: hidden;
+        touch-action: pan-y;
+    }
+
+    .playerControls,
+    .botPart,
+    .peekCard {
+        transform: translateX(var(--swipe-x, 0px));
+        transition: none;
+    }
+
+    .swipeAnimating .playerControls,
+    .swipeAnimating .botPart,
+    .swipeAnimating .peekCard {
+        transition: transform .22s ease;
+    }
+
+    .peekCard {
+        position: absolute;
+        top: 8px;
+        bottom: 8px;
+        width: calc(100% - 56px);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 9px;
+        border-radius: 16px;
+        opacity: 0.7;
+        pointer-events: none;
+    }
+
+    .peekCard.prev {
+        left: calc(78px - 100%);
+    }
+
+    .peekCard.next {
+        left: calc(100% - 22px);
+    }
+
+    .peekCover {
+        width: 52px;
+        height: 52px;
+        flex-shrink: 0;
+        border-radius: 8px;
+        object-fit: cover;
+        user-select: none;
+    }
+
+    .peekText {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+    }
+
+    .peekName,
+    .peekArtist {
+        font-size: 13px;
+        line-height: 1.2;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .peekName {
+        color: #fff;
+        font-weight: 600;
+    }
+
+    .peekArtist {
+        color: hsla(0, 0%, 100%, 0.5);
     }
 
     .progress-slider {
@@ -873,26 +1087,26 @@ function onMoveToTop(track: TrackMetadata) {
     }
 
     .playerControlsWrapper .progress-bar-bg,
-    .playerControlsWrapper .progress-bar-fill,
-    .progress-bg {
+    .playerControlsWrapper .progress-bar-fill {
         display: none;
     }
 
     .playerControls {
         height: 100%;
         border-radius: 16px;
-        background-color: hsla(var(--player-accent-h), min(var(--player-accent-s), 50%), 14%, 0.98);
+        background-color: var(--mobile-card-bg, hsl(0, 0%, 7%));
     }
 
     .progress-bg {
         height: 100%;
+        pointer-events: none;
     }
 
     .botPart {
         top: 0;
         width: 100%;
         height: 100%;
-        padding: 0 24px 0 20px;
+        padding: 0 38px 0 37px;
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto auto;
         gap: 4px;
@@ -908,10 +1122,11 @@ function onMoveToTop(track: TrackMetadata) {
         gap: 8px;
     }
 
+    /* 52px in the 68px bar (84 - 2 * 8) gives 8px top and bottom; 37 - 28 on the left looks equal next to the rounder bar corner. */
     .coverWrapper,
     .trackCover {
-        width: 56px;
-        height: 56px;
+        width: 52px;
+        height: 52px;
         border-radius: 8px;
     }
 

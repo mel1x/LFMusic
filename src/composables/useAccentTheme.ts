@@ -1,11 +1,15 @@
-import { watchEffect } from "vue";
+import { ref, watchEffect } from "vue";
 import { useSettings } from "./useSettings";
 import { usePlayer } from "./usePlayer";
 
 // Dynamic theming: derives --accent-* CSS vars on :root from the current track's
 // accent color (or the static setting); also sets the Android/mobile system bar color.
 
-function hexToHSL(hex: string) {
+/** Accent of a track that is about to become current (mini player swipe): the theme
+ *  switches right away instead of waiting for playback to start. */
+export const accentPreview = ref<string | null>(null);
+
+export function hexToHSL(hex: string) {
     const r = parseInt(hex.slice(1, 3), 16) / 255;
     const g = parseInt(hex.slice(3, 5), 16) / 255;
     const b = parseInt(hex.slice(5, 7), 16) / 255;
@@ -169,7 +173,7 @@ export function useAccentTheme() {
 
     watchEffect(() => {
         const hex = settings.value.dynamic_accent_color
-            ? (currentAccentColor.value ?? "#1a1a1a")
+            ? (accentPreview.value ?? currentAccentColor.value ?? "#1a1a1a")
             : settings.value.static_accent_color;
         const { h, s } = hexToHSL(hex);
         // Near-black gray fallback: lighten to #353535 so it doesn't match the base color.
