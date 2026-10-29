@@ -42,9 +42,11 @@ mod imp {
         THB_TOOLTIP, THBF_ENABLED, THUMBBUTTON, THUMBBUTTONMASK,
     };
     use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, GetClientRect, IsIconic, RegisterWindowMessageW, HICON, ICONINFO,
-        PW_RENDERFULLCONTENT, WM_COMMAND,
+        CreateIconIndirect, GetClientRect, GetSystemMetrics, IsIconic, LoadImageW,
+        RegisterWindowMessageW, SendMessageW, HICON, ICONINFO, ICON_BIG, IMAGE_ICON,
+        LR_DEFAULTCOLOR, PW_RENDERFULLCONTENT, SM_CXICON, SM_CYICON, WM_COMMAND, WM_SETICON,
     };
 
     const ID_SHUFFLE: u32 = 1;
@@ -945,11 +947,29 @@ mod imp {
         WAKE.1.notify_one();
     }
 
+    /// tao only sets `ICON_SMALL`; without `ICON_BIG` the taskbar button can show
+    /// no icon at all. Loads the exe's icon resource (tauri-build embeds it as 32512).
+    unsafe fn set_big_icon(h: HWND) {
+        let Ok(module) = GetModuleHandleW(None) else { return };
+        let Ok(icon) = LoadImageW(
+            Some(module.into()),
+            windows::core::PCWSTR(32512 as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON),
+            GetSystemMetrics(SM_CYICON),
+            LR_DEFAULTCOLOR,
+        ) else {
+            return;
+        };
+        SendMessageW(h, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(icon.0 as isize)));
+    }
+
     pub fn init(app: &AppHandle, hwnd_raw: isize) {
         let _ = APP.set(app.clone());
         HWND_RAW.store(hwnd_raw, Ordering::Relaxed);
         let h = HWND(hwnd_raw as *mut c_void);
         unsafe {
+            set_big_icon(h);
             let msg = RegisterWindowMessageW(w!("TaskbarButtonCreated"));
             TASKBAR_MSG.store(msg, Ordering::Relaxed);
 

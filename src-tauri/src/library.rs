@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::SystemTime;
@@ -110,6 +110,13 @@ pub struct MusicLibrary {
     /// "Already downloaded" index cache for the Downloads page (title -> local matches).
     /// Keyed by the separators it was built with since debounced search re-queries it per keystroke.
     catalog_index_cache: RefCell<Option<(Vec<String>, CatalogIndex)>>,
+}
+
+/// (file path, tags, mtime) of a file read during a scan.
+type ScannedFile = (String, TrackMetadata, u64);
+
+fn lock_library(lib: &Mutex<MusicLibrary>) -> Result<std::sync::MutexGuard<'_, MusicLibrary>, String> {
+    lib.lock().map_err(|e| format!("Lock error: {}", e))
 }
 
 /// Title key -> local matches, see `catalog_index_cache`.
@@ -630,6 +637,13 @@ impl MusicLibrary {
         }
     }
 
+    fn list_audio_files(dir: &Path) -> Vec<PathBuf> {
+        let supported: HashSet<&str> = AudioPlayer::supported_formats().iter().copied().collect();
+        let mut files = Vec::new();
+        Self::collect_audio_files(dir, &supported, 0, &mut files);
+        files
+    }
+
     /// Scans a folder; `progress(current, total)` is called per processed file.
     fn scan_folder_internal<F>(
         &mut self,
@@ -646,11 +660,7 @@ impl MusicLibrary {
             return Err(format!("Не является директорией: {}", folder));
         }
 
-        let supported: HashSet<&str> = AudioPlayer::supported_formats().iter().copied().collect();
-
-        let mut all_files: Vec<PathBuf> = Vec::new();
-        Self::collect_audio_files(&path, &supported, 0, &mut all_files);
-
+        let all_files = Self::list_audio_files(&path);
         self.scan_folder_files(
             folder,
             &all_files,
@@ -725,6 +735,111 @@ impl MusicLibrary {
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         mark_track_indexes_dirty();
         Ok(self.get_all_tracks_light())
+    }
+
+    /// [`Self::add_folder`] that holds `lib` only for DB reads/writes: listing
+    /// files and reading tags (the slow part) runs unlocked, so other commands
+    /// (and the main thread waiting on them) aren't blocked during the scan.
+    pub fn add_folder_unlocked<F>(
+        lib: &Mutex<MusicLibrary>,
+        folder: String,
+        artist_separators: &[String],
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
+        progress: F,
+    ) -> Result<(), String>
+    where
+        F: Fn(usize, usize) + Send + Sync,
+    {
+        let path = PathBuf::from(&folder);
+        if !path.is_dir() {
+            return Err(format!("Папка не существует: {}", folder));
+        }
+        let cached_mtimes = {
+            let library = lock_library(lib)?;
+            library
+                .conn
+                .execute("INSERT OR IGNORE INTO folders (path) VALUES (?1)", params![folder])
+                .map_err(|e| format!("Ошибка добавления папки: {}", e))?;
+            library.folder_mtimes(&folder)?
+        };
+
+        let files = Self::list_audio_files(&path);
+        let batch = Self::read_changed_files(&files, &cached_mtimes, &progress)?;
+
+        let mut library = lock_library(lib)?;
+        library.write_scanned(&folder, &batch, true, audio_feature_progress)?;
+        library.rebuild_album_playlists()?;
+        library.rebuild_artist_playlists(artist_separators)?;
+        CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
+        Ok(())
+    }
+
+    /// [`Self::rescan_all`] with the same locking scheme as [`Self::add_folder_unlocked`].
+    pub fn rescan_all_unlocked<F>(
+        lib: &Mutex<MusicLibrary>,
+        artist_separators: &[String],
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
+        progress: F,
+    ) -> Result<(), String>
+    where
+        F: Fn(usize, usize) + Send + Sync,
+    {
+        let folders: Vec<(String, HashMap<String, u64>)> = {
+            let library = lock_library(lib)?;
+            library
+                .folder_paths()?
+                .into_iter()
+                .map(|f| {
+                    let mtimes = library.folder_mtimes(&f)?;
+                    Ok((f, mtimes))
+                })
+                .collect::<Result<_, String>>()?
+        };
+
+        let listed: Vec<(String, HashMap<String, u64>, Vec<PathBuf>)> = folders
+            .into_iter()
+            .filter(|(f, _)| Path::new(f).is_dir())
+            .map(|(f, mtimes)| {
+                let files = Self::list_audio_files(Path::new(&f));
+                (f, mtimes, files)
+            })
+            .collect();
+        let grand_total: usize = listed.iter().map(|(_, _, files)| files.len()).sum();
+
+        let mut offset = 0usize;
+        let mut scanned: Vec<(String, Vec<ScannedFile>)> = Vec::new();
+        for (folder, mtimes, files) in &listed {
+            let batch = Self::read_changed_files(files, mtimes, &|i, _| progress(offset + i, grand_total))?;
+            offset += files.len();
+            scanned.push((folder.clone(), batch));
+        }
+
+        let mut library = lock_library(lib)?;
+        let mut scanned_count = 0usize;
+        for (folder, batch) in &scanned {
+            scanned_count += library.write_scanned(folder, batch, false, None)?;
+        }
+        let deleted_count = library.delete_missing_tracks()?;
+        library.rebuild_album_playlists()?;
+        library.rebuild_artist_playlists(artist_separators)?;
+        if scanned_count > 0 || deleted_count > 0 {
+            let _ = library.restart_pending_audio_feature_analysis(audio_feature_progress);
+        }
+        CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
+        mark_track_indexes_dirty();
+        Ok(())
+    }
+
+    fn folder_paths(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM folders")
+            .map_err(|e| format!("Ошибка чтения папок: {}", e))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Ошибка запроса: {}", e))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     /// Registered library folder that equals or contains `dir`, compared via
@@ -1372,29 +1487,15 @@ impl MusicLibrary {
     where
         F: Fn(usize, usize) + Send + Sync,
     {
-        let folders: Vec<String> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT path FROM folders")
-                .map_err(|e| format!("Ошибка чтения папок: {}", e))?;
-
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| format!("Ошибка запроса: {}", e))?;
-
-            rows.filter_map(|r| r.ok()).collect()
-        };
-
-        let supported: HashSet<&str> = AudioPlayer::supported_formats().iter().copied().collect();
-
-        let mut folder_file_lists: Vec<(String, Vec<PathBuf>)> = Vec::new();
-        for folder in &folders {
-            if PathBuf::from(folder).is_dir() {
-                let mut files = Vec::new();
-                Self::collect_audio_files(PathBuf::from(folder).as_path(), &supported, 0, &mut files);
-                folder_file_lists.push((folder.clone(), files));
-            }
-        }
+        let folder_file_lists: Vec<(String, Vec<PathBuf>)> = self
+            .folder_paths()?
+            .into_iter()
+            .filter(|f| Path::new(f).is_dir())
+            .map(|f| {
+                let files = Self::list_audio_files(Path::new(&f));
+                (f, files)
+            })
+            .collect();
         let grand_total: usize = folder_file_lists.iter().map(|(_, f)| f.len()).sum();
         let mut global_current: usize = 0;
 
@@ -1435,27 +1536,41 @@ impl MusicLibrary {
     where
         F: Fn(usize, usize) + Send + Sync,
     {
-        let total = files.len();
-        if total == 0 {
+        if files.is_empty() {
             return Ok(0);
         }
+        let cached_mtimes = self.folder_mtimes(folder)?;
+        let batch = Self::read_changed_files(files, &cached_mtimes, &progress)?;
+        self.write_scanned(folder, &batch, analyze_audio_features, audio_feature_progress)
+    }
 
-        let cached_mtimes: HashMap<String, u64> = {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT file_path, modified_secs FROM tracks WHERE folder_path = ?1",
-                )
-                .map_err(|e| format!("Ошибка запроса: {}", e))?;
+    fn folder_mtimes(&self, folder: &str) -> Result<HashMap<String, u64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_path, modified_secs FROM tracks WHERE folder_path = ?1")
+            .map_err(|e| format!("Ошибка запроса: {}", e))?;
+        let rows = stmt
+            .query_map(params![folder], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })
+            .map_err(|e| format!("Ошибка запроса: {}", e))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
 
-            let rows = stmt
-                .query_map(params![folder], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
-                })
-                .map_err(|e| format!("Ошибка запроса: {}", e))?;
-
-            rows.filter_map(|r| r.ok()).collect()
-        };
+    /// Reads tags of new/changed files. No DB access, so callers can run it
+    /// without holding the library lock (see [`Self::add_folder_unlocked`]).
+    fn read_changed_files<F>(
+        files: &[PathBuf],
+        cached_mtimes: &HashMap<String, u64>,
+        progress: &F,
+    ) -> Result<Vec<ScannedFile>, String>
+    where
+        F: Fn(usize, usize) + Send + Sync,
+    {
+        let total = files.len();
+        if total == 0 {
+            return Ok(Vec::new());
+        }
 
         // mtime reads are IO-bound, parallelized; par_iter preserves file order.
         let to_scan: Vec<(String, u64)> = files
@@ -1481,7 +1596,7 @@ impl MusicLibrary {
 
         if to_scan.is_empty() {
             progress(total, total);
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         let counter = AtomicUsize::new(cached_count);
@@ -1490,7 +1605,7 @@ impl MusicLibrary {
             .build()
             .map_err(|e| format!("scan thread pool error: {}", e))?;
 
-        let batch: Vec<(String, TrackMetadata, u64)> = pool.install(|| {
+        let batch: Vec<ScannedFile> = pool.install(|| {
             to_scan
                 .par_iter()
                 .filter_map(|(path_str, mtime)| {
@@ -1506,6 +1621,16 @@ impl MusicLibrary {
 
         progress(total, total);
 
+        Ok(batch)
+    }
+
+    fn write_scanned(
+        &mut self,
+        folder: &str,
+        batch: &[ScannedFile],
+        analyze_audio_features: bool,
+        audio_feature_progress: Option<AudioFeatureProgressEmitter>,
+    ) -> Result<usize, String> {
         if !batch.is_empty() {
             let tx = self
                 .conn
@@ -1546,7 +1671,7 @@ impl MusicLibrary {
                         has_cover = excluded.has_cover"
                 ).map_err(|e| format!("Ошибка подготовки INSERT: {}", e))?;
 
-                for (file_path, m, mtime) in &batch {
+                for (file_path, m, mtime) in batch {
                     stmt.execute(params![
                         file_path,
                         folder,
@@ -3730,6 +3855,29 @@ mod tests {
         assert_eq!(library.get_all_tracks().len(), 1);
 
         drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unlocked_add_and_rescan_scan_files_and_drop_deleted_ones() {
+        let dir = temp_library_dir("unlocked_scan");
+        let music = dir.join("music");
+        fs::create_dir_all(&music).unwrap();
+        write_test_wav(&music.join("a.wav"), 44_100, 2, 44_100);
+        write_test_wav(&music.join("b.wav"), 44_100, 2, 44_100);
+
+        let lib = Mutex::new(MusicLibrary::new(dir.clone()).expect("library init"));
+        MusicLibrary::add_folder_unlocked(&lib, music.to_str().unwrap().to_string(), &[], None, |_, _| {})
+            .expect("add folder");
+        assert_eq!(lib.lock().unwrap().get_all_tracks().len(), 2);
+
+        fs::remove_file(music.join("b.wav")).unwrap();
+        MusicLibrary::rescan_all_unlocked(&lib, &[], None, |_, _| {}).expect("rescan");
+        let tracks = lib.lock().unwrap().get_all_tracks();
+        assert_eq!(tracks.len(), 1);
+        assert!(tracks[0].file_path.ends_with("a.wav"));
+
+        drop(lib);
         let _ = fs::remove_dir_all(dir);
     }
 

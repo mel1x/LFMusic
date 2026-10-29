@@ -530,15 +530,13 @@ fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, St
 async fn library_add_folder(app: tauri::AppHandle, folder_path: String) -> Result<(), String> {
     run_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
-        let state = app.state::<LibraryState>();
-        let mut library = state.lock()?;
-        library.add_folder(
+        MusicLibrary::add_folder_unlocked(
+            &app.state::<LibraryState>().0,
             folder_path,
             &separators,
             Some(audio_feature_progress_emitter(app.clone())),
             scan_progress_emitter(app.clone()),
-        )?;
-        Ok(())
+        )
     })
     .await
 }
@@ -588,12 +586,12 @@ async fn library_add_android_music_folders(app: tauri::AppHandle) -> Result<(), 
 
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
         let state = app.state::<LibraryState>();
-        let mut library = state.lock()?;
         let mut added = 0usize;
         let mut last_error: Option<String> = None;
 
         for folder_path in candidates {
-            match library.add_folder(
+            match MusicLibrary::add_folder_unlocked(
+                &state.0,
                 folder_path,
                 &separators,
                 Some(audio_feature_progress_emitter(app.clone())),
@@ -723,14 +721,12 @@ fn library_cleanup(state: State<LibraryState>) -> Result<usize, String> {
 async fn library_rescan(app: tauri::AppHandle) -> Result<(), String> {
     run_blocking(move || {
         let separators = settings::get_artist_separators(&app.state::<SettingsState>());
-        let state = app.state::<LibraryState>();
-        let mut library = state.lock()?;
-        library.rescan_all(
+        MusicLibrary::rescan_all_unlocked(
+            &app.state::<LibraryState>().0,
             &separators,
             Some(audio_feature_progress_emitter(app.clone())),
             scan_progress_emitter(app.clone()),
-        )?;
-        Ok(())
+        )
     })
     .await
 }
