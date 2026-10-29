@@ -1,5 +1,16 @@
 {
   "settings": {
+    "enhance": {
+      "title": "Auto sound enhancement",
+      "auto": "Auto",
+      "profiles": {
+        "headphones": "Headphones",
+        "laptop": "Laptop speakers",
+        "speakers": "Speakers",
+        "tv": "TV / HDMI",
+        "universal": "Universal"
+      }
+    },
     "language": "Interface language",
     "languageDescription": "Switch the application language",
     "russian": "Russian",

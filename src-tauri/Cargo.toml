@@ -69,6 +69,7 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Dwm",
     "Win32_Media",
     "Win32_Storage_Xps",
+    "Win32_System_Power",
 ] }
 
 # Dev-сборка: зависимости (image, lofty, symphonia и т.п.) в debug медленнее

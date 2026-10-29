@@ -4,6 +4,7 @@ use std::path::Path;
 use tauri::State;
 
 use crate::audio_player::EqSettings;
+use crate::enhance::EnhanceSettings;
 use crate::json_store;
 use crate::SettingsState;
 
@@ -18,6 +19,10 @@ pub struct AppSettings {
 
     #[serde(default)]
     pub eq_settings: EqSettings,
+
+    /// Auto sound enhancement (device profile, normalization).
+    #[serde(default)]
+    pub enhance_settings: EnhanceSettings,
 
     /// Download folder for external sources; empty/None uses the default
     /// "LFMusic Downloads" under the system music dir. Kept as its own field

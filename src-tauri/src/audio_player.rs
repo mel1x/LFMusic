@@ -1,5 +1,6 @@
 use base64::Engine;
 
+use crate::enhance::{EnhanceSettings, EnhanceShared, EnhanceSource, EnhanceStatus};
 use crate::spectrum::SpectrumAnalyzer;
 use lofty::picture::PictureType;
 use lofty::prelude::*;
@@ -94,13 +95,13 @@ impl Default for EqSettings {
 
 /// Biquad coefficients (Direct Form I)
 #[derive(Debug, Clone, Copy)]
-struct BiquadCoeffs {
-    b0: f32, b1: f32, b2: f32,
-    a1: f32, a2: f32,
+pub(crate) struct BiquadCoeffs {
+    pub(crate) b0: f32, pub(crate) b1: f32, pub(crate) b2: f32,
+    pub(crate) a1: f32, pub(crate) a2: f32,
 }
 
 impl BiquadCoeffs {
-    fn peaking_eq(sample_rate: f32, center_freq: f32, gain_db: f32, q: f32) -> Self {
+    pub(crate) fn peaking_eq(sample_rate: f32, center_freq: f32, gain_db: f32, q: f32) -> Self {
         if gain_db.abs() < 0.01 {
             // Passthrough
             return Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
@@ -124,7 +125,7 @@ impl BiquadCoeffs {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct BiquadState {
+pub(crate) struct BiquadState {
     x1: f32, x2: f32,
     y1: f32, y2: f32,
 }
@@ -135,7 +136,7 @@ struct BiquadState {
 /// limiter effectively hard-clip for most of the loud range. CEILING < 1.0 so a
 /// sample never hits exactly ±1.0 (guards against overflow if ever converted to int).
 #[inline(always)]
-fn soft_clip(x: f32) -> f32 {
+pub(crate) fn soft_clip(x: f32) -> f32 {
     const T: f32 = 0.97;
     const CEILING: f32 = 0.999;
     const KNEE: f32 = 0.5;
@@ -150,7 +151,7 @@ fn soft_clip(x: f32) -> f32 {
 }
 
 impl BiquadState {
-    fn process(&mut self, coeffs: &BiquadCoeffs, input: f32) -> f32 {
+    pub(crate) fn process(&mut self, coeffs: &BiquadCoeffs, input: f32) -> f32 {
         let output = coeffs.b0 * input + coeffs.b1 * self.x1 + coeffs.b2 * self.x2
             - coeffs.a1 * self.y1 - coeffs.a2 * self.y2;
         self.x2 = self.x1;
@@ -277,6 +278,15 @@ impl<S: Source<Item = f32>> Source for EqSource<S> {
     fn channels(&self) -> u16 { self.channels }
     fn sample_rate(&self) -> u32 { self.sample_rate }
     fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
+}
+
+/// User EQ followed by auto enhancement.
+fn effects<S: Source<Item = f32>>(
+    source: S,
+    eq_settings: &Arc<RwLock<EqSettings>>,
+    enhance: &Arc<EnhanceShared>,
+) -> EnhanceSource<EqSource<S>> {
+    EnhanceSource::new(EqSource::new(source, eq_settings.clone()), enhance.clone())
 }
 
 type Resp = mpsc::SyncSender<Result<(), String>>;
@@ -1099,6 +1109,7 @@ fn audio_thread_loop(
     _stream: OutputStream, // must stay alive for the thread's lifetime
     stream_handle: OutputStreamHandle,
     eq_settings: Arc<RwLock<EqSettings>>,
+    enhance: Arc<EnhanceShared>,
     spectrum: Arc<SpectrumAnalyzer>,
     sink_empty: Arc<SinkEndSignal>,
 ) {
@@ -1118,7 +1129,7 @@ fn audio_thread_loop(
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        EqSource::new(source, eq_settings.clone()),
+                        effects(source, &eq_settings, &enhance),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1161,7 +1172,7 @@ fn audio_thread_loop(
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        EqSource::new(source, eq_settings.clone()),
+                        effects(source, &eq_settings, &enhance),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1186,7 +1197,7 @@ fn audio_thread_loop(
                     fade_sink.set_volume(volume);
                     let fade_source = BufferedSymphoniaSource::new_with_seek(&file_path, current_pos)?;
                     fade_sink.append(FadeOut::new(
-                        EqSource::new(fade_source, eq_settings.clone()),
+                        effects(fade_source, &eq_settings, &enhance),
                         dur,
                     ));
 
@@ -1200,7 +1211,7 @@ fn audio_thread_loop(
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        EqSource::new(source, eq_settings.clone()).fade_in(dur),
+                        effects(source, &eq_settings, &enhance).fade_in(dur),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1228,7 +1239,7 @@ fn audio_thread_loop(
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        EqSource::new(source, eq_settings.clone()).fade_in(dur),
+                        effects(source, &eq_settings, &enhance).fade_in(dur),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1252,6 +1263,7 @@ pub struct AudioPlayer {
     playback_started_at: Option<Instant>,
     accumulated_position: f64,
     eq_settings: Arc<RwLock<EqSettings>>,
+    enhance: Arc<EnhanceShared>,
     spectrum: Arc<SpectrumAnalyzer>,
     /// Whether the current sink is empty (track finished/stopped). Updated
     /// asynchronously by the audio thread so the main thread can poll status
@@ -1266,6 +1278,8 @@ impl AudioPlayer {
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(0);
         let eq_settings = Arc::new(RwLock::new(EqSettings::default()));
         let eq_for_thread = eq_settings.clone();
+        let enhance = Arc::new(EnhanceShared::new());
+        let enhance_for_thread = enhance.clone();
         let spectrum = Arc::new(SpectrumAnalyzer::new());
         let spectrum_for_thread = spectrum.clone();
         // true = nothing playing; set false when a track starts.
@@ -1277,12 +1291,15 @@ impl AudioPlayer {
             .spawn(move || {
                 match OutputStream::try_default() {
                     Ok((stream, handle)) => {
+                        let (device_name, profile) = crate::enhance::detect_output_device();
+                        enhance_for_thread.set_detected(device_name, profile);
                         let _ = init_tx.send(Ok(()));
                         audio_thread_loop(
                             cmd_rx,
                             stream,
                             handle,
                             eq_for_thread,
+                            enhance_for_thread,
                             spectrum_for_thread,
                             sink_empty_for_thread,
                         );
@@ -1309,6 +1326,7 @@ impl AudioPlayer {
             playback_started_at: None,
             accumulated_position: 0.0,
             eq_settings,
+            enhance,
             spectrum,
             sink_empty,
         })
@@ -1756,6 +1774,18 @@ impl AudioPlayer {
         if let Ok(mut current) = self.eq_settings.write() {
             *current = settings;
         }
+    }
+
+    pub fn set_enhance_settings(&self, settings: &EnhanceSettings) {
+        self.enhance.apply(settings);
+    }
+
+    pub fn enhance_settings(&self) -> EnhanceSettings {
+        self.enhance.settings()
+    }
+
+    pub fn enhance_status(&self) -> EnhanceStatus {
+        self.enhance.status()
     }
 }
 

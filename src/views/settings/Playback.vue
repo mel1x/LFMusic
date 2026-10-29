@@ -1,11 +1,42 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue';
+import { onMounted, onUnmounted, computed, ref } from 'vue';
 import { useSettings, type SettingKey } from '../../composables/useSettings';
 import { useEqualizer, EQ_PRESETS, EQ_BAND_LABELS } from '../../composables/useEqualizer';
 import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
+import { useEnhance, DEVICE_PROFILES, type DeviceProfile } from '../../composables/useEnhance';
+import { useI18n } from '../../composables/useI18n';
 
+const { t } = useI18n();
 const { settings, settingItems, load, save } = useSettings();
+const { status: enhance, load: loadEnhance, toggleEnabled: toggleEnhance, setDevice } = useEnhance();
+const enhanceToggleItem = computed(() => ({ label: t('settings.enhance.title') }));
+const deviceLabel = (p: DeviceProfile | null) => p
+    ? t(`settings.enhance.profiles.${p}`)
+    : `${t('settings.enhance.auto')} (${t(`settings.enhance.profiles.${enhance.value.detected}`)})`;
+
+const deviceMenuOpen = ref(false);
+const deviceMenuRoot = ref<HTMLElement | null>(null);
+
+function chooseDevice(p: DeviceProfile | null) {
+    deviceMenuOpen.value = false;
+    void setDevice(p);
+}
+function onDocMouseDown(e: MouseEvent) {
+    if (deviceMenuOpen.value && !deviceMenuRoot.value?.contains(e.target as Node)) deviceMenuOpen.value = false;
+}
+function onDocKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') deviceMenuOpen.value = false;
+}
+onMounted(() => {
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onDocKey);
+});
+onUnmounted(() => {
+    document.removeEventListener('mousedown', onDocMouseDown);
+    document.removeEventListener('keydown', onDocKey);
+});
+
 const {
     eqEnabled, eqBands, eqGain, activePreset,
     load: loadEq, toggleEnabled: toggleEq,
@@ -24,6 +55,7 @@ async function toggle(key: SettingKey) {
 onMounted(async () => {
     await load();
     await loadEq();
+    await loadEnhance();
 });
 
 function onBandInput(index: number, event: Event) {
@@ -53,6 +85,43 @@ function formatBandValue(value: number): string {
                     :checked="settings[item.key]"
                     @toggle="toggle(item.key)"
                 />
+            </div>
+        </div>
+
+        <div class="settingBlock">
+            <div class="enhanceRow">
+                <SettingToggle compact :item="enhanceToggleItem" :checked="enhance.enabled" @toggle="toggleEnhance" />
+                <div class="deviceDropdown" :class="{ disabled: !enhance.enabled }" ref="deviceMenuRoot">
+                    <button
+                        type="button"
+                        class="deviceTrigger"
+                        :class="{ open: deviceMenuOpen }"
+                        :disabled="!enhance.enabled"
+                        :title="enhance.device_name ?? undefined"
+                        @click="deviceMenuOpen = !deviceMenuOpen"
+                        :aria-expanded="deviceMenuOpen"
+                        aria-haspopup="listbox"
+                    >
+                        <span class="deviceCurrent">{{ deviceLabel(enhance.device) }}</span>
+                        <svg class="deviceChevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="m6 9 6 6 6-6" />
+                        </svg>
+                    </button>
+                    <transition name="deviceMenu">
+                        <div v-if="deviceMenuOpen" class="deviceMenu" role="listbox">
+                            <button
+                                v-for="p in [null, ...DEVICE_PROFILES]"
+                                :key="p ?? 'auto'"
+                                type="button"
+                                class="deviceOption"
+                                :class="{ active: enhance.device === p }"
+                                role="option"
+                                :aria-selected="enhance.device === p"
+                                @click="chooseDevice(p)"
+                            >{{ deviceLabel(p) }}</button>
+                        </div>
+                    </transition>
+                </div>
             </div>
         </div>
 
@@ -143,6 +212,101 @@ function formatBandValue(value: number): string {
     gap: 2px;
     max-width: 800px;
     width: 100%;
+}
+.enhanceRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    max-width: 800px;
+    width: 100%;
+}
+.deviceDropdown {
+    position: relative;
+    min-width: 200px;
+    transition: opacity .24s ease;
+
+    &.disabled {
+        opacity: 0.35;
+    }
+}
+.deviceTrigger {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 12px;
+    border-radius: 36px;
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color .2s ease;
+}
+.deviceTrigger:hover:not(:disabled),
+.deviceTrigger.open {
+    background-color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
+}
+.deviceTrigger:disabled {
+    cursor: not-allowed;
+}
+.deviceCurrent {
+    flex: 1;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.deviceChevron {
+    flex-shrink: 0;
+    color: hsla(0, 0%, 100%, 0.48);
+    transition: transform .18s ease;
+}
+.deviceTrigger.open .deviceChevron {
+    transform: rotate(180deg);
+}
+.deviceMenu {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    position: absolute;
+    top: calc(100% + 7px);
+    right: 0;
+    z-index: 20;
+    width: 100%;
+    padding: 5px;
+    border-radius: 20px;
+    background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 12%, 0.98);
+    box-shadow: 0 14px 32px hsla(0, 0%, 0%, 0.34), inset 0 0 0 1px hsla(0, 0%, 100%, 0.08);
+    backdrop-filter: blur(14px);
+}
+.deviceOption {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 16px;
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.68);
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color .18s ease, color .18s ease;
+}
+.deviceOption:hover,
+.deviceOption.active {
+    background-color: hsla(0, 0%, 100%, 0.09);
+    color: #ffffff;
+}
+.deviceMenu-enter-active,
+.deviceMenu-leave-active {
+    transition: opacity .16s ease, transform .16s ease;
+    transform-origin: top right;
+}
+.deviceMenu-enter-from,
+.deviceMenu-leave-to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
 }
 .eqBlock {
     margin-top: 16px;
@@ -332,8 +496,12 @@ function formatBandValue(value: number): string {
         max-width: none;
     }
     .eqHeader,
-    .eqGainRow {
+    .eqGainRow,
+    .enhanceRow {
         flex-wrap: wrap;
+    }
+    .deviceDropdown {
+        width: 100%;
     }
     .eqResetBtn,
     .eqPresetBtn {

@@ -4,6 +4,7 @@ mod catalog_search;
 mod covers;
 mod discord_rpc;
 mod downloader;
+mod enhance;
 mod external;
 mod json_store;
 mod library;
@@ -1490,6 +1491,47 @@ fn eq_get_settings(state: State<PlayerState>) -> Result<EqSettings, String> {
     Ok(player.get_eq_settings())
 }
 
+// ── Auto enhancement commands ────────────────────────────────────────────────
+
+fn enhance_update(
+    player_state: &State<PlayerState>,
+    settings_state: &State<SettingsState>,
+    update: impl FnOnce(&mut enhance::EnhanceSettings),
+) -> Result<enhance::EnhanceStatus, String> {
+    let player = player_state.read()?;
+    let mut s = player.enhance_settings();
+    update(&mut s);
+    player.set_enhance_settings(&s);
+    let mut state = settings_state.lock()?;
+    state.0.enhance_settings = s;
+    settings::save(&state.1, &state.0)?;
+    Ok(player.enhance_status())
+}
+
+#[tauri::command]
+fn enhance_get_status(state: State<PlayerState>) -> Result<enhance::EnhanceStatus, String> {
+    Ok(state.read()?.enhance_status())
+}
+
+#[tauri::command]
+fn enhance_set_enabled(
+    player_state: State<PlayerState>,
+    settings_state: State<SettingsState>,
+    enabled: bool,
+) -> Result<enhance::EnhanceStatus, String> {
+    enhance_update(&player_state, &settings_state, |s| s.enabled = enabled)
+}
+
+/// `device = None` returns to automatic detection.
+#[tauri::command]
+fn enhance_set_device(
+    player_state: State<PlayerState>,
+    settings_state: State<SettingsState>,
+    device: Option<enhance::DeviceProfile>,
+) -> Result<enhance::EnhanceStatus, String> {
+    enhance_update(&player_state, &settings_state, |s| s.device = device)
+}
+
 // ── Settings commands ────────────────────────────────────────────────────────
 
 /// Options are freeform (bool/string/etc.), stored as JSON values.
@@ -2138,6 +2180,7 @@ pub fn run() {
             let player_state = app.state::<PlayerState>();
             let player = player_state.0.read().expect("Lock error");
             player.set_eq_settings(app_settings.eq_settings.clone());
+            player.set_enhance_settings(&app_settings.enhance_settings);
             drop(player);
 
             // Must be managed before code below calls app.state::<SettingsState>().
@@ -2277,6 +2320,9 @@ pub fn run() {
             eq_set_gain,
             eq_set_enabled,
             eq_get_settings,
+            enhance_get_status,
+            enhance_set_enabled,
+            enhance_set_device,
             // Settings
             get_settings,
             save_settings,

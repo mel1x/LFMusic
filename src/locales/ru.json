@@ -1,5 +1,16 @@
 {
   "settings": {
+    "enhance": {
+      "title": "Авто-улучшение звука",
+      "auto": "Авто",
+      "profiles": {
+        "headphones": "Наушники",
+        "laptop": "Динамики ноутбука",
+        "speakers": "Колонки",
+        "tv": "Телевизор / HDMI",
+        "universal": "Универсальный"
+      }
+    },
     "language": "Язык интерфейса",
     "languageDescription": "Переключение языка приложения",
     "russian": "Русский",
