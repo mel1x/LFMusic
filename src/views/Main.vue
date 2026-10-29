@@ -762,13 +762,17 @@ onUnmounted(() => {
     color: #fff;
 }
 
+/* Pinned to the bottom outside the flow, so the mix block centers on the whole page. */
 .moodStrip {
-    flex-shrink: 0;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 24px;
+    z-index: 2;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 12px;
-    margin-top: 16px;
 }
 .moodStripLabel {
     user-select: none;
@@ -1139,7 +1143,6 @@ onUnmounted(() => {
 
 @media (max-height: 800px) {
     .mixName { font-size: 40px; }
-    .moodStrip { margin-top: 26px; }
 }
 
 @media (max-width: 1100px) and (min-width: 769px) {
@@ -1149,6 +1152,7 @@ onUnmounted(() => {
 /* Phone breakpoint (canonical for this app; see other views too). */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .pageRoot { padding: 16px 10px; }
+    .moodStrip { bottom: 16px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
     .mixName { font-size: 34px; letter-spacing: -0.8px; }
     /* Own padding so text doesn't hit the edges even with the page's small padding. */
