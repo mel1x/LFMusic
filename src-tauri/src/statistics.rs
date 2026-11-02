@@ -1,5 +1,7 @@
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DayPart {
@@ -114,7 +116,34 @@ pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_track_statistics_updated_at
              ON track_statistics(updated_at);
          CREATE INDEX IF NOT EXISTS idx_track_statistics_listen_count
-             ON track_statistics(listen_count);",
+             ON track_statistics(listen_count);
+         -- Listening history for the year recap (see HistoryBuffer). No foreign
+         -- keys on purpose: history must outlive tracks deleted from the library.
+         -- No indexes either: the logs are append-only and rowid order is time
+         -- order, so one yearly scan is cheap and every insert touches one page.
+         CREATE TABLE IF NOT EXISTS history_tracks (
+             id                         INTEGER PRIMARY KEY,
+             file_path                  TEXT NOT NULL UNIQUE,
+             title                      TEXT,
+             artist                     TEXT,
+             album                      TEXT,
+             genre                      TEXT,
+             duration_secs              REAL
+         );
+         CREATE TABLE IF NOT EXISTS listen_history (
+             started_at                 INTEGER NOT NULL,
+             track_id                   INTEGER NOT NULL,
+             listened_secs              INTEGER NOT NULL,
+             flags                      INTEGER NOT NULL DEFAULT 0,
+             source_kind                INTEGER NOT NULL DEFAULT 0,
+             source_id                  INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS library_history (
+             at                         INTEGER NOT NULL,
+             kind                       INTEGER NOT NULL,
+             track_id                   INTEGER,
+             ref_id                     INTEGER
+         );",
     )
 }
 
@@ -261,6 +290,261 @@ pub fn apply_collection_full_listen(
         params![kind.as_str(), key],
     )?;
     Ok(())
+}
+
+// ── Listening history ────────────────────────────────────────────────────────
+//
+// One compact row per play session (`listen_history`) plus rare library events
+// (`library_history`), the raw material for year recap cards. Events are kept in
+// memory and written in one transaction per batch, so playback adds no disk
+// writes of its own: a batch lands about once an hour of music.
+
+/// Bits of `listen_history.flags`.
+pub const LISTEN_COUNTED: i64 = 1;
+pub const LISTEN_FULL: i64 = 1 << 1;
+pub const LISTEN_SKIPPED: i64 = 1 << 2;
+pub const LISTEN_EARLY_SKIP: i64 = 1 << 3;
+pub const LISTEN_SHUFFLE: i64 = 1 << 4;
+pub const LISTEN_REPEAT_ONE: i64 = 1 << 5;
+pub const LISTEN_SEARCH_START: i64 = 1 << 6;
+pub const LISTEN_MANUAL_START: i64 = 1 << 7;
+pub const LISTEN_SEEKED: i64 = 1 << 8;
+pub const LISTEN_MOBILE: i64 = 1 << 9;
+
+/// `listen_history.source_kind`: what the track was played from.
+pub const SOURCE_OTHER: i64 = 0;
+pub const SOURCE_CATALOG: i64 = 1;
+pub const SOURCE_ALBUM: i64 = 2;
+pub const SOURCE_ARTIST: i64 = 3;
+/// `source_id` holds the playlist id (favorites included).
+pub const SOURCE_PLAYLIST: i64 = 4;
+pub const SOURCE_SEARCH: i64 = 5;
+pub const SOURCE_MIX: i64 = 6;
+
+const HISTORY_FLUSH_EVENTS: usize = 16;
+const HISTORY_FLUSH_AGE: Duration = Duration::from_secs(20 * 60);
+
+/// One play session as reported by the player.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ListenEvent {
+    pub file_path: String,
+    /// Unix seconds when the session started.
+    pub started_at: i64,
+    pub listened_secs: f64,
+    pub counted: bool,
+    pub full: bool,
+    pub skipped: bool,
+    pub early_skip: bool,
+    pub shuffle: bool,
+    pub repeat_one: bool,
+    pub search_start: bool,
+    pub manual_start: bool,
+    pub seeked: bool,
+    /// Player source id: "album:...", "playlist:12", "mix", ...
+    pub source: Option<String>,
+    /// false while the track is still playing (see `HistoryBuffer::open_listen`).
+    pub finished: bool,
+}
+
+impl ListenEvent {
+    fn flags(&self) -> i64 {
+        [
+            (self.counted, LISTEN_COUNTED),
+            (self.full, LISTEN_FULL),
+            (self.skipped, LISTEN_SKIPPED),
+            (self.early_skip, LISTEN_EARLY_SKIP),
+            (self.shuffle, LISTEN_SHUFFLE),
+            (self.repeat_one, LISTEN_REPEAT_ONE),
+            (self.search_start, LISTEN_SEARCH_START),
+            (self.manual_start, LISTEN_MANUAL_START),
+            (self.seeked, LISTEN_SEEKED),
+            (cfg!(target_os = "android"), LISTEN_MOBILE),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |acc, (_, bit)| acc | bit)
+    }
+
+    fn same_session(&self, other: &ListenEvent) -> bool {
+        self.file_path == other.file_path && self.started_at == other.started_at
+    }
+}
+
+pub fn parse_source(source: Option<&str>) -> (i64, Option<i64>) {
+    let Some(source) = source else {
+        return (SOURCE_OTHER, None);
+    };
+    if let Some(id) = source.strip_prefix("playlist:") {
+        return (SOURCE_PLAYLIST, id.parse().ok());
+    }
+    let kind = if source.starts_with("catalog") {
+        SOURCE_CATALOG
+    } else if source.starts_with("album:") {
+        SOURCE_ALBUM
+    } else if source.starts_with("artist:") {
+        SOURCE_ARTIST
+    } else if source.starts_with("search:") {
+        SOURCE_SEARCH
+    } else if source == "mix" {
+        SOURCE_MIX
+    } else {
+        SOURCE_OTHER
+    };
+    (kind, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryEventKind {
+    /// `ref_id` = playlist id (favorites is a playlist too).
+    PlaylistAdd = 1,
+    PlaylistRemove = 2,
+    /// `ref_id` = new playlist id, no track.
+    PlaylistCreate = 3,
+    Downloaded = 4,
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryEvent {
+    pub at: i64,
+    pub kind: LibraryEventKind,
+    pub file_path: Option<String>,
+    pub ref_id: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+pub struct HistoryBuffer {
+    listens: Vec<ListenEvent>,
+    /// Session of the track that is still playing, refreshed on every forced
+    /// progress save. Written only by a shutdown flush, so closing the app
+    /// mid-track keeps that listen without logging it twice otherwise.
+    open_listen: Option<ListenEvent>,
+    library: Vec<LibraryEvent>,
+    first_buffered: Option<Instant>,
+}
+
+impl HistoryBuffer {
+    /// Returns true when the buffer is due to be written.
+    pub fn push_listen(&mut self, event: ListenEvent) -> bool {
+        if !event.finished {
+            self.open_listen = Some(event);
+            return false;
+        }
+        if self.open_listen.as_ref().is_some_and(|open| open.same_session(&event)) {
+            self.open_listen = None;
+        }
+        // Sub-second sessions are just clicking through the queue.
+        if event.file_path.trim().is_empty() || (event.listened_secs < 1.0 && !event.skipped) {
+            return false;
+        }
+        self.listens.push(event);
+        self.mark_buffered()
+    }
+
+    pub fn push_library(&mut self, event: LibraryEvent) -> bool {
+        self.library.push(event);
+        self.mark_buffered()
+    }
+
+    fn mark_buffered(&mut self) -> bool {
+        let first = *self.first_buffered.get_or_insert_with(Instant::now);
+        self.listens.len() + self.library.len() >= HISTORY_FLUSH_EVENTS
+            || first.elapsed() >= HISTORY_FLUSH_AGE
+    }
+
+    /// Drains the buffer; `include_open` also takes the unfinished session.
+    pub fn take(&mut self, include_open: bool) -> (Vec<ListenEvent>, Vec<LibraryEvent>) {
+        let mut listens = std::mem::take(&mut self.listens);
+        if include_open {
+            listens.extend(self.open_listen.take());
+        }
+        self.first_buffered = None;
+        (listens, std::mem::take(&mut self.library))
+    }
+}
+
+/// Id of the track in `history_tracks`, refreshing its metadata snapshot so the
+/// recap can still name tracks removed from the library later in the year.
+fn history_track_id(
+    conn: &Connection,
+    ids: &mut HashMap<String, i64>,
+    file_path: &str,
+) -> rusqlite::Result<i64> {
+    if let Some(id) = ids.get(file_path) {
+        return Ok(*id);
+    }
+    // The WHERE on the update skips the page write when nothing changed.
+    conn.prepare_cached(
+        "INSERT INTO history_tracks (file_path, title, artist, album, genre, duration_secs)
+         SELECT t.file_path, COALESCE(o.title, t.title), COALESCE(o.artist, t.artist),
+                t.album, t.genre, t.duration_secs
+         FROM tracks t
+         LEFT JOIN track_overrides o ON o.file_path = t.file_path
+         WHERE t.file_path = ?1
+         ON CONFLICT(file_path) DO UPDATE SET
+             title = excluded.title,
+             artist = excluded.artist,
+             album = excluded.album,
+             genre = excluded.genre,
+             duration_secs = excluded.duration_secs
+         WHERE history_tracks.title IS NOT excluded.title
+            OR history_tracks.artist IS NOT excluded.artist
+            OR history_tracks.album IS NOT excluded.album
+            OR history_tracks.genre IS NOT excluded.genre
+            OR history_tracks.duration_secs IS NOT excluded.duration_secs",
+    )?
+    .execute(params![file_path])?;
+    conn.prepare_cached("INSERT OR IGNORE INTO history_tracks (file_path) VALUES (?1)")?
+        .execute(params![file_path])?;
+    let id: i64 = conn
+        .prepare_cached("SELECT id FROM history_tracks WHERE file_path = ?1")?
+        .query_row(params![file_path], |row| row.get(0))?;
+    ids.insert(file_path.to_string(), id);
+    Ok(id)
+}
+
+/// Writes a drained batch in a single transaction.
+pub fn write_history(
+    conn: &Connection,
+    listens: &[ListenEvent],
+    library: &[LibraryEvent],
+) -> rusqlite::Result<()> {
+    if listens.is_empty() && library.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut ids = HashMap::new();
+
+    for event in listens {
+        let track_id = history_track_id(&tx, &mut ids, &event.file_path)?;
+        let (source_kind, source_id) = parse_source(event.source.as_deref());
+        tx.prepare_cached(
+            "INSERT INTO listen_history
+                 (started_at, track_id, listened_secs, flags, source_kind, source_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?
+        .execute(params![
+            event.started_at,
+            track_id,
+            event.listened_secs.max(0.0).round() as i64,
+            event.flags(),
+            source_kind,
+            source_id,
+        ])?;
+    }
+
+    for event in library {
+        let track_id = match &event.file_path {
+            Some(path) => Some(history_track_id(&tx, &mut ids, path)?),
+            None => None,
+        };
+        tx.prepare_cached(
+            "INSERT INTO library_history (at, kind, track_id, ref_id) VALUES (?1, ?2, ?3, ?4)",
+        )?
+        .execute(params![event.at, event.kind as i64, track_id, event.ref_id])?;
+    }
+
+    tx.commit()
 }
 
 #[cfg(test)]

@@ -271,6 +271,203 @@
     },
     "close": "Got it"
   },
+  "recap": {
+    "title": "{year} recap",
+    "loading": "Putting your year together",
+    "error": "Could not build the recap",
+    "untitled": "Untitled",
+    "unknownArtist": "Unknown artist",
+    "open": "{year} recap",
+    "controls": {
+      "close": "Close",
+      "prev": "Back",
+      "next": "Next",
+      "pause": "Pause",
+      "play": "Resume",
+      "mute": "Mute",
+      "unmute": "Unmute",
+      "volume": "Volume"
+    },
+    "units": {
+      "minutes": "minute|minutes",
+      "minutesShort": "min|min",
+      "hours": "hour|hours",
+      "days": "day|days",
+      "tracks": "track|tracks",
+      "differentTracks": "different track|different tracks",
+      "plays": "play|plays",
+      "genres": "genre|genres",
+      "times": "time|times",
+      "newPlaylists": "new playlist|new playlists",
+      "downloads": "downloaded track|downloaded tracks",
+      "h": "h",
+      "min": "min"
+    },
+    "empty": {
+      "title": "Not enough music yet",
+      "text": "Keep listening - the cards appear once there is some listening history."
+    },
+    "intro": {
+      "title": "Your {year}",
+      "text": "A year told by your music",
+      "hint": "Tap to continue"
+    },
+    "minutes": {
+      "kicker": "Time with music",
+      "days": "That is {days} of nonstop music",
+      "hours": "That is {hours} of music",
+      "daysListened": "Music played on {days} out of {total}"
+    },
+    "first": {
+      "kicker": "First track of the year",
+      "text": "It all started here: {date}"
+    },
+    "variety": {
+      "kicker": "Variety"
+    },
+    "topTrack": {
+      "kicker": "Track of the year"
+    },
+    "topTracks": {
+      "kicker": "Your top 5",
+      "title": "Tracks that stayed with you"
+    },
+    "topArtist": {
+      "kicker": "Artist of the year",
+      "text": "{minutes} together"
+    },
+    "topArtists": {
+      "kicker": "Favorite artists",
+      "title": "The ones you played the most"
+    },
+    "topAlbum": {
+      "kicker": "Album of the year"
+    },
+    "genres": {
+      "kicker": "Genres of the year",
+      "title": "Your sound",
+      "more": "{count} in total this year"
+    },
+    "moments": {
+      "kicker": "Your time",
+      "peak": "Music played most around {hour}",
+      "night": {
+        "title": "Night mode",
+        "text": "{tracks} between midnight and 5 am",
+        "text2": "Your music plays while the city sleeps"
+      },
+      "morning": {
+        "title": "Early bird",
+        "text": "{tracks} before 9 am",
+        "text2": "Your day starts with music"
+      },
+      "day": {
+        "title": "Daytime listener",
+        "text": "{tracks} during the day",
+        "text2": "Music carries you through the day"
+      },
+      "evening": {
+        "title": "Evening listener",
+        "text": "{tracks} in the evening",
+        "text2": "You save the best tracks for the evening"
+      }
+    },
+    "obsession": {
+      "kicker": "Could not stop",
+      "text": "On {date} you played it {times}"
+    },
+    "marathon": {
+      "kicker": "Marathon",
+      "text": "of music without a break"
+    },
+    "rhythm": {
+      "kicker": "Rhythm of the year",
+      "title": "Most musical month: {month}"
+    },
+    "discovery": {
+      "kicker": "Discovery of the year",
+      "text": "New this year and already {plays}"
+    },
+    "collection": {
+      "kicker": "Your collection grew",
+      "title": "Your library got bigger",
+      "likes": "{tracks} liked",
+      "playlist": "Favorite playlist",
+      "favorites": "Liked"
+    },
+    "habits": {
+      "kicker": "How you listen",
+      "full": "of tracks played to the end"
+    },
+    "character": {
+      "kicker": "Your music character",
+      "nightOwl": {
+        "title": "Night owl",
+        "desc": "The best music plays while everyone sleeps"
+      },
+      "fan": {
+        "title": "True fan",
+        "desc": "Found your artist and never let go"
+      },
+      "explorer": {
+        "title": "Explorer",
+        "desc": "Always new names and new sounds"
+      },
+      "marathoner": {
+        "title": "Marathoner",
+        "desc": "Your music plays for hours"
+      },
+      "energy": {
+        "title": "Full charge",
+        "desc": "Loud, fast and driven"
+      },
+      "calm": {
+        "title": "Calm harbor",
+        "desc": "Calm sound for a clear head"
+      },
+      "dancer": {
+        "title": "Dance floor",
+        "desc": "Impossible to stand still to your year"
+      },
+      "completist": {
+        "title": "Connoisseur",
+        "desc": "You listen to the very last note"
+      },
+      "shuffler": {
+        "title": "Surprise lover",
+        "desc": "Hit shuffle and let the music surprise you"
+      },
+      "melomane": {
+        "title": "Music lover",
+        "desc": "Music is always somewhere near"
+      }
+    },
+    "outro": {
+      "title": "Thanks for this year in music",
+      "track": "Track of the year",
+      "minutes": "Minutes",
+      "artist": "Artist of the year",
+      "genre": "Genre",
+      "character": "Character",
+      "replay": "Watch again"
+    },
+    "labels": {
+      "plays": "Plays",
+      "artists": "Artists",
+      "albums": "Albums",
+      "played": "Played",
+      "time": "Time",
+      "favoriteTrack": "Favorite track",
+      "tracksInRow": "Tracks in a row",
+      "date": "Date",
+      "streak": "Days in a row with music",
+      "record": "Day record",
+      "shuffle": "On shuffle",
+      "skips": "Skips",
+      "search": "Found through search",
+      "mobile": "On the phone"
+    }
+  },
   "onboarding": {
     "kicker": "Welcome to LFMusic",
     "step": "Step {n} of {total}",

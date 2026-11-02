@@ -93,7 +93,19 @@ interface PlaybackStatsSession {
   listenRecorded: boolean;
   fullRecorded: boolean;
   lastWallClockMs: number | null;
+  /** Unix seconds, for the listening history. */
+  startedAt: number;
+  source: string | null;
+  searchStart: boolean;
+  manualStart: boolean;
+  startCountsReported: boolean;
+  seeked: boolean;
 }
+
+type StatsSessionEnd = { fullListen?: boolean; forwardSkip?: boolean };
+
+/** Periodic state saves write listened time only once this much has piled up. */
+const STATS_FLUSH_MIN_SECS = 60;
 
 type CollectionStatsKind = "album" | "playlist";
 
@@ -414,6 +426,12 @@ function createPlayer() {
       listenRecorded: false,
       fullRecorded: false,
       lastWallClockMs: state === "Playing" ? performance.now() : null,
+      startedAt: Math.floor(Date.now() / 1000),
+      source: activePlaylistSource.value,
+      searchStart: false,
+      manualStart: false,
+      startCountsReported: false,
+      seeked: false,
     };
   }
 
@@ -440,37 +458,79 @@ function createPlayer() {
 
     if (!session.listenRecorded && session.listenedSecs >= session.listenThresholdSecs) {
       session.listenRecorded = true;
-      void sendTrackStatisticsDelta({
+      const delta: TrackStatisticsDelta = {
         ...createTrackDelta(session.filePath),
         listenCountDelta: 1,
         ...dayPartListenDelta(),
-      });
+      };
+      addUnreportedStartCounts(delta);
+      void sendTrackStatisticsDelta(delta);
     }
+  }
+
+  function sessionListenedSecs(session: PlaybackStatsSession, fullListen: boolean): number {
+    return fullListen && session.durationSecs > 0 ? session.durationSecs : session.listenedSecs;
   }
 
   function addUnreportedListenedTime(delta: TrackStatisticsDelta, fullListen: boolean) {
     const session = statsSession;
     if (!session) return;
-    const target = fullListen && session.durationSecs > 0
-      ? session.durationSecs
-      : session.listenedSecs;
-    const unreported = roundedSeconds(target - session.reportedListenedSecs);
+    const unreported = roundedSeconds(sessionListenedSecs(session, fullListen) - session.reportedListenedSecs);
     if (unreported > 0) {
       delta.totalListenedSecsDelta = (delta.totalListenedSecsDelta ?? 0) + unreported;
       session.reportedListenedSecs += unreported;
     }
   }
 
-  async function flushCurrentStatisticsProgress() {
+  /** Start counters ride along with the session's next write instead of a write of their own. */
+  function addUnreportedStartCounts(delta: TrackStatisticsDelta) {
+    const session = statsSession;
+    if (!session || session.startCountsReported) return;
+    session.startCountsReported = true;
+    if (session.searchStart) delta.searchStartCountDelta = 1;
+    if (session.manualStart) delta.manualStartCountDelta = 1;
+  }
+
+  /** Hands the session to the backend history log (kept in memory, written in batches). */
+  function logListen(session: PlaybackStatsSession, end: StatsSessionEnd, finished: boolean) {
+    const forwardSkip = !!end.forwardSkip;
+    const event = {
+      filePath: session.filePath,
+      startedAt: session.startedAt,
+      listenedSecs: roundedSeconds(sessionListenedSecs(session, !!end.fullListen)),
+      counted: session.listenRecorded,
+      full: !!end.fullListen,
+      skipped: forwardSkip,
+      earlySkip: forwardSkip && session.lastPositionSecs <= 15,
+      shuffle: shuffled.value,
+      repeatOne: repeatMode.value === "track",
+      searchStart: session.searchStart,
+      manualStart: session.manualStart,
+      seeked: session.seeked,
+      source: session.source,
+      finished,
+    };
+    void invoke("statistics_log_listen", { event }).catch((e) => {
+      console.error("Ошибка записи истории прослушиваний:", e);
+    });
+  }
+
+  /** `final` (closing, reloading) writes everything and hands the still playing session
+   *  to the history log. Periodic saves skip the write until a minute has piled up,
+   *  so frequent state saves don't each hit the disk. */
+  async function flushCurrentStatisticsProgress(final = true) {
     const session = statsSession;
     if (!session) return;
     updateStatsProgress(positionSecs.value, playbackState.value);
+    if (!final && session.listenedSecs - session.reportedListenedSecs < STATS_FLUSH_MIN_SECS) return;
     const delta = createTrackDelta(session.filePath);
     addUnreportedListenedTime(delta, false);
+    addUnreportedStartCounts(delta);
     await sendTrackStatisticsDelta(delta);
+    if (final) logListen(session, {}, false);
   }
 
-  async function finishCurrentStatsSession(options: { fullListen?: boolean; forwardSkip?: boolean } = {}) {
+  async function finishCurrentStatsSession(options: StatsSessionEnd = {}) {
     const session = statsSession;
     if (!session) return;
 
@@ -496,7 +556,9 @@ function createPlayer() {
     }
 
     addUnreportedListenedTime(delta, !!options.fullListen);
+    addUnreportedStartCounts(delta);
     await sendTrackStatisticsDelta(delta);
+    logListen(session, options, true);
 
     if (options.fullListen) {
       await markCollectionTrackCompleted(session.filePath);
@@ -506,10 +568,9 @@ function createPlayer() {
   }
 
   function recordTrackStartStatistics(filePath: string, options: PlayTrackOptions) {
-    const delta = createTrackDelta(filePath);
-    if (options.searchStart) delta.searchStartCountDelta = 1;
-    if (options.manualListStart) delta.manualStartCountDelta = 1;
-    void sendTrackStatisticsDelta(delta);
+    if (statsSession?.filePath !== filePath) return;
+    statsSession.searchStart = !!options.searchStart;
+    statsSession.manualStart = !!options.manualListStart;
   }
 
   function collectionRefFromSource(sourceId: string | null): { kind: CollectionStatsKind; key: string } | null {
@@ -1080,6 +1141,7 @@ function createPlayer() {
       }
       positionSecs.value = position;
       lastFrameTime = performance.now();
+      if (statsSession) statsSession.seeked = true;
       updateStatsProgress(position, playbackState.value);
     } catch (e: any) {
       errorMessage.value = `Ошибка перемотки: ${e}`;
@@ -1158,17 +1220,18 @@ function createPlayer() {
     if (saveStateTimer) clearTimeout(saveStateTimer);
     saveStateTimer = setTimeout(() => {
       saveStateTimer = null;
-      void saveState();
+      void saveState(false);
     }, 650);
   }
 
-  async function saveState() {
+  /** `final`: the app is closing or reloading, so pending statistics are written now. */
+  async function saveState(final = true) {
     // An immediate save supersedes any pending debounced one.
     if (saveStateTimer) {
       clearTimeout(saveStateTimer);
       saveStateTimer = null;
     }
-    await flushCurrentStatisticsProgress();
+    await flushCurrentStatisticsProgress(final);
 
     let trackIndex: number | null = null;
     if (currentTrack.value) {
@@ -1349,6 +1412,14 @@ function createPlayer() {
     // primary path for advancing the queue; the status poll above is the fallback.
     stopTrackEndedListener = await listen<string>("track_ended", (event) => {
       void handleTrackNaturallyEnded(event.payload);
+    });
+
+    // Listening history is written in batches; the OS may kill a backgrounded
+    // app (Android) before the next batch is due.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        void invoke("statistics_flush_history").catch(() => {});
+      }
     });
 
     // Persist the current page on navigation (debounced). Set up after restoreState

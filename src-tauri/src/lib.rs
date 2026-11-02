@@ -11,7 +11,9 @@ mod library;
 mod mpris;
 mod pins;
 mod player_state;
+mod recap;
 mod settings;
+mod snippets;
 mod spectrum;
 pub mod statistics;
 mod taskbar;
@@ -1368,6 +1370,36 @@ fn statistics_add_collection_full_listen(
     library.add_collection_full_listen(kind, &key)
 }
 
+/// Buffers a finished (or, before closing, the still playing) play session;
+/// the disk write happens in batches, see `statistics::HistoryBuffer`.
+#[tauri::command(async)]
+fn statistics_log_listen(
+    state: State<LibraryState>,
+    event: statistics::ListenEvent,
+) -> Result<(), String> {
+    let library = state.lock()?;
+    library.log_listen(event);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn statistics_get_year_recap(
+    state: State<LibraryState>,
+    settings_state: State<SettingsState>,
+    year: i32,
+) -> Result<recap::YearRecap, String> {
+    let separators = settings::get_artist_separators(&settings_state);
+    let library = state.lock()?;
+    library.year_recap(year, &separators)
+}
+
+/// Writes buffered history now: the app may be killed in the background (Android).
+#[tauri::command(async)]
+fn statistics_flush_history(state: State<LibraryState>) -> Result<(), String> {
+    let library = state.lock()?;
+    library.flush_history(false)
+}
+
 #[tauri::command(async)]
 fn statistics_get_recently_played(
     state: State<LibraryState>,
@@ -2150,6 +2182,10 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("lfmusic-external", |ctx, request, responder| {
             external::protocol_handler(ctx, request, responder);
         })
+        // Short track fragments for the year recap cards, decoded in memory.
+        .register_asynchronous_uri_scheme_protocol("lfmusic-snippet", |ctx, request, responder| {
+            snippets::protocol_handler(ctx, request, responder);
+        })
         .setup(move |app| {
             let app_data_dir = app
                 .path()
@@ -2308,6 +2344,9 @@ pub fn run() {
             statistics_get_track,
             statistics_sum_listen_count,
             statistics_add_collection_full_listen,
+            statistics_log_listen,
+            statistics_flush_history,
+            statistics_get_year_recap,
             statistics_get_recently_played,
             statistics_get_most_played,
             statistics_get_top_artists,

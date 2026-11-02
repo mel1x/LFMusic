@@ -15,6 +15,7 @@ import OnboardingTour from './components/OnboardingTour.vue';
 import HolidayPattern from './components/HolidayPattern.vue';
 import HolidaySnow from './components/HolidaySnow.vue';
 import HolidayModal from './components/HolidayModal.vue';
+import YearRecap from './components/recap/YearRecap.vue';
 
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
@@ -139,6 +140,7 @@ watchEffect(() => {
   <FullscreenCover />
   <OnboardingTour />
   <HolidayModal />
+  <YearRecap />
   <HolidaySnow v-if="activeHoliday === 'new_year' && !showSplash" />
 </template>
 

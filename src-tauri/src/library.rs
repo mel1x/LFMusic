@@ -1,7 +1,10 @@
 use crate::audio_features::{self, AudioFeatures, AUDIO_FEATURE_ANALYZER_VERSION};
 use crate::audio_player::{AudioPlayer, TrackMetadata};
 use crate::external::ExternalTrack;
-use crate::statistics::{self, CollectionKind, TrackStatistics, TrackStatisticsDelta};
+use crate::statistics::{
+    self, CollectionKind, HistoryBuffer, LibraryEvent, LibraryEventKind, ListenEvent,
+    TrackStatistics, TrackStatisticsDelta,
+};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -110,6 +113,8 @@ pub struct MusicLibrary {
     /// "Already downloaded" index cache for the Downloads page (title -> local matches).
     /// Keyed by the separators it was built with since debounced search re-queries it per keystroke.
     catalog_index_cache: RefCell<Option<(Vec<String>, CatalogIndex)>>,
+    /// Listening history waiting for its batched write (see `statistics::HistoryBuffer`).
+    history: RefCell<HistoryBuffer>,
 }
 
 /// (file path, tags, mtime) of a file read during a scan.
@@ -471,6 +476,7 @@ impl MusicLibrary {
             centroid_cache: RefCell::new(None),
             search_index: RefCell::new(None),
             catalog_index_cache: RefCell::new(None),
+            history: RefCell::new(HistoryBuffer::default()),
         })
     }
 
@@ -561,6 +567,9 @@ impl MusicLibrary {
     /// WAL stays enabled here (not disabled on shutdown): background DSP threads
     /// may still hold their own SQLite connection while the window closes.
     pub fn shutdown(&self) -> Result<(), String> {
+        if let Err(e) = self.flush_history(true) {
+            eprintln!("{}", e);
+        }
         let _ = self.conn.execute_batch("PRAGMA optimize;");
         match self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
             Ok(_) => Ok(()),
@@ -939,6 +948,7 @@ impl MusicLibrary {
                 ],
             )
             .map_err(|e| format!("Ошибка вставки трека: {}", e))?;
+        self.log_library_event(LibraryEventKind::Downloaded, Some(file_path), None);
 
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
@@ -1799,6 +1809,7 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка создания плейлиста: {}", e))?;
 
         let id = self.conn.last_insert_rowid();
+        self.log_library_event(LibraryEventKind::PlaylistCreate, None, Some(id));
         Ok(PlaylistInfo {
             id,
             name,
@@ -1931,6 +1942,7 @@ impl MusicLibrary {
                 playlist_add_count_delta: 1,
                 ..TrackStatisticsDelta::default()
             })?;
+            self.log_library_event(LibraryEventKind::PlaylistAdd, Some(file_path), Some(playlist_id));
         }
         Ok(())
     }
@@ -1956,6 +1968,7 @@ impl MusicLibrary {
                 playlist_add_count_delta: -1,
                 ..TrackStatisticsDelta::default()
             })?;
+            self.log_library_event(LibraryEventKind::PlaylistRemove, Some(file_path), Some(playlist_id));
         }
         Ok(())
     }
@@ -2019,6 +2032,68 @@ impl MusicLibrary {
             self.update_centroid_for_listen(&delta.file_path, old_count, new_count);
         }
         Ok(())
+    }
+
+    pub fn log_listen(&self, event: ListenEvent) {
+        let due = self.history.borrow_mut().push_listen(event);
+        if due {
+            if let Err(e) = self.flush_history(false) {
+                eprintln!("{}", e);
+            }
+        }
+    }
+
+    fn log_library_event(&self, kind: LibraryEventKind, file_path: Option<&str>, ref_id: Option<i64>) {
+        let due = self.history.borrow_mut().push_library(LibraryEvent {
+            at: crate::util::unix_secs() as i64,
+            kind,
+            file_path: file_path.map(str::to_string),
+            ref_id,
+        });
+        if due {
+            if let Err(e) = self.flush_history(false) {
+                eprintln!("{}", e);
+            }
+        }
+    }
+
+    /// Writes buffered history; `include_open` also writes the session of the
+    /// track still playing (shutdown only). A failed batch is dropped rather
+    /// than retried forever.
+    pub fn flush_history(&self, include_open: bool) -> Result<(), String> {
+        let (listens, library) = self.history.borrow_mut().take(include_open);
+        statistics::write_history(&self.conn, &listens, &library)
+            .map_err(|e| format!("Ошибка записи истории прослушиваний: {}", e))
+    }
+
+    /// Recap of one calendar year from the listening history.
+    pub fn year_recap(&self, year: i32, artist_separators: &[String]) -> Result<crate::recap::YearRecap, String> {
+        self.flush_history(false)?;
+        let mut recap = crate::recap::year_recap(&self.conn, year, artist_separators)
+            .map_err(|e| format!("Ошибка подсчета итогов года: {}", e))?;
+        recap.attach_media(
+            |path| crate::thumbnails::cover_url(self, path),
+            // Accents are normally cached on first playback; recap tracks may never
+            // have been played in this install, so compute (and cache) them here.
+            // Custom covers are skipped: their accent lives in track_overrides.
+            |path| {
+                if self.get_override_cover_sig(path).is_some() {
+                    return None;
+                }
+                let bytes = AudioPlayer::extract_cover_bytes(path)?;
+                let color = crate::audio_player::extract_accent_color(&bytes)?;
+                let _ = self.set_accent_color(path, &color);
+                Some(color)
+            },
+        );
+        Ok(recap)
+    }
+
+    pub fn is_library_track(&self, file_path: &str) -> bool {
+        self.conn
+            .prepare_cached("SELECT 1 FROM tracks WHERE file_path = ?1")
+            .and_then(|mut stmt| stmt.exists(params![file_path]))
+            .unwrap_or(false)
     }
 
     pub fn get_track_statistics(&self, file_path: &str) -> Result<TrackStatistics, String> {
@@ -4403,6 +4478,184 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn listen_rows(library: &MusicLibrary) -> i64 {
+        library
+            .conn
+            .query_row("SELECT COUNT(*) FROM listen_history", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn finished_listen(path: &str, started_at: i64) -> ListenEvent {
+        ListenEvent {
+            file_path: path.to_string(),
+            started_at,
+            listened_secs: 200.4,
+            counted: true,
+            full: true,
+            shuffle: true,
+            source: Some("playlist:7".to_string()),
+            finished: true,
+            ..ListenEvent::default()
+        }
+    }
+
+    #[test]
+    fn listen_history_is_buffered_until_flush_and_survives_track_removal() {
+        let dir = temp_library_dir("listen_history");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), Some("Al"), Some("Rock"), 1);
+
+        library.log_listen(finished_listen("/m/a.flac", 1_000));
+        library.log_listen(finished_listen("/m/a.flac", 2_000));
+        assert_eq!(listen_rows(&library), 0, "nothing is written before the batch is due");
+
+        library.flush_history(false).unwrap();
+        assert_eq!(listen_rows(&library), 2);
+
+        let (secs, flags, kind, source_id): (i64, i64, i64, Option<i64>) = library
+            .conn
+            .query_row(
+                "SELECT listened_secs, flags, source_kind, source_id FROM listen_history LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(secs, 200);
+        assert_eq!(
+            flags,
+            statistics::LISTEN_COUNTED | statistics::LISTEN_FULL | statistics::LISTEN_SHUFFLE
+        );
+        assert_eq!((kind, source_id), (statistics::SOURCE_PLAYLIST, Some(7)));
+
+        library.remove_track("/m/a.flac", &[]).unwrap();
+        let (tracks, artist, genre): (i64, String, String) = library
+            .conn
+            .query_row("SELECT COUNT(*), artist, genre FROM history_tracks", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!((tracks, artist.as_str(), genre.as_str()), (1, "X", "Rock"));
+        assert_eq!(listen_rows(&library), 2);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn listen_history_writes_a_batch_once_enough_events_are_buffered() {
+        let dir = temp_library_dir("listen_history_batch");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+
+        for i in 0..15 {
+            library.log_listen(finished_listen("/m/a.flac", i));
+        }
+        assert_eq!(listen_rows(&library), 0);
+        library.log_listen(finished_listen("/m/a.flac", 15));
+        assert_eq!(listen_rows(&library), 16);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn open_listen_is_written_only_on_shutdown_and_replaced_by_its_finish() {
+        let dir = temp_library_dir("listen_history_open");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+
+        let open = ListenEvent { finished: false, ..finished_listen("/m/a.flac", 50) };
+        library.log_listen(open.clone());
+        library.flush_history(false).unwrap();
+        assert_eq!(listen_rows(&library), 0, "a regular flush leaves the playing track alone");
+
+        // Finishing the same session drops the open copy: one row, not two.
+        library.log_listen(finished_listen("/m/a.flac", 50));
+        library.shutdown().unwrap();
+        assert_eq!(listen_rows(&library), 1);
+
+        library.log_listen(open);
+        library.shutdown().unwrap();
+        assert_eq!(listen_rows(&library), 2, "shutdown keeps the unfinished listen");
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn year_recap_aggregates_tops_days_and_obsession() {
+        let dir = temp_library_dir("year_recap");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X feat. Y"), Some("Al"), Some("Rock"), 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), Some("Z"), None, Some("Jazz"), 2);
+
+        // Local noon of 2025-03-10 and the next day, whatever the test machine's zone.
+        let day1: i64 = library
+            .conn
+            .query_row("SELECT CAST(strftime('%s', '2025-03-10 12:00:00', 'utc') AS INTEGER)", [], |r| r.get(0))
+            .unwrap();
+        let day2 = day1 + 86_400;
+        for i in 0..3 {
+            library.log_listen(finished_listen("/m/a.flac", day1 + i * 250));
+        }
+        library.log_listen(finished_listen("/m/b.flac", day2));
+        library.log_listen(ListenEvent { counted: false, listened_secs: 4.0, skipped: true, ..finished_listen("/m/b.flac", day2 + 300) });
+
+        let recap = library.year_recap(2025, &[" feat. ".to_string()]).unwrap();
+        assert_eq!(recap.plays, 4);
+        assert_eq!(recap.unique_tracks, 2);
+        assert_eq!(recap.top_tracks[0].file_path, "/m/a.flac");
+        assert_eq!(recap.top_tracks[0].plays, 3);
+        // "X feat. Y" is split, so both artists get the track's 3 plays.
+        let mut leaders: Vec<&str> = recap.top_artists[..2].iter().map(|a| a.name.as_str()).collect();
+        leaders.sort_unstable();
+        assert_eq!(leaders, ["X", "Y"]);
+        assert_eq!(recap.top_artists[2].name, "Z");
+        assert_eq!(recap.top_genres[0].name, "Rock");
+        assert_eq!((recap.days_listened, recap.longest_streak), (2, 2));
+        assert_eq!(recap.skips, 1);
+        let obsession = recap.obsession.expect("3 plays in one day");
+        assert_eq!((obsession.track.file_path.as_str(), obsession.day.as_str()), ("/m/a.flac", "2025-03-10"));
+        assert_eq!(recap.marathon.expect("back to back plays").tracks, 3);
+        assert_eq!(recap.first_track.unwrap().file_path, "/m/a.flac");
+        assert!(recap.top_tracks[0].snippet_url.is_some());
+        assert_eq!(library.year_recap(2024, &[]).unwrap().plays, 0);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn library_history_records_playlist_events() {
+        let dir = temp_library_dir("library_history");
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
+        let playlist = library.create_playlist("Mix".to_string()).unwrap();
+        library.add_track_to_playlist(playlist.id, "/m/a.flac", false).unwrap();
+        library.remove_track_from_playlist(playlist.id, "/m/a.flac").unwrap();
+        library.flush_history(false).unwrap();
+
+        let kinds: Vec<(i64, Option<i64>)> = library
+            .conn
+            .prepare("SELECT kind, ref_id FROM library_history ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (LibraryEventKind::PlaylistCreate as i64, Some(playlist.id)),
+                (LibraryEventKind::PlaylistAdd as i64, Some(playlist.id)),
+                (LibraryEventKind::PlaylistRemove as i64, Some(playlist.id)),
+            ]
+        );
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

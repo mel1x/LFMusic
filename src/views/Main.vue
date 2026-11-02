@@ -20,6 +20,7 @@ import {
 } from '../composables/useStatistics';
 import { formatTotalDuration } from '../utils/format';
 import { useI18n } from '../composables/useI18n';
+import { openYearRecap, seasonalRecapYear } from '../composables/useYearRecap';
 
 const router = useRouter();
 const { t } = useI18n();
@@ -259,6 +260,9 @@ const character = computed(() => {
     return t('stats.characterSentence', { traits });
 });
 
+// Year recap: only offered as a badge in December/January.
+const seasonYear = seasonalRecapYear();
+
 function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     if (statsOpen.value) statsOpen.value = false;
@@ -284,6 +288,10 @@ onUnmounted(() => {
                     <path d="M13 17V5"/>
                     <path d="M8 17v-3"/>
                 </svg>
+            </button>
+            <button v-if="seasonYear !== null && hasLibrary" class="recapBadge" @click="openYearRecap(seasonYear)">
+                <span class="recapBadgeDot"></span>
+                {{ t('recap.open', { year: seasonYear }) }}
             </button>
 
             <template v-if="hasLibrary">
@@ -427,7 +435,7 @@ onUnmounted(() => {
                 <div v-if="statsOpen" class="statsBackdrop" @click="statsOpen = false">
                     <div class="statsModal" @click.stop>
                         <button class="statsClose" @click="statsOpen = false" v-tooltip:left="'Закрыть'">
-                            <CloseIcon width="20" height="20" />
+                            <CloseIcon width="18" height="18" />
                         </button>
 
                         <div v-if="statsLoading" class="statsLoading">Загрузка музыкального профиля…</div>
@@ -458,7 +466,7 @@ onUnmounted(() => {
                                         <circle
                                             v-for="(a, i) in radarAxes"
                                             :key="'dot' + i"
-                                            :cx="a.px" :cy="a.py" r="3.4"
+                                            :cx="a.px" :cy="a.py" r="2.6"
                                             class="radarDot"
                                         />
                                         <g v-for="(a, i) in radarAxes" :key="'lbl' + i">
@@ -469,38 +477,18 @@ onUnmounted(() => {
                                 </div>
                             </div>
 
-                            <div class="statCards">
-                                <div class="statCard">
-                                    <span class="statCardIcon">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M4 14v-1a8 8 0 0 1 16 0v1"/>
-                                            <rect x="2.5" y="14" width="4.5" height="6.5" rx="2"/>
-                                            <rect x="17" y="14" width="4.5" height="6.5" rx="2"/>
-                                        </svg>
-                                    </span>
-                                    <div class="statCardValue">{{ summary ? summary.total_listens.toLocaleString('ru-RU') : 0 }}</div>
-                                    <div class="statCardLabel">Прослушиваний</div>
+                            <div class="statsFacts">
+                                <div class="statsFact">
+                                    <div class="statsFactValue">{{ summary ? summary.total_listens.toLocaleString('ru-RU') : 0 }}</div>
+                                    <div class="statsFactLabel">Прослушиваний</div>
                                 </div>
-                                <div class="statCard">
-                                    <span class="statCardIcon">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M3 12h3l3 7 4-15 3 8h5"/>
-                                        </svg>
-                                    </span>
-                                    <div class="statCardValue">{{ analyzedTracks.toLocaleString('ru-RU') }} треков</div>
-                                    <div class="statCardLabel">Проанализировано</div>
+                                <div class="statsFact">
+                                    <div class="statsFactValue">{{ summary ? formatTotalDuration(summary.total_listened_secs) : '0 мин' }}</div>
+                                    <div class="statsFactLabel">За музыкой</div>
                                 </div>
-                                <div class="statCard wide">
-                                    <span class="statCardIcon">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                            <circle cx="12" cy="12" r="9"/>
-                                            <path d="M12 7v5l3.5 2"/>
-                                        </svg>
-                                    </span>
-                                    <div class="statCardText">
-                                        <div class="statCardValue">{{ summary ? formatTotalDuration(summary.total_listened_secs) : '0 мин' }}</div>
-                                        <div class="statCardLabel">За музыкой</div>
-                                    </div>
+                                <div class="statsFact">
+                                    <div class="statsFactValue">{{ analyzedTracks.toLocaleString('ru-RU') }}</div>
+                                    <div class="statsFactLabel">Проанализировано</div>
                                 </div>
                             </div>
                         </template>
@@ -576,6 +564,44 @@ onUnmounted(() => {
 .statsBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.11);
     color: hsla(0, 0%, 100%, 1);
+}
+
+.recapBadge {
+    position: absolute;
+    top: 20px;
+    right: 78px;
+    z-index: 3;
+    user-select: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 16px 0 14px;
+    border: none;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #fff;
+    background:
+        linear-gradient(120deg, hsla(var(--accent-h), max(var(--accent-s), 55%), 50%, 0.9), hsla(calc(var(--accent-h) + 45), max(var(--accent-s), 55%), 45%, 0.9));
+    box-shadow: 0 8px 24px hsla(var(--accent-h), var(--accent-s), 30%, 0.35);
+    transition: transform .2s ease, box-shadow .2s ease;
+}
+.recapBadge:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 28px hsla(var(--accent-h), var(--accent-s), 35%, 0.5);
+}
+.recapBadgeDot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fff;
+    animation: recapBadgePulse 2.4s ease-in-out infinite;
+}
+@keyframes recapBadgePulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .45; transform: scale(.7); }
 }
 
 .mixStage {
@@ -1141,23 +1167,25 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: hsla(0, 0%, 0%, 0.55);
-    backdrop-filter: blur(4px);
+    background-color: hsla(0, 0%, 0%, 0.6);
+    backdrop-filter: blur(8px);
     padding: 24px;
     box-sizing: border-box;
 }
+/* Same language as the year recap cards: dark accent-tinted surface, one soft
+   light from the top, hairline dividers instead of nested cards. */
 .statsModal {
     position: relative;
-    width: 500px;
+    width: 460px;
     max-width: 100%;
     max-height: 88vh;
     overflow-y: auto;
-    padding: 28px 30px 24px;
-    border-radius: 26px;
+    padding: 26px 28px 24px;
+    border-radius: 20px;
     background:
-        radial-gradient(130% 90% at 50% -10%, hsla(var(--accent-h), var(--accent-s), 40%, 0.18), transparent 55%),
-        hsl(var(--accent-h), min(var(--accent-s), 48%), 12%);
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+        radial-gradient(130% 70% at 50% -12%, hsla(var(--accent-h), var(--accent-s), 56%, 0.16), transparent 62%),
+        hsl(var(--accent-h), min(var(--accent-s), 26%), 9%);
+    box-shadow: 0 32px 90px hsla(0, 0%, 0%, 0.5), inset 0 0 0 1px hsla(0, 0%, 100%, 0.05);
     border: none;
     outline: none;
     box-sizing: border-box;
@@ -1166,21 +1194,21 @@ onUnmounted(() => {
 .statsModal::-webkit-scrollbar-thumb { background: hsla(0, 0%, 100%, 0.14); border-radius: 3px; }
 .statsClose {
     position: absolute;
-    top: 20px;
-    right: 20px;
+    top: 18px;
+    right: 18px;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
-    height: 38px;
+    width: 32px;
+    height: 32px;
     border: none;
     outline: none;
     box-shadow: none;
     border-radius: 9999px;
     background: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.7);
-    transition: .2s ease;
+    transition: background-color .18s ease, color .18s ease;
 }
 .statsClose:hover {
     background: hsla(0, 0%, 100%, 0.12);
@@ -1196,65 +1224,50 @@ onUnmounted(() => {
 .statsHead {
     display: flex;
     flex-direction: column;
-    padding-right: 48px;
-    margin-top: 2px;
+    padding-right: 44px;
 }
 .statsKicker {
     font-size: 11px;
-    font-weight: 800;
-    letter-spacing: 1px;
+    font-weight: 700;
+    letter-spacing: .12em;
     text-transform: uppercase;
-    color: hsla(var(--accent-h), var(--accent-s), 72%, 0.9);
-    margin-bottom: 6px;
+    color: hsla(var(--accent-h), min(var(--accent-s), 60%), 82%, 0.8);
     user-select: none;
 }
 .statsTitle {
+    margin-top: 8px;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 25px;
-    font-weight: 900;
-    color: #fff;
-    letter-spacing: -0.5px;
+    font-size: 24px;
+    line-height: 1.15;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: hsla(0, 0%, 100%, 0.96);
     user-select: none;
 }
 .statsSubtitle {
     margin-top: 6px;
-    font-size: 13px;
-    line-height: 1.45;
-    color: hsla(0, 0%, 100%, 0.55);
+    font-size: 13.5px;
+    line-height: 1.5;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.6);
 }
 .statsLoading, .statsEmpty {
-    margin-top: 18px;
+    padding-right: 44px;
     font-size: 14px;
     line-height: 1.55;
-    color: hsla(0, 0%, 100%, 0.5);
+    color: hsla(0, 0%, 100%, 0.55);
 }
 
 .statsSection {
-    margin-top: 28px;
+    margin-top: 22px;
 }
 
 .radarWrap {
-    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
-    margin: -4px 0 2px;
-}
-/* Soft accent glow behind the radar, matching the page's orb style. */
-.radarWrap::before {
-    content: "";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 220px;
-    height: 220px;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    background: radial-gradient(circle, hsla(var(--accent-h), var(--accent-s), 58%, 0.18), transparent 62%);
-    pointer-events: none;
 }
 .radar {
-    position: relative;
     width: 100%;
     max-width: 360px;
     height: auto;
@@ -1262,128 +1275,82 @@ onUnmounted(() => {
 }
 .radarRing {
     fill: none;
-    stroke: hsla(0, 0%, 100%, 0.08);
-    stroke-width: 1;
-}
-.radarRing:last-of-type { stroke: hsla(0, 0%, 100%, 0.14); }
-.radarAxis {
     stroke: hsla(0, 0%, 100%, 0.07);
     stroke-width: 1;
 }
+.radarRing:last-of-type { stroke: hsla(0, 0%, 100%, 0.12); }
+.radarAxis {
+    stroke: hsla(0, 0%, 100%, 0.06);
+    stroke-width: 1;
+}
 .radarShape {
-    fill: hsla(var(--accent-h), var(--accent-s), 58%, 0.28);
-    stroke: hsla(var(--accent-h), var(--accent-s), 64%, 1);
-    stroke-width: 2;
+    fill: hsla(var(--accent-h), var(--accent-s), 60%, 0.16);
+    stroke: hsl(var(--accent-h), min(var(--accent-s), 70%), 72%);
+    stroke-width: 1.5;
     stroke-linejoin: round;
-    filter: drop-shadow(0 0 12px hsla(var(--accent-h), var(--accent-s), 55%, 0.45));
     transform-box: fill-box;
     transform-origin: center;
-    animation: radarPop .6s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: radarIn .5s cubic-bezier(.2, .8, .2, 1);
 }
-@keyframes radarPop {
-    from { transform: scale(0.6); opacity: 0; }
+@keyframes radarIn {
+    from { transform: scale(0.85); opacity: 0; }
     to { transform: scale(1); opacity: 1; }
 }
 .radarDot {
-    fill: #fff;
-    stroke: hsla(var(--accent-h), var(--accent-s), 50%, 1);
-    stroke-width: 2;
+    fill: hsl(var(--accent-h), min(var(--accent-s), 70%), 72%);
 }
 .radarLabel {
-    fill: hsla(0, 0%, 100%, 0.9);
+    fill: hsla(0, 0%, 100%, 0.82);
     font-size: 12px;
-    font-weight: 700;
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-weight: 600;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 .radarValue {
-    fill: hsla(var(--accent-h), var(--accent-s), 74%, 0.95);
+    fill: hsla(0, 0%, 100%, 0.45);
     font-size: 11px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-}
-
-/* Hero stat cards: top row has 2 cards, bottom row 1 wide card. */
-.statCards {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin-top: 22px;
-}
-.statCard {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    padding: 14px 14px 13px;
-    border-radius: 18px;
-    background:
-        radial-gradient(140% 120% at 100% 0%, hsla(var(--accent-h), var(--accent-s), 56%, 0.14), transparent 58%),
-        hsla(0, 0%, 100%, 0.045);
-    box-shadow: inset 0 1px 0 hsla(0, 0%, 100%, 0.05);
-    overflow: hidden;
-}
-.statCardIcon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px;
-    height: 30px;
-    margin-bottom: 10px;
-    border-radius: 10px;
-    background: hsla(var(--accent-h), var(--accent-s), 55%, 0.16);
-    color: hsla(var(--accent-h), var(--accent-s), 74%, 1);
-}
-.statCardIcon svg { width: 17px; height: 17px; }
-.statCardValue {
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 16px;
-    font-weight: 800;
-    color: #fff;
-    letter-spacing: -0.3px;
-    font-variant-numeric: tabular-nums;
-    line-height: 1.2;
-}
-.statCardLabel {
-    margin-top: auto;
-    padding-top: 4px;
-    font-size: 11.5px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.45);
-    user-select: none;
+    font-variant-numeric: tabular-nums;
 }
 
-/* Wide bottom card (listening time): icon on the left, text on the right. */
-.statCard.wide {
-    grid-column: 1 / -1;
-    flex-direction: row;
-    align-items: center;
-    gap: 14px;
-    padding: 15px 18px;
+/* Three numbers in one row, split by hairlines; columns size to their values
+   so a long duration doesn't wrap. */
+.statsFacts {
+    display: flex;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid hsla(0, 0%, 100%, 0.08);
 }
-.statCard.wide .statCardIcon {
-    margin-bottom: 0;
-    width: 38px;
-    height: 38px;
-    border-radius: 12px;
-}
-.statCard.wide .statCardIcon svg { width: 20px; height: 20px; }
-.statCardText {
+.statsFact {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    min-width: 0;
+    gap: 4px;
+    padding: 0 14px;
 }
-.statCard.wide .statCardLabel {
-    margin-top: 0;
-    padding-top: 0;
+.statsFact:first-child {
+    padding-left: 0;
 }
-
-.statsFootNote {
-    margin-top: 26px;
+.statsFact:last-child {
+    padding-right: 0;
+}
+.statsFact + .statsFact {
+    border-left: 1px solid hsla(0, 0%, 100%, 0.08);
+}
+.statsFactValue {
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 17px;
+    line-height: 1.2;
+    font-weight: 800;
+    color: hsla(0, 0%, 100%, 0.96);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.statsFactLabel {
     font-size: 12px;
-    color: hsla(0, 0%, 100%, 0.35);
-    text-align: center;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.5);
+    user-select: none;
 }
 
 .stats-enter-active, .stats-leave-active { transition: opacity .2s ease; }
@@ -1400,6 +1367,8 @@ onUnmounted(() => {
         height: 100%;
         max-height: none;
         border-radius: 0;
+        padding-top: calc(var(--safe-top, 0px) + 26px);
     }
+    .statsClose { top: calc(var(--safe-top, 0px) + 18px); }
 }
 </style>
