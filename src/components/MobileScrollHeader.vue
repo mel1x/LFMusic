@@ -34,11 +34,11 @@ function openSearch() {
         </button>
         <div class="mobileScrollTitle">{{ title }}</div>
         <div class="mobileScrollActions">
-            <button v-if="search" class="mobileScrollButton" type="button" aria-label="Поиск" @click="openSearch">
-                <SearchIcon width="22" height="22" />
-            </button>
             <button class="mobileScrollButton upBtn" type="button" aria-label="Вверх" :tabindex="scrolled ? 0 : -1" @click="emit('top')">
                 <ArrowUpIcon width="22" height="22" />
+            </button>
+            <button v-if="search" class="mobileScrollButton" type="button" aria-label="Поиск" @click="openSearch">
+                <SearchIcon width="22" height="22" />
             </button>
         </div>
     </div>
@@ -110,14 +110,18 @@ function openSearch() {
         transform: scale(0.94);
     }
 
-    /* "Up" only makes sense once the page is scrolled. */
+    /* "Up" only makes sense once the page is scrolled. Collapsed while hidden
+       and placed before search, so search always stays in the corner. */
     .upBtn {
+        width: 0;
+        overflow: hidden;
         opacity: 0;
         pointer-events: none;
-        transition: opacity .22s ease, transform .18s ease;
+        transition: width .22s ease, opacity .22s ease, transform .18s ease;
     }
 
     .mobileScrollHeader.scrolled .upBtn {
+        width: 44px;
         opacity: 1;
         pointer-events: auto;
     }

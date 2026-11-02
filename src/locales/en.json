@@ -254,6 +254,27 @@
     "traitSlow": "slow-paced",
     "traitBalanced": "balanced"
   },
+  "onboarding": {
+    "kicker": "Welcome to LFMusic",
+    "step": "Step {n} of {total}",
+    "skip": "Skip",
+    "back": "Back",
+    "next": "Next",
+    "start": "Get started",
+    "addMusic": "Add music",
+    "libraryTitle": "Add your music",
+    "libraryText": "Pick a folder with your tracks in Library settings. Albums, artists and covers are put together automatically.",
+    "libraryLabel": "Music",
+    "playTitle": "Search and play",
+    "playText": "The catalog holds your whole library. Start typing a name and play a track in one click - the interface takes the color of its cover.",
+    "playLabel": "Catalog",
+    "collectionTitle": "Build your collection",
+    "collectionText": "Albums, artists and playlists are always at hand. Pin favorites to the side menu and like tracks with a heart.",
+    "collectionLabel": "Collection",
+    "mixTitle": "My mix",
+    "mixText": "An endless wave from your own library. Pick a mood and the mix chooses tracks to match it.",
+    "mixLabel": "Mix"
+  },
   "source": {
     "Мне нравится": "Liked",
     "Статистика": "Statistics",

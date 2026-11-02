@@ -11,6 +11,7 @@ import TrackEditModal from './components/TrackEditModal.vue';
 import AndroidPermissionWarning from './components/AndroidPermissionWarning.vue';
 import TracksReadyModal from './components/TracksReadyModal.vue';
 import FullscreenCover from './components/FullscreenCover.vue';
+import OnboardingTour from './components/OnboardingTour.vue';
 
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
@@ -130,6 +131,7 @@ watchEffect(() => {
   <AndroidPermissionWarning />
   <TracksReadyModal />
   <FullscreenCover />
+  <OnboardingTour />
 </template>
 
 <style>
