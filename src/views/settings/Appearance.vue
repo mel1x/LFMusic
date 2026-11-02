@@ -11,6 +11,7 @@ const { t } = useI18n();
 const dynamicItem = computed(() => settingItems.find(i => i.key === 'dynamic_accent_color')!);
 const extraBlockItem = computed(() => settingItems.find(i => i.key === 'show_player_extra_block')!);
 const githubItem = computed(() => settingItems.find(i => i.key === 'show_github_badge')!);
+const holidayItem = computed(() => settingItems.find(i => i.key === 'holiday_events')!);
 
 async function toggle(key: SettingKey) {
     settings.value[key] = !settings.value[key];
@@ -268,6 +269,12 @@ async function selectPreset(color: string) {
                     :checked="settings.show_github_badge"
                     phoneHidden
                     @toggle="toggle('show_github_badge')"
+                />
+
+                <SettingToggle
+                    :item="holidayItem"
+                    :checked="settings.holiday_events"
+                    @toggle="toggle('holiday_events')"
                 />
 
                 <SettingToggle

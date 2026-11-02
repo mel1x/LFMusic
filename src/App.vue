@@ -12,6 +12,9 @@ import AndroidPermissionWarning from './components/AndroidPermissionWarning.vue'
 import TracksReadyModal from './components/TracksReadyModal.vue';
 import FullscreenCover from './components/FullscreenCover.vue';
 import OnboardingTour from './components/OnboardingTour.vue';
+import HolidayPattern from './components/HolidayPattern.vue';
+import HolidaySnow from './components/HolidaySnow.vue';
+import HolidayModal from './components/HolidayModal.vue';
 
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
@@ -23,6 +26,7 @@ import { useUiScale } from './composables/useUiScale';
 import { useAccentTheme } from './composables/useAccentTheme';
 import { useTaskbar } from './composables/useTaskbar';
 import { useAndroidShell } from './composables/useAndroidShell';
+import { useHoliday } from './composables/useHoliday';
 import { isAndroidRuntime, isPhoneViewport } from './composables/usePlatform';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
@@ -38,6 +42,7 @@ useUiScale();
 useAccentTheme();
 useTaskbar();
 useAndroidShell();
+const { activeHoliday } = useHoliday();
 
 const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
 if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
@@ -123,6 +128,7 @@ watchEffect(() => {
       <source :src="splashVideoMp4" type="video/mp4" />
     </video>
   </div>
+  <HolidayPattern />
   <TitleBar />
   <MainBlock :key="`main-${language}`" class="mainFrame" />
   <Player :key="`player-${language}`" />
@@ -132,6 +138,8 @@ watchEffect(() => {
   <TracksReadyModal />
   <FullscreenCover />
   <OnboardingTour />
+  <HolidayModal />
+  <HolidaySnow v-if="activeHoliday === 'new_year' && !showSplash" />
 </template>
 
 <style>
@@ -273,6 +281,9 @@ body {
   transition: .24s ease;
 }
 #app {
+  /* Own stacking context so the holiday pattern (z-index: -1) sits above the
+     body background but under every app surface. */
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   overflow: hidden;

@@ -1,9 +1,12 @@
 import { ref, watchEffect } from "vue";
 import { useSettings } from "./useSettings";
 import { usePlayer } from "./usePlayer";
+import { activeHoliday } from "./useHoliday";
+import { HOLIDAY_ART } from "../utils/holidayArt";
 
 // Dynamic theming: derives --accent-* CSS vars on :root from the current track's
-// accent color (or the static setting); also sets the Android/mobile system bar color.
+// accent color (or the static setting, replaced by the holiday color during a
+// holiday event); also sets the Android/mobile system bar color.
 
 /** Accent of a track that is about to become current (mini player swipe): the theme
  *  switches right away instead of waiting for playback to start. */
@@ -172,9 +175,10 @@ export function useAccentTheme() {
     };
 
     watchEffect(() => {
+        const holiday = activeHoliday.value;
         const hex = settings.value.dynamic_accent_color
             ? (accentPreview.value ?? currentAccentColor.value ?? "#1a1a1a")
-            : settings.value.static_accent_color;
+            : (holiday ? HOLIDAY_ART[holiday].accent : settings.value.static_accent_color);
         const { h, s } = hexToHSL(hex);
         // Near-black gray fallback: lighten to #353535 so it doesn't match the base color.
         const accentHex = h === 0 && s === 0 ? "#353535" : hex;

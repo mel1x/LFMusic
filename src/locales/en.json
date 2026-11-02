@@ -254,6 +254,23 @@
     "traitSlow": "slow-paced",
     "traitBalanced": "balanced"
   },
+  "holiday": {
+    "new_year": "New Year",
+    "valentine": "Valentine's Day",
+    "womens_day": "Women's Day",
+    "cosmonautics": "Cosmonautics Day",
+    "music_day": "Music Day",
+    "halloween": "Halloween",
+    "text": {
+      "new_year": "New Year is the time to look back and turn your favorite tracks up louder. May the next year sound exactly the way you want.",
+      "valentine": "Valentine's Day is a reason to put together a playlist for someone you think about. Music says what is hard to put into words.",
+      "womens_day": "March 8 celebrates spring, tenderness and all women. We wish you your favorite music always playing nearby.",
+      "cosmonautics": "On April 12, 1961 Yuri Gagarin became the first human in space. A good day to play something cosmic.",
+      "music_day": "On June 21 the world celebrates Music Day, with musicians playing right on the streets. A great reason to find something new in your collection.",
+      "halloween": "Halloween is a night of pumpkins, costumes and spooky stories. The perfect time for atmospheric, slightly eerie tracks."
+    },
+    "close": "Got it"
+  },
   "onboarding": {
     "kicker": "Welcome to LFMusic",
     "step": "Step {n} of {total}",
@@ -486,6 +503,8 @@
     "Отображение дополнительного блока у плеера": "Show the player's extra block",
     "Бейдж github в шапке": "GitHub badge in the header",
     "Динамическая цветовая тема": "Dynamic color theme",
+    "Праздничное оформление": "Holiday decorations",
+    "В праздники добавляет тематический фон, плашку в шапке и снег на Новый год": "On holidays adds a themed background, a header badge and snow on New Year",
     "Об этой настройке": "About this setting",
     "Предупреждение": "Warning",
     "При включении звучание трека будет плавно переходить при перемотке": "When enabled, the track's sound transitions smoothly while seeking",

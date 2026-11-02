@@ -25,6 +25,7 @@ export const settingItems = [
     { key: 'external_supplement_missing', label: 'Дополнять плейлисты недостающими треками', default: false, description: 'Показывает в альбомах отсутствующие в библиотеке треки полупрозрачными (не воспроизводятся и не идут в очередь)', warning: 'Требует подключения к интернету' },
     { key: 'external_track_covers',    label: 'Искать обложки для треков без обложки',      default: false, description: 'Если у трека нет встроенной обложки - подставляет обложку альбома из внешних источников',         warning: 'Требует подключения к интернету' },
     { key: 'external_artist_avatars',  label: 'Получать аватарки исполнителей',             default: false, description: 'Подставляет аватарки исполнителей из внешних открытых источников',                              warning: 'Требует подключения к интернету' },
+    { key: 'holiday_events',           label: 'Праздничное оформление',                     default: true,  description: 'В праздники добавляет тематический фон, плашку в шапке и снег на Новый год',               warning: '' },
     { key: 'show_downloads_page',      label: 'Страница «Скачивание» в меню',               default: false,  description: 'Показывать раздел «Скачивание» в боковом меню (только на ПК)',                                  warning: '' },
 ] as const
 
