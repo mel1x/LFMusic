@@ -215,8 +215,18 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
+/// Unix seconds of local midnight on January 1st of `year` and of the next year.
+/// Rows are filtered by this range instead of formatting every timestamp.
+fn year_bounds(conn: &Connection, year: i32) -> rusqlite::Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT CAST(strftime('%s', ?1, 'utc') AS INTEGER), CAST(strftime('%s', ?2, 'utc') AS INTEGER)",
+        params![format!("{:04}-01-01", year), format!("{:04}-01-01", year + 1)],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqlite::Result<YearRecap> {
-    let year_str = format!("{:04}", year);
+    let (from, to) = year_bounds(conn, year)?;
     let mut tracks: HashMap<i64, RecapTrack> = HashMap::new();
     let mut rows: Vec<Row> = Vec::new();
 
@@ -242,10 +252,10 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
              LEFT JOIN tracks t ON t.file_path = ht.file_path
              LEFT JOIN track_overrides o ON o.file_path = ht.file_path
              LEFT JOIN track_audio_features af ON af.file_path = ht.file_path
-             WHERE strftime('%Y', h.started_at, 'unixepoch', 'localtime') = ?1
+             WHERE h.started_at >= ?1 AND h.started_at < ?2
              ORDER BY h.started_at, h.rowid",
         )?;
-        let mut query = stmt.query(params![year_str])?;
+        let mut query = stmt.query(params![from, to])?;
         while let Some(r) = query.next()? {
             let track_id: i64 = r.get(10)?;
             tracks.entry(track_id).or_insert_with(|| RecapTrack {
@@ -507,7 +517,7 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
             plays: *plays,
         });
 
-    recap.discovery = find_discovery(conn, year, separators, &artist_ranking, &artist_names, &artist_tracks, &best_track)?;
+    recap.discovery = find_discovery(conn, from, separators, &artist_ranking, &artist_names, &artist_tracks, &best_track)?;
 
     let top_playlist = rank(by_playlist).into_iter().next();
     if let Some((id, t)) = top_playlist {
@@ -540,8 +550,8 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
              COALESCE(SUM(kind = 4), 0)
          FROM library_history
          LEFT JOIN (SELECT id FROM playlists WHERE kind = 'favorites' LIMIT 1) f
-         WHERE strftime('%Y', at, 'unixepoch', 'localtime') = ?1",
-        params![year_str],
+         WHERE at >= ?1 AND at < ?2",
+        params![from, to],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
     )?;
     recap.likes = likes.max(0);
@@ -562,7 +572,7 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
 /// no listens before the history log existed (lifetime counters would be higher).
 fn find_discovery(
     conn: &Connection,
-    year: i32,
+    year_start: i64,
     separators: &[String],
     artist_ranking: &[(String, Totals)],
     artist_names: &HashMap<String, String>,
@@ -584,9 +594,9 @@ fn find_discovery(
          JOIN history_tracks ht ON ht.id = h.track_id
          LEFT JOIN tracks t ON t.file_path = ht.file_path
          LEFT JOIN track_overrides o ON o.file_path = ht.file_path
-         WHERE CAST(strftime('%Y', h.started_at, 'unixepoch', 'localtime') AS INTEGER) < ?1",
+         WHERE h.started_at < ?1",
     )?;
-    for artist in stmt.query_map(params![year], |r| r.get::<_, Option<String>>(0))? {
+    for artist in stmt.query_map(params![year_start], |r| r.get::<_, Option<String>>(0))? {
         if let Some(artist) = artist? {
             known.extend(split_artists(&artist, separators).into_iter().map(|a| a.to_lowercase()));
         }

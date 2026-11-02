@@ -10,6 +10,8 @@ const FADE_IN = 0.9
 const FADE_OUT = 0.6
 /** Short fade baked into each fragment's edges so the loop seam doesn't click. */
 const EDGE_FADE_SECS = 0.06
+/** Decoded fragments kept around (~5 MB of PCM each): current, next and a few to go back to. */
+const MAX_BUFFERS = 6
 
 interface Voice {
   url: string
@@ -59,7 +61,11 @@ export function useRecapSound() {
 
   function load(url: string): Promise<AudioBuffer | null> {
     let pending = buffers.get(url)
-    if (!pending) {
+    if (pending) {
+      // Map order is the LRU order: move the hit to the end.
+      buffers.delete(url)
+      buffers.set(url, pending)
+    } else {
       const audio = ctx!
       pending = fetch(url)
         .then(res => (res.ok ? res.arrayBuffer() : Promise.reject(res.status)))
@@ -70,6 +76,11 @@ export function useRecapSound() {
         })
         .catch(() => null)
       buffers.set(url, pending)
+      // A playing voice holds its own buffer, so evicting it here is safe.
+      for (const key of buffers.keys()) {
+        if (buffers.size <= MAX_BUFFERS) break
+        if (key !== url && key !== playingUrl.value) buffers.delete(key)
+      }
     }
     return pending
   }

@@ -393,11 +393,19 @@ pub struct EnhanceSource<S: Source<Item = f32>> {
     detect: [BiquadCoeffs; 2],
     detect_states: [BiquadState; 2],
     mean_square: f32,
+    /// Detector smoothing per frame during the fast start and afterwards
+    /// (precomputed: an `exp()` per sample is the costliest op of the stage).
+    ms_coeff_fast: f32,
+    ms_coeff_slow: f32,
+    fast_frames: u64,
     agc_gain_db: f32,
     agc_gain: f32,
     agc_counter: u32,
     frames_seen: u64,
     envelope: f32,
+    /// Envelope below this (linear) is under the compressor knee: no gain change,
+    /// so the per-sample log10 is skipped.
+    comp_knee_lin: f32,
     attack: f32,
     release: f32,
     enabled: bool,
@@ -434,11 +442,15 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
             detect_states: [BiquadState::default(); 2],
             // Start consistent with the initial gain so nothing moves until real data arrives.
             mean_square: 10.0_f32.powf((tuning.target_db - agc_gain_db) / 10.0),
+            ms_coeff_fast: time_coeff(0.4, sr),
+            ms_coeff_slow: time_coeff(3.0, sr),
+            fast_frames: (AGC_FAST_SECS * sr) as u64,
             agc_gain_db,
             agc_gain: db_to_lin(agc_gain_db),
             agc_counter: 0,
             frames_seen: 0,
             envelope: 0.0,
+            comp_knee_lin: 0.0,
             attack: time_coeff(0.005, sr),
             release: time_coeff(0.12, sr),
             enabled,
@@ -463,6 +475,7 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
             BiquadCoeffs::peaking_eq(sr, t.presence.0, t.presence.1, t.presence.2),
             shelf(sr, t.high_shelf.0, t.high_shelf.1, true),
         ];
+        self.comp_knee_lin = db_to_lin(t.comp_threshold_db - COMP_KNEE_DB / 2.0);
     }
 
     fn refresh(&mut self) {
@@ -483,7 +496,7 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
 
     fn update_agc(&mut self) {
         let sr = self.sample_rate as f32;
-        let fast = (self.frames_seen as f32) < AGC_FAST_SECS * sr;
+        let fast = self.frames_seen < self.fast_frames;
         let level_db = 10.0 * self.mean_square.max(1.0e-10).log10();
         if level_db < AGC_GATE_DB {
             // Silence / fades: hold the gain instead of pumping it up.
@@ -557,9 +570,8 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
         let mono = wet[..ch].iter().sum::<f32>() / ch as f32;
         let d0 = self.detect_states[0].process(&self.detect[0], mono);
         let d = self.detect_states[1].process(&self.detect[1], d0);
-        let fast = (self.frames_seen as f32) < AGC_FAST_SECS * self.sample_rate as f32;
-        let tau = if fast { 0.4 } else { 3.0 };
-        self.mean_square += (d * d - self.mean_square) * time_coeff(tau, self.sample_rate as f32);
+        let ms_coeff = if self.frames_seen < self.fast_frames { self.ms_coeff_fast } else { self.ms_coeff_slow };
+        self.mean_square += (d * d - self.mean_square) * ms_coeff;
         self.frames_seen += 1;
         self.agc_counter += 1;
         if self.agc_counter >= AGC_BLOCK {
@@ -575,9 +587,13 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
         }
         let coeff = if peak > self.envelope { self.attack } else { self.release };
         self.envelope += (peak - self.envelope) * coeff;
-        let env_db = 20.0 * self.envelope.max(1.0e-6).log10();
-        let gr_db = compressor_gain_db(env_db, t.comp_threshold_db, t.comp_ratio, COMP_KNEE_DB);
-        let gr = if gr_db < -0.01 { db_to_lin(gr_db) } else { 1.0 };
+        let gr = if self.envelope <= self.comp_knee_lin {
+            1.0
+        } else {
+            let env_db = 20.0 * self.envelope.max(1.0e-6).log10();
+            let gr_db = compressor_gain_db(env_db, t.comp_threshold_db, t.comp_ratio, COMP_KNEE_DB);
+            if gr_db < -0.01 { db_to_lin(gr_db) } else { 1.0 }
+        };
 
         let mix = self.mix;
         for c in 0..ch {

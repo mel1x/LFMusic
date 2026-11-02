@@ -2089,11 +2089,12 @@ impl MusicLibrary {
         Ok(recap)
     }
 
-    pub fn is_library_track(&self, file_path: &str) -> bool {
+    /// `None` when the file isn't a library track, otherwise its tagged duration.
+    pub fn library_track_duration(&self, file_path: &str) -> Option<Option<f64>> {
         self.conn
-            .prepare_cached("SELECT 1 FROM tracks WHERE file_path = ?1")
-            .and_then(|mut stmt| stmt.exists(params![file_path]))
-            .unwrap_or(false)
+            .prepare_cached("SELECT duration_secs FROM tracks WHERE file_path = ?1")
+            .and_then(|mut stmt| stmt.query_row(params![file_path], |row| row.get::<_, Option<f64>>(0)))
+            .ok()
     }
 
     pub fn get_track_statistics(&self, file_path: &str) -> Result<TrackStatistics, String> {

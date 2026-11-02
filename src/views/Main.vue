@@ -301,7 +301,8 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
     window.addEventListener('keydown', onKeydown);
-    spectrum.start(drawAmbient);
+    // The bars are hidden with reduced motion (see CSS): no need to tap the FFT for them.
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) spectrum.start(drawAmbient);
 });
 
 onUnmounted(() => {

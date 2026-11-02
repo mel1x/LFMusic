@@ -50,6 +50,8 @@ async function load(id: number) {
     const mySeq = ++seq
     tracks.value = []
     hasMore.value = false
+    // A page request of the previous artist may still be in flight; it won't reset this.
+    loadingMore.value = false
     failed.value = false
     nextIndex = 0
     loading.value = true
@@ -82,7 +84,7 @@ async function loadMore() {
         hasMore.value = page.has_more
     } catch (e) {
         console.error('Ошибка подгрузки треков исполнителя:', e)
-        hasMore.value = false
+        if (mySeq === seq) hasMore.value = false
     } finally {
         if (mySeq === seq) loadingMore.value = false
     }

@@ -103,7 +103,13 @@ function onPlayerRipple(e: MouseEvent) {
 // Mobile mini player: neighbours of the current track peek from the sides and a
 // horizontal swipe switches to them (the queue wraps like the prev/next buttons).
 const wrapperEl = ref<HTMLElement | null>(null);
-const swipeX = ref(0);
+// Offset goes straight to a CSS variable: a reactive value would re-render the
+// whole player on every pointermove.
+let swipeX = 0;
+function setSwipeX(x: number) {
+    swipeX = x;
+    wrapperEl.value?.style.setProperty('--swipe-x', `${x}px`);
+}
 const swipeAnimating = ref(false);
 // Side gap between the bar and a peeking card; the bar inset is 28px (see mobile CSS).
 const PEEK_GAP = 6;
@@ -156,7 +162,7 @@ function onSwipeMove(e: PointerEvent) {
         wrapperEl.value?.setPointerCapture(e.pointerId);
     }
     const hasTarget = dx < 0 ? !!nextPeek.value : !!prevPeek.value;
-    swipeX.value = hasTarget ? dx : dx * 0.25;
+    setSwipeX(hasTarget ? dx : dx * 0.25);
 }
 
 function wait(ms: number) {
@@ -172,17 +178,17 @@ async function onSwipeUp(e: PointerEvent) {
     suppressClickUntil = performance.now() + 400;
 
     const width = wrapperEl.value?.clientWidth ?? 0;
-    const dx = swipeX.value;
+    const dx = swipeX;
     const dir = dx < 0 ? 1 : -1;
     const target = dir > 0 ? nextPeek.value : prevPeek.value;
     swipeAnimating.value = true;
     if (!target || Math.abs(dx) < width * 0.22) {
-        swipeX.value = 0;
+        setSwipeX(0);
         await wait(220);
         swipeAnimating.value = false;
         return;
     }
-    swipeX.value = -dir * (width - BAR_INSET * 2 + PEEK_GAP);
+    setSwipeX(-dir * (width - BAR_INSET * 2 + PEEK_GAP));
     // Start the theme change together with the slide, not after playback starts.
     accentPreview.value = target.accent_color ?? '#1a1a1a';
     await wait(220);
@@ -191,7 +197,7 @@ async function onSwipeUp(e: PointerEvent) {
     // Hold the slid position until the new track is in, then jump back without animation.
     await Promise.race([action, wait(800)]);
     swipeAnimating.value = false;
-    swipeX.value = 0;
+    setSwipeX(0);
 }
 
 function onSwipeCancel() {
@@ -199,7 +205,7 @@ function onSwipeCancel() {
     swipeStart = null;
     swipeDragging = false;
     swipeAnimating.value = true;
-    swipeX.value = 0;
+    setSwipeX(0);
     setTimeout(() => { swipeAnimating.value = false; }, 220);
 }
 
@@ -242,7 +248,6 @@ function onMoveToTop(track: TrackMetadata) {
         ref="wrapperEl"
         class="playerControlsWrapper"
         :class="{ swipeAnimating }"
-        :style="{ '--swipe-x': swipeX + 'px' }"
         @pointerdown="onSwipeDown"
         @pointermove="onSwipeMove"
         @pointerup="onSwipeUp"

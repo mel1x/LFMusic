@@ -63,7 +63,7 @@ function frame(now: number) {
         void fetchSpectrum();
     }
     if (!playing) {
-        targets = targets.map(() => 0);
+        targets.fill(0);
     }
 
     let moving = false;

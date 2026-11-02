@@ -44,7 +44,9 @@ fn snippet_start(duration_secs: Option<f64>) -> f64 {
 }
 
 /// Decodes the fragment to interleaved stereo i16 and returns (samples, rate).
-fn decode_snippet(file_path: &str) -> Result<(Vec<i16>, u32), String> {
+/// `known_duration` (from the library) is used when the container doesn't state
+/// its length (e.g. MP3 without a Xing header), so the fragment isn't the intro.
+fn decode_snippet(file_path: &str, known_duration: Option<f64>) -> Result<(Vec<i16>, u32), String> {
     let file = File::open(file_path).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -62,7 +64,11 @@ fn decode_snippet(file_path: &str) -> Result<(Vec<i16>, u32), String> {
         .ok_or("no audio track")?;
     let track_id = track.id;
     let rate = track.codec_params.sample_rate.unwrap_or(44_100).max(1);
-    let duration = track.codec_params.n_frames.map(|n| n as f64 / rate as f64);
+    let duration = track
+        .codec_params
+        .n_frames
+        .map(|n| n as f64 / rate as f64)
+        .or(known_duration.filter(|d| *d > 0.0));
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| e.to_string())?;
@@ -161,16 +167,16 @@ fn build_response<R: Runtime>(app: &tauri::AppHandle<R>, uri: &tauri::http::Uri)
     else {
         return respond_status(StatusCode::NOT_FOUND);
     };
-    let in_library = app
+    let library_duration = app
         .state::<crate::LibraryState>()
         .0
         .lock()
-        .map(|lib| lib.is_library_track(&file_path))
-        .unwrap_or(false);
-    if !in_library {
+        .ok()
+        .and_then(|lib| lib.library_track_duration(&file_path));
+    let Some(known_duration) = library_duration else {
         return respond_status(StatusCode::FORBIDDEN);
-    }
-    match decode_snippet(&file_path) {
+    };
+    match decode_snippet(&file_path, known_duration) {
         Ok((samples, rate)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "audio/wav")

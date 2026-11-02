@@ -165,6 +165,8 @@ async function runSearch(q: string) {
     albums.value = []
     artists.value = []
     hasMore.value = false
+    // A page of the previous query may still be in flight; it won't reset this.
+    loadingMore.value = false
     searchError.value = false
     nextIndex = 0
     tab.value = 'all'

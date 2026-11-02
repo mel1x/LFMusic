@@ -24,6 +24,8 @@ interface Flake {
 
 /** Flakes per 100k px^2 of window. */
 const DENSITY = 3.2;
+/** ~30 fps: plenty for slow snow, and a full-window canvas redraw isn't free on 120/144Hz screens. */
+const FRAME_MS = 30;
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 
@@ -83,6 +85,7 @@ function resize() {
 
 function frame(now: number) {
   raf = requestAnimationFrame(frame);
+  if (last && now - last < FRAME_MS) return;
   const dt = last ? Math.min((now - last) / 1000, 0.05) : 0;
   last = now;
   time += dt;
