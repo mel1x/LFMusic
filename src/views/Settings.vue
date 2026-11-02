@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { isAndroidRuntime, isPhoneViewport } from '../composables/usePlatform';
+import { useI18n } from '../composables/useI18n';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
+import DonateModal from '../components/DonateModal.vue';
+
+const { t } = useI18n();
+const donateOpen = ref(false);
 
 const allCategories = [
     {
@@ -72,6 +77,18 @@ function scrollToTop() {
                 </svg>
             </RouterLink>
         </div>
+
+        <button type="button" class="categoryRow donateRow" @click="donateOpen = true">
+            <span class="rowText">
+                <span class="rowTitle">{{ t('donate.title') }}</span>
+                <span class="rowDesc">{{ t('donate.desc') }}</span>
+            </span>
+            <svg class="rowChevron" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m9 18 6-6-6-6" />
+            </svg>
+        </button>
+
+        <DonateModal :open="donateOpen" @close="donateOpen = false" />
     </div>
 </template>
 
@@ -155,6 +172,14 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 0.85);
     transform: translateX(4px);
 }
+/* Same row as the categories, set apart by spacing. */
+.donateRow {
+    margin-top: 24px;
+    max-width: 760px;
+    background-color: transparent;
+    font: inherit;
+    text-align: left;
+}
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .pageRoot {
@@ -178,6 +203,10 @@ function scrollToTop() {
     }
     .rowTitle {
         font-size: 18px;
+    }
+    .donateRow {
+        margin-top: 12px;
+        max-width: none;
     }
 }
 </style>

@@ -799,5 +799,14 @@
     "Показывать раздел «Скачивание» в боковом меню (только на ПК)": "Show the \"Downloads\" section in the side menu (desktop only)",
     "Требует подключения к интернету": "Requires an internet connection",
     "Данные берутся из открытых источников. Повторные открытия не обращаются к сети.": "Data comes from open sources. Reopening does not hit the network."
+  },
+  "donate": {
+    "title": "Support the author",
+    "desc": "LFMusic is free and ad-free",
+    "linkSub": "Card and other payment methods",
+    "open": "Open",
+    "crypto": "Crypto",
+    "copy": "Copy",
+    "copied": "Copied"
   }
 }
