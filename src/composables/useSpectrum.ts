@@ -1,4 +1,4 @@
-import { watch } from 'vue';
+import { watch, effectScope } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer } from './usePlayer';
 
@@ -108,8 +108,11 @@ function subscribe(fn: SpectrumListener) {
     if (listeners.size > 1) return;
     if (!playingWatchSet) {
         playingWatchSet = true;
-        // Play/pause restarts the loop; on pause the bars settle smoothly.
-        watch(usePlayer().isPlaying, () => { if (listeners.size > 0) start(); });
+        // Play/pause restarts the loop; on pause the bars settle smoothly. Detached scope:
+        // the first subscriber is a component, and its unmount must not stop this watcher.
+        effectScope(true).run(() => {
+            watch(usePlayer().isPlaying, () => { if (listeners.size > 0) start(); });
+        });
     }
     void invoke('player_set_spectrum_enabled', { enabled: true }).catch(() => {});
     start();
