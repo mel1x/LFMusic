@@ -51,12 +51,34 @@ if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
 const showSplash = ref(!isReload && !isPhoneViewport());
 const splashFading = ref(false);
 
+// The overlay is opaque and sits above everything, so it must never depend on
+// `ended` alone: if WebView2 fails to load, start or finish the video, the app
+// would stay a black window forever. The fallback timer covers that.
+let splashTimer: ReturnType<typeof setTimeout> | null = null;
+
+function armSplashTimer(ms: number) {
+  if (splashTimer) clearTimeout(splashTimer);
+  splashTimer = setTimeout(onSplashEnded, ms);
+}
+
 function onSplashEnded() {
+  if (splashTimer) clearTimeout(splashTimer);
+  splashTimer = null;
+  if (splashFading.value || !showSplash.value) return;
   splashFading.value = true;
   setTimeout(() => {
     showSplash.value = false;
   }, 600);
 }
+
+// Once the video actually plays, wait for its remaining length plus a margin.
+function onSplashPlaying(e: Event) {
+  const video = e.target as HTMLVideoElement;
+  const left = Number.isFinite(video.duration) ? video.duration - video.currentTime : 3;
+  armSplashTimer(Math.max(0, left) * 1000 + 1500);
+}
+
+if (showSplash.value) armSplashTimer(4000);
 
 // Escape for the "tracks ready" modal and cover overlay is handled inside
 // TracksReadyModal / FullscreenCover themselves.
@@ -124,7 +146,7 @@ watchEffect(() => {
 
 <template>
   <div data-tauri-drag-region v-if="showSplash" class="splash-overlay" :class="{ 'splash-fading': splashFading }">
-    <video data-tauri-drag-region autoplay muted playsinline @ended="onSplashEnded" class="splash-video">
+    <video data-tauri-drag-region autoplay muted playsinline @playing="onSplashPlaying" @ended="onSplashEnded" @error="onSplashEnded" class="splash-video">
       <source :src="splashVideoWebm" type="video/webm" />
       <source :src="splashVideoMp4" type="video/mp4" />
     </video>
