@@ -245,6 +245,13 @@
     "deleteErrorDismiss": "Понятно",
     "noTitle": "Без названия"
   },
+  "searchPage": {
+    "topArtists": "Вы часто слушаете",
+    "recent": "Недавно играли"
+  },
+  "mix": {
+    "nowPlaying": "Сейчас в миксе"
+  },
   "stats": {
     "characterSentence": "Преимущественно {traits} музыка",
     "traitEnergetic": "энергичная",
@@ -252,7 +259,17 @@
     "traitDanceable": "танцевальная",
     "traitFast": "быстрая",
     "traitSlow": "неторопливая",
-    "traitBalanced": "сбалансированная"
+    "traitBalanced": "сбалансированная",
+    "sound": "Звучание",
+    "dayTime": "Время прослушивания",
+    "topTracks": "Чаще всего",
+    "libraryTracks": "Треков в коллекции",
+    "morning": "Утро",
+    "day": "День",
+    "evening": "Вечер",
+    "night": "Ночь",
+    "hoursShort": "ч",
+    "minutesShort": "мин"
   },
   "holiday": {
     "new_year": "Новый год",

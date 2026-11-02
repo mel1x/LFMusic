@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import trackCover from '../../assets/trackCover.webp';
 
 import TrackArtists from '../TrackArtists.vue';
@@ -8,6 +7,7 @@ import { useSettings } from '../../composables/useSettings';
 import { usePlayer } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
 import { useI18n } from '../../composables/useI18n';
+import { useSpectrum, SPECTRUM_BARS } from '../../composables/useSpectrum';
 
 const { settings } = useSettings();
 const { t } = useI18n();
@@ -21,116 +21,37 @@ const {
 } = usePlayer();
 const { nextTrack, nextTrackTitle } = usePlayerUi();
 
-// Real FFT spectrum from the Rust backend, N bars (0..1). Polled on rAF frames
-// (~30fps data) and smoothed toward targets every render frame (~60fps): fast
-// attack, slow decay so it looks alive instead of jittery.
-const SPECTRUM_BARS = 16;
+// Real FFT spectrum, shared with other visualizers (see useSpectrum).
+// Bar heights are written straight to the DOM every frame, outside Vue.
 const SPECTRUM_INDICES = Array.from({ length: SPECTRUM_BARS }, (_, i) => i);
-const spectrumLevels = ref<number[]>(new Array(SPECTRUM_BARS).fill(0));
+const barsBox = ref<HTMLElement | null>(null);
+const spectrum = useSpectrum();
+
+function drawBars(levels: Float32Array) {
+    const els = barsBox.value?.children;
+    if (!els) return;
+    for (let i = 0; i < els.length; i++) {
+        (els[i] as HTMLElement).style.transform = `scaleY(${Math.max(0.04, levels[i] ?? 0)})`;
+    }
+}
 
 const visualizerActive = computed(
     () => settings.value.show_player_extra_block
         && settings.value.player_extra_block_mode === 'visualizer',
 );
 
-let spectrumRaf: number | null = null;
-let spectrumTargets = new Array(SPECTRUM_BARS).fill(0);
-let spectrumLastFetch = 0;
-let spectrumFetching = false;
-
-async function fetchSpectrum() {
-    if (spectrumFetching) return;
-    spectrumFetching = true;
-    try {
-        const bars = await invoke<number[]>('player_get_spectrum', { bars: SPECTRUM_BARS });
-        if (Array.isArray(bars) && bars.length === SPECTRUM_BARS) {
-            spectrumTargets = bars;
-        }
-    } catch {
-        // Backend unavailable (e.g. plain Vite mode) — keep zeros.
-    } finally {
-        spectrumFetching = false;
-    }
-}
-
-function spectrumFrame(now: number) {
-    spectrumRaf = null;
-    const playing = isPlaying.value;
-
-    if (playing && now - spectrumLastFetch >= 33) {
-        spectrumLastFetch = now;
-        void fetchSpectrum();
-    }
-    if (!playing) {
-        spectrumTargets = spectrumTargets.map(() => 0);
-    }
-
-    const cur = spectrumLevels.value.slice();
-    let moving = false;
-    for (let i = 0; i < SPECTRUM_BARS; i++) {
-        const target = spectrumTargets[i] ?? 0;
-        const c = cur[i];
-        // Attack faster than decay: peaks jump up, don't jitter down.
-        const k = target > c ? 0.5 : 0.16;
-        let next = c + (target - c) * k;
-        if (target === 0 && next < 0.001) next = 0;
-        cur[i] = next;
-        if (next > 0.004 || target > 0.004) moving = true;
-    }
-    spectrumLevels.value = cur;
-
-    if (playing || moving) {
-        spectrumRaf = requestAnimationFrame(spectrumFrame);
-    }
-}
-
-function startSpectrum() {
-    if (spectrumRaf == null) {
-        spectrumLastFetch = 0;
-        spectrumRaf = requestAnimationFrame(spectrumFrame);
-    }
-}
-
-function stopSpectrum() {
-    if (spectrumRaf != null) {
-        cancelAnimationFrame(spectrumRaf);
-        spectrumRaf = null;
-    }
-}
-
-// Toggle spectrum capture in the Rust engine: when the visualizer is off,
-// the backend spends nothing on audio tap/FFT.
+// The backend tap runs only while some visualizer is visible.
 watch(
     visualizerActive,
     (active) => {
-        void invoke('player_set_spectrum_enabled', { enabled: active }).catch(() => {});
+        if (active) spectrum.start(drawBars);
+        else spectrum.stop();
     },
     { immediate: true },
 );
-
-watch(
-    [isPlaying, visualizerActive],
-    ([playing, active]) => {
-        if (active && playing) {
-            startSpectrum();
-        } else if (!active) {
-            stopSpectrum();
-            spectrumLevels.value = new Array(SPECTRUM_BARS).fill(0);
-        } else {
-            // Paused/stopped while visualizer active: let bars settle smoothly.
-            startSpectrum();
-        }
-    },
-    { immediate: true },
-);
-
-onMounted(() => {
-    if (visualizerActive.value && isPlaying.value) startSpectrum();
-});
 
 onBeforeUnmount(() => {
-    stopSpectrum();
-    void invoke('player_set_spectrum_enabled', { enabled: false }).catch(() => {});
+    spectrum.stop();
 });
 
 // Preload next track's cover for "next track" mode.
@@ -174,12 +95,11 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
                     </div>
                 </div>
                 <div class="asideVisualBottom">
-                    <div class="asideBars" aria-hidden="true">
+                    <div ref="barsBox" class="asideBars" aria-hidden="true">
                         <span
                             v-for="i in SPECTRUM_INDICES"
                             :key="i"
                             class="asideBar"
-                            :style="{ '--bar-scale': Math.max(0.04, spectrumLevels[i]) }"
                         ></span>
                     </div>
                     <!-- <div class="asideProgressTrack">
@@ -319,8 +239,8 @@ watch([shouldLoadAsideNextCover, nextTrack], ([show, track]) => {
     min-height: 4px;
     border-radius: 3px;
     background-color: hsla(0, 0%, 100%, 0.62);
-    /* Height (--bar-scale) is set by JS every rAF frame from the real FFT. */
-    transform: scaleY(var(--bar-scale, 0.04));
+    /* Height is set by JS (inline transform) every frame from the real FFT. */
+    transform: scaleY(0.04);
     transform-origin: bottom;
     opacity: 0.56;
     will-change: transform;

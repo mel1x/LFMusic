@@ -2673,9 +2673,10 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    pub fn get_top_artists(&self, limit: usize) -> Vec<TopArtist> {
-        // Grouped by exact spelling in SQL, then merged case-insensitively in Rust
-        // so "MZLFF"/"mzlff" count as one artist.
+    pub fn get_top_artists(&self, limit: usize, separators: &[String]) -> Vec<TopArtist> {
+        // Grouped by exact spelling in SQL, then split into single artists by the
+        // user's separators ("A; B" counts for both A and B, like artist playlists)
+        // and merged case-insensitively in Rust so "MZLFF"/"mzlff" count as one artist.
         let sql = "SELECT COALESCE(o.artist, t.artist) AS artist_name,
                           SUM(s.listen_count) AS total_listens,
                           SUM(s.total_listened_secs) AS total_secs,
@@ -2708,17 +2709,19 @@ impl MusicLibrary {
             track_count: usize,
         }
         let mut map: HashMap<String, Agg> = HashMap::new();
-        for (name, listens, secs, tracks) in rows.flatten() {
-            let entry = map.entry(name.to_lowercase()).or_insert_with(|| Agg {
-                variants: HashMap::new(),
-                listen_count: 0,
-                total_listened_secs: 0.0,
-                track_count: 0,
-            });
-            *entry.variants.entry(name).or_insert(0) += tracks;
-            entry.listen_count += listens;
-            entry.total_listened_secs += secs;
-            entry.track_count += tracks;
+        for (full, listens, secs, tracks) in rows.flatten() {
+            for name in split_artists(&full, separators) {
+                let entry = map.entry(name.to_lowercase()).or_insert_with(|| Agg {
+                    variants: HashMap::new(),
+                    listen_count: 0,
+                    total_listened_secs: 0.0,
+                    track_count: 0,
+                });
+                *entry.variants.entry(name).or_insert(0) += tracks;
+                entry.listen_count += listens;
+                entry.total_listened_secs += secs;
+                entry.track_count += tracks;
+            }
         }
 
         let mut result: Vec<TopArtist> = map
@@ -4829,10 +4832,36 @@ mod tests {
             })
             .unwrap();
 
-        let top = library.get_top_artists(10);
+        let top = library.get_top_artists(10, &[]);
         assert_eq!(top.len(), 1, "разные написания должны слиться в одного артиста");
         assert_eq!(top[0].listen_count, 7);
         assert_eq!(top[0].track_count, 2);
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_top_artists_splits_joint_artists_by_separators() {
+        let dir = temp_library_dir("top_artists_split");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_track_row(&library, "/m/a.flac", Some("A"), Some("frommee; maryy"), None, None, 1);
+        insert_track_row(&library, "/m/b.flac", Some("B"), Some("maryy"), None, None, 2);
+        for (path, n) in [("/m/a.flac", 5), ("/m/b.flac", 2)] {
+            library
+                .add_track_statistics_delta(TrackStatisticsDelta {
+                    file_path: path.to_string(),
+                    listen_count_delta: n,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let top = library.get_top_artists(10, &[";".to_string()]);
+        let names: Vec<&str> = top.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["maryy", "frommee"]);
+        assert_eq!(top[0].listen_count, 7);
+        assert_eq!(top[1].listen_count, 5);
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

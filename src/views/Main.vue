@@ -14,13 +14,17 @@ import {
     getRecommendations,
     getTasteProfile,
     getSummaryStats,
+    getMostPlayed,
+    getTrackStatistics,
     type RecommendationOptions,
     type TasteProfile,
     type SummaryStats,
 } from '../composables/useStatistics';
-import { formatTotalDuration } from '../utils/format';
+import { timesCountText } from '../utils/format';
+import defaultTrackCover from '../assets/trackCover.webp';
 import { useI18n } from '../composables/useI18n';
 import { openYearRecap, seasonalRecapYear } from '../composables/useYearRecap';
+import { useSpectrum, SPECTRUM_BARS } from '../composables/useSpectrum';
 
 const router = useRouter();
 const { t } = useI18n();
@@ -39,6 +43,7 @@ const {
     setMixSourceFromPaths,
     cacheTracks,
     fetchTracksByPaths,
+    getTrackByPath,
 } = usePlayer();
 
 // Mix settings ("wave" style tuning)
@@ -56,9 +61,21 @@ const isBuildingMix = ref(false);
 
 const currentMood = computed(() => moods.find(m => m.id === selectedMood.value) ?? moods[0]);
 
-// Mood chips are split into two centered rows (3 + remainder).
-const moodRowSplit = Math.ceil(moods.length / 2);
-const moodRows = [moods.slice(0, moodRowSplit), moods.slice(moodRowSplit)];
+// Background spectrum while music plays: mirrored, so the bass sits in the middle.
+// Bars are written straight to the DOM every frame, outside Vue.
+const AMBIENT_BARS = SPECTRUM_BARS * 2;
+const ambientBox = ref<HTMLElement | null>(null);
+const spectrum = useSpectrum();
+
+function drawAmbient(levels: Float32Array) {
+    const els = ambientBox.value?.children as HTMLCollectionOf<HTMLElement> | undefined;
+    if (!els || els.length !== AMBIENT_BARS) return;
+    for (let i = 0; i < SPECTRUM_BARS; i++) {
+        const t = `scaleY(${Math.max(0.03, levels[i])})`;
+        els[SPECTRUM_BARS - 1 - i].style.transform = t;
+        els[SPECTRUM_BARS + i].style.transform = t;
+    }
+}
 
 const isMixActive = computed(() => activePlaylistSource.value === 'mix');
 const isMixPlaying = computed(() => isMixActive.value && isPlaying.value);
@@ -171,24 +188,75 @@ const statsOpen = ref(false);
 const statsLoading = ref(false);
 const taste = ref<TasteProfile | null>(null);
 const summary = ref<SummaryStats | null>(null);
+const topTracks = ref<{ track: TrackMetadata; listens: number }[]>([]);
+
+async function loadTopTracks() {
+    const raw = await getMostPlayed(4);
+    // Live cache objects, so lazily loaded covers show up.
+    cacheTracks(raw);
+    const list = raw.map(tr => getTrackByPath(tr.file_path) ?? tr);
+    loadCoversForTracks(list);
+    const counts = await Promise.all(list.map(tr =>
+        getTrackStatistics(tr.file_path).then(st => st.listen_count).catch(() => 0)
+    ));
+    return list.map((track, i) => ({ track, listens: counts[i] }));
+}
 
 async function openStats() {
     statsOpen.value = true;
     statsLoading.value = true;
     try {
-        const [t, s] = await Promise.all([
+        const [tp, s, top] = await Promise.all([
             getTasteProfile().catch(() => null),
             getSummaryStats().catch(() => null),
+            loadTopTracks().catch(() => []),
         ]);
-        taste.value = t;
+        taste.value = tp;
         summary.value = s;
+        topTracks.value = top;
     } finally {
         statsLoading.value = false;
     }
 }
 
 const hasTaste = computed(() => !!taste.value && taste.value.analyzed_tracks > 0);
+const hasListens = computed(() => (summary.value?.total_listens ?? 0) > 0);
 const analyzedTracks = computed(() => taste.value?.analyzed_tracks ?? 0);
+
+const statsFacts = computed(() => {
+    const s = summary.value;
+    const secs = s?.total_listened_secs ?? 0;
+    const hours = Math.floor(secs / 3600);
+    return [
+        hours > 0
+            ? { value: hours.toLocaleString('ru-RU'), unit: t('stats.hoursShort'), label: 'За музыкой' }
+            : { value: String(Math.floor(secs / 60)), unit: t('stats.minutesShort'), label: 'За музыкой' },
+        { value: (s?.total_listens ?? 0).toLocaleString('ru-RU'), unit: '', label: 'Прослушиваний' },
+        { value: (s?.total_tracks ?? 0).toLocaleString('ru-RU'), unit: '', label: t('stats.libraryTracks') },
+        { value: analyzedTracks.value.toLocaleString('ru-RU'), unit: '', label: 'Проанализировано' },
+    ];
+});
+
+// Listening by time of day: shares for the segmented bar, the peak is highlighted.
+const dayParts = computed(() => {
+    const s = summary.value;
+    if (!s) return [];
+    const parts = [
+        { id: 'morning', label: t('stats.morning'), count: s.morning_listens },
+        { id: 'day', label: t('stats.day'), count: s.day_listens },
+        { id: 'evening', label: t('stats.evening'), count: s.evening_listens },
+        { id: 'night', label: t('stats.night'), count: s.night_listens },
+    ];
+    const total = parts.reduce((sum, p) => sum + p.count, 0);
+    if (total === 0) return [];
+    const max = Math.max(...parts.map(p => p.count));
+    return parts.map(p => ({
+        ...p,
+        share: p.count / total,
+        pct: Math.round((p.count / total) * 100),
+        peak: p.count === max,
+    }));
+});
 
 function clamp01(v: number): number { return Math.min(1, Math.max(0, v)); }
 function pct(v: number | null | undefined): number { return Math.round(clamp01(v ?? 0) * 100); }
@@ -199,51 +267,13 @@ const metrics = computed(() => {
     const bpm = t.bpm ?? 0;
     const loud = t.loudness ?? 0;
     return [
-        { key: 'Энергичность', short: 'Энергия', value: pct(t.energy), display: `${pct(t.energy)}%` },
-        { key: 'Танцевальность', short: 'Танец', value: pct(t.danceability), display: `${pct(t.danceability)}%` },
-        { key: 'Яркость', short: 'Яркость', value: pct((t.spectral_centroid ?? 0) / 4000), display: `${pct((t.spectral_centroid ?? 0) / 4000)}%` },
-        { key: 'Темп', short: 'Темп', value: pct((bpm - 50) / 140), display: `${Math.round(bpm)} BPM` },
-        { key: 'Громкость', short: 'Громкость', value: pct((loud + 30) / 30), display: `${loud.toFixed(1)} dB` },
+        { key: 'Энергичность', value: pct(t.energy), display: `${pct(t.energy)}%` },
+        { key: 'Танцевальность', value: pct(t.danceability), display: `${pct(t.danceability)}%` },
+        { key: 'Яркость', value: pct((t.spectral_centroid ?? 0) / 4000), display: `${pct((t.spectral_centroid ?? 0) / 4000)}%` },
+        { key: 'Темп', value: pct((bpm - 50) / 140), display: `${Math.round(bpm)} BPM` },
+        { key: 'Громкость', value: pct((loud + 30) / 30), display: `${loud.toFixed(1)} dB` },
     ];
 });
-
-// Sound character radar (SVG spider chart)
-const RADAR = { w: 360, h: 248, cx: 180, cy: 118, r: 86, labelR: 110 };
-
-const radarAxes = computed(() => {
-    const n = metrics.value.length || 5;
-    return metrics.value.map((m, i) => {
-        const ang = (-90 + (360 / n) * i) * Math.PI / 180;
-        const cos = Math.cos(ang), sin = Math.sin(ang);
-        return {
-            short: m.short,
-            display: m.display,
-            value: m.value,
-            cos, sin,
-            ax: RADAR.cx + RADAR.r * cos,
-            ay: RADAR.cy + RADAR.r * sin,
-            px: RADAR.cx + RADAR.r * (m.value / 100) * cos,
-            py: RADAR.cy + RADAR.r * (m.value / 100) * sin,
-            lx: RADAR.cx + RADAR.labelR * cos,
-            ly: RADAR.cy + RADAR.labelR * sin + (sin < -0.5 ? 0 : 4),
-            anchor: cos > 0.25 ? 'start' : cos < -0.25 ? 'end' : 'middle',
-        };
-    });
-});
-
-const radarPolygon = computed(() =>
-    radarAxes.value.map(a => `${a.px.toFixed(1)},${a.py.toFixed(1)}`).join(' ')
-);
-
-const radarRings = computed(() =>
-    [0.25, 0.5, 0.75, 1].map(f =>
-        radarAxes.value.map(a => {
-            const x = RADAR.cx + RADAR.r * f * a.cos;
-            const y = RADAR.cy + RADAR.r * f * a.sin;
-            return `${x.toFixed(1)},${y.toFixed(1)}`;
-        }).join(' ')
-    )
-);
 
 const character = computed(() => {
     const tp = taste.value;
@@ -271,10 +301,12 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
     window.addEventListener('keydown', onKeydown);
+    spectrum.start(drawAmbient);
 });
 
 onUnmounted(() => {
     window.removeEventListener('keydown', onKeydown);
+    spectrum.stop();
 });
 </script>
 
@@ -295,6 +327,10 @@ onUnmounted(() => {
             </button>
 
             <template v-if="hasLibrary">
+                <div ref="ambientBox" class="ambientBars" :class="{ on: isPlaying }" aria-hidden="true">
+                    <span v-for="i in AMBIENT_BARS" :key="i" class="ambientBar"></span>
+                </div>
+
                 <div class="stageArea">
                     <div class="mixStage">
                         <div class="mixHeader">
@@ -338,26 +374,34 @@ onUnmounted(() => {
                             <button class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">{{ familiarityLabel }}</button>
                             <button v-if="losslessOnly" class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">Lossless</button>
                         </div>
+
+                        <!-- Fixed slot, so the stage doesn't jump when the mix starts. -->
+                        <div class="mixNowSlot">
+                            <Transition name="desc-fade">
+                                <div v-if="isMixActive && currentTrack" class="mixNow">
+                                    <img class="mixNowCover" :src="currentTrack.cover_art || defaultTrackCover" alt="" draggable="false" />
+                                    <div class="mixNowText">
+                                        <div class="mixNowLabel">{{ t('mix.nowPlaying') }}</div>
+                                        <div class="mixNowTitle">{{ currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop() }}<span v-if="currentTrack.artist" class="mixNowArtist"> - {{ currentTrack.artist }}</span></div>
+                                    </div>
+                                </div>
+                            </Transition>
+                        </div>
                     </div>
                 </div>
 
-                <div class="moodStrip">
-                    <div class="moodStripLabel">Настроение</div>
-                    <div class="moodChips">
-                        <div v-for="(row, r) in moodRows" :key="r" class="moodChipsRow">
-                            <button
-                                v-for="mood in row"
-                                :key="mood.id"
-                                class="moodChip"
-                                :class="{ active: selectedMood === mood.id }"
-                                @click="selectMood(mood.id)"
-                                v-tooltip:top="mood.short_desc"
-                            >
-                                <MoodIcon :name="mood.id" width="15" height="15" />
-                                <span>{{ mood.label }}</span>
-                            </button>
-                        </div>
-                    </div>
+                <div class="moodGrid">
+                    <button
+                        v-for="mood in moods"
+                        :key="mood.id"
+                        class="moodTile"
+                        :class="{ active: selectedMood === mood.id }"
+                        @click="selectMood(mood.id)"
+                    >
+                        <span class="moodTileIcon"><MoodIcon :name="mood.id" width="18" height="18" /></span>
+                        <span class="moodTileName">{{ mood.label }}</span>
+                        <span class="moodTileDesc">{{ mood.short_desc }}</span>
+                    </button>
                 </div>
             </template>
 
@@ -440,55 +484,78 @@ onUnmounted(() => {
 
                         <div v-if="statsLoading" class="statsLoading">Загрузка музыкального профиля…</div>
 
-                        <template v-else-if="hasTaste">
+                        <template v-else-if="hasTaste || hasListens">
                             <div class="statsHead">
                                 <div class="statsKicker">Музыкальный профиль</div>
                                 <div class="statsTitle">Ваш характер</div>
-                                <div class="statsSubtitle">{{ character }}.</div>
-                            </div>
-
-                            <div class="statsSection">
-                                <div class="radarWrap">
-                                    <svg class="radar" :viewBox="`0 0 ${RADAR.w} ${RADAR.h}`">
-                                        <polygon
-                                            v-for="(ring, i) in radarRings"
-                                            :key="'ring' + i"
-                                            :points="ring"
-                                            class="radarRing"
-                                        />
-                                        <line
-                                            v-for="(a, i) in radarAxes"
-                                            :key="'axis' + i"
-                                            :x1="RADAR.cx" :y1="RADAR.cy" :x2="a.ax" :y2="a.ay"
-                                            class="radarAxis"
-                                        />
-                                        <polygon :points="radarPolygon" class="radarShape" />
-                                        <circle
-                                            v-for="(a, i) in radarAxes"
-                                            :key="'dot' + i"
-                                            :cx="a.px" :cy="a.py" r="2.6"
-                                            class="radarDot"
-                                        />
-                                        <g v-for="(a, i) in radarAxes" :key="'lbl' + i">
-                                            <text :x="a.lx" :y="a.ly" :text-anchor="a.anchor" class="radarLabel">{{ a.short }}</text>
-                                            <text :x="a.lx" :y="a.ly + 15" :text-anchor="a.anchor" class="radarValue">{{ a.display }}</text>
-                                        </g>
-                                    </svg>
-                                </div>
+                                <div v-if="character" class="statsSubtitle">{{ character }}.</div>
                             </div>
 
                             <div class="statsFacts">
-                                <div class="statsFact">
-                                    <div class="statsFactValue">{{ summary ? summary.total_listens.toLocaleString('ru-RU') : 0 }}</div>
-                                    <div class="statsFactLabel">Прослушиваний</div>
+                                <div v-for="f in statsFacts" :key="f.label" class="statsFact">
+                                    <div class="statsFactValue">{{ f.value }}<span v-if="f.unit" class="statsFactUnit">{{ f.unit }}</span></div>
+                                    <div class="statsFactLabel">{{ f.label }}</div>
                                 </div>
-                                <div class="statsFact">
-                                    <div class="statsFactValue">{{ summary ? formatTotalDuration(summary.total_listened_secs) : '0 мин' }}</div>
-                                    <div class="statsFactLabel">За музыкой</div>
+                            </div>
+
+                            <div class="statsGrid" :class="{ single: !hasTaste }">
+                                <div v-if="hasTaste" class="statsCol">
+                                    <div class="statsBlock">
+                                        <div class="statsLabel">{{ t('stats.sound') }}</div>
+                                        <div class="metricList">
+                                            <div v-for="m in metrics" :key="m.key" class="metricRow">
+                                                <div class="metricHead">
+                                                    <span class="metricName">{{ m.key }}</span>
+                                                    <span class="metricValue">{{ m.display }}</span>
+                                                </div>
+                                                <div class="metricTrack">
+                                                    <span class="metricFill" :style="{ width: `${Math.max(m.value, 2)}%` }"></span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div class="statsFact">
-                                    <div class="statsFactValue">{{ analyzedTracks.toLocaleString('ru-RU') }}</div>
-                                    <div class="statsFactLabel">Проанализировано</div>
+
+                                <div class="statsCol">
+                                    <div v-if="dayParts.length" class="statsBlock">
+                                        <div class="statsLabel">{{ t('stats.dayTime') }}</div>
+                                        <div class="dayBar">
+                                            <span
+                                                v-for="p in dayParts.filter(d => d.count > 0)"
+                                                :key="p.id"
+                                                class="daySeg"
+                                                :class="[p.id, { peak: p.peak }]"
+                                                :style="{ flexGrow: p.share }"
+                                            ></span>
+                                        </div>
+                                        <div class="dayLegend">
+                                            <div v-for="p in dayParts" :key="p.id" class="dayItem" :class="{ peak: p.peak }">
+                                                <span class="dayDot" :class="p.id"></span>
+                                                <span class="dayName">{{ p.label }}</span>
+                                                <span class="dayPct">{{ p.pct }}%</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div v-if="topTracks.length" class="statsBlock">
+                                        <div class="statsLabel">{{ t('stats.topTracks') }}</div>
+                                        <div class="topList">
+                                            <div v-for="(item, i) in topTracks" :key="item.track.file_path" class="topRow">
+                                                <span class="topRank">{{ i + 1 }}</span>
+                                                <img
+                                                    class="topCover"
+                                                    :src="(getTrackByPath(item.track.file_path) ?? item.track).cover_art || defaultTrackCover"
+                                                    alt=""
+                                                    draggable="false"
+                                                />
+                                                <div class="topText">
+                                                    <div class="topTitle">{{ item.track.title || item.track.file_path.split(/[\\/]/).pop() }}</div>
+                                                    <div class="topArtist">{{ item.track.artist || t('recap.unknownArtist') }}</div>
+                                                </div>
+                                                <span v-if="item.listens > 0" class="topCount">{{ timesCountText(item.listens) }}</span>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </template>
@@ -522,14 +589,40 @@ onUnmounted(() => {
     padding: 24px 28px;
     box-sizing: border-box;
     background-color: var(--light-bg);
-    /* Ambient accent light: soft top/bottom glows + subtle vignette, all on accent vars so it follows the current track's color. */
-    background-image:
-        radial-gradient(120% 75% at 50% -12%, hsla(var(--accent-h), var(--accent-s), 62%, 0.20), transparent 60%),
-        radial-gradient(100% 58% at 50% 116%, hsla(var(--accent-h), var(--accent-s), 55%, 0.17), transparent 62%),
-        radial-gradient(72% 58% at 50% 44%, hsla(var(--accent-h), var(--accent-s), 55%, 0.06), transparent 75%),
-        radial-gradient(140% 125% at 50% 50%, transparent 50%, hsla(var(--accent-h), min(var(--accent-s), 40%), 5%, 0.55) 100%);
-    background-repeat: no-repeat;
     overflow: hidden;
+}
+
+/* Live spectrum behind the page: flat, faint accent bars that appear only while music plays. */
+.ambientBars {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 46%;
+    z-index: 0;
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    padding: 0 28px;
+    box-sizing: border-box;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .6s ease;
+}
+.ambientBars.on {
+    opacity: 1;
+}
+.ambientBar {
+    flex: 1;
+    height: 100%;
+    border-radius: 8px 8px 0 0;
+    background-color: hsla(var(--accent-h), var(--accent-s), 62%, 0.09);
+    transform: scaleY(0.03);
+    transform-origin: center bottom;
+    will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+    .ambientBars { display: none; }
 }
 
 .stageArea {
@@ -583,14 +676,11 @@ onUnmounted(() => {
     font-size: 13px;
     font-weight: 700;
     color: #fff;
-    background:
-        linear-gradient(120deg, hsla(var(--accent-h), max(var(--accent-s), 55%), 50%, 0.9), hsla(calc(var(--accent-h) + 45), max(var(--accent-s), 55%), 45%, 0.9));
-    box-shadow: 0 8px 24px hsla(var(--accent-h), var(--accent-s), 30%, 0.35);
-    transition: transform .2s ease, box-shadow .2s ease;
+    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.92);
+    transition: background-color .2s ease;
 }
 .recapBadge:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 10px 28px hsla(var(--accent-h), var(--accent-s), 35%, 0.5);
+    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 1);
 }
 .recapBadgeDot {
     width: 7px;
@@ -744,77 +834,140 @@ onUnmounted(() => {
     color: #fff;
 }
 
-/* Pinned to the bottom outside the flow, so the mix block centers on the whole page. */
-.moodStrip {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 24px;
-    z-index: 2;
+/* Current mix track: one small cover, shown only while the mix is the active source. */
+.mixNowSlot {
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
+    justify-content: center;
+    max-width: 100%;
+    height: 52px;
+    margin-top: 26px;
 }
-.moodStripLabel {
-    user-select: none;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 11px;
-    font-weight: 800;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    color: hsla(0, 0%, 100%, 0.38);
-}
-.moodStripLabel::before,
-.moodStripLabel::after {
-    content: "";
-    width: 28px;
-    height: 1px;
-    background-color: hsla(0, 0%, 100%, 0.12);
-}
-.moodChips {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    max-width: 620px;
-}
-.moodChipsRow {
+.mixNow {
     display: flex;
     flex-direction: row;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px;
+    align-items: center;
+    gap: 12px;
+    max-width: 100%;
+    padding: 6px 18px 6px 6px;
+    border-radius: 999px;
+    /* Opaque (--light-bg lifted a step), so the background spectrum stays behind it. */
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 19%);
+    box-sizing: border-box;
+    text-align: left;
 }
-.moodChip {
+.mixNowCover {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    object-fit: cover;
+    user-select: none;
+    background-color: hsla(0, 0%, 100%, 0.06);
+}
+.mixNowText {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.mixNowLabel {
+    user-select: none;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: hsla(var(--accent-h), var(--accent-s), 72%, 0.85);
+}
+.mixNowTitle {
+    max-width: 420px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.92);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.mixNowArtist {
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.5);
+}
+
+/* Mood tiles: the main way to steer the mix, so they get real size. */
+.moodGrid {
+    position: relative;
+    z-index: 2;
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+    width: 100%;
+    max-width: 920px;
+}
+.moodTile {
     user-select: none;
     cursor: pointer;
+    min-width: 0;
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 7px;
-    padding: 8px 14px 8px 12px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 16px 16px 15px;
     border: none;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
-    color: hsla(0, 0%, 100%, 0.6);
-    font-size: 12.5px;
-    font-weight: 600;
-    transition: .2s ease;
+    border-radius: 20px;
+    /* Opaque like .mixNow: the background spectrum passes behind, not through. */
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 18.5%);
+    color: hsla(0, 0%, 100%, 0.9);
+    font-family: inherit;
+    text-align: left;
+    transition: background-color .2s ease, color .2s ease;
 }
-.moodChip svg { opacity: 0.7; transition: opacity .2s ease; }
-.moodChip:hover {
-    background-color: hsla(0, 0%, 100%, 0.09);
-    color: hsla(0, 0%, 100%, 0.95);
+.moodTile:hover {
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 22%);
 }
-.moodChip:hover svg { opacity: 0.95; }
-.moodChip.active {
-    background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.92);
+.moodTileIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    margin-bottom: 10px;
+    border-radius: 50%;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(var(--accent-h), var(--accent-s), 72%, 1);
+    transition: background-color .2s ease, color .2s ease;
+}
+.moodTileName {
+    max-width: 100%;
+    font-size: 14px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.moodTileDesc {
+    max-width: 100%;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+    color: hsla(0, 0%, 100%, 0.45);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: calc(2 * 1.35em);
+    transition: color .2s ease;
+}
+.moodTile.active {
+    background-color: hsl(var(--accent-h), var(--accent-s), 52%);
     color: #fff;
 }
-.moodChip.active svg { opacity: 1; }
+.moodTile.active .moodTileIcon {
+    background-color: hsla(0, 0%, 100%, 0.2);
+    color: #fff;
+}
+.moodTile.active .moodTileDesc {
+    color: hsla(0, 0%, 100%, 0.78);
+}
 
 .emptyState {
     flex: 1;
@@ -1134,7 +1287,24 @@ onUnmounted(() => {
 /* Phone breakpoint (canonical for this app; see other views too). */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .pageRoot { padding: 16px 10px; }
-    .moodStrip { bottom: 16px; }
+    /* Phones: tiles shrink to icon + name chips that wrap. */
+    .moodGrid {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+    }
+    .moodTile {
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 14px 6px 6px;
+        border-radius: 999px;
+    }
+    .moodTileIcon { width: 30px; height: 30px; margin-bottom: 0; }
+    .moodTileName { font-size: 13px; font-weight: 600; }
+    .moodTileDesc { display: none; }
+    .mixNowTitle { max-width: 240px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
     .mixName { font-size: 34px; letter-spacing: -0.8px; }
     /* Own padding so text doesn't hit the edges even with the page's small padding. */
@@ -1172,20 +1342,18 @@ onUnmounted(() => {
     padding: 24px;
     box-sizing: border-box;
 }
-/* Same language as the year recap cards: dark accent-tinted surface, one soft
-   light from the top, hairline dividers instead of nested cards. */
+/* Flat surface like the other modals; sections are separated by spacing only. */
 .statsModal {
+    --stats-s: max(min(var(--accent-s), 70%), 35%);
     position: relative;
-    width: 460px;
+    width: 760px;
     max-width: 100%;
     max-height: 88vh;
     overflow-y: auto;
-    padding: 26px 28px 24px;
-    border-radius: 20px;
-    background:
-        radial-gradient(130% 70% at 50% -12%, hsla(var(--accent-h), var(--accent-s), 56%, 0.16), transparent 62%),
-        hsl(var(--accent-h), min(var(--accent-s), 26%), 9%);
-    box-shadow: 0 32px 90px hsla(0, 0%, 0%, 0.5), inset 0 0 0 1px hsla(0, 0%, 100%, 0.05);
+    padding: 28px 30px 26px;
+    border-radius: 28px;
+    background-color: var(--light-bg);
+    box-shadow: 0 32px 90px hsla(0, 0%, 0%, 0.5);
     border: none;
     outline: none;
     box-sizing: border-box;
@@ -1194,8 +1362,8 @@ onUnmounted(() => {
 .statsModal::-webkit-scrollbar-thumb { background: hsla(0, 0%, 100%, 0.14); border-radius: 3px; }
 .statsClose {
     position: absolute;
-    top: 18px;
-    right: 18px;
+    top: 20px;
+    right: 20px;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -1237,7 +1405,7 @@ onUnmounted(() => {
 .statsTitle {
     margin-top: 8px;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 24px;
+    font-size: 26px;
     line-height: 1.15;
     font-weight: 800;
     letter-spacing: -0.01em;
@@ -1246,7 +1414,7 @@ onUnmounted(() => {
 }
 .statsSubtitle {
     margin-top: 6px;
-    font-size: 13.5px;
+    font-size: 14px;
     line-height: 1.5;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.6);
@@ -1258,99 +1426,239 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.55);
 }
 
-.statsSection {
-    margin-top: 22px;
-}
-
-.radarWrap {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.radar {
-    width: 100%;
-    max-width: 360px;
-    height: auto;
-    overflow: visible;
-}
-.radarRing {
-    fill: none;
-    stroke: hsla(0, 0%, 100%, 0.07);
-    stroke-width: 1;
-}
-.radarRing:last-of-type { stroke: hsla(0, 0%, 100%, 0.12); }
-.radarAxis {
-    stroke: hsla(0, 0%, 100%, 0.06);
-    stroke-width: 1;
-}
-.radarShape {
-    fill: hsla(var(--accent-h), var(--accent-s), 60%, 0.16);
-    stroke: hsl(var(--accent-h), min(var(--accent-s), 70%), 72%);
-    stroke-width: 1.5;
-    stroke-linejoin: round;
-    transform-box: fill-box;
-    transform-origin: center;
-    animation: radarIn .5s cubic-bezier(.2, .8, .2, 1);
-}
-@keyframes radarIn {
-    from { transform: scale(0.85); opacity: 0; }
-    to { transform: scale(1); opacity: 1; }
-}
-.radarDot {
-    fill: hsl(var(--accent-h), min(var(--accent-s), 70%), 72%);
-}
-.radarLabel {
-    fill: hsla(0, 0%, 100%, 0.82);
-    font-size: 12px;
-    font-weight: 600;
-    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
-.radarValue {
-    fill: hsla(0, 0%, 100%, 0.45);
-    font-size: 11px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-}
-
-/* Three numbers in one row, split by hairlines; columns size to their values
-   so a long duration doesn't wrap. */
+/* Four numbers in one row. */
 .statsFacts {
-    display: flex;
-    margin-top: 18px;
-    padding-top: 16px;
-    border-top: 1px solid hsla(0, 0%, 100%, 0.08);
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    column-gap: 24px;
+    margin-top: 24px;
 }
 .statsFact {
-    flex: 1 1 auto;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 0 14px;
-}
-.statsFact:first-child {
-    padding-left: 0;
-}
-.statsFact:last-child {
-    padding-right: 0;
-}
-.statsFact + .statsFact {
-    border-left: 1px solid hsla(0, 0%, 100%, 0.08);
+    gap: 5px;
 }
 .statsFactValue {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 17px;
-    line-height: 1.2;
+    font-size: 26px;
+    line-height: 1.1;
     font-weight: 800;
+    letter-spacing: -0.01em;
     color: hsla(0, 0%, 100%, 0.96);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.statsFact:first-child .statsFactValue {
+    color: hsl(var(--accent-h), var(--stats-s), 80%);
+}
+.statsFactUnit {
+    margin-left: 4px;
+    font-size: 15px;
+    font-weight: 700;
+    opacity: 0.6;
 }
 .statsFactLabel {
     font-size: 12px;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.5);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     user-select: none;
+}
+
+.statsGrid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 40px;
+    margin-top: 34px;
+}
+.statsGrid.single {
+    grid-template-columns: minmax(0, 1fr);
+}
+.statsCol {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+.statsLabel {
+    margin-bottom: 14px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.42);
+    user-select: none;
+}
+.statsBlock + .statsBlock {
+    margin-top: 24px;
+}
+
+/* Sound metrics: same thin accent bars as the time-of-day strip. */
+.metricList {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+}
+.metricHead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+.metricName {
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.85);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+}
+.metricValue {
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.5);
+    font-variant-numeric: tabular-nums;
+}
+.metricTrack {
+    height: 6px;
+    border-radius: 9999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    overflow: hidden;
+}
+.metricFill {
+    display: block;
+    height: 100%;
+    border-radius: 9999px;
+    background-color: hsl(var(--accent-h), var(--stats-s), 68%);
+    transform-origin: left center;
+    animation: daySegIn .5s cubic-bezier(.2, .8, .2, 1);
+}
+
+/* Time of day: light-to-dark accent tones, like the sun going down. */
+.dayBar {
+    display: flex;
+    gap: 3px;
+    height: 10px;
+}
+.daySeg {
+    flex-basis: 0;
+    min-width: 6px;
+    border-radius: 3px;
+    transform-origin: left center;
+    animation: daySegIn .5s cubic-bezier(.2, .8, .2, 1);
+}
+.daySeg:first-child { border-radius: 9999px 3px 3px 9999px; }
+.daySeg:last-child { border-radius: 3px 9999px 9999px 3px; }
+@keyframes daySegIn {
+    from { transform: scaleX(0.6); opacity: 0; }
+    to { transform: scaleX(1); opacity: 1; }
+}
+.daySeg.morning, .dayDot.morning { background: hsl(var(--accent-h), var(--stats-s), 84%); }
+.daySeg.day, .dayDot.day { background: hsl(var(--accent-h), var(--stats-s), 68%); }
+.daySeg.evening, .dayDot.evening { background: hsl(var(--accent-h), var(--stats-s), 52%); }
+.daySeg.night, .dayDot.night { background: hsl(var(--accent-h), var(--stats-s), 36%); }
+.dayLegend {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 14px;
+}
+.dayItem {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: 6px;
+    row-gap: 3px;
+}
+.dayDot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+.dayName {
+    font-size: 12px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.5);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+}
+.dayPct {
+    grid-column: 1 / -1;
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    font-weight: 800;
+    color: hsla(0, 0%, 100%, 0.55);
+    font-variant-numeric: tabular-nums;
+}
+.dayItem.peak .dayName { color: hsla(0, 0%, 100%, 0.85); }
+.dayItem.peak .dayPct { color: hsla(0, 0%, 100%, 0.96); }
+
+.topList {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.topRow {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 14px 40px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 12px;
+}
+.topRank {
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+    color: hsla(0, 0%, 100%, 0.35);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+}
+.topRow:first-child .topRank {
+    color: hsl(var(--accent-h), var(--stats-s), 78%);
+}
+.topCover {
+    width: 40px;
+    height: 40px;
+    border-radius: 6px;
+    object-fit: cover;
+    display: block;
+    background: hsla(0, 0%, 100%, 0.06);
+    user-select: none;
+}
+.topText {
+    min-width: 0;
+}
+.topTitle, .topArtist {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.topTitle {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.92);
+}
+.topArtist {
+    margin-top: 2px;
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.5);
+}
+.topCount {
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.42);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
 .stats-enter-active, .stats-leave-active { transition: opacity .2s ease; }
@@ -1358,7 +1666,7 @@ onUnmounted(() => {
 .stats-enter-from, .stats-leave-to { opacity: 0; }
 .stats-enter-from .statsModal, .stats-leave-to .statsModal { transform: scale(0.96) translateY(6px); opacity: 0; }
 
-/* Phones: stats modal full-screen, no edge padding. */
+/* Phones: stats modal full-screen, no edge padding, one column. */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .statsBackdrop { padding: 0; }
     .statsModal {
@@ -1367,8 +1675,16 @@ onUnmounted(() => {
         height: 100%;
         max-height: none;
         border-radius: 0;
-        padding-top: calc(var(--safe-top, 0px) + 26px);
+        padding: calc(var(--safe-top, 0px) + 26px) 20px calc(var(--safe-bottom, 0px) + 28px);
     }
     .statsClose { top: calc(var(--safe-top, 0px) + 18px); }
+    .statsFacts {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        row-gap: 18px;
+    }
+    .statsGrid {
+        grid-template-columns: minmax(0, 1fr);
+        row-gap: 32px;
+    }
 }
 </style>

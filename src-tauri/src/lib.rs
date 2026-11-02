@@ -1421,10 +1421,12 @@ fn statistics_get_most_played(
 #[tauri::command(async)]
 fn statistics_get_top_artists(
     state: State<LibraryState>,
+    settings_state: State<SettingsState>,
     limit: usize,
 ) -> Result<Vec<library::TopArtist>, String> {
+    let separators = settings::get_artist_separators(&settings_state);
     let library = state.lock()?;
-    Ok(library.get_top_artists(limit))
+    Ok(library.get_top_artists(limit, &separators))
 }
 
 #[tauri::command(async)]

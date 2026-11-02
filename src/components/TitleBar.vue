@@ -16,6 +16,7 @@ import { useI18n } from '../composables/useI18n';
 import { isAndroidRuntime } from '../composables/usePlatform';
 import { activeHoliday, holidayModalOpen } from '../composables/useHoliday';
 import { holidayBadgeSvg } from '../utils/holidayArt';
+import { splitArtistsList } from '../utils/format';
 
 interface AudioFeatureProgressPayload {
     current: number;
@@ -30,6 +31,13 @@ const win = getCurrentWindow();
 const { settings } = useSettings();
 const { t } = useI18n();
 const { currentTrack, saveState } = usePlayer();
+
+// Joint artists ("A; B") read like everywhere else: split by the user's separators, joined with commas.
+const headerArtist = computed(() => {
+    const artist = currentTrack.value?.artist;
+    if (!artist) return 'Неизвестный исполнитель';
+    return splitArtistsList(artist, settings.value.artist_separators).join(', ') || artist;
+});
 
 // Background audio-feature worker progress
 const featureProgressVisible = ref(false);
@@ -258,7 +266,7 @@ const closeWindow = async () => {
     <div class="hat" data-tauri-drag-region>
         <div class="winTitle">
             <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
-            <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.artist || 'Неизвестный исполнитель') : 'by mel1x' }}</div>
+            <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? headerArtist : 'by mel1x' }}</div>
         </div>
         <div class="winControls">
             <DownloadQueueIndicator />

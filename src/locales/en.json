@@ -245,6 +245,13 @@
     "deleteErrorDismiss": "Got it",
     "noTitle": "Untitled"
   },
+  "searchPage": {
+    "topArtists": "Your top artists",
+    "recent": "Recently played"
+  },
+  "mix": {
+    "nowPlaying": "Now in the mix"
+  },
   "stats": {
     "characterSentence": "Mostly {traits} music",
     "traitEnergetic": "energetic",
@@ -252,7 +259,17 @@
     "traitDanceable": "danceable",
     "traitFast": "fast",
     "traitSlow": "slow-paced",
-    "traitBalanced": "balanced"
+    "traitBalanced": "balanced",
+    "sound": "Sound",
+    "dayTime": "Listening time of day",
+    "topTracks": "Most played",
+    "libraryTracks": "Tracks in library",
+    "morning": "Morning",
+    "day": "Day",
+    "evening": "Evening",
+    "night": "Night",
+    "hoursShort": "h",
+    "minutesShort": "min"
   },
   "holiday": {
     "new_year": "New Year",
@@ -530,6 +547,8 @@
     "Проанализировано": "Analyzed",
     "Характер звучания": "Sound vibe",
     "Когда вы слушаете": "When you listen",
+    "Энергичность": "Energy",
+    "Танцевальность": "Danceability",
     "Энергия": "Energy",
     "Танец": "Dance",
     "Яркость": "Brightness",

@@ -27,8 +27,12 @@ import { useExternalSources } from '../composables/useExternalSources'
 import { useCoverGate } from '../composables/useCoverGate'
 import { useVirtualScroll } from '../composables/useVirtualScroll'
 import { useScrollLine } from '../composables/useScrollLine'
+import { useSearchBrowse } from '../composables/useSearchBrowse'
+import { useI18n } from '../composables/useI18n'
+import { listenCountText } from '../utils/format'
 
 const router = useRouter()
+const { t } = useI18n()
 
 const PAST_SEARCHES_KEY = 'lfmusic_past_searches'
 const MAX_PAST_SEARCHES = 15
@@ -137,6 +141,7 @@ const {
     loadCoversForTracks,
     getTrackByPath,
     cacheTracks,
+    fetchTracksByPaths,
 } = usePlayer()
 const { playSource } = usePlaySource()
 
@@ -289,8 +294,9 @@ watch(query, async (q) => {
     try {
         const res = await invoke<TrackMetadata[]>('library_search', { query: q })
         if (reqId === trackSearchReqId) {
-            trackResults.value = res
             cacheTracks(res)
+            // Live cache objects: the cover loader writes covers into those, not into `res`.
+            trackResults.value = res.map(tr => getTrackByPath(tr.file_path) ?? tr)
         }
     } catch {
         if (reqId === trackSearchReqId) trackResults.value = []
@@ -473,6 +479,55 @@ onUnmounted(() => {
     window.removeEventListener('resize', recomputeTracksOffset)
 })
 
+// Empty query: show the user's most played artists and recently played tracks
+// instead of a blank page. Cached between visits (see useSearchBrowse).
+const { topArtistStats, recentTracks, loaded: browseLoaded, refresh: refreshBrowse } = useSearchBrowse()
+
+onMounted(() => { void refreshBrowse() })
+
+const topArtists = computed(() => {
+    const byName = new Map(artistPlaylists.value.map(pl => [pl.name.toLowerCase(), pl]))
+    return topArtistStats.value.map((a, i) => {
+        const pl = byName.get(a.name.toLowerCase())
+        const tr = pl?.first_file_path ? getTrackByPath(pl.first_file_path) : undefined
+        return {
+            id: pl?.id ?? -1 - i,
+            name: pl?.name ?? a.name,
+            cover: tr?.cover_art ?? null,
+            firstPath: pl?.first_file_path ?? null,
+            trackCount: pl?.track_count ?? 0,
+            listens: a.listens,
+        }
+    })
+})
+
+// Artist avatars fall back to the first track's cover: make sure those are loaded.
+watch(topArtists, async (list) => {
+    const paths = list.map(a => a.firstPath).filter((p): p is string => !!p && !getTrackByPath(p)?.cover_art)
+    if (paths.length === 0) return
+    const tracks = await fetchTracksByPaths(paths)
+    if (tracks.length) loadCoversForTracks(tracks)
+})
+
+const hasBrowse = computed(() => topArtists.value.length > 0 || recentTracks.value.length > 0)
+
+function onRecentCoverClick(track: TrackMetadata) {
+    if (currentTrack.value?.file_path === track.file_path) {
+        togglePlayPause()
+        return
+    }
+    setPlaylistSource('search:recent', recentTracks.value)
+    playTrack(track, { manualListStart: true })
+}
+
+function onRecentClick(e: MouseEvent, track: TrackMetadata) {
+    if (isPhoneViewport()) {
+        onRecentCoverClick(track)
+        return
+    }
+    createRipple(e)
+}
+
 const noResults = computed(() => hasQuery.value &&
     artistResults.value.length === 0 &&
     albumResults.value.length === 0 &&
@@ -538,7 +593,46 @@ function scrollToTop() {
         </div>
 
         <Transition name="gate-fade" mode="out-in" @after-enter="onGateAfterEnter">
-        <div v-if="!hasQuery" class="emptyState" key="gate-no-query">
+        <div v-if="!hasQuery && hasBrowse" class="browse" key="gate-browse">
+            <section v-if="topArtists.length > 0" class="pageLine">
+                <div class="lineHat">
+                    <div class="lineTitle nonClickable">{{ t('searchPage.topArtists') }}</div>
+                </div>
+                <div class="topArtistGrid">
+                    <div
+                        v-for="a in topArtists"
+                        :key="a.name"
+                        class="topArtistCard"
+                        @click="openArtist(a)"
+                    >
+                        <AnimatedCover class="topArtistAvatar" :src="artistCoverFor(a.name, a.cover)" />
+                        <div v-truncate class="topArtistName">{{ a.name }}</div>
+                        <div class="topArtistMeta">{{ listenCountText(a.listens) }}</div>
+                    </div>
+                </div>
+            </section>
+
+            <section v-if="recentTracks.length > 0" class="pageLine">
+                <div class="lineHat">
+                    <div class="lineTitle nonClickable">{{ t('searchPage.recent') }}</div>
+                </div>
+                <div class="tracksList">
+                    <TrackRow
+                        v-for="track in recentTracks"
+                        :key="track.file_path"
+                        :track="getTrackByPath(track.file_path) ?? track"
+                        :active="currentTrack?.file_path === track.file_path"
+                        :activePaused="currentTrack?.file_path === track.file_path && !isPlaying"
+                        :menuOpen="trackMenu?.track.file_path === track.file_path"
+                        @rowClick="onRecentClick($event, track)"
+                        @coverClick="onRecentCoverClick(track)"
+                        @openMenu="openTrackMenu($event, track)"
+                    />
+                </div>
+            </section>
+        </div>
+
+        <div v-else-if="!hasQuery && browseLoaded" class="emptyState" key="gate-no-query">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Введите запрос</div>
             <div class="emptyDesc">Введите текст для поиска треков, альбомов, исполнителей и плейлистов в вашей библиотеке.</div>
@@ -549,6 +643,9 @@ function scrollToTop() {
             <div class="emptyText">Ничего не найдено</div>
             <div class="emptyDesc">Попробуйте изменить запрос или добавить папки с треками в настройках.</div>
         </div>
+
+        <!-- First visit, browse data still loading: nothing instead of a flashing empty state. -->
+        <div v-else-if="!hasQuery" key="gate-wait"></div>
 
         <LoadingSpinner v-else-if="!coversReady" key="gate-spinner" />
 
@@ -927,6 +1024,64 @@ function scrollToTop() {
     opacity: 0.65;
 }
 
+/* Empty query: most played artists, one row of round avatars (extra rows are clipped). */
+.browse {
+    display: flex;
+    flex-direction: column;
+    margin-top: 8px;
+}
+.topArtistGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+    grid-template-rows: auto;
+    grid-auto-rows: 0;
+    column-gap: 16px;
+    overflow: hidden;
+}
+.topArtistCard {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 8px 12px;
+    border-radius: 18px;
+    cursor: pointer;
+    user-select: none;
+    text-align: center;
+    transition: background-color .2s ease;
+}
+.topArtistCard:hover {
+    background-color: hsla(0, 0%, 100%, 0.05);
+}
+.topArtistAvatar {
+    display: block;
+    width: 100%;
+    max-width: 112px;
+    aspect-ratio: 1 / 1;
+    margin-bottom: 8px;
+    border-radius: 50%;
+    object-fit: cover;
+    background-color: hsla(0, 0%, 100%, 0.06);
+}
+.topArtistName {
+    max-width: 100%;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.92);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.topArtistMeta {
+    max-width: 100%;
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.45);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* Artists row (badges) */
 .artistsBlockWrap {
     position: relative;
@@ -1276,6 +1431,27 @@ function scrollToTop() {
     .pastSearchesBar {
         gap: 8px !important;
         margin-bottom: 20px !important;
+    }
+
+    /* Top artists: a swipeable row of smaller avatars instead of a clipped grid. */
+    .topArtistGrid {
+        display: flex;
+        gap: 4px;
+        margin: 0 -14px;
+        padding: 0 14px;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    .topArtistGrid::-webkit-scrollbar { display: none; }
+    .topArtistCard {
+        flex: 0 0 96px;
+        padding: 6px 4px 8px;
+    }
+    .topArtistAvatar {
+        max-width: 84px;
+    }
+    .topArtistMeta {
+        display: none;
     }
 
     .pastSearchChip {
