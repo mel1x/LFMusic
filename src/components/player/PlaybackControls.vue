@@ -14,6 +14,7 @@ import NextIcon from '../Icons/NextIcon.vue';
 import RepeatIcon from '../Icons/RepeatIcon.vue';
 import RepeatOneIcon from '../Icons/RepeatOneIcon.vue';
 import ListIcon from '../Icons/ListIcon.vue';
+import LyricsIcon from '../Icons/LyricsIcon.vue';
 import VolumeMaxIcon from '../Icons/VolumeMaxIcon.vue';
 import VolumeMinIcon from '../Icons/VolumeMinIcon.vue';
 import VolumeZeroIcon from '../Icons/VolumeZeroIcon.vue';
@@ -21,6 +22,7 @@ import FullscreenIcon from '../Icons/FullscreenIcon.vue';
 
 import { usePlayer, type TrackMetadata } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
+import { useLyrics } from '../../composables/useLyrics';
 import { isWebKitRuntime } from '../../composables/usePlatform';
 import { accentPreview, hexToHSL } from '../../composables/useAccentTheme';
 
@@ -62,12 +64,15 @@ const {
 const {
     openFullscreen,
     openQueueFullscreen,
+    openLyricsFullscreen,
     canMoveToTop,
     moveTrackToTop,
     toggleMute,
     onVolumeScroll,
     onVolumeInput,
 } = usePlayerUi();
+
+const { hasLyrics } = useLyrics();
 
 const progressSliderValue = computed(() => {
     return isSeeking.value ? seekValue.value : positionSecs.value;
@@ -361,6 +366,14 @@ function onMoveToTop(track: TrackMetadata) {
                 </button>
             </div>
             <div class="additionalControls" @click.stop>
+                <button
+                    v-if="currentTrack"
+                    class="lyricsBtn"
+                    :disabled="!hasLyrics"
+                    @click.stop="openLyricsFullscreen"
+                >
+                    <LyricsIcon />
+                </button>
                 <div v-if="currentTrack" class="queueList" @click.stop="openQueueFullscreen"><ListIcon /></div>
                 <div class="codecInfo" v-if="currentTrack && codecDisplay">
                     {{ codecDisplay }}
@@ -748,6 +761,24 @@ function onMoveToTop(track: TrackMetadata) {
     flex: 1;
     min-width: 0;
     max-width: 300px;
+}
+.lyricsBtn {
+    display: flex;
+    margin-top: -1px;
+    margin-right: -8px;
+    padding: 8px;
+    background: transparent;
+    color: hsla(0, 0%, 100%, 0.5);
+    cursor: pointer;
+    transition: .24s;
+
+    &:hover:not(:disabled) {
+        color: hsla(0, 0%, 100%, 0.8);
+    }
+}
+.lyricsBtn:disabled {
+    opacity: 0.25;
+    cursor: default;
 }
 .queueList {
     margin-top: -1px;
@@ -1210,6 +1241,7 @@ function onMoveToTop(track: TrackMetadata) {
     }
 
     .codecInfo,
+    .lyricsBtn,
     .volumeControl {
         display: none;
     }

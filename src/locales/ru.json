@@ -32,7 +32,9 @@
     "now": "Сейчас",
     "nextTrack": "Следующий трек",
     "noTrack": "Нет трека",
-    "untitled": "Без названия"
+    "untitled": "Без названия",
+    "lyrics": "Текст",
+    "noLyrics": "У этого трека нет текста"
   },
   "audioFeatures": {
     "progressPendingTitle": "Подготовка рекомендаций",

@@ -436,6 +436,35 @@ fn player_seek_crossfade(
     player.seek_crossfade(position_secs, crossfade_secs)
 }
 
+/// Lyrics from a sidecar next to the track (`song.lrc`, then `song.txt`).
+/// Extension case is ignored; `None` when there is no non-empty file.
+#[tauri::command(async)]
+fn get_track_lyrics(file_path: String) -> Option<String> {
+    let path = std::path::Path::new(&file_path);
+    let stem = path.file_stem()?.to_str()?;
+    let dir = path.parent()?;
+    let mut found: Vec<(usize, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let p = entry.path();
+            if p.file_stem()?.to_str()? != stem {
+                return None;
+            }
+            let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+            let rank = ["lrc", "txt"].iter().position(|e| *e == ext)?;
+            Some((rank, p))
+        })
+        .collect();
+    found.sort_by_key(|(rank, _)| *rank);
+    found.into_iter().find_map(|(_, p)| {
+        let bytes = std::fs::read(p).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let text = text.trim_start_matches('\u{feff}').trim();
+        (!text.is_empty()).then(|| text.to_string())
+    })
+}
+
 // Polled reads are `(async)`: on the main thread they would stall the window
 // whenever player_play holds the write lock while opening/probing a file.
 // Control commands (pause/volume/seek) stay sync so they keep their call order.
@@ -2342,6 +2371,7 @@ pub fn run() {
             get_track_metadata,
             get_cover_art,
             get_original_cover_art,
+            get_track_lyrics,
             // Library
             library_get_folders,
             library_add_folder,

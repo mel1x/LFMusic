@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
@@ -18,6 +18,7 @@ import NextIcon from '../Icons/NextIcon.vue';
 import RepeatIcon from '../Icons/RepeatIcon.vue';
 import RepeatOneIcon from '../Icons/RepeatOneIcon.vue';
 import ListIcon from '../Icons/ListIcon.vue';
+import LyricsIcon from '../Icons/LyricsIcon.vue';
 import VolumeMaxIcon from '../Icons/VolumeMaxIcon.vue';
 import VolumeMinIcon from '../Icons/VolumeMinIcon.vue';
 import VolumeZeroIcon from '../Icons/VolumeZeroIcon.vue';
@@ -30,10 +31,13 @@ import CloseIcon from '../Icons/CloseIcon.vue';
 import { usePlayer, type TrackMetadata } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
 import { usePlaylists } from '../../composables/usePlaylists';
+import { useLyrics } from '../../composables/useLyrics';
 import { createRipple } from '../../composables/useRipple';
 import { isPhoneViewport } from '../../composables/usePlatform';
+import { useI18n } from '../../composables/useI18n';
 
 const win = getCurrentWindow();
+const { t } = useI18n();
 
 const {
     currentTrack,
@@ -61,6 +65,7 @@ const {
     onSeekStart,
     onSeekInput,
     onSeekEnd,
+    seekTo,
     saveState,
 } = usePlayer();
 
@@ -69,6 +74,7 @@ const {
     showOverlay,
     closeFullscreen,
     toggleFsMode,
+    toggleLyricsMode,
     fsCoverA,
     fsCoverB,
     fsActiveBuffer,
@@ -83,6 +89,100 @@ const {
     onVolumeScroll,
     onVolumeInput,
 } = usePlayerUi();
+
+const { lines: lyricLines, synced: lyricsSynced, hasLyrics, activeIndex: lyricIndex } = useLyrics();
+
+// Synced lyrics: the sung line stays in the middle of the panel. The line
+// column slides with a CSS transform transition (written straight to the DOM);
+// the wheel shifts it by hand for a few seconds, then it snaps back.
+const lyricsEl = ref<HTMLElement | null>(null);
+const lyricsTrackEl = ref<HTMLElement | null>(null);
+const LYRICS_MANUAL_MS = 3000;
+let lyricsManualShift = 0;
+let lyricsManualTimer: ReturnType<typeof setTimeout> | null = null;
+
+function lyricsBaseOffset(): number | null {
+    const box = lyricsEl.value;
+    const track = lyricsTrackEl.value;
+    if (!box || !track) return null;
+    const line = track.children[Math.max(0, lyricIndex.value)] as HTMLElement | undefined;
+    if (!line) return null;
+    return box.clientHeight / 2 - (line.offsetTop + line.offsetHeight / 2);
+}
+
+function setLyricsOffset(y: number, transition: string) {
+    const track = lyricsTrackEl.value;
+    if (!track) return;
+    track.style.transition = transition;
+    track.style.transform = `translate3d(0, ${y}px, 0)`;
+}
+
+function alignLyrics(animate: boolean) {
+    const base = lyricsBaseOffset();
+    if (base === null) return;
+    setLyricsOffset(base + lyricsManualShift, animate ? '' : 'none');
+}
+
+function resetLyricsManual() {
+    lyricsManualShift = 0;
+    if (lyricsManualTimer) clearTimeout(lyricsManualTimer);
+    lyricsManualTimer = null;
+}
+
+function shiftLyrics(delta: number, transition: string) {
+    const box = lyricsEl.value;
+    const track = lyricsTrackEl.value;
+    const base = lyricsBaseOffset();
+    if (!box || !track || base === null) return;
+    const half = box.clientHeight / 2;
+    // Keep some text on screen: the column may move until its edge reaches the middle.
+    const y = Math.min(half, Math.max(half - track.offsetHeight, base + lyricsManualShift + delta));
+    lyricsManualShift = y - base;
+    setLyricsOffset(y, transition);
+    if (lyricsManualTimer) clearTimeout(lyricsManualTimer);
+    lyricsManualTimer = setTimeout(() => {
+        resetLyricsManual();
+        alignLyrics(true);
+    }, LYRICS_MANUAL_MS);
+}
+
+function onLyricsWheel(e: WheelEvent) {
+    shiftLyrics(-e.deltaY, 'transform .2s ease-out');
+}
+
+let lyricsTouchY: number | null = null;
+function onLyricsTouchStart(e: TouchEvent) {
+    lyricsTouchY = e.touches[0]?.clientY ?? null;
+}
+function onLyricsTouchMove(e: TouchEvent) {
+    const y = e.touches[0]?.clientY;
+    if (lyricsTouchY === null || y === undefined) return;
+    shiftLyrics(y - lyricsTouchY, 'none');
+    lyricsTouchY = y;
+}
+
+watch(lyricIndex, () => {
+    if (fsMode.value === 'lyrics' && lyricsSynced.value && !lyricsManualTimer) nextTick(() => alignLyrics(true));
+});
+watch([() => fsMode.value === 'lyrics', lyricLines], ([open]) => {
+    resetLyricsManual();
+    if (open) nextTick(() => alignLyrics(false));
+});
+
+function onLyricsResize() {
+    if (fsMode.value === 'lyrics') alignLyrics(false);
+}
+onMounted(() => window.addEventListener('resize', onLyricsResize));
+onBeforeUnmount(() => {
+    window.removeEventListener('resize', onLyricsResize);
+    resetLyricsManual();
+});
+
+function onLyricClick(time: number | null) {
+    if (time === null) return;
+    resetLyricsManual();
+    void seekTo(time);
+}
 
 const { isFavorite, toggleFavorite, ensureFavoritesLoaded } = usePlaylists();
 void ensureFavoritesLoaded();
@@ -163,7 +263,7 @@ function openQfCoverMenu(e: MouseEvent) {
             <div
                 v-if="showOverlay"
                 class="fullscreen-overlay"
-                :class="[fsMode === 'queue' ? 'mode-queue' : 'mode-player']"
+                :class="[fsMode === 'player' ? 'mode-player' : 'mode-queue', { 'mode-lyrics': fsMode === 'lyrics' }]"
                 @keydown.escape="closeFullscreen"
                 tabindex="-1"
             >
@@ -221,6 +321,14 @@ function openQfCoverMenu(e: MouseEvent) {
                                 >
                                     <FullscreenIcon v-if="fsMode === 'queue'" />
                                     <ListIcon v-else />
+                                </button>
+                                <button
+                                    class="qf-corner-btn qf-corner-tl"
+                                    :disabled="!hasLyrics"
+                                    @click="toggleLyricsMode"
+                                >
+                                    <FullscreenIcon v-if="fsMode === 'lyrics'" />
+                                    <LyricsIcon v-else />
                                 </button>
                                 <button
                                     class="qf-corner-btn qf-corner-bl"
@@ -382,18 +490,57 @@ function openQfCoverMenu(e: MouseEvent) {
                                 </button>
                             </div>
 
-                            <button
-                                class="qf-mobile-queue-toggle-btn"
-                                :disabled="!currentTrack"
-                                @click="toggleFsMode"
-                            >
-                                <ListIcon class="qf-mobile-queue-icon" />
-                                <span>Очередь</span>
-                            </button>
+                            <div class="qf-mobile-toggle-row">
+                                <button
+                                    class="qf-mobile-queue-toggle-btn"
+                                    :disabled="!hasLyrics"
+                                    @click="toggleLyricsMode"
+                                >
+                                    <LyricsIcon class="qf-mobile-queue-icon" />
+                                    <span>{{ t('player.lyrics') }}</span>
+                                </button>
+                                <button
+                                    class="qf-mobile-queue-toggle-btn"
+                                    :disabled="!currentTrack"
+                                    @click="toggleFsMode"
+                                >
+                                    <ListIcon class="qf-mobile-queue-icon" />
+                                    <span>Очередь</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <div class="qf-right-wrap">
-                        <div class="qf-right">
+                        <div v-if="fsMode === 'lyrics'" class="qf-right qf-lyrics" :class="{ synced: hasLyrics && lyricsSynced }">
+                            <template v-if="!(hasLyrics && lyricsSynced)">
+                                <div class="qf-queue-header" style="color:#fff;margin-bottom:2px;margin-top:2px;">{{ t('player.lyrics') }}</div>
+                                <div v-truncate class="qf-queue-header styled-header" style="color:#fff;margin-top:2px;">{{ trackTitle }}</div>
+                            </template>
+                            <div
+                                v-if="hasLyrics && lyricsSynced"
+                                ref="lyricsEl"
+                                class="qf-lyrics-list synced"
+                                @wheel.prevent="onLyricsWheel"
+                                @touchstart.passive="onLyricsTouchStart"
+                                @touchmove.prevent="onLyricsTouchMove"
+                                @touchend="lyricsTouchY = null"
+                            >
+                                <div ref="lyricsTrackEl" class="qf-lyrics-track">
+                                    <div
+                                        v-for="(line, i) in lyricLines"
+                                        :key="i"
+                                        class="qf-lyric-line"
+                                        :class="{ active: i === lyricIndex, past: i < lyricIndex, gap: !line.text }"
+                                        @click="onLyricClick(line.time)"
+                                    >{{ line.text }}</div>
+                                </div>
+                            </div>
+                            <div v-else-if="hasLyrics" class="qf-lyrics-list">
+                                <div v-for="(line, i) in lyricLines" :key="i" class="qf-lyric-line" :class="{ gap: !line.text }">{{ line.text }}</div>
+                            </div>
+                            <div v-else class="qf-queue-empty">{{ t('player.noLyrics') }}</div>
+                        </div>
+                        <div v-else class="qf-right">
                             <div class="qf-queue-header" style="color:#fff;margin-bottom:2px;margin-top:2px;">{{ queueSourcePrefix }}</div>
                             <div v-truncate class="qf-queue-header styled-header" style="color:#fff;margin-top:2px;">{{ queueSourceName }}</div>
                             <div class="qf-queue-list">
@@ -854,6 +1001,10 @@ function openQfCoverMenu(e: MouseEvent) {
     top: 16px;
     right: 16px;
 }
+.qf-corner-tl {
+    top: 16px;
+    left: 16px;
+}
 .qf-corner-bl {
     bottom: 16px;
     left: 16px;
@@ -1250,6 +1401,79 @@ function openQfCoverMenu(e: MouseEvent) {
     padding: 24px 12px;
     text-align: center;
 }
+/* Short lyrics sit centered like the queue; long ones shrink the list, which scrolls. */
+.qf-lyrics {
+    overflow: hidden;
+}
+.qf-lyrics-list {
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 4px 24px;
+    scrollbar-width: none;
+}
+.qf-lyrics-list::-webkit-scrollbar {
+    display: none;
+}
+.qf-lyric-line {
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1.5;
+    color: hsla(0, 0%, 100%, 0.85);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+.qf-lyric-line.gap {
+    height: 24px;
+}
+/* Synced: the whole panel height, lines fade out towards the edges. */
+.qf-lyrics.synced {
+    justify-content: stretch;
+}
+.qf-lyrics-list.synced {
+    position: relative;
+    flex: 1 1 auto;
+    height: 100%;
+    padding: 0;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+}
+.qf-lyrics-track {
+    position: relative;
+    padding: 0 4px;
+    will-change: transform;
+    transition: transform .65s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.synced .qf-lyric-line {
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-weight: 800;
+    font-size: 38px;
+    line-height: 1.22;
+    letter-spacing: -0.01em;
+    padding: 12px 0;
+    color: hsla(0, 0%, 100%, 0.24);
+    cursor: pointer;
+    user-select: none;
+    transform: scale(0.94);
+    transform-origin: left center;
+    transition: color .5s ease, transform .65s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.synced .qf-lyric-line.past {
+    color: hsla(0, 0%, 100%, 0.36);
+}
+.synced .qf-lyric-line:hover {
+    color: hsla(0, 0%, 100%, 0.6);
+}
+.synced .qf-lyric-line.active {
+    color: #fff;
+    transform: scale(1);
+}
+.synced .qf-lyric-line.gap {
+    height: 28px;
+    padding: 0;
+}
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .mobile-only {
@@ -1453,6 +1677,12 @@ function openQfCoverMenu(e: MouseEvent) {
         height: 20px !important;
     }
 
+    .qf-mobile-toggle-row {
+        display: flex;
+        gap: 8px;
+        width: 100%;
+    }
+
     .qf-mobile-queue-toggle-btn {
         width: 100% !important;
         height: 48px !important;
@@ -1469,6 +1699,10 @@ function openQfCoverMenu(e: MouseEvent) {
         cursor: pointer !important;
         transition: background-color 0.2s !important;
         margin-top: 6px !important;
+    }
+
+    .qf-mobile-queue-toggle-btn:disabled {
+        opacity: 0.35;
     }
 
     .qf-mobile-queue-toggle-btn:active {
@@ -1619,6 +1853,21 @@ function openQfCoverMenu(e: MouseEvent) {
 
     .mode-queue .qf-left {
         display: none;
+    }
+
+    .mode-lyrics .qf-right-wrap {
+        min-height: 0;
+    }
+
+    .mode-lyrics .qf-right {
+        height: 100%;
+        overflow: hidden;
+        padding-bottom: 0;
+    }
+
+    .synced .qf-lyric-line {
+        font-size: 28px;
+        padding: 9px 0;
     }
 
     .qf-right {

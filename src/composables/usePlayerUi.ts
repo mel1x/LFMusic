@@ -15,7 +15,7 @@ import { isCoverResolved } from "./useCoverLoader";
 // sub-components the state must be shared, hence this composable singleton
 // (same effectScope pattern as usePlayer/usePins).
 
-type FsMode = null | "player" | "queue";
+type FsMode = null | "player" | "queue" | "lyrics";
 
 const QUEUE_DISPLAY_COUNT = 7;
 
@@ -119,9 +119,19 @@ function createPlayerUi() {
         if (currentTrack.value) fsMode.value = "queue";
     }
 
+    function openLyricsFullscreen() {
+        if (currentTrack.value) fsMode.value = "lyrics";
+    }
+
+    // Queue and lyrics share the right panel: from either one it goes back to the player.
     function toggleFsMode() {
         if (!currentTrack.value) return;
-        fsMode.value = fsMode.value === "queue" ? "player" : "queue";
+        fsMode.value = fsMode.value === "player" ? "queue" : "player";
+    }
+
+    function toggleLyricsMode() {
+        if (!currentTrack.value) return;
+        fsMode.value = fsMode.value === "lyrics" ? "player" : "lyrics";
     }
 
     // Fullscreen cover crossfade
@@ -342,6 +352,8 @@ function createPlayerUi() {
         openFullscreen,
         closeFullscreen,
         openQueueFullscreen,
+        openLyricsFullscreen,
+        toggleLyricsMode,
         toggleFsMode,
         // cover crossfade
         fsCoverA,

@@ -32,7 +32,9 @@
     "now": "Now",
     "nextTrack": "Next track",
     "noTrack": "No track",
-    "untitled": "Untitled"
+    "untitled": "Untitled",
+    "lyrics": "Lyrics",
+    "noLyrics": "This track has no lyrics"
   },
   "audioFeatures": {
     "progressPendingTitle": "Recommendation prep",
