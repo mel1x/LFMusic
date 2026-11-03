@@ -1587,6 +1587,47 @@ fn save_settings(
     settings::save(&state.1, &state.0)
 }
 
+// ── Dev mode ─────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct DevInfo {
+    version: String,
+    os: &'static str,
+    arch: &'static str,
+    debug_build: bool,
+    data_dir: String,
+}
+
+#[tauri::command]
+fn dev_info(app: tauri::AppHandle, state: State<SettingsState>) -> Result<DevInfo, String> {
+    Ok(DevInfo {
+        version: app.package_info().version.to_string(),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        debug_build: cfg!(debug_assertions),
+        data_dir: state.data_dir()?.to_string_lossy().into_owned(),
+    })
+}
+
+#[tauri::command]
+fn dev_open_data_dir(app: tauri::AppHandle, state: State<SettingsState>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = state.data_dir()?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn dev_open_devtools(window: tauri::WebviewWindow) {
+    window.open_devtools();
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 // ── Player state persistence ─────────────────────────────────────────────────
 
 #[tauri::command]
@@ -2194,6 +2235,22 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Не удалось получить директорию данных приложения");
 
+            let app_settings = settings::load(&app_data_dir);
+
+            // The main window has `create: false` in tauri.conf.json and is built
+            // here, so WebView devtools (Ctrl+Shift+I) exist only in dev mode.
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .expect("Нет конфигурации главного окна");
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .devtools(settings::option_bool(&app_settings, "dev_mode", false))
+                .build()?;
+
             window_state::restore_main_window_geometry(app, &app_data_dir);
 
             #[cfg(windows)]
@@ -2212,8 +2269,6 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(&cover_dir);
                 mpris::init(&app.handle().clone(), cover_dir);
             }
-
-            let app_settings = settings::load(&app_data_dir);
 
             let player_state = app.state::<PlayerState>();
             let player = player_state.0.read().expect("Lock error");
@@ -2367,6 +2422,10 @@ pub fn run() {
             // Settings
             get_settings,
             save_settings,
+            dev_info,
+            dev_open_data_dir,
+            dev_open_devtools,
+            restart_app,
             // Player state
             save_player_state,
             load_player_state,

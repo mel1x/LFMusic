@@ -16,6 +16,7 @@ import HolidayPattern from './components/HolidayPattern.vue';
 import HolidaySnow from './components/HolidaySnow.vue';
 import HolidayModal from './components/HolidayModal.vue';
 import YearRecap from './components/recap/YearRecap.vue';
+import DevPanel from './components/DevPanel.vue';
 
 import { useSettings } from './composables/useSettings';
 import { usePlayer } from './composables/usePlayer';
@@ -33,7 +34,7 @@ import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 
 const win = getCurrentWindow();
-const { load } = useSettings();
+const { load, devModeActive } = useSettings();
 const { language } = useI18n();
 const { currentTrack, isPlaying, saveState } = usePlayer();
 const { loadCustomCovers } = useCustomCovers();
@@ -164,6 +165,7 @@ watchEffect(() => {
   <HolidayModal />
   <YearRecap />
   <HolidaySnow v-if="activeHoliday === 'new_year' && !showSplash" />
+  <DevPanel v-if="devModeActive" />
 </template>
 
 <style>

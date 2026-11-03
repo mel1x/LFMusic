@@ -1,19 +1,30 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref, watch } from 'vue';
 import { useSettings, type Language, type SettingKey } from '../../composables/useSettings';
+import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '../../composables/useI18n';
+import { usePlayer } from '../../composables/usePlayer';
 import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
 
-const { settings, settingItems, load, save } = useSettings();
+const { settings, settingItems, devModeActive, load, save } = useSettings();
 const { t, setLanguage } = useI18n();
+const { saveState } = usePlayer();
 
-const generalKeys: SettingKey[] = ['discord_rpc_enabled'];
+const generalKeys: SettingKey[] = ['discord_rpc_enabled', 'dev_mode'];
 const generalItems = computed(() => generalKeys.map(key => settingItems.find(i => i.key === key)!));
 
 async function toggle(key: SettingKey) {
     settings.value[key] = !settings.value[key];
     await save();
+}
+
+// Dev mode is read once at startup, so offer a restart while it differs.
+const devRestartPending = computed(() => settings.value.dev_mode !== devModeActive.value);
+
+async function restartApp() {
+    await saveState();
+    await invoke('restart_app');
 }
 
 onMounted(load);
@@ -66,14 +77,19 @@ watch(() => settings.value.language, () => {
 <template>
     <SettingsShell title="Общее" description="Язык интерфейса и интеграции с другими приложениями">
         <div class="settingsBlock">
-            <SettingToggle
-                v-for="item in generalItems"
-                :key="item.key"
-                :item="item"
-                :checked="settings[item.key]"
-                :phoneHidden="item.key === 'discord_rpc_enabled'"
-                @toggle="toggle(item.key)"
-            />
+            <div v-for="item in generalItems" :key="item.key" class="toggleRow" :class="{ phoneHiddenRow: item.key === 'discord_rpc_enabled' }">
+                <SettingToggle
+                    :item="item"
+                    :checked="settings[item.key]"
+                    @toggle="toggle(item.key)"
+                />
+                <button
+                    v-if="item.key === 'dev_mode' && devRestartPending"
+                    type="button"
+                    class="restartBtn"
+                    @click="restartApp"
+                >{{ t('dev.restart') }}</button>
+            </div>
 
             <div class="settingElem languageSetting">
                 <span class="languageText">
@@ -136,6 +152,27 @@ watch(() => settings.value.language, () => {
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
     font-weight: 600;
     font-size: 16px;
+}
+.toggleRow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.restartBtn {
+    flex-shrink: 0;
+    height: 32px;
+    padding: 0 15px;
+    border-radius: 999px;
+    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.16);
+    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 85%, 1);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background-color .18s ease, color .18s ease;
+}
+.restartBtn:hover {
+    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.28);
+    color: #fff;
 }
 .languageSetting {
     align-items: center;
@@ -258,6 +295,9 @@ watch(() => settings.value.language, () => {
     }
     .languageSetting {
         flex-wrap: wrap;
+    }
+    .phoneHiddenRow {
+        display: none;
     }
     .languageDropdown {
         width: 100%;

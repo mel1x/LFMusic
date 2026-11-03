@@ -798,6 +798,9 @@
     "Подставляет аватарки исполнителей из внешних открытых источников": "Uses artist avatars from open external sources",
     "Показывать раздел «Скачивание» в боковом меню (только на ПК)": "Show the \"Downloads\" section in the side menu (desktop only)",
     "Требует подключения к интернету": "Requires an internet connection",
+    "Режим разработчика": "Developer mode",
+    "Добавляет справа снизу кнопку панели разработчика: вызовы бэкенда, ошибки, метрики": "Adds a developer panel button in the bottom right: backend calls, errors, metrics",
+    "Применяется после перезапуска приложения": "Applies after restarting the app",
     "Данные берутся из открытых источников. Повторные открытия не обращаются к сети.": "Data comes from open sources. Reopening does not hit the network."
   },
   "donate": {
@@ -808,5 +811,31 @@
     "crypto": "Crypto",
     "copy": "Copy",
     "copied": "Copied"
+  },
+  "dev": {
+    "restart": "Restart",
+    "title": "Developer panel",
+    "overview": "Overview",
+    "calls": "Calls",
+    "errors": "Errors",
+    "version": "Version",
+    "build": "Build",
+    "platform": "Platform",
+    "viewport": "Window",
+    "uiScale": "UI scale",
+    "fps": "FPS",
+    "memory": "JS memory",
+    "domNodes": "DOM nodes",
+    "recent": "Recent",
+    "uptime": "Uptime",
+    "dataDir": "Data folder",
+    "openDataDir": "Open data folder",
+    "reloadUi": "Reload UI",
+    "copyLog": "Copy log",
+    "clear": "Clear",
+    "filter": "Filter by command",
+    "noCalls": "No calls yet",
+    "noErrors": "No errors",
+    "pending": "pending"
   }
 }

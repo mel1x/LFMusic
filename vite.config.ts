@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
+import { fileURLToPath } from "node:url";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -7,6 +8,16 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
   plugins: [vue()],
+
+  resolve: {
+    alias: [
+      // App invokes go through a wrapper that dev mode can hook (src/utils/tauriCore.ts).
+      {
+        find: /^@tauri-apps\/api\/core$/,
+        replacement: fileURLToPath(new URL("./src/utils/tauriCore.ts", import.meta.url)),
+      },
+    ],
+  },
 
   build: {
     // WebView2 на Windows / WKWebView на macOS-iOS — современные движки,

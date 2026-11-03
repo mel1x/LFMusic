@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { stopDevCapture } from './useDevTools'
 
 export const STATIC_ACCENT_COLOR_DEFAULT = '#3D3D3D'
 export const ARTIST_SEPARATORS_DEFAULT: string[] = ['; ', ', ']
@@ -27,6 +28,7 @@ export const settingItems = [
     { key: 'external_artist_avatars',  label: 'Получать аватарки исполнителей',             default: false, description: 'Подставляет аватарки исполнителей из внешних открытых источников',                              warning: 'Требует подключения к интернету' },
     { key: 'holiday_events',           label: 'Праздничное оформление',                     default: true,  description: 'В праздники добавляет тематический фон, плашку в шапке и снег на Новый год',               warning: '' },
     { key: 'show_downloads_page',      label: 'Страница «Скачивание» в меню',               default: false,  description: 'Показывать раздел «Скачивание» в боковом меню (только на ПК)',                                  warning: '' },
+    { key: 'dev_mode',                 label: 'Режим разработчика',                         default: false, description: 'Добавляет справа снизу кнопку панели разработчика: вызовы бэкенда, ошибки, метрики',           warning: 'Применяется после перезапуска приложения' },
 ] as const
 
 export type SettingKey = typeof settingItems[number]['key']
@@ -53,6 +55,9 @@ const defaults: AppSettings = {
 const settings = ref<AppSettings>({ ...defaults, artist_separators: [...ARTIST_SEPARATORS_DEFAULT] })
 
 let initialized = false
+
+// Dev mode as read at startup: toggling it applies only after a restart.
+const devModeActive = ref(false)
 
 type RawSettings = Record<string, boolean | string | string[]>
 
@@ -92,6 +97,8 @@ export function useSettings() {
         const hasRemoved = Object.keys(saved).some(k => !knownKeys.includes(k))
 
         settings.value = next
+        devModeActive.value = next.dev_mode
+        if (!next.dev_mode) stopDevCapture()
         initialized = true
 
         if (hasNew || hasRemoved) await save()
@@ -101,5 +108,5 @@ export function useSettings() {
         await invoke('save_settings', { settings: settings.value })
     }
 
-    return { settings, settingItems, load, save }
+    return { settings, settingItems, devModeActive, load, save }
 }
