@@ -17,6 +17,7 @@ import { isAndroidRuntime } from '../composables/usePlatform';
 import { activeHoliday, holidayModalOpen } from '../composables/useHoliday';
 import { holidayBadgeSvg } from '../utils/holidayArt';
 import { splitArtistsList } from '../utils/format';
+import { vLiveWidth } from '../directives/live';
 
 interface AudioFeatureProgressPayload {
     current: number;
@@ -106,6 +107,9 @@ const featureProgressAriaLabel = computed(() => {
 // "trickle" during download phase capped at the current track's slot end
 // ((current+1)/total) so it never overtakes reality.
 const displayPercent = ref(0);
+// Bar width is written per frame via v-live-width; the label only re-renders on whole percents.
+const liveDisplayPercent = () => displayPercent.value;
+const displayPercentRounded = computed(() => Math.round(displayPercent.value));
 let progressRaf: number | null = null;
 let lastFrameTs = 0;
 let trickle = 0;
@@ -276,9 +280,9 @@ const closeWindow = async () => {
                 :aria-label="featureProgressAriaLabel"
             >
                 <div class="featureWorkerTrack">
-                    <div class="featureWorkerFill" :style="{ width: displayPercent + '%' }"></div>
+                    <div class="featureWorkerFill" v-live-width="liveDisplayPercent"></div>
                 </div>
-                <span class="featureWorkerPercent">{{ Math.round(displayPercent) }}%</span>
+                <span class="featureWorkerPercent">{{ displayPercentRounded }}%</span>
                 <div class="featureWorkerTooltip" role="tooltip">
                     <div class="featureWorkerTooltipTitle">{{ featureProgressTooltipHeading }}</div>
                     <div class="featureWorkerTooltipText">

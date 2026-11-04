@@ -35,6 +35,7 @@ import { useLyrics } from '../../composables/useLyrics';
 import { createRipple } from '../../composables/useRipple';
 import { isPhoneViewport } from '../../composables/usePlatform';
 import { useI18n } from '../../composables/useI18n';
+import { vLiveWidth, vLiveValue } from '../../directives/live';
 
 const win = getCurrentWindow();
 const { t } = useI18n();
@@ -201,9 +202,13 @@ const progressSliderValue = computed(() => {
 });
 
 const fsProgressPercent = computed(() => {
-    if (!durationSecs.value) return '0%';
-    return ((progressSliderValue.value / durationSecs.value) * 100) + '%';
+    if (!durationSecs.value) return 0;
+    return (progressSliderValue.value / durationSecs.value) * 100;
 });
+// Getters for v-live-*: position changes every frame, and re-rendering this whole
+// template (queue list included) per frame is expensive.
+const liveSliderValue = () => progressSliderValue.value;
+const liveFillPercent = () => fsProgressPercent.value;
 
 const minimizeWindow = () => win.minimize();
 // Backend handles this: if in OS fullscreen (F11), click exits it and maximizes;
@@ -401,7 +406,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                     min="0"
                                     :max="durationSecs || 0"
                                     step="0.1"
-                                    :value="progressSliderValue"
+                                    v-live-value="liveSliderValue"
                                     @mousedown="onSeekStart"
                                     @input="onSeekInput"
                                     @mouseup="onSeekEnd"
@@ -410,7 +415,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                     :disabled="!currentTrack"
                                 />
                                 <div class="fs-progress-track">
-                                    <div class="fs-progress-fill" :style="{ width: fsProgressPercent }"></div>
+                                    <div class="fs-progress-fill" v-live-width="liveFillPercent"></div>
                                 </div>
                             </div>
                             <div class="fs-times">
@@ -442,7 +447,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                         min="0"
                                         :max="durationSecs || 0"
                                         step="0.1"
-                                        :value="progressSliderValue"
+                                        v-live-value="liveSliderValue"
                                         @mousedown="onSeekStart"
                                         @input="onSeekInput"
                                         @mouseup="onSeekEnd"
@@ -451,7 +456,7 @@ function openQfCoverMenu(e: MouseEvent) {
                                         :disabled="!currentTrack"
                                     />
                                     <div class="fs-progress-track">
-                                        <div class="fs-progress-fill" :style="{ width: fsProgressPercent }"></div>
+                                        <div class="fs-progress-fill" v-live-width="liveFillPercent"></div>
                                     </div>
                                 </div>
                                 <div class="fs-times">

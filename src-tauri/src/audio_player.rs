@@ -488,6 +488,9 @@ struct BufferedSymphoniaSource {
     sample_rate: u32,
     channels: u16,
     rx: mpsc::Receiver<Vec<f32>>,
+    /// Spent blocks go back to the decode thread for reuse, so the real-time output
+    /// callback never frees memory and the decoder doesn't allocate per packet.
+    recycle: mpsc::SyncSender<Vec<f32>>,
     current: Vec<f32>,
     pos: usize,
 }
@@ -504,12 +507,20 @@ impl BufferedSymphoniaSource {
         // Bounded queue = backpressure: decoder blocks on `send()` when full,
         // consumer blocks on `recv()` when empty.
         let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(DECODE_QUEUE_BLOCKS);
+        let (recycle, recycled) = mpsc::sync_channel::<Vec<f32>>(DECODE_QUEUE_BLOCKS);
 
         std::thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
-                while inner.decode_next_packet() {
-                    // Take without copying; next decode reuses the emptied buffer.
+                loop {
+                    // Decode into a spent block when one is back (keeps its capacity).
+                    if let Ok(buf) = recycled.try_recv() {
+                        inner.current_samples = buf;
+                    }
+                    if !inner.decode_next_packet() {
+                        break;
+                    }
+                    // Take without copying; the consumer sends the buffer back once played.
                     let block = std::mem::take(&mut inner.current_samples);
                     if block.is_empty() {
                         continue;
@@ -527,6 +538,7 @@ impl BufferedSymphoniaSource {
             sample_rate,
             channels,
             rx,
+            recycle,
             current: Vec::new(),
             pos: 0,
         })
@@ -541,7 +553,12 @@ impl Iterator for BufferedSymphoniaSource {
             // Blocks only happen under starvation; normally the buffer stays non-empty.
             match self.rx.recv() {
                 Ok(block) => {
-                    self.current = block;
+                    let spent = std::mem::replace(&mut self.current, block);
+                    if spent.capacity() > 0 {
+                        // Non-blocking; if the decoder is gone or the queue is full, the
+                        // buffer is simply dropped.
+                        let _ = self.recycle.try_send(spent);
+                    }
                     self.pos = 0;
                 }
                 Err(_) => return None,
@@ -998,25 +1015,59 @@ fn cover_meta_from_tag(tag: &lofty::tag::Tag) -> (bool, Option<String>) {
     (true, accent)
 }
 
+/// Runs `$m!(buffer, conv)` for whichever sample format `$buf` holds, where `conv`
+/// maps one sample to f32 in [-1, 1]. Covers every symphonia format: a missing arm
+/// used to decode e.g. 24-bit WAV/AIFF or 64-bit float WAV as silence.
+macro_rules! dispatch_f32 {
+    ($buf:expr, $m:ident) => {{
+        use symphonia::core::audio::AudioBufferRef as B;
+        use symphonia::core::sample::{i24, u24};
+        match $buf {
+            B::F32(b) => $m!(b, |s: f32| s),
+            B::F64(b) => $m!(b, |s: f64| s as f32),
+            B::S32(b) => $m!(b, |s: i32| s as f32 / i32::MAX as f32),
+            B::S24(b) => $m!(b, |s: i24| s.inner() as f32 / 8_388_607.0),
+            B::S16(b) => $m!(b, |s: i16| s as f32 / i16::MAX as f32),
+            B::S8(b) => $m!(b, |s: i8| s as f32 / i8::MAX as f32),
+            B::U32(b) => $m!(b, |s: u32| ((s as f64 - 2_147_483_648.0) / 2_147_483_648.0) as f32),
+            B::U24(b) => $m!(b, |s: u24| (s.inner() as f32 - 8_388_608.0) / 8_388_608.0),
+            B::U16(b) => $m!(b, |s: u16| (s as f32 - 32_768.0) / 32_768.0),
+            B::U8(b) => $m!(b, |s: u8| (s as f32 - 128.0) / 128.0),
+        }
+    }};
+}
+pub(crate) use dispatch_f32;
+
+/// Appends `buf` to `samples` as interleaved f32.
 fn extract_samples_into(buf: &AudioBufferRef, samples: &mut Vec<f32>) {
     macro_rules! extract {
         ($b:expr, $conv:expr) => {{
             let b = $b;
-            samples.reserve(b.frames() * b.spec().channels.count());
-            for frame in 0..b.frames() {
-                for ch in 0..b.spec().channels.count() {
-                    samples.push($conv(b.chan(ch)[frame]));
+            let frames = b.frames();
+            let channels = b.spec().channels.count();
+            samples.reserve(frames * channels);
+            // Mono/stereo fast paths: slices hoisted out of the loop, no per-sample
+            // plane lookup or bounds check.
+            match channels {
+                1 => samples.extend(b.chan(0)[..frames].iter().map(|&s| $conv(s))),
+                2 => {
+                    let (l, r) = (&b.chan(0)[..frames], &b.chan(1)[..frames]);
+                    for (&a, &c) in l.iter().zip(r) {
+                        samples.push($conv(a));
+                        samples.push($conv(c));
+                    }
+                }
+                _ => {
+                    for frame in 0..frames {
+                        for ch in 0..channels {
+                            samples.push($conv(b.chan(ch)[frame]));
+                        }
+                    }
                 }
             }
         }};
     }
-    match buf {
-        AudioBufferRef::F32(b) => extract!(b, |s: f32| s),
-        AudioBufferRef::S32(b) => extract!(b, |s: i32| s as f32 / i32::MAX as f32),
-        AudioBufferRef::S16(b) => extract!(b, |s: i16| s as f32 / i16::MAX as f32),
-        AudioBufferRef::U8(b)  => extract!(b, |s: u8| (s as f32 - 128.0) / 128.0),
-        _ => {}
-    }
+    dispatch_f32!(buf, extract)
 }
 
 /// Caches probe_actual_codec by (path, mtime). M4A/MP4 is the only format needing a
@@ -2115,6 +2166,46 @@ mod metadata_tests {
             buf.extend_from_slice(&sample.to_le_bytes());
         }
         std::fs::write(path, buf).expect("write test wav");
+    }
+
+    /// 24-bit PCM WAV with a full-scale-ish square wave.
+    fn write_test_wav_24(path: &std::path::Path, sample_rate: u32, channels: u16, num_frames: u32) {
+        let block_align: u16 = channels * 3;
+        let data_size: u32 = num_frames * block_align as u32;
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+        buf.extend_from_slice(b"WAVEfmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&(sample_rate * block_align as u32).to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&24u16.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..(num_frames as usize * channels as usize) {
+            let v: i32 = if (i / 50) % 2 == 0 { 4_000_000 } else { -4_000_000 };
+            buf.extend_from_slice(&v.to_le_bytes()[..3]);
+        }
+        std::fs::write(path, buf).expect("write test wav");
+    }
+
+    #[test]
+    fn symphonia_source_decodes_24_bit_wav_as_audible_samples() {
+        let path = temp_path("clip24.wav");
+        write_test_wav_24(&path, 8_000, 2, 4_000);
+
+        let samples: Vec<f32> = SymphoniaSource::new(path.to_str().unwrap())
+            .expect("open 24-bit wav")
+            .take(2_000)
+            .collect();
+        assert_eq!(samples.len(), 2_000);
+        let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!((peak - 4_000_000.0 / 8_388_607.0).abs() < 0.01, "peak={peak}");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

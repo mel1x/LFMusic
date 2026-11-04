@@ -25,6 +25,7 @@ import { usePlayerUi } from '../../composables/usePlayerUi';
 import { useLyrics } from '../../composables/useLyrics';
 import { isWebKitRuntime } from '../../composables/usePlatform';
 import { accentPreview, hexToHSL } from '../../composables/useAccentTheme';
+import { vLiveWidth, vLiveValue } from '../../directives/live';
 
 // WebKitGTK (Linux) can't render the vertical volume popup, so we render a
 // separate horizontal one there instead (see template / .volumeSliderPopupLinux).
@@ -82,6 +83,9 @@ const progressFillPercent = computed(() => {
     if (!durationSecs.value) return 0;
     return (progressSliderValue.value / durationSecs.value) * 100;
 });
+// Getters for v-live-*: position changes every frame, the template must not read it.
+const liveSliderValue = () => progressSliderValue.value;
+const liveFillPercent = () => progressFillPercent.value;
 
 const mobilePlayerQuery = '(max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px)';
 
@@ -279,7 +283,7 @@ function onMoveToTop(track: TrackMetadata) {
             min="0"
             :max="durationSecs || 0"
             step="0.1"
-            :value="progressSliderValue"
+            v-live-value="liveSliderValue"
             @mousedown="onSeekStart"
             @input="onSeekInput"
             @mouseup="onSeekEnd"
@@ -289,8 +293,8 @@ function onMoveToTop(track: TrackMetadata) {
         />
         <div ref="playerControlsEl" class="playerControls" :class="{ seeking: isSeeking }" :style="{ '--mobile-card-bg': currentCardBg }">
             <div class="progress-bar-bg"></div>
-            <div class="progress-bar-fill" :style="{ width: progressFillPercent + '%' }"></div>
-            <div class="progress-bg" :style="{ width: progressFillPercent + '%' }"></div>
+            <div class="progress-bar-fill" v-live-width="liveFillPercent"></div>
+            <div class="progress-bg" v-live-width="liveFillPercent"></div>
         </div>
         <div class="botPart" @click="onPlayerSurfaceClick">
             <div class="trackInfo">

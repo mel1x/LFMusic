@@ -234,13 +234,7 @@ fn push_downsampled_mono(
         }};
     }
 
-    match buf {
-        AudioBufferRef::F32(b) => extract!(b, |s: f32| s),
-        AudioBufferRef::S32(b) => extract!(b, |s: i32| s as f32 / i32::MAX as f32),
-        AudioBufferRef::S16(b) => extract!(b, |s: i16| s as f32 / i16::MAX as f32),
-        AudioBufferRef::U8(b) => extract!(b, |s: u8| (s as f32 - 128.0) / 128.0),
-        _ => {}
-    }
+    crate::audio_player::dispatch_f32!(buf, extract)
 }
 
 fn global_rms(samples: &[f32]) -> f32 {

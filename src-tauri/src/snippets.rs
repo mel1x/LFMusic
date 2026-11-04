@@ -7,7 +7,7 @@ use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use symphonia::core::audio::{AudioBufferRef, Signal};
+use symphonia::core::audio::Signal;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
@@ -113,15 +113,7 @@ fn decode_snippet(file_path: &str, known_duration: Option<f64>) -> Result<(Vec<i
                 }
             }};
         }
-        match decoded {
-            AudioBufferRef::F32(b) => push!(b, |s: f32| s),
-            AudioBufferRef::F64(b) => push!(b, |s: f64| s as f32),
-            AudioBufferRef::S32(b) => push!(b, |s: i32| s as f32 / i32::MAX as f32),
-            AudioBufferRef::S24(b) => push!(b, |s: symphonia::core::sample::i24| s.inner() as f32 / 8_388_607.0),
-            AudioBufferRef::S16(b) => push!(b, |s: i16| s as f32 / i16::MAX as f32),
-            AudioBufferRef::U8(b) => push!(b, |s: u8| (s as f32 - 128.0) / 128.0),
-            _ => {}
-        }
+        crate::audio_player::dispatch_f32!(decoded, push);
     }
 
     if out.is_empty() {
