@@ -1,11 +1,23 @@
 import { nextTick, watch } from 'vue'
 import { translateText, useI18n } from './useI18n'
 
-const textSources = new WeakMap<Text, string>()
 const ATTRS = ['placeholder', 'aria-label', 'title'] as const
+type Attr = typeof ATTRS[number]
+
+// What a node held before we translated it, and what we wrote. If the node still
+// shows `written`, nothing re-rendered it and `source` stays the original text;
+// anything else means Vue (or other code) changed it, so the current value is the
+// new source. Only nodes we actually translated are tracked.
+interface Tracked {
+    source: string
+    written: string
+}
+
+const textState = new WeakMap<Text, Tracked>()
+const attrState = new WeakMap<Element, Partial<Record<Attr, Tracked>>>()
 
 let observer: MutationObserver | null = null
-let translating = false
+let observing = false
 let mutationScheduled = false
 let mutationQueue: MutationRecord[] = []
 
@@ -17,46 +29,41 @@ function shouldSkip(node: Node): boolean {
     return !!parent.closest('script, style, code, pre, textarea')
 }
 
-function translatedFromSource(source: string): string {
-    return translateText(source)
-}
-
 function translateTextNode(node: Text) {
-    if (shouldSkip(node)) return
     const current = node.nodeValue ?? ''
-    if (!current.trim()) return
+    const tracked = textState.get(node)
+    const source = tracked && current === tracked.written ? tracked.source : current
+    if (!source.trim()) return
 
-    const previousSource = textSources.get(node)
-    const previousTranslation = previousSource ? translatedFromSource(previousSource) : null
-    const source = !previousSource || (current !== previousSource && current !== previousTranslation)
-        ? current
-        : previousSource
+    const next = translateText(source)
+    // Untranslatable text (track titles, names) is neither tracked nor written.
+    if (next === source && !tracked) return
+    // closest() is the costly part, so it runs only when there is something to write.
+    if (shouldSkip(node)) return
 
-    if (source !== previousSource) textSources.set(node, source)
-
-    const next = translatedFromSource(source)
+    textState.set(node, { source, written: next })
     if (current !== next) node.nodeValue = next
 }
 
 function translateAttrs(el: Element) {
-    if (shouldSkip(el)) return
-
+    let state = attrState.get(el)
     for (const attr of ATTRS) {
-        if (!el.hasAttribute(attr)) continue
+        const current = el.getAttribute(attr)
+        if (current === null) continue
 
-        const current = el.getAttribute(attr) ?? ''
-        if (!current.trim()) continue
+        const tracked = state?.[attr]
+        const source = tracked && current === tracked.written ? tracked.source : current
+        if (!source.trim()) continue
 
-        const key = `i18nSource${attr.replace(/(^|-)(\w)/g, (_, __, c: string) => c.toUpperCase())}`
-        const previousSource = (el as HTMLElement).dataset[key]
-        const previousTranslation = previousSource ? translatedFromSource(previousSource) : null
-        const source = !previousSource || (current !== previousSource && current !== previousTranslation)
-            ? current
-            : previousSource
+        const next = translateText(source)
+        if (next === source && !tracked) continue
+        if (shouldSkip(el)) return
 
-        ;(el as HTMLElement).dataset[key] = source
-
-        const next = translatedFromSource(source)
+        if (!state) {
+            state = {}
+            attrState.set(el, state)
+        }
+        state[attr] = { source, written: next }
         if (current !== next) el.setAttribute(attr, next)
     }
 }
@@ -80,13 +87,18 @@ function walk(root: Node) {
     }
 }
 
+/** Our own writes would come back as mutation records; drop them. Callers only
+ *  invoke this right after a synchronous pass, so nothing else is pending. */
+function dropOwnRecords() {
+    observer?.takeRecords()
+}
+
 export function refreshDomI18n() {
     if (!document.body) return
 
     const run = () => {
-        translating = true
         walk(document.body)
-        translating = false
+        dropOwnRecords()
     }
 
     run()
@@ -97,12 +109,12 @@ export function refreshDomI18n() {
 
 function flushMutationQueue() {
     mutationScheduled = false
-    if (translating || mutationQueue.length === 0) return
-
-    const records = mutationQueue
+    // Records delivered after the callback but before this microtask are still
+    // queued in the observer: take them too, then drop what our writes produced.
+    const records = observer ? mutationQueue.concat(observer.takeRecords()) : mutationQueue
     mutationQueue = []
+    if (records.length === 0) return
 
-    translating = true
     for (const record of records) {
         if (record.type === 'characterData') {
             translateTextNode(record.target as Text)
@@ -112,7 +124,7 @@ function flushMutationQueue() {
             record.addedNodes.forEach(walk)
         }
     }
-    translating = false
+    dropOwnRecords()
 }
 
 function scheduleMutationFlush(records: MutationRecord[]) {
@@ -122,23 +134,37 @@ function scheduleMutationFlush(records: MutationRecord[]) {
     queueMicrotask(flushMutationQueue)
 }
 
+function setObserving(on: boolean) {
+    if (!observer || on === observing) return
+    observing = on
+    if (on) {
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: [...ATTRS],
+        })
+    } else {
+        observer.disconnect()
+        mutationQueue = []
+    }
+}
+
 export function startDomI18n() {
     if (observer) return
 
     const { language } = useI18n()
 
-    observer = new MutationObserver((records) => {
-        if (translating) return
-        scheduleMutationFlush(records)
-    })
+    observer = new MutationObserver(scheduleMutationFlush)
 
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: [...ATTRS],
-    })
-
-    watch(language, refreshDomI18n, { immediate: true, flush: 'post' })
+    // Legacy literals are Russian, so in Russian there is nothing to translate:
+    // the observer only runs in English. The refresh still runs on every switch,
+    // so text translated earlier goes back to its source.
+    let previous: string | null = null
+    watch(language, (lang) => {
+        setObserving(lang === 'en')
+        if (lang === 'en' || previous === 'en') refreshDomI18n()
+        previous = lang
+    }, { immediate: true, flush: 'post' })
 }

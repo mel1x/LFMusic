@@ -2386,7 +2386,8 @@ fn build_external_response<R: Runtime>(
         "cover" => &TRACK_COVERS,
         _ => return not_found(),
     };
-    let path = cache.dir(&app_data_dir).join(cache.file_name_for_hex(hex));
+    // Read-only path: no create_dir_all per request (a missing dir is just a 404).
+    let path = app_data_dir.join(cache.name).join(cache.file_name_for_hex(hex));
     match fs::read(&path) {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
@@ -2399,7 +2400,8 @@ fn build_external_response<R: Runtime>(
     }
 }
 
-/// File read happens on a separate thread so the webview isn't blocked.
+/// File read happens on a small shared pool so the webview isn't blocked and a
+/// grid of avatars doesn't spawn a thread per image.
 pub fn protocol_handler<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
@@ -2407,7 +2409,7 @@ pub fn protocol_handler<R: Runtime>(
 ) {
     let app = ctx.app_handle().clone();
     let uri = request.uri().clone();
-    std::thread::spawn(move || {
+    crate::thumbnails::spawn_file_read(move || {
         responder.respond(build_external_response(&app, &uri));
     });
 }

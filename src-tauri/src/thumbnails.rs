@@ -10,6 +10,7 @@
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -26,11 +27,8 @@ const BLUR_SIZE: u32 = 96;
 
 const SCHEME: &str = "lfmusic-cover";
 
-pub fn cache_dir(app_data_dir: &Path) -> PathBuf {
-    let dir = app_data_dir.join("thumb_cache");
-    let _ = fs::create_dir_all(&dir);
-    dir
-}
+/// Thumbnail cache folder inside the app data dir.
+const CACHE_DIR: &str = "thumb_cache";
 
 fn hash_str(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -105,34 +103,38 @@ fn sanitize(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
-/// Ensures the track's thumbnail is generated and cached; returns its path.
-/// Source is the override cover (DB) if present, else the embedded cover.
-pub fn ensure_thumbnail<R: Runtime>(
+/// On-disk cache file for a thumbnail (no I/O; the dir is created on first write).
+fn thumb_cache_file<R: Runtime>(
     app: &AppHandle<R>,
     file_path: &str,
     size: u32,
     sig: &str,
 ) -> Option<PathBuf> {
-    let app_data_dir = app.path().app_data_dir().ok()?;
-    let dir = cache_dir(&app_data_dir);
-    let cache_file = dir.join(format!(
+    let dir = app.path().app_data_dir().ok()?.join(CACHE_DIR);
+    Some(dir.join(format!(
         "{:016x}_{}_{}.webp",
         hash_str(file_path),
         size,
         sanitize(sig)
-    ));
-    if cache_file.exists() {
-        return Some(cache_file);
-    }
+    )))
+}
 
+/// Encodes the thumbnail from its source and stores it at `cache_file`.
+/// Source is the override cover (DB) if present, else the embedded cover.
+fn generate_thumbnail<R: Runtime>(
+    app: &AppHandle<R>,
+    file_path: &str,
+    size: u32,
+    sig: &str,
+    cache_file: &Path,
+) -> Option<Vec<u8>> {
     // A smaller size (e.g. the blur background) decodes from the already-cached
     // full-size WebP instead of re-reading and re-decoding the original embedded
     // cover a second time — the original can be several MB, the cached WebP a
     // few KB, and the full-size cache almost always exists already by the time
     // a blur variant is requested (the UI loads the regular cover first).
     let source = if size != THUMB_SIZE {
-        let full = ensure_thumbnail(app, file_path, THUMB_SIZE, sig)?;
-        fs::read(full).ok()?
+        thumbnail_bytes(app, file_path, THUMB_SIZE, sig)?
     } else if sig.starts_with('e') {
         // Signature prefix picks the source: `e…` forces the embedded tag cover
         // (used to preview the "original" even with an override set); anything
@@ -151,29 +153,56 @@ pub fn ensure_thumbnail<R: Runtime>(
     };
 
     let webp = encode_thumbnail(&source, size)?;
+    write_cache_file(cache_file, &webp);
+    Some(webp)
+}
 
-    // Atomic write via temp + rename so concurrent requests never read a
-    // partially-written file.
+/// Atomic write via a unique temp file + rename, so concurrent requests for the
+/// same cover (regular + blur load at once) never read or rename a half-written
+/// file. Failures only cost a regeneration next time.
+fn write_cache_file(cache_file: &Path, bytes: &[u8]) {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let Some(dir) = cache_file.parent() else { return };
     let tmp = dir.join(format!(
-        ".tmp_{:016x}_{}_{}.webp",
-        hash_str(file_path),
-        size,
-        std::process::id()
+        ".tmp_{}_{}_{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed),
+        cache_file.file_name().and_then(|n| n.to_str()).unwrap_or("thumb"),
     ));
-    if fs::write(&tmp, &webp).is_ok() {
-        let _ = fs::rename(&tmp, &cache_file);
+    let written = fs::write(&tmp, bytes).is_ok()
+        || (fs::create_dir_all(dir).is_ok() && fs::write(&tmp, bytes).is_ok());
+    if written && fs::rename(&tmp, cache_file).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// Ensures the track's thumbnail is generated and cached; returns its path.
+pub fn ensure_thumbnail<R: Runtime>(
+    app: &AppHandle<R>,
+    file_path: &str,
+    size: u32,
+    sig: &str,
+) -> Option<PathBuf> {
+    let cache_file = thumb_cache_file(app, file_path, size, sig)?;
+    if !cache_file.exists() {
+        generate_thumbnail(app, file_path, size, sig, &cache_file)?;
     }
     Some(cache_file)
 }
 
+/// Thumbnail bytes: a cache hit is a single read (no separate exists check), and a
+/// fresh thumbnail is returned straight from memory instead of being read back.
 pub fn thumbnail_bytes<R: Runtime>(
     app: &AppHandle<R>,
     file_path: &str,
     size: u32,
     sig: &str,
 ) -> Option<Vec<u8>> {
-    let path = ensure_thumbnail(app, file_path, size, sig)?;
-    fs::read(path).ok()
+    let cache_file = thumb_cache_file(app, file_path, size, sig)?;
+    if let Ok(bytes) = fs::read(&cache_file) {
+        return Some(bytes);
+    }
+    generate_thumbnail(app, file_path, size, sig, &cache_file)
 }
 
 /// Cached thumbnail path for native integrations (MPRIS); signature computed
@@ -251,33 +280,36 @@ fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Res
     }
 }
 
-type ThumbJob = Box<dyn FnOnce() + Send>;
+type PoolJob = Box<dyn FnOnce() + Send>;
 
-/// Small fixed worker pool shared by every `lfmusic-cover` request. Generation
-/// used to spawn a fresh OS thread per request, which meant dozens of live
-/// threads while scrolling a large catalog; a bounded pool keeps generation
-/// off the webview thread without that per-request spawn cost.
-fn thumbnail_pool() -> &'static mpsc::Sender<ThumbJob> {
-    static POOL: OnceLock<mpsc::Sender<ThumbJob>> = OnceLock::new();
+/// Fixed worker pool fed by a channel. Protocol requests used to spawn a fresh OS
+/// thread each, which meant dozens of live threads while scrolling a large catalog.
+fn worker_pool(name: &'static str, workers: usize) -> mpsc::Sender<PoolJob> {
+    let (tx, rx) = mpsc::channel::<PoolJob>();
+    let rx = Arc::new(Mutex::new(rx));
+    for _ in 0..workers {
+        let rx = Arc::clone(&rx);
+        let _ = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || loop {
+                let job = { rx.lock().unwrap_or_else(|e| e.into_inner()).recv() };
+                match job {
+                    Ok(job) => job(),
+                    Err(_) => break,
+                }
+            });
+    }
+    tx
+}
+
+/// Thumbnail generation (decode + WebP encode) is CPU-bound: 2-4 workers.
+fn thumbnail_pool() -> &'static mpsc::Sender<PoolJob> {
+    static POOL: OnceLock<mpsc::Sender<PoolJob>> = OnceLock::new();
     POOL.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<ThumbJob>();
-        let rx = Arc::new(Mutex::new(rx));
-        let worker_count = std::thread::available_parallelism()
+        let workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(2, 4))
             .unwrap_or(2);
-        for _ in 0..worker_count {
-            let rx = Arc::clone(&rx);
-            let _ = std::thread::Builder::new()
-                .name("thumbnail-worker".into())
-                .spawn(move || loop {
-                    let job = { rx.lock().unwrap_or_else(|e| e.into_inner()).recv() };
-                    match job {
-                        Ok(job) => job(),
-                        Err(_) => break,
-                    }
-                });
-        }
-        tx
+        worker_pool("thumbnail-worker", workers)
     })
 }
 
@@ -293,6 +325,15 @@ pub fn protocol_handler<R: Runtime>(
     let _ = thumbnail_pool().send(Box::new(move || {
         responder.respond(build_response(&app, &uri));
     }));
+}
+
+/// Cached-file reads for other image protocols (`lfmusic-external`). A separate
+/// pool so quick reads never queue behind slow thumbnail encodes.
+pub(crate) fn spawn_file_read(job: impl FnOnce() + Send + 'static) {
+    static POOL: OnceLock<mpsc::Sender<PoolJob>> = OnceLock::new();
+    let _ = POOL
+        .get_or_init(|| worker_pool("image-file-reader", 2))
+        .send(Box::new(job));
 }
 
 #[cfg(test)]
@@ -368,12 +409,14 @@ mod tests {
     }
 
     #[test]
-    fn cache_dir_is_created_and_idempotent() {
-        let dir = temp_dir("cache_dir");
-        let cache1 = cache_dir(&dir);
-        assert!(cache1.exists());
-        let cache2 = cache_dir(&dir);
-        assert_eq!(cache1, cache2);
+    fn write_cache_file_creates_missing_dir_and_leaves_no_temp_files() {
+        let dir = temp_dir("write_cache");
+        let file = dir.join(CACHE_DIR).join("a_512_e1.webp");
+        write_cache_file(&file, b"one");
+        write_cache_file(&file, b"two");
+        assert_eq!(std::fs::read(&file).unwrap(), b"two");
+        let entries = std::fs::read_dir(dir.join(CACHE_DIR)).unwrap().count();
+        assert_eq!(entries, 1, "temp files must be renamed away");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,6 +12,11 @@ const normalizedSourceMap = Object.fromEntries(
     Object.entries(sourceMap).map(([key, value]) => [normalizeSpaces(key), value])
 )
 const enTextCache = new Map<string, string>()
+// Text with no translation (track titles, names: the bulk of the DOM) is remembered
+// too, so the observer doesn't rerun the lookups and patterns on every re-render.
+// Bounded, since such strings are open-ended.
+const enMissCache = new Set<string>()
+const EN_MISS_CACHE_MAX = 20_000
 
 function normalizeSpaces(value: string): string {
     return value.trim().replace(/\s+/g, ' ')
@@ -109,8 +114,14 @@ export function translateText(text: string): string {
 
     const cached = enTextCache.get(text)
     if (cached !== undefined) return cached
+    if (enMissCache.has(text)) return text
     const finish = (value: string) => {
-        if (value !== text) enTextCache.set(text, value)
+        if (value !== text) {
+            enTextCache.set(text, value)
+        } else {
+            if (enMissCache.size >= EN_MISS_CACHE_MAX) enMissCache.clear()
+            enMissCache.add(text)
+        }
         return value
     }
 
