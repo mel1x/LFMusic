@@ -2756,9 +2756,11 @@ pub fn artist_settled_keys(app_data_dir: &Path) -> HashSet<String> {
     ARTIST_IMAGES.settled_keys(app_data_dir)
 }
 
-/// Bulk-marks cover keys as "none" without network calls, for tracks that
-/// already have a local cover - avoids re-reading their tags on next startup.
-pub fn mark_track_covers_none(app_data_dir: &Path, keys: &[String]) {
+/// Bulk-marks cover keys whose tracks all have a local cover, without network
+/// calls. "local" is not a settled status: the batch pass skips such a key only
+/// while its tracks are still all covered, so a coverless track added to the
+/// album later still gets an external cover.
+pub fn mark_track_covers_local(app_data_dir: &Path, keys: &[String]) {
     if keys.is_empty() {
         return;
     }
@@ -2768,9 +2770,23 @@ pub fn mark_track_covers_none(app_data_dir: &Path, keys: &[String]) {
         for key in keys.iter().filter(|k| !k.is_empty()) {
             manifest
                 .entry(key.clone())
-                .or_insert_with(|| none_image_record(now));
+                .or_insert_with(|| ArtistImageRecord {
+                    status: "local".into(),
+                    ..none_image_record(now)
+                });
         }
     });
+}
+
+/// Keys marked by [`mark_track_covers_local`].
+pub fn cover_local_keys(app_data_dir: &Path) -> HashSet<String> {
+    TRACK_COVERS.ensure_version(app_data_dir);
+    TRACK_COVERS
+        .load_manifest(app_data_dir)
+        .into_iter()
+        .filter(|(_, r)| r.status == "local")
+        .map(|(k, _)| k)
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, shallowRef, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { goBackOrHome } from '../router'
 
@@ -38,6 +38,7 @@ const router = useRouter()
 
 const {
     getTrackByPath,
+    peekTrackByPath,
     cacheTracks,
     currentTrack,
     isPlaying,
@@ -65,18 +66,34 @@ const playlist = computed<PlaylistInfo | undefined>(() =>
 const isFavorites = computed(() => playlist.value?.kind === 'Favorites')
 
 const playlistTrackPaths = ref<string[]>([])
+// The page's own copies: a playlist bigger than the shared track cache can't
+// rely on it (misses would refetch and evict each other forever).
+const ownTracks = shallowRef(new Map<string, TrackMetadata>())
 
 async function reloadPlaylistTracks() {
-    if (!Number.isFinite(playlistId.value)) return
-    const tracks = await getPlaylistTracks(playlistId.value)
-    cacheTracks(tracks)
-    playlistTrackPaths.value = tracks.map(t => t.file_path)
+    if (!Number.isFinite(playlistId.value)) {
+        playlistTrackPaths.value = []
+        return
+    }
+    try {
+        const tracks = await getPlaylistTracks(playlistId.value)
+        cacheTracks(tracks)
+        ownTracks.value = new Map(tracks.map(t => [t.file_path, t]))
+        playlistTrackPaths.value = tracks.map(t => t.file_path)
+    } catch (e) {
+        // Deleted playlist or a backend error: show it empty instead of an endless loader.
+        console.error('Ошибка загрузки треков плейлиста:', e)
+        ownTracks.value = new Map()
+        playlistTrackPaths.value = []
+    }
 }
 
 const playlistTracks = computed<TrackMetadata[]>(() => {
     const out: TrackMetadata[] = []
+    const own = ownTracks.value
     for (const p of playlistTrackPaths.value) {
-        const t = getTrackByPath(p)
+        // Live cache object first, so lazily loaded covers show.
+        const t = peekTrackByPath(p) ?? own.get(p)
         if (t) out.push(t)
     }
     return out
@@ -299,7 +316,11 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 async function onRemoveFromPlaylist(track: TrackMetadata) {
     const idx = playlistTrackPaths.value.indexOf(track.file_path)
     if (idx !== -1) playlistTrackPaths.value.splice(idx, 1)
-    await removeTrackFromPlaylist(playlistId.value, track.file_path)
+    // Optimistic; put the row back if the backend refused.
+    const ok = await removeTrackFromPlaylist(playlistId.value, track.file_path)
+    if (!ok && idx !== -1 && !playlistTrackPaths.value.includes(track.file_path)) {
+        playlistTrackPaths.value.splice(Math.min(idx, playlistTrackPaths.value.length), 0, track.file_path)
+    }
 }
 
 // "Move to top" is always available here; playback order only resyncs if

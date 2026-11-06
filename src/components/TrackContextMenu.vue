@@ -282,8 +282,7 @@ function onMoveToTop() {
 
 async function onAddToPlaylist(playlistId: number) {
     if (trackPlaylistIds.value.has(playlistId)) return
-    await addTrackToPlaylist(playlistId, props.track.file_path)
-    trackPlaylistIds.value.add(playlistId)
+    if (await addTrackToPlaylist(playlistId, props.track.file_path)) trackPlaylistIds.value.add(playlistId)
     emit('close')
 }
 

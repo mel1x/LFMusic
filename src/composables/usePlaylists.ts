@@ -1,6 +1,7 @@
 import { ref, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrackMetadata } from "./usePlayer";
+import { useAlbumTrackOrder } from "./useAlbumTrackOrder";
 
 export type PlaylistKind = "Album" | "Artist" | "User" | "Favorites";
 
@@ -157,19 +158,19 @@ function createPlaylists() {
     return favoritePaths.value.has(filePath);
   }
 
-  // Add/remove the track from the favorites playlist (optimistic; keeps the
-  // shared set and the playlist's track_count in sync).
+  // Add/remove the track from the favorites playlist. Optimistic: the heart
+  // flips at once and flips back if the backend call fails.
   async function toggleFavorite(filePath: string) {
     await ensureFavoritesLoaded();
     const fav = favoritesPlaylist.value;
     if (!fav) return;
     if (favoritePaths.value.has(filePath)) {
       favoritePaths.value.delete(filePath);
-      await removeTrackFromPlaylist(fav.id, filePath);
+      if (!(await removeTrackFromPlaylist(fav.id, filePath))) favoritePaths.value.add(filePath);
     } else {
       favoritePaths.value.add(filePath);
       // New likes go to the top of the favorites playlist.
-      await addTrackToPlaylist(fav.id, filePath, true);
+      if (!(await addTrackToPlaylist(fav.id, filePath, true))) favoritePaths.value.delete(filePath);
     }
   }
 
@@ -177,7 +178,11 @@ function createPlaylists() {
     const tracks = await invoke<TrackMetadata[]>("playlist_get_tracks", { playlistId });
     const playlist = playlists.value.find((p) => p.id === playlistId);
     if (playlist && playlist.kind === "Album") {
-      return tracks.sort((a, b) => a.file_path.localeCompare(b.file_path, undefined, { numeric: true, sensitivity: 'base' }));
+      // Same order the album page shows (user's saved order, else by file path),
+      // so a card's play button and a restored queue match the page.
+      const { loadOrder, applyOrder } = useAlbumTrackOrder();
+      await loadOrder(playlist.name);
+      return applyOrder(playlist.name, tracks);
     }
     return tracks;
   }
@@ -215,23 +220,30 @@ function createPlaylists() {
     }
   }
 
-  async function addTrackToPlaylist(playlistId: number, filePath: string, prepend = false) {
+  /** Resolves to false when the backend call failed (callers roll back their UI). */
+  async function addTrackToPlaylist(playlistId: number, filePath: string, prepend = false): Promise<boolean> {
     try {
-      await invoke("playlist_add_track", { playlistId, filePath, prepend });
+      // false = the track was already in the playlist, so the count stays.
+      const added = await invoke<boolean>("playlist_add_track", { playlistId, filePath, prepend });
       const idx = playlists.value.findIndex((p) => p.id === playlistId);
-      if (idx !== -1) playlists.value[idx].track_count++;
+      if (added && idx !== -1) playlists.value[idx].track_count++;
+      return true;
     } catch (e) {
       console.error("Ошибка добавления трека:", e);
+      return false;
     }
   }
 
-  async function removeTrackFromPlaylist(playlistId: number, filePath: string) {
+  /** Resolves to false when the backend call failed (callers roll back their UI). */
+  async function removeTrackFromPlaylist(playlistId: number, filePath: string): Promise<boolean> {
     try {
-      await invoke("playlist_remove_track", { playlistId, filePath });
+      const removed = await invoke<boolean>("playlist_remove_track", { playlistId, filePath });
       const idx = playlists.value.findIndex((p) => p.id === playlistId);
-      if (idx !== -1) playlists.value[idx].track_count--;
+      if (removed && idx !== -1) playlists.value[idx].track_count--;
+      return true;
     } catch (e) {
       console.error("Ошибка удаления трека:", e);
+      return false;
     }
   }
 

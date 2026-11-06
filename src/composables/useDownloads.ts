@@ -202,17 +202,23 @@ const activeCount = computed(() =>
  * Port of Rust `external::normalize` / `track_identity_key` — must stay
  * identical so queue lookups agree with the backend's dedup.
  */
-const ALNUM_RE = /[\p{L}\p{N}]/u
+// Rust `char::is_alphanumeric` = Alphabetic or Numeric (letters plus
+// combining vowel signs etc.), not just \p{L}.
+const ALNUM_RE = /[\p{Alphabetic}\p{N}]/u
 function normalizeKey(s: string): string {
   let out = ''
   let prevSpace = true
-  for (const ch of s.toLowerCase()) {
-    if (ALNUM_RE.test(ch)) {
-      out += ch
-      prevSpace = false
-    } else if (!prevSpace) {
-      out += ' '
-      prevSpace = true
+  // Lowercase per character like Rust's `chars().flat_map(to_lowercase)`:
+  // whole-string toLowerCase is context-sensitive (Greek final sigma).
+  for (const orig of s) {
+    for (const ch of orig.toLowerCase()) {
+      if (ALNUM_RE.test(ch)) {
+        out += ch
+        prevSpace = false
+      } else if (!prevSpace) {
+        out += ' '
+        prevSpace = true
+      }
     }
   }
   return out.replace(/ +$/, '')

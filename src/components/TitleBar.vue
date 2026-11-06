@@ -31,7 +31,7 @@ interface AudioFeatureProgressPayload {
 const win = getCurrentWindow();
 const { settings } = useSettings();
 const { t } = useI18n();
-const { currentTrack, saveState } = usePlayer();
+const { currentTrack } = usePlayer();
 
 // Joint artists ("A; B") read like everywhere else: split by the user's separators, joined with commas.
 const headerArtist = computed(() => {
@@ -260,10 +260,8 @@ const minimizeWindow = () => win.minimize();
 // Backend handles this: if in fullscreen (F11), click exits fullscreen and
 // maximizes; otherwise it's a normal maximize toggle.
 const maximizeWindow = () => invoke('toggle_window_maximize');
-const closeWindow = async () => {
-    await saveState();
-    win.close();
-};
+// State is saved by the close-requested handler in usePlayer (any close path).
+const closeWindow = () => win.close();
 </script>
 
 <template>

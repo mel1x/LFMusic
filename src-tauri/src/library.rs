@@ -1913,7 +1913,8 @@ impl MusicLibrary {
 
     /// Adds a track to a playlist. `prepend` puts it at the top (used for new
     /// likes on the favorites playlist); otherwise it's appended to the bottom.
-    pub fn add_track_to_playlist(&self, playlist_id: i64, file_path: &str, prepend: bool) -> Result<(), String> {
+    /// Returns whether the track was added (false if it was already there).
+    pub fn add_track_to_playlist(&self, playlist_id: i64, file_path: &str, prepend: bool) -> Result<bool, String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
             .map_err(|e| format!("Плейлист не найден: {}", e))?;
@@ -1956,10 +1957,11 @@ impl MusicLibrary {
             })?;
             self.log_library_event(LibraryEventKind::PlaylistAdd, Some(file_path), Some(playlist_id));
         }
-        Ok(())
+        Ok(changed > 0)
     }
 
-    pub fn remove_track_from_playlist(&self, playlist_id: i64, file_path: &str) -> Result<(), String> {
+    /// Returns whether the track was removed (false if it wasn't there).
+    pub fn remove_track_from_playlist(&self, playlist_id: i64, file_path: &str) -> Result<bool, String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
             .map_err(|e| format!("Плейлист не найден: {}", e))?;
@@ -1982,7 +1984,7 @@ impl MusicLibrary {
             })?;
             self.log_library_event(LibraryEventKind::PlaylistRemove, Some(file_path), Some(playlist_id));
         }
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// File paths of a playlist's tracks, in order. Lighter than

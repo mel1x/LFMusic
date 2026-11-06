@@ -67,7 +67,6 @@ const {
     onSeekInput,
     onSeekEnd,
     seekTo,
-    saveState,
 } = usePlayer();
 
 const {
@@ -214,10 +213,8 @@ const minimizeWindow = () => win.minimize();
 // Backend handles this: if in OS fullscreen (F11), click exits it and maximizes;
 // otherwise it's a normal maximize toggle.
 const maximizeWindow = () => invoke('toggle_window_maximize');
-const closeWindow = async () => {
-    await saveState();
-    win.close();
-};
+// State is saved by the close-requested handler in usePlayer (any close path).
+const closeWindow = () => win.close();
 
 const qfTrackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null);
 

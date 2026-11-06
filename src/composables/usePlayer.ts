@@ -1,6 +1,7 @@
 import { ref, shallowRef, reactive, computed, watch, effectScope } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { useSettings } from "./useSettings";
 import { useFolders } from "./useFolders";
@@ -8,6 +9,7 @@ import { saveMixQueuePaths, loadMixQueuePaths } from "./useMix";
 import { usePlaylists } from "./usePlaylists";
 import { useCoverLoader } from "./useCoverLoader";
 import { emitTrackStatisticsUpdated } from "./useStatistics";
+import { isAndroidRuntime } from "./usePlatform";
 import router from "../router";
 
 export interface SavedPlayerState {
@@ -340,6 +342,15 @@ function getTrackByPath(filePath: string): TrackMetadata | undefined {
   }
   scheduleTrackFetch(filePath);
   return undefined;
+}
+
+/** Cache read without the background fetch on a miss. For lists that hold their
+ *  own track objects: fetching on every miss would make a list larger than the
+ *  cache evict and refetch its own entries in an endless loop. */
+function peekTrackByPath(filePath: string): TrackMetadata | undefined {
+  const hit = trackCache.get(filePath);
+  if (hit) cacheAccessTick.set(filePath, ++cacheTick);
+  return hit;
 }
 
 /** Explicit batch materialization of paths (e.g. a visible catalog window). */
@@ -1171,6 +1182,9 @@ function createPlayer() {
     }
   }
 
+  const PERIODIC_SAVE_MS = 15_000;
+  let lastPeriodicSaveMs = performance.now();
+
   async function pollStatus() {
     try {
       const status = await invoke<PlayerStatus>("player_get_status");
@@ -1182,6 +1196,12 @@ function createPlayer() {
         lastFrameTime = performance.now();
       }
       updateStatsProgress(status.position_secs, status.state);
+      // Position is otherwise saved only on events; keep it fresh in case the
+      // app is killed (Android background, OS shutdown, crash).
+      if (status.state === "Playing" && performance.now() - lastPeriodicSaveMs >= PERIODIC_SAVE_MS) {
+        lastPeriodicSaveMs = performance.now();
+        void saveState(false);
+      }
 
       if (status.current_file_path) {
         if (currentTrack.value?.file_path !== status.current_file_path) {
@@ -1438,12 +1458,31 @@ function createPlayer() {
     });
 
     // Listening history is written in batches; the OS may kill a backgrounded
-    // app (Android) before the next batch is due.
+    // app (Android) before the next batch is due. The full state save also
+    // writes the listened time and position (an unfinished session only
+    // replaces the open one in the backend, so repeats don't duplicate it).
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
-        void invoke("statistics_flush_history").catch(() => {});
+        void saveState()
+          .finally(() => invoke("statistics_flush_history"))
+          .catch(() => {});
       }
     });
+
+    // Any close path (title bar button, Alt+F4, taskbar) saves first. Bounded,
+    // so a backend busy with a long scan can't keep the window from closing.
+    if (!isAndroidRuntime()) {
+      try {
+        await getCurrentWindow().onCloseRequested(async () => {
+          await Promise.race([
+            saveState().catch(() => {}),
+            new Promise((resolve) => setTimeout(resolve, CLOSE_SAVE_TIMEOUT_MS)),
+          ]);
+        });
+      } catch (e) {
+        console.error("Ошибка подписки на закрытие окна:", e);
+      }
+    }
 
     // Persist the current page on navigation (debounced). Set up after restoreState
     // so its own router.replace doesn't trigger a save.
@@ -1461,6 +1500,8 @@ function createPlayer() {
       }
     });
   }
+
+  const CLOSE_SAVE_TIMEOUT_MS = 1500;
 
   function destroy() {
     stopStatusPolling();
@@ -1531,6 +1572,7 @@ function createPlayer() {
     formatTime,
     getTrackDisplayName,
     getTrackByPath,
+    peekTrackByPath,
     cacheTracks,
     fetchTracksByPaths,
     folderDisplayName,

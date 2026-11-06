@@ -820,7 +820,7 @@ fn playlist_add_track(
     playlist_id: i64,
     file_path: String,
     prepend: Option<bool>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let library = state.lock()?;
     library.add_track_to_playlist(playlist_id, &file_path, prepend.unwrap_or(false))
 }
@@ -830,7 +830,7 @@ fn playlist_remove_track(
     state: State<LibraryState>,
     playlist_id: i64,
     file_path: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let library = state.lock()?;
     library.remove_track_from_playlist(playlist_id, &file_path)
 }
@@ -1251,15 +1251,24 @@ fn run_external_preparation(
         })
         .collect();
 
-    let cover_settled = if covers_on {
-        external::cover_settled_keys(&dir)
+    let (cover_settled, cover_local) = if covers_on {
+        (external::cover_settled_keys(&dir), external::cover_local_keys(&dir))
     } else {
-        HashSet::new()
+        (HashSet::new(), HashSet::new())
     };
     let pending_covers: Vec<CoverGroup> = cover_groups
         .into_iter()
         .filter(|g| {
-            !cover_settled.contains(&external::track_cover_key(&g.artist, &g.album, &g.title))
+            let key = external::track_cover_key(&g.artist, &g.album, &g.title);
+            if cover_settled.contains(&key) {
+                return false;
+            }
+            // Marked as locally covered: skip while that still holds.
+            let all_local = g
+                .paths
+                .iter()
+                .all(|p| override_paths.contains(p) || cover_present_paths.contains(p));
+            !(cover_local.contains(&key) && all_local)
         })
         .collect();
 
@@ -1358,7 +1367,7 @@ fn run_external_preparation(
     // Batch-save "no external cover" markers once all workers finished collecting keys.
     if external_prep_current(generation) {
         let keys = none_keys.lock().unwrap_or_else(|e| e.into_inner());
-        external::mark_track_covers_none(&dir, &keys);
+        external::mark_track_covers_local(&dir, &keys);
     }
 }
 
@@ -1759,12 +1768,15 @@ fn read_cover_as_data_url(source_path: &str) -> Result<(String, Option<String>),
 #[tauri::command(async)]
 fn track_set_override(
     library: State<LibraryState>,
+    settings_state: State<SettingsState>,
     file_path: String,
     title: Option<String>,
     artist: Option<String>,
     cover: Option<CoverInput>,
 ) -> Result<TrackMetadata, String> {
-    let lib = library.lock()?;
+    let separators = settings::get_artist_separators(&settings_state);
+    let mut lib = library.lock()?;
+    let artist_before = lib.get_track(&file_path).and_then(|t| t.artist);
 
     let (cover_data, accent_color, keep_existing_cover) = match cover {
         Some(c) if c.reset.unwrap_or(false) => (None, None, false),
@@ -1783,6 +1795,10 @@ fn track_set_override(
         accent_color.as_deref(),
         keep_existing_cover,
     )?;
+    // Artist playlists are built from the effective (overridden) artist.
+    if lib.get_track(&file_path).and_then(|t| t.artist) != artist_before {
+        lib.rebuild_artist_playlists(&separators)?;
+    }
     drop(lib);
 
     fetch_track_with_override(&library, &file_path)

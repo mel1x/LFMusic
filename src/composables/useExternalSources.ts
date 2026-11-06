@@ -168,13 +168,17 @@ function coverCacheKey(artist: string, album: string, title: string): string {
 function normalizeKey(s: string): string {
   let out = "";
   let prevSpace = true;
-  for (const ch of s.toLowerCase()) {
-    if (/[\p{L}\p{N}]/u.test(ch)) {
-      out += ch;
-      prevSpace = false;
-    } else if (!prevSpace) {
-      out += " ";
-      prevSpace = true;
+  // Per-character lowercase (whole-string toLowerCase is context-sensitive:
+  // Greek final sigma) and Rust's alphanumeric set (Alphabetic + Numeric).
+  for (const orig of s) {
+    for (const ch of orig.toLowerCase()) {
+      if (/[\p{Alphabetic}\p{N}]/u.test(ch)) {
+        out += ch;
+        prevSpace = false;
+      } else if (!prevSpace) {
+        out += " ";
+        prevSpace = true;
+      }
     }
   }
   return out.replace(/\s+$/u, "");
