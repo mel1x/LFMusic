@@ -23,13 +23,8 @@ import FullscreenIcon from '../Icons/FullscreenIcon.vue';
 import { usePlayer, type TrackMetadata } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
 import { useLyrics } from '../../composables/useLyrics';
-import { isWebKitRuntime } from '../../composables/usePlatform';
 import { accentPreview, hexToHSL } from '../../composables/useAccentTheme';
 import { vLiveWidth, vLiveValue } from '../../directives/live';
-
-// WebKitGTK (Linux) can't render the vertical volume popup, so we render a
-// separate horizontal one there instead (see template / .volumeSliderPopupLinux).
-const isWebKit = isWebKitRuntime();
 
 const {
     currentTrack,
@@ -48,6 +43,7 @@ const {
     codecDisplay,
     codecDetails,
     volumePercent,
+    setVolume,
     togglePlayPause,
     playNext,
     playPrev,
@@ -70,8 +66,47 @@ const {
     moveTrackToTop,
     toggleMute,
     onVolumeScroll,
-    onVolumeInput,
 } = usePlayerUi();
+
+// Vertical volume slider drawn with plain elements: a native range input with
+// writing-mode renders differently in WebView2 and WebKitGTK (Linux), so the
+// popup is the same everywhere. Geometry matches .volumeSlider / .volumeThumb.
+const VOLUME_SLIDER_H = 140;
+const VOLUME_THUMB = 11;
+const volumeDragging = ref(false);
+
+function setVolumeFromPointer(e: PointerEvent) {
+    // rect is in zoomed (UI scale) pixels, like clientY. The thumb center
+    // travels between the track ends, half a thumb in from the edges.
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const inset = (rect.height * VOLUME_THUMB) / VOLUME_SLIDER_H / 2;
+    const ratio = (rect.bottom - inset - e.clientY) / (rect.height - inset * 2);
+    setVolume(Math.round(Math.min(1, Math.max(0, ratio)) * 100) / 100);
+}
+
+function onVolumePointerDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    volumeDragging.value = true;
+    setVolumeFromPointer(e);
+}
+
+function onVolumePointerMove(e: PointerEvent) {
+    if (volumeDragging.value) setVolumeFromPointer(e);
+}
+
+function onVolumePointerUp() {
+    volumeDragging.value = false;
+}
+
+function onVolumeKeydown(e: KeyboardEvent) {
+    const step = e.key === 'ArrowUp' || e.key === 'ArrowRight' ? 0.05
+        : e.key === 'ArrowDown' || e.key === 'ArrowLeft' ? -0.05
+        : 0;
+    if (!step) return;
+    e.preventDefault();
+    setVolume(Math.round(Math.min(1, Math.max(0, volume.value + step)) * 100) / 100);
+}
 
 const { hasLyrics } = useLyrics();
 
@@ -388,32 +423,27 @@ function onMoveToTop(track: TrackMetadata) {
                 </div>
                 <div
                     class="volumeControl"
+                    :class="{ dragging: volumeDragging }"
                     @wheel.prevent="onVolumeScroll"
                 >
-                    <div class="volumeSliderPopup" v-if="!isWebKit" :style="{ '--val': volumePercent + '%' }">
-                        <div class="volumeTrack" aria-hidden="true"></div>
-                        <input
-                            type="range"
-                            class="volume-slider"
-                            min="0"
-                            max="1"
-                            step="0.01"
-                            :value="volume"
-                            @input.stop="onVolumeInput"
-                            orient="vertical"
-                        />
-                    </div>
-                    <div class="volumeSliderPopupLinux" v-else>
-                        <input
-                            type="range"
-                            class="volume-slider-linux"
-                            min="0"
-                            max="1"
-                            step="0.01"
-                            :value="volume"
-                            :style="{ '--val': volumePercent + '%' }"
-                            @input.stop="onVolumeInput"
-                        />
+                    <div class="volumeSliderPopup" :style="{ '--vol': volume }">
+                        <div
+                            class="volumeSlider"
+                            role="slider"
+                            tabindex="0"
+                            aria-orientation="vertical"
+                            aria-valuemin="0"
+                            aria-valuemax="100"
+                            :aria-valuenow="volumePercent"
+                            @pointerdown="onVolumePointerDown"
+                            @pointermove="onVolumePointerMove"
+                            @pointerup="onVolumePointerUp"
+                            @pointercancel="onVolumePointerUp"
+                            @keydown="onVolumeKeydown"
+                        >
+                            <div class="volumeTrack" aria-hidden="true"></div>
+                            <div class="volumeThumb" aria-hidden="true"></div>
+                        </div>
                     </div>
                     <div class="volumeIconWrap" @click="toggleMute">
                         <VolumeZeroIcon v-if="volume === 0" />
@@ -908,16 +938,26 @@ function onMoveToTop(track: TrackMetadata) {
     position: absolute;
     inset: -24px;
 }
-.volumeControl:hover .volumeSliderPopup {
+.volumeControl:hover .volumeSliderPopup,
+.volumeControl.dragging .volumeSliderPopup {
     visibility: visible;
     opacity: 1;
     pointer-events: auto;
 }
-/* Visible track is a separate div behind the transparent input: needs a 5px
-   rounded width the input's own background can't do. Height is shortened by
-   thumb size (11px) so thumb center reaches exactly the track ends, and the
-   fill boundary lines up with the thumb center. Fill driven by --val (set on
-   the popup). */
+/* 24px wide drag hit area; the thumb center reaches exactly the track ends,
+   so the track is shorter by one thumb (11px) and the fill boundary lines up
+   with the thumb center. Fill and thumb are driven by --vol (0..1, set on the
+   popup). */
+.volumeSlider {
+    position: relative;
+    /* above the popup's ::after hover zone, which would swallow the pointer */
+    z-index: 1;
+    width: 24px;
+    height: 140px;
+    cursor: pointer;
+    touch-action: none;
+    outline: none;
+}
 .volumeTrack {
     pointer-events: none;
     position: absolute;
@@ -925,92 +965,33 @@ function onMoveToTop(track: TrackMetadata) {
     top: 50%;
     transform: translate(-50%, -50%);
     width: 5px;
-    height: calc(140px - 11px);
+    height: calc(100% - 11px);
     border-radius: 999px;
     background: linear-gradient(
         to top,
-        #fff var(--val, 50%),
-        hsla(0, 0%, 100%, 0.25) var(--val, 50%)
+        #fff calc(var(--vol, 0.5) * 100%),
+        hsla(0, 0%, 100%, 0.25) calc(var(--vol, 0.5) * 100%)
     );
-    z-index: 0;
 }
-.volume-slider {
-    position: relative;
-    z-index: 1;
-    appearance: none;
-    -webkit-appearance: none;
-    writing-mode: vertical-lr;
-    direction: rtl;
-    /* 24px input width = drag hit area; thumb centers within it and lines up
-       with the centered .volumeTrack. Background is transparent. */
-    width: 24px;
-    height: 140px;
-    cursor: pointer;
-    background: transparent;
-}
-.volume-slider::-webkit-slider-runnable-track {
-    -webkit-appearance: none;
-    appearance: none;
-    background: transparent;
-    border: 0;
-}
-.volume-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
+.volumeThumb {
+    pointer-events: none;
+    position: absolute;
+    left: 50%;
+    bottom: calc(var(--vol, 0.5) * (100% - 11px));
     width: 11px;
     height: 11px;
-    border-radius: 50%;
-    background: #fff !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-}
-/* Separate HORIZONTAL volume popup for Linux/WebKitGTK only (v-if="isWebKit").
-   Own classes, no inheritance from the vertical .volume-slider base — copy of
-   the working qf-volume-slider. No transform. */
-.volumeSliderPopupLinux {
-    visibility: hidden;
-    opacity: 0;
-    pointer-events: none;
-
-    position: absolute;
-    bottom: calc(100% + 6px);
-    left: 50%;
-    width: 148px;
-    margin-left: -74px;
-
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background-color: hsla(var(--player-accent-h), var(--player-accent-s), var(--player-accent-l), 0.15);
-    border-radius: 16px;
-    padding: 10px 0;
-    backdrop-filter: blur(17px);
-    box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
-
-    z-index: 11;
-    transition: opacity 0.2s ease, visibility 0.2s ease;
-}
-.volumeControl:hover .volumeSliderPopupLinux {
-    visibility: visible;
-    opacity: 1;
-    pointer-events: auto;
-}
-.volume-slider-linux {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 120px;
-    height: 6px;
-    border-radius: 3px;
-    cursor: pointer;
-    background: linear-gradient(to right, #fff var(--val, 50%), #ffffff25 var(--val, 50%));
-}
-.volume-slider-linux::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 13px;
-    height: 13px;
+    margin-left: -5.5px;
     border-radius: 50%;
     background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
 }
+/* The popup rises above the player into the page; lift the whole player
+   over page layers (e.g. the mood grid on Main, z-index 2) while it's open. */
+:global(.player:has(.volumeControl:hover)),
+:global(.player:has(.volumeControl.dragging)) {
+    z-index: 60;
+}
+.botPart:has(.volumeControl.dragging),
 .botPart:has(.volumeControl:hover) {
     z-index: 100001;
 }

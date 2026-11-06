@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { useI18n } from '../composables/useI18n';
 import { usePlayer } from '../composables/usePlayer';
 import { isAndroidRuntime, isPhoneViewport } from '../composables/usePlatform';
+import { usePlayableUrl } from '../utils/mediaUrl';
 
 // First launch tour: four short explainer videos recorded from the real UI
 // (see onboarding-videos/record.mjs). Shown once, then remembered locally.
@@ -46,6 +47,9 @@ function src(id: string, ext: 'webm' | 'mp4'): string | undefined {
     return videos[`../assets/onboarding/${id}_${language.value}.${ext}`]
         ?? videos[`../assets/onboarding/${id}_ru.${ext}`];
 }
+
+const webmUrl = usePlayableUrl(() => src(step.value.id, 'webm'));
+const mp4Url = usePlayableUrl(() => src(step.value.id, 'mp4'));
 
 function goTo(i: number) {
     index.value = Math.max(0, Math.min(STEPS.length - 1, i));
@@ -159,8 +163,8 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
                                 @timeupdate="onTimeUpdate"
                                 @ended="onEnded"
                             >
-                                <source v-if="src(step.id, 'webm')" :src="src(step.id, 'webm')" type="video/webm" />
-                                <source v-if="src(step.id, 'mp4')" :src="src(step.id, 'mp4')" type="video/mp4" />
+                                <source v-if="webmUrl" :src="webmUrl" type="video/webm" />
+                                <source v-if="mp4Url" :src="mp4Url" type="video/mp4" />
                             </video>
                         </Transition>
                     </div>

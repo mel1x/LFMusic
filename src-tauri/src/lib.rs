@@ -2,6 +2,7 @@ mod audio_features;
 mod audio_player;
 mod catalog_search;
 mod covers;
+mod desktop_entry;
 mod discord_rpc;
 mod downloader;
 mod enhance;
@@ -2297,6 +2298,17 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     set_windows_priority_class();
 
+    // WebKitGTK's Skia layer compositor shows the end value of an
+    // opacity/transform transition for one frame before animating it (fades
+    // and hovers blink and jump; seen on WebKitGTK 2.54, Wayland). The older
+    // TextureMapper compositor has no such glitch and keeps GPU rendering
+    // (disabling the DMABUF renderer also hides it, but drops the frame rate).
+    // Set before GTK/WebKit init; an explicit value from the user wins.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_USE_SKIA_FOR_COMPOSITION").is_none() {
+        std::env::set_var("WEBKIT_USE_SKIA_FOR_COMPOSITION", "0");
+    }
+
     let player = AudioPlayer::new().expect("Не удалось инициализировать аудиоплеер");
     let track_end_signal = player.sink_end_signal();
 
@@ -2407,6 +2419,10 @@ pub fn run() {
                     .unwrap_or_else(|_| app_data_dir.clone());
                 let _ = std::fs::create_dir_all(&cover_dir);
                 mpris::init(&app.handle().clone(), cover_dir);
+
+                if let Ok(data_dir) = app.path().data_dir() {
+                    std::thread::spawn(move || desktop_entry::register(data_dir));
+                }
             }
 
             Ok(())

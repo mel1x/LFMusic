@@ -32,6 +32,7 @@ import { useHoliday } from './composables/useHoliday';
 import { isAndroidRuntime, isPhoneViewport } from './composables/usePlatform';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
+import { usePlayableUrl } from './utils/mediaUrl';
 
 const win = getCurrentWindow();
 const { load, devModeActive } = useSettings();
@@ -50,6 +51,8 @@ const isReload = sessionStorage.getItem('lfmusic_reloaded') === '1';
 if (isReload) sessionStorage.removeItem('lfmusic_reloaded');
 
 const showSplash = ref(!isReload && !isPhoneViewport());
+const splashWebm = usePlayableUrl(() => splashVideoWebm);
+const splashMp4 = usePlayableUrl(() => splashVideoMp4);
 const splashFading = ref(false);
 
 // The overlay is opaque and sits above everything, so it must never depend on
@@ -147,9 +150,9 @@ watchEffect(() => {
 
 <template>
   <div data-tauri-drag-region v-if="showSplash" class="splash-overlay" :class="{ 'splash-fading': splashFading }">
-    <video data-tauri-drag-region autoplay muted playsinline @playing="onSplashPlaying" @ended="onSplashEnded" @error="onSplashEnded" class="splash-video">
-      <source :src="splashVideoWebm" type="video/webm" />
-      <source :src="splashVideoMp4" type="video/mp4" />
+    <video v-if="splashWebm || splashMp4" data-tauri-drag-region autoplay muted playsinline @playing="onSplashPlaying" @ended="onSplashEnded" @error="onSplashEnded" class="splash-video">
+      <source v-if="splashWebm" :src="splashWebm" type="video/webm" />
+      <source v-if="splashMp4" :src="splashMp4" type="video/mp4" />
     </video>
   </div>
   <HolidayPattern />
