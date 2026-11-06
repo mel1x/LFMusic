@@ -1153,6 +1153,21 @@ fn format_name_from_ext(ext: &str) -> String {
     .to_string()
 }
 
+/// Play/seek commands stop the old sink before opening the new source. When the
+/// open fails, nothing is playing any more: drop the sinks and mark the end signal,
+/// otherwise the stopped source never reports EOF and the player stays "Playing".
+fn stop_after_failed_open(
+    sink: &mut Option<Sink>,
+    fadeout_sink: &mut Option<Sink>,
+    spectrum: &SpectrumAnalyzer,
+    sink_empty: &SinkEndSignal,
+) {
+    if let Some(s) = sink.take() { s.stop(); }
+    if let Some(s) = fadeout_sink.take() { s.stop(); }
+    spectrum.set_active(false);
+    sink_empty.set_finished();
+}
+
 /// Main loop of the dedicated audio thread; owns OutputStream (and the Windows COM
 /// context), OutputStreamHandle, and the current Sink.
 fn audio_thread_loop(
@@ -1187,6 +1202,9 @@ fn audio_thread_loop(
                     sink = Some(new_sink);
                     Ok(())
                 })();
+                if result.is_err() {
+                    stop_after_failed_open(&mut sink, &mut fadeout_sink, &spectrum, &sink_empty);
+                }
                 let _ = resp.send(result);
             }
 
@@ -1231,6 +1249,9 @@ fn audio_thread_loop(
                     sink = Some(new_sink);
                     Ok(())
                 })();
+                if result.is_err() {
+                    stop_after_failed_open(&mut sink, &mut fadeout_sink, &spectrum, &sink_empty);
+                }
                 let _ = resp.send(result);
             }
 
@@ -1270,6 +1291,9 @@ fn audio_thread_loop(
                     sink = Some(new_sink);
                     Ok(())
                 })();
+                if result.is_err() {
+                    stop_after_failed_open(&mut sink, &mut fadeout_sink, &spectrum, &sink_empty);
+                }
                 let _ = resp.send(result);
             }
 
@@ -1297,6 +1321,9 @@ fn audio_thread_loop(
                     sink = Some(new_sink);
                     Ok(())
                 })();
+                if result.is_err() {
+                    stop_after_failed_open(&mut sink, &mut fadeout_sink, &spectrum, &sink_empty);
+                }
                 let _ = resp.send(result);
             }
         }
@@ -1398,6 +1425,16 @@ impl AudioPlayer {
             .map_err(|_| "Аудио поток недоступен".to_string())?;
         rx.recv()
             .map_err(|_| "Аудио поток недоступен".to_string())?
+    }
+
+    /// Like `send`, for play/seek commands: on failure the audio thread has already
+    /// stopped output (see `stop_after_failed_open`), so the state follows it.
+    fn send_play(&mut self, make: impl FnOnce(Resp) -> AudioCmd) -> Result<(), String> {
+        let result = self.send(make);
+        if result.is_err() {
+            self.sink_stopped();
+        }
+        result
     }
 
     /// Fire-and-forget, no response wait
@@ -1624,10 +1661,11 @@ impl AudioPlayer {
             return self.play_from(file_path, 0.0, metadata);
         }
 
-        self.send(|resp| AudioCmd::PlayCrossfade {
+        let volume = self.volume;
+        self.send_play(|resp| AudioCmd::PlayCrossfade {
             file_path: file_path.to_string(),
             seek_secs: 0.0,
-            volume: self.volume,
+            volume,
             crossfade_secs,
             resp,
         })?;
@@ -1646,10 +1684,11 @@ impl AudioPlayer {
         seek_secs: f64,
         metadata: TrackMetadata,
     ) -> Result<TrackMetadata, String> {
-        self.send(|resp| AudioCmd::PlayFrom {
+        let volume = self.volume;
+        self.send_play(|resp| AudioCmd::PlayFrom {
             file_path: file_path.to_string(),
             seek_secs,
-            volume: self.volume,
+            volume,
             resp,
         })?;
 
@@ -1705,10 +1744,11 @@ impl AudioPlayer {
 
         let was_paused = self.state == PlaybackState::Paused;
 
-        self.send(|resp| AudioCmd::Seek {
+        let volume = self.volume;
+        self.send_play(|resp| AudioCmd::Seek {
             file_path,
             position_secs,
-            volume: self.volume,
+            volume,
             was_paused,
             resp,
         })?;
@@ -1734,11 +1774,12 @@ impl AudioPlayer {
         let current_pos = self.get_position();
         let was_paused = self.state == PlaybackState::Paused;
 
-        self.send(|resp| AudioCmd::SeekCrossfade {
+        let volume = self.volume;
+        self.send_play(|resp| AudioCmd::SeekCrossfade {
             file_path,
             position_secs,
             current_pos,
-            volume: self.volume,
+            volume,
             was_paused,
             crossfade_secs,
             resp,

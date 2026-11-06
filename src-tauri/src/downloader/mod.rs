@@ -797,9 +797,13 @@ fn run_job(app: &AppHandle, job: &DownloadItem, control: &Control) -> Result<Pat
     control.check()?;
 
     let target = unique_path(&downloads, &job.artist, &job.title, ext);
+    // `target` is an empty placeholder reserved by unique_path; rename replaces it.
     std::fs::rename(&playable, &target)
         .or_else(|_| std::fs::copy(&playable, &target).map(|_| ()))
-        .map_err(|e| JobError::new(ErrorKind::Disk, format!("Не удалось сохранить файл: {}", e)))?;
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&target);
+            JobError::new(ErrorKind::Disk, format!("Не удалось сохранить файл: {}", e))
+        })?;
     postprocess::write_lrc(&target, lyrics.as_ref());
 
     import_track(app, &downloads, &target)
@@ -1269,22 +1273,32 @@ pub fn delete_downloaded_track(app: &AppHandle, file_path: &str) -> Result<(), S
             player.stop();
         }
     }
+    // The audio thread may need a moment to release the handle. The file goes
+    // first: dropping the library row for a file that stays on disk would just
+    // bring it back (without its statistics) on the next rescan.
+    let mut last_err = None;
+    for _ in 0..20 {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_millis(150))
+            }
+            _ => {
+                last_err = None;
+                break;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(format!("Не удалось удалить файл: {}", e));
+    }
+    let _ = std::fs::remove_file(path.with_extension("lrc"));
     let separators = crate::settings::get_artist_separators(&app.state::<crate::SettingsState>());
     app.state::<crate::LibraryState>()
         .0
         .lock()
         .map_err(|e| e.to_string())?
         .remove_track(file_path, &separators)?;
-    // The audio thread may need a moment to release the handle.
-    for _ in 0..20 {
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                std::thread::sleep(Duration::from_millis(150))
-            }
-            _ => break,
-        }
-    }
-    let _ = std::fs::remove_file(path.with_extension("lrc"));
     let _ = app.emit("downloads_library_updated", ());
     Ok(())
 }
@@ -1312,7 +1326,9 @@ fn sanitize_component(s: &str) -> String {
     }
 }
 
-/// `Artist - Title.ext`, with " (2)", " (3)"… when taken.
+/// `Artist - Title.ext`, with " (2)", " (3)"... when taken. The name is reserved by
+/// creating an empty file atomically, so two workers finishing same-named tracks
+/// can't pick one path (the later rename would silently overwrite on Unix).
 fn unique_path(dir: &Path, artist: &str, title: &str, ext: &str) -> PathBuf {
     let base = match (artist.trim().is_empty(), title.trim().is_empty()) {
         (false, false) => format!("{} - {}", sanitize_component(artist), sanitize_component(title)),
@@ -1322,11 +1338,16 @@ fn unique_path(dir: &Path, artist: &str, title: &str, ext: &str) -> PathBuf {
     };
     let mut candidate = dir.join(format!("{}.{}", base, ext));
     let mut n = 2;
-    while candidate.exists() {
-        candidate = dir.join(format!("{} ({}).{}", base, n, ext));
-        n += 1;
+    loop {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                candidate = dir.join(format!("{} ({}).{}", base, n, ext));
+                n += 1;
+            }
+            // Created, or an unrelated error the following rename will report.
+            _ => return candidate,
+        }
     }
-    candidate
 }
 
 fn import_track(app: &AppHandle, dir: &Path, file: &Path) -> Result<(), String> {

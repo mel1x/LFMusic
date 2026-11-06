@@ -997,10 +997,16 @@ function createPlayer() {
       showSettings.value = false;
       scheduleSaveState();
     } catch (e: any) {
-      // Drop the unavailable track from the queue and try the next one.
-      const failedIdx = playbackOrder.value.indexOf(filePath);
+      // Drop the unavailable track from the queue and try the next one. In shuffle
+      // the same path can sit in several passes (history too), so take the slot we
+      // were asked to play, else the nearest one ahead of the current position.
+      const order = playbackOrder.value;
+      const failedIdx = options.orderIndex !== undefined && order[options.orderIndex] === filePath
+        ? options.orderIndex
+        : locateInOrder(filePath);
       if (failedIdx !== -1) {
-        playbackOrder.value = playbackOrder.value.filter((_, i) => i !== failedIdx);
+        playbackOrder.value = order.filter((_, i) => i !== failedIdx);
+        if (failedIdx < currentOrderIndex.value) currentOrderIndex.value -= 1;
       }
       if (!options.skipAttempt && playbackOrder.value.length > 0) {
         const nextIdx = Math.min(failedIdx === -1 ? 0 : failedIdx, playbackOrder.value.length - 1);
@@ -1010,8 +1016,25 @@ function createPlayer() {
         }
       }
       errorMessage.value = `Ошибка воспроизведения: ${e}`;
+      await syncAfterFailedPlay();
     } finally {
       isLoading.value = false;
+    }
+  }
+
+  /** A file that exists but can't be opened stops the previous track in the backend
+   *  (a missing file doesn't: it fails before playback is touched), so mirror its state. */
+  async function syncAfterFailedPlay() {
+    try {
+      const status = await invoke<PlayerStatus>("player_get_status");
+      playbackState.value = status.state;
+      if (!status.current_file_path) {
+        statsSession = null;
+        currentTrack.value = null;
+        positionSecs.value = 0;
+      }
+    } catch {
+      // ignore: the next status poll corrects it
     }
   }
 

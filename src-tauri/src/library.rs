@@ -1056,24 +1056,36 @@ impl MusicLibrary {
     }
 
     fn delete_missing_tracks(&mut self) -> Result<usize, String> {
-        let all_paths: Vec<String> = {
+        let all_paths: Vec<(String, String)> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT file_path FROM tracks")
+                .prepare("SELECT file_path, folder_path FROM tracks")
                 .map_err(|e| format!("Ошибка: {}", e))?;
 
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
                 .map_err(|e| format!("Ошибка: {}", e))?;
 
             rows.filter_map(|r| r.ok()).collect()
         };
 
+        // A library folder on an unplugged/unmounted drive makes every track in it
+        // look missing. Deleting them would cascade-drop statistics, playlist
+        // membership and overrides, so tracks of unavailable folders are kept.
+        let available_roots: HashSet<String> = all_paths
+            .iter()
+            .map(|(_, folder)| folder.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|folder| Path::new(folder).is_dir())
+            .collect();
+
         // Existence checks are IO-bound; parallelized since a serial walk is
         // very slow for large libraries / network drives.
         let dead: Vec<String> = all_paths
             .into_par_iter()
-            .filter(|p| !PathBuf::from(p).exists())
+            .filter(|(p, folder)| available_roots.contains(folder) && !PathBuf::from(p).exists())
+            .map(|(p, _)| p)
             .collect();
 
         let count = dead.len();
@@ -3469,6 +3481,44 @@ mod tests {
         // calls this unconditionally after draining the results channel.
         flush_audio_features(&mut library.conn, &mut pending);
         assert!(pending.is_empty());
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cleanup_keeps_tracks_of_unavailable_folders() {
+        let dir = temp_library_dir("cleanup_unavailable_folder");
+        let present_root = dir.join("present");
+        fs::create_dir_all(&present_root).unwrap();
+        let present_root = present_root.to_string_lossy().to_string();
+        let gone_root = dir.join("unplugged-drive").to_string_lossy().to_string();
+        let mut library = MusicLibrary::new(dir.clone()).expect("library init");
+        for (path, root) in [
+            (format!("{}/deleted.flac", present_root), &present_root),
+            (format!("{}/offline.flac", gone_root), &gone_root),
+        ] {
+            library
+                .conn
+                .execute(
+                    "INSERT INTO tracks (file_path, folder_path, format) VALUES (?1, ?2, 'flac')",
+                    params![path, root],
+                )
+                .expect("track insert");
+        }
+
+        // The file under an available folder is really gone; the one under a
+        // missing folder may just be on a drive that isn't plugged in.
+        assert_eq!(library.cleanup_missing_tracks().unwrap(), 1);
+        let left: Vec<String> = library
+            .conn
+            .prepare("SELECT file_path FROM tracks")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(left, vec![format!("{}/offline.flac", gone_root)]);
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

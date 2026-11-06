@@ -378,6 +378,10 @@ function isDownloadedTrack(filePath: string): boolean {
 }
 
 async function deleteDownloadedTrack(filePath: string): Promise<void> {
+  // Stop through the player first: the backend would stop it too, but the status
+  // poll would then read that as a natural end and count a full listen.
+  const player = usePlayer()
+  if (player.currentTrack.value?.file_path === filePath) await player.stop()
   await invoke('downloads_delete_track', { filePath })
 }
 

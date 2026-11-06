@@ -1502,15 +1502,48 @@ fn statistics_get_taste_profile(
 
 // ── Equalizer commands ───────────────────────────────────────────────────────
 
-fn eq_persist(settings_state: &State<SettingsState>, eq: &EqSettings) -> Result<(), String> {
-    let mut state = settings_state
-        .lock()?;
-    state.0.eq_settings = eq.clone();
-    settings::save(&state.1, &state.0)
+/// Bumped by every deferred settings save; only the latest one writes.
+static SETTINGS_SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
+const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(400);
+
+fn save_settings_now(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<SettingsState>() {
+        if let Ok(s) = state.lock() {
+            if let Err(e) = settings::save(&s.1, &s.0) {
+                eprintln!("Settings save error: {}", e);
+            }
+        }
+    }
+}
+
+/// Writes settings.json once the burst of changes is over: EQ sliders call
+/// their command on every input event, and each call used to hit the disk.
+fn schedule_settings_save(app: &tauri::AppHandle) {
+    let generation = SETTINGS_SAVE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("settings-save".into())
+        .spawn(move || {
+            std::thread::sleep(SETTINGS_SAVE_DELAY);
+            if SETTINGS_SAVE_GENERATION.load(Ordering::SeqCst) == generation {
+                save_settings_now(&app);
+            }
+        });
+}
+
+fn eq_persist(
+    app: &tauri::AppHandle,
+    settings_state: &State<SettingsState>,
+    eq: &EqSettings,
+) -> Result<(), String> {
+    settings_state.lock()?.0.eq_settings = eq.clone();
+    schedule_settings_save(app);
+    Ok(())
 }
 
 #[tauri::command]
 fn eq_set_bands(
+    app: tauri::AppHandle,
     player_state: State<PlayerState>,
     settings_state: State<SettingsState>,
     bands: Vec<f32>,
@@ -1519,11 +1552,12 @@ fn eq_set_bands(
         .read()?;
     player.set_eq_bands(bands);
     let eq = player.get_eq_settings();
-    eq_persist(&settings_state, &eq)
+    eq_persist(&app, &settings_state, &eq)
 }
 
 #[tauri::command]
 fn eq_set_gain(
+    app: tauri::AppHandle,
     player_state: State<PlayerState>,
     settings_state: State<SettingsState>,
     gain: f32,
@@ -1532,11 +1566,12 @@ fn eq_set_gain(
         .read()?;
     player.set_eq_gain(gain);
     let eq = player.get_eq_settings();
-    eq_persist(&settings_state, &eq)
+    eq_persist(&app, &settings_state, &eq)
 }
 
 #[tauri::command]
 fn eq_set_enabled(
+    app: tauri::AppHandle,
     player_state: State<PlayerState>,
     settings_state: State<SettingsState>,
     enabled: bool,
@@ -1545,7 +1580,7 @@ fn eq_set_enabled(
         .read()?;
     player.set_eq_enabled(enabled);
     let eq = player.get_eq_settings();
-    eq_persist(&settings_state, &eq)
+    eq_persist(&app, &settings_state, &eq)
 }
 
 #[tauri::command]
@@ -2100,23 +2135,28 @@ async fn downloads_set_dir(
             let new = new_dir.to_string_lossy().to_string();
 
             let state = app.state::<LibraryState>();
-            let mut library = state.lock()?;
-            if library.covering_folder(&old).as_deref() == Some(old.as_str()) {
-                library.remove_folder(
-                    old,
-                    &separators,
-                    Some(audio_feature_progress_emitter(app.clone())),
-                )?;
-            }
-            if library.covering_folder(&new).is_none() {
-                library.add_folder(
+            let needs_add = {
+                let mut library = state.lock()?;
+                if library.covering_folder(&old).as_deref() == Some(old.as_str()) {
+                    library.remove_folder(
+                        old,
+                        &separators,
+                        Some(audio_feature_progress_emitter(app.clone())),
+                    )?;
+                }
+                library.covering_folder(&new).is_none()
+            };
+            // The scan itself runs without holding the library lock, so the catalog,
+            // playlists and statistics stay readable while a big folder is scanned.
+            if needs_add {
+                MusicLibrary::add_folder_unlocked(
+                    &state.0,
                     new,
                     &separators,
                     Some(audio_feature_progress_emitter(app.clone())),
                     scan_progress_emitter(app.clone()),
                 )?;
             }
-            drop(library);
             let _ = app.emit("downloads_library_updated", ());
         }
 
@@ -2266,44 +2306,13 @@ pub fn run() {
 
             let app_settings = settings::load(&app_data_dir);
 
-            // The main window has `create: false` in tauri.conf.json and is built
-            // here, so WebView devtools (Ctrl+Shift+I) exist only in dev mode.
-            let window_config = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|w| w.label == "main")
-                .cloned()
-                .expect("Нет конфигурации главного окна");
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
-                .devtools(settings::option_bool(&app_settings, "dev_mode", false))
-                .build()?;
-
-            window_state::restore_main_window_geometry(app, &app_data_dir);
-
-            #[cfg(windows)]
-            if let Some(window) = app.get_webview_window("main") {
-                if let Ok(hwnd) = window.hwnd() {
-                    taskbar::init(&app.handle().clone(), hwnd.0 as isize);
-                }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                let cover_dir = app
-                    .path()
-                    .app_cache_dir()
-                    .unwrap_or_else(|_| app_data_dir.clone());
-                let _ = std::fs::create_dir_all(&cover_dir);
-                mpris::init(&app.handle().clone(), cover_dir);
-            }
-
             let player_state = app.state::<PlayerState>();
             let player = player_state.0.read().expect("Lock error");
             player.set_eq_settings(app_settings.eq_settings.clone());
             player.set_enhance_settings(&app_settings.enhance_settings);
             drop(player);
+
+            let dev_mode = settings::option_bool(&app_settings, "dev_mode", false);
 
             // Must be managed before code below calls app.state::<SettingsState>().
             app.manage(SettingsState(Mutex::new((
@@ -2313,7 +2322,7 @@ pub fn run() {
 
             let external_marker_dir = app_data_dir.clone();
             let mut library =
-                MusicLibrary::new(app_data_dir).expect("Не удалось инициализировать библиотеку");
+                MusicLibrary::new(app_data_dir.clone()).expect("Не удалось инициализировать библиотеку");
 
             // Rebuild once on startup so existing libraries get artist playlists without waiting for a rescan.
             let separators = {
@@ -2347,6 +2356,42 @@ pub fn run() {
             app.manage(LibraryState(Mutex::new(library)));
 
             spawn_track_end_watcher(app.handle().clone(), track_end_signal.clone());
+
+            // Built after every state is managed: a command arriving from the page
+            // must find SettingsState/LibraryState (on Android the WebView can
+            // call in while setup is still running).
+            // The main window has `create: false` in tauri.conf.json and is built
+            // here, so WebView devtools (Ctrl+Shift+I) exist only in dev mode.
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .expect("Нет конфигурации главного окна");
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .devtools(dev_mode)
+                .build()?;
+
+            window_state::restore_main_window_geometry(app, &app_data_dir);
+
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(hwnd) = window.hwnd() {
+                    taskbar::init(&app.handle().clone(), hwnd.0 as isize);
+                }
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                let cover_dir = app
+                    .path()
+                    .app_cache_dir()
+                    .unwrap_or_else(|_| app_data_dir.clone());
+                let _ = std::fs::create_dir_all(&cover_dir);
+                mpris::init(&app.handle().clone(), cover_dir);
+            }
 
             Ok(())
         })
@@ -2492,6 +2537,10 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 // Kill any running yt-dlp/ffmpeg, or they'd outlive the app.
                 downloader::shutdown(app_handle);
+                // A deferred settings save may still be waiting.
+                if SETTINGS_SAVE_GENERATION.load(Ordering::SeqCst) > 0 {
+                    save_settings_now(app_handle);
+                }
                 if let Some(state) = app_handle.try_state::<LibraryState>() {
                     if let Ok(library) = state.0.lock() {
                         if let Err(e) = library.shutdown() {
