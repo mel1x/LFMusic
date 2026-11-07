@@ -15,10 +15,12 @@ import android.graphics.Color
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Base64
 import android.view.View
 import android.view.WindowManager
@@ -27,12 +29,14 @@ import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONObject
+import java.io.File
 
 private const val AUDIO_PERMISSION_REQUEST = 42
 private const val MEDIA_NOTIFICATION_ID = 1001
@@ -603,6 +607,31 @@ class MainActivity : TauriActivity() {
             notificationManager.cancel(MEDIA_NOTIFICATION_ID)
           }
         }
+      }
+    }
+
+    /** Opens the system installer for a downloaded update APK (app cache dir).
+     *  Returns "started", "permission" (sent to the "install unknown apps" screen,
+     *  the user retries after allowing it) or "error". */
+    @JavascriptInterface
+    fun installApk(path: String): String {
+      return try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+          startActivity(
+            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          )
+          return "permission"
+        }
+        val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", File(path))
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+          setDataAndType(uri, "application/vnd.android.package-archive")
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+        "started"
+      } catch (_: Exception) {
+        "error"
       }
     }
 

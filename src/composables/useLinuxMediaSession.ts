@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { TrackMetadata } from './usePlayer'
 import { isLinuxDesktop } from './usePlatform'
+import { useSettings } from './useSettings'
+import { joinArtists } from '../utils/format'
 
 type PlaybackState = 'Stopped' | 'Playing' | 'Paused'
 
@@ -28,6 +30,7 @@ function trackTitle(track: TrackMetadata): string {
 export function useLinuxMediaSession(options: LinuxMediaSessionOptions) {
   if (!isLinuxDesktop()) return
 
+  const { settings } = useSettings()
   let unlisten: UnlistenFn | null = null
   let lastPositionSentAt = 0
 
@@ -35,7 +38,7 @@ export function useLinuxMediaSession(options: LinuxMediaSessionOptions) {
     const track = options.currentTrack.value
     invoke('mpris_update_metadata', {
       title: track ? trackTitle(track) : null,
-      artist: track?.artist || null,
+      artist: track?.artist ? joinArtists(track.artist, settings.value.artist_separators) : null,
       album: track?.album || null,
       // Backend builds a file:// URL to the cached WebP thumbnail from file_path.
       filePath: track?.file_path || null,

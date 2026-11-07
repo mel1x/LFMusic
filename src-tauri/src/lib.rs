@@ -2329,10 +2329,9 @@ pub fn run() {
         })
         .setup(move |app| {
             #[cfg(target_os = "windows")]
-            {
-                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
-                app.manage(updater::PendingUpdate::default());
-            }
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            #[cfg(any(target_os = "windows", target_os = "android"))]
+            app.manage(updater::PendingUpdate::default());
 
             let app_data_dir = app
                 .path()

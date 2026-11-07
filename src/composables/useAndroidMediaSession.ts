@@ -2,6 +2,8 @@ import type { ComputedRef, Ref } from 'vue'
 import { onMounted, onUnmounted, watch } from 'vue'
 import type { TrackMetadata } from './usePlayer'
 import { isAndroidRuntime } from './usePlatform'
+import { useSettings } from './useSettings'
+import { joinArtists } from '../utils/format'
 
 declare global {
   interface Window {
@@ -12,6 +14,7 @@ declare global {
       getPermissionStatus?(): string
       getSystemInsets?(): string
       requestRequiredPermissionsFromJs?(): void
+      installApk?(path: string): string
     }
   }
 }
@@ -38,16 +41,41 @@ function trackTitle(track: TrackMetadata): string {
   return track.title || fileName || 'LFMusic'
 }
 
+// The native side decodes only base64 data URLs, while covers are protocol URLs
+// (lfmusic-cover / lfmusic-external), so the image is fetched and inlined here.
+let artworkSource = ''
+let artworkData = ''
+
+async function artworkDataUrl(source: string): Promise<string> {
+  if (!source || source.startsWith('data:')) return source
+  if (source === artworkSource) return artworkData
+  try {
+    const blob = await (await fetch(source)).blob()
+    const data = await new Promise<string>(resolve => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+      reader.onerror = () => resolve('')
+      reader.readAsDataURL(blob)
+    })
+    artworkSource = source
+    artworkData = data
+    return data
+  } catch {
+    return ''
+  }
+}
+
 function sendUpdate(options: AndroidMediaSessionOptions, artwork?: string) {
   const bridge = window.LFMusicAndroid
   if (!bridge) return false
 
+  const { settings } = useSettings()
   const track = options.currentTrack.value
   const payload: Record<string, unknown> = track
     ? {
         hasTrack: true,
         title: trackTitle(track),
-        artist: track.artist || '',
+        artist: track.artist ? joinArtists(track.artist, settings.value.artist_separators) : '',
         album: track.album || '',
         state: options.playbackState.value,
         positionSecs: Math.max(0, options.positionSecs.value || 0),
@@ -77,12 +105,15 @@ export function useAndroidMediaSession(options: AndroidMediaSessionOptions) {
 
   const sendSoon = (forceArtwork = false) => {
     if (retryTimer) window.clearTimeout(retryTimer)
-    retryTimer = window.setTimeout(() => {
+    retryTimer = window.setTimeout(async () => {
       retryTimer = null
-      const artwork = options.currentCoverArt.value || ''
-      const includeArtwork = forceArtwork || artwork !== lastArtworkSent
-      const delivered = sendUpdate(options, includeArtwork ? artwork : undefined)
-      if (delivered && includeArtwork) lastArtworkSent = artwork
+      const source = options.currentCoverArt.value || ''
+      const includeArtwork = forceArtwork || source !== lastArtworkSent
+      const artwork = includeArtwork ? await artworkDataUrl(source) : undefined
+      // The cover changed while it was loading; the newer call sends it.
+      if ((options.currentCoverArt.value || '') !== source) return
+      const delivered = sendUpdate(options, artwork)
+      if (delivered && includeArtwork) lastArtworkSent = source
     }, 120)
   }
 

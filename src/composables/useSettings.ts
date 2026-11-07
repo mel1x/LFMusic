@@ -28,7 +28,7 @@ export const settingItems = [
     { key: 'external_artist_avatars',  label: 'Получать аватарки исполнителей',             default: false, description: 'Подставляет аватарки исполнителей из внешних открытых источников',                              warning: 'Требует подключения к интернету' },
     { key: 'holiday_events',           label: 'Праздничное оформление',                     default: true,  description: 'В праздники добавляет тематический фон, плашку в шапке и снег на Новый год',               warning: '' },
     { key: 'show_downloads_page',      label: 'Страница «Скачивание» в меню',               default: false,  description: 'Показывать раздел «Скачивание» в боковом меню (только на ПК)',                                  warning: '' },
-    { key: 'auto_update_check',        label: 'Проверять обновления при запуске',           default: true,  description: 'При запуске проверяет новую версию на GitHub и показывает кнопку обновления в шапке',            warning: '' },
+    { key: 'auto_update_check',        label: 'Проверять обновления при запуске',           default: true,  description: 'При запуске проверяет новую версию на GitHub и предлагает обновиться',            warning: '' },
     { key: 'dev_mode',                label: 'Режим разработчика',                         default: false, description: 'Добавляет справа снизу кнопку панели разработчика: вызовы бэкенда, ошибки, метрики',           warning: 'Применяется после перезапуска приложения' },
 ] as const
 

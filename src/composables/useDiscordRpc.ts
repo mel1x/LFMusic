@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { TrackMetadata } from './usePlayer'
 import { useSettings } from './useSettings'
 import { isAndroidRuntime } from './usePlatform'
+import { joinArtists } from '../utils/format'
 
 type PlaybackState = 'Stopped' | 'Playing' | 'Paused'
 
@@ -119,7 +120,7 @@ export function useDiscordRpc(options: DiscordRpcOptions) {
     const title = presenceTitle(track)
     const payload: PresencePayload = {
       details: playing ? title : `⏸ ${title}`,
-      state: track.artist || 'Неизвестный исполнитель',
+      state: track.artist ? joinArtists(track.artist, settings.value.artist_separators) : 'Неизвестный исполнитель',
       cover_url: coverUrl,
       cover_text: options.sourceLabel.value,
       duration_secs: Math.max(0, options.durationSecs.value || 0),

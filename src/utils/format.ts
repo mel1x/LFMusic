@@ -70,6 +70,11 @@ export function splitArtistsList(input: string, separators: string[]): string[] 
         .map(p => p.text)
 }
 
+/** Joint artists ("A; B") for one-line display: split by the user's separators, joined with commas. */
+export function joinArtists(input: string, separators: string[]): string {
+    return splitArtistsList(input, separators).join(', ') || input
+}
+
 export function formatTotalDuration(secs: number): string {
     const total = Math.max(0, Math.floor(secs))
     const h = Math.floor(total / 3600)

@@ -9,6 +9,7 @@ import TitleBar from './components/TitleBar.vue';
 import TrackInfoModal from './components/TrackInfoModal.vue';
 import TrackEditModal from './components/TrackEditModal.vue';
 import AndroidPermissionWarning from './components/AndroidPermissionWarning.vue';
+import AndroidUpdatePrompt from './components/AndroidUpdatePrompt.vue';
 import TracksReadyModal from './components/TracksReadyModal.vue';
 import FullscreenCover from './components/FullscreenCover.vue';
 import OnboardingTour from './components/OnboardingTour.vue';
@@ -166,6 +167,7 @@ watchEffect(() => {
   <TrackInfoModal :key="`info-${language}`" />
   <TrackEditModal :key="`edit-${language}`" />
   <AndroidPermissionWarning />
+  <AndroidUpdatePrompt />
   <TracksReadyModal />
   <FullscreenCover />
   <OnboardingTour />
@@ -591,8 +593,21 @@ body {
     overflow-x: hidden !important;
   }
 
-  body.lfmusic-phone .mobileHeroPage .scrollHeader {
+  /* The cover fades out at its bottom edge into this tint, and the tint fades
+     into the page background further down (scrolls with the content). */
+  body.lfmusic-phone .mobileHeroPage {
     --hero-cover-height: clamp(290px, 86vw, 390px);
+    background-image: linear-gradient(
+        to bottom,
+        hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.5) 0,
+        hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.5) calc(var(--hero-cover-height) - 40px),
+        hsla(var(--accent-h), min(var(--accent-s), 48%), 14%, 0.22) calc(var(--hero-cover-height) + 110px),
+        hsla(var(--accent-h), min(var(--accent-s), 48%), 14%, 0) calc(var(--hero-cover-height) + 280px)
+    );
+    background-attachment: local;
+  }
+
+  body.lfmusic-phone .mobileHeroPage .scrollHeader {
     --hero-header-overlap: 56px;
     position: relative;
     isolation: isolate;
@@ -600,25 +615,6 @@ body {
     flex-direction: column;
     align-items: center;
     width: 100%;
-  }
-
-  body.lfmusic-phone .mobileHeroPage .scrollHeader::after {
-    content: "";
-    position: absolute;
-    left: -14px;
-    right: -14px;
-    top: calc(var(--hero-cover-height) - 18px);
-    bottom: 0;
-    z-index: 0;
-    pointer-events: none;
-    background:
-        linear-gradient(
-            to bottom,
-            var(--light-bg) 0%,
-            hsla(var(--accent-h), min(var(--accent-s), 52%), 15%, 0.42) 42%,
-            hsla(var(--accent-h), min(var(--accent-s), 48%), 14%, 0.22) 70%,
-            var(--light-bg) 100%
-        );
   }
 
   body.lfmusic-phone .mobileHeroPage .pageHat {
