@@ -31,3 +31,11 @@ AGENTS.md
 DESIGN.md
 PRODUCT.md
 release-key.jks
+
+# Local-only files
+ex/
+onboarding-videos/
+GEMINI.md
+*.apk
+*.jks
+*.keystore
