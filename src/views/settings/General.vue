@@ -4,15 +4,43 @@ import { useSettings, type Language, type SettingKey } from '../../composables/u
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '../../composables/useI18n';
 import { usePlayer } from '../../composables/usePlayer';
+import { useUpdater } from '../../composables/useUpdater';
+import { getVersion } from '@tauri-apps/api/app';
 import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
 
 const { settings, settingItems, devModeActive, load, save } = useSettings();
 const { t, setLanguage } = useI18n();
+
+const updater = useUpdater();
 const { saveState } = usePlayer();
 
-const generalKeys: SettingKey[] = ['discord_rpc_enabled', 'dev_mode'];
-const generalItems = computed(() => generalKeys.map(key => settingItems.find(i => i.key === key)!));
+const generalKeys: SettingKey[] = ['discord_rpc_enabled', 'auto_update_check', 'dev_mode'];
+const generalItems = computed(() => generalKeys
+    .filter(key => key !== 'auto_update_check' || updater.supported.value)
+    .map(key => settingItems.find(i => i.key === key)!));
+
+const updateStatusText = computed(() => {
+    switch (updater.status.value) {
+        case 'checking': return t('updater.checking');
+        case 'latest': return t('updater.latest');
+        case 'error': return t('updater.error');
+        case 'downloading': return t('updater.downloading', { percent: updater.progress.value });
+        default: return updater.availableVersion.value
+            ? t('updater.available', { version: updater.availableVersion.value })
+            : '';
+    }
+});
+
+function onUpdateClick() {
+    if (updater.availableVersion.value) updater.install(saveState);
+    else updater.check();
+}
+
+const appVersion = ref('');
+onMounted(async () => {
+    appVersion.value = await getVersion().catch(() => '');
+});
 
 async function toggle(key: SettingKey) {
     settings.value[key] = !settings.value[key];
@@ -89,6 +117,20 @@ watch(() => settings.value.language, () => {
                     class="restartBtn"
                     @click="restartApp"
                 >{{ t('dev.restart') }}</button>
+            </div>
+
+            <div v-if="appVersion" class="settingElem languageSetting">
+                <span class="languageText">
+                    <span>{{ t('updater.version', { version: appVersion }) }}</span>
+                    <small v-if="updateStatusText">{{ updateStatusText }}</small>
+                </span>
+                <button
+                    v-if="updater.supported.value"
+                    type="button"
+                    class="restartBtn"
+                    :disabled="updater.status.value === 'checking' || updater.status.value === 'downloading'"
+                    @click="onUpdateClick"
+                >{{ updater.availableVersion.value ? t('updater.install') : t('updater.check') }}</button>
             </div>
 
             <div class="settingElem languageSetting">
@@ -170,7 +212,11 @@ watch(() => settings.value.language, () => {
     cursor: pointer;
     transition: background-color .18s ease, color .18s ease;
 }
-.restartBtn:hover {
+.restartBtn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.restartBtn:hover:not(:disabled) {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.28);
     color: #fff;
 }

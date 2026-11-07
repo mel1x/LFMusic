@@ -29,13 +29,15 @@ import { useAccentTheme } from './composables/useAccentTheme';
 import { useTaskbar } from './composables/useTaskbar';
 import { useAndroidShell } from './composables/useAndroidShell';
 import { useHoliday } from './composables/useHoliday';
+import { useUpdater } from './composables/useUpdater';
 import { isAndroidRuntime, isPhoneViewport } from './composables/usePlatform';
 import splashVideoWebm from './assets/splash_screen_dark.webm';
 import splashVideoMp4 from './assets/splash_screen_dark.mp4';
 import { usePlayableUrl } from './utils/mediaUrl';
 
 const win = getCurrentWindow();
-const { load, devModeActive } = useSettings();
+const { settings, load, devModeActive } = useSettings();
+const { check: checkForUpdate } = useUpdater();
 const { language } = useI18n();
 const { currentTrack, isPlaying, saveState } = usePlayer();
 const { loadCustomCovers } = useCustomCovers();
@@ -124,7 +126,9 @@ function handleContextMenu(e: MouseEvent) {
 }
 
 onMounted(() => {
-  load();
+  load().then(() => {
+    if (settings.value.auto_update_check) checkForUpdate();
+  });
   startDomI18n();
   loadCustomCovers();
   loadCachedAvatars();

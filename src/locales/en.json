@@ -802,6 +802,8 @@
     "Подставляет аватарки исполнителей из внешних открытых источников": "Uses artist avatars from open external sources",
     "Показывать раздел «Скачивание» в боковом меню (только на ПК)": "Show the \"Downloads\" section in the side menu (desktop only)",
     "Требует подключения к интернету": "Requires an internet connection",
+    "Проверять обновления при запуске": "Check for updates on startup",
+    "При запуске проверяет новую версию на GitHub и показывает кнопку обновления в шапке": "On startup checks GitHub for a new version and shows an update button in the header",
     "Режим разработчика": "Developer mode",
     "Добавляет справа снизу кнопку панели разработчика: вызовы бэкенда, ошибки, метрики": "Adds a developer panel button in the bottom right: backend calls, errors, metrics",
     "Применяется после перезапуска приложения": "Applies after restarting the app",
@@ -815,6 +817,17 @@
     "crypto": "Crypto",
     "copy": "Copy",
     "copied": "Copied"
+  },
+  "updater": {
+    "badge": "Update to {version}",
+    "version": "Version {version}",
+    "check": "Check for updates",
+    "install": "Update",
+    "checking": "Checking for updates...",
+    "latest": "You have the latest version",
+    "available": "Version {version} is available",
+    "downloading": "Downloading update: {percent}%",
+    "error": "Could not check for updates"
   },
   "dev": {
     "restart": "Restart",

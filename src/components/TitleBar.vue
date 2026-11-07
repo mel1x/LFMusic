@@ -15,6 +15,7 @@ import { usePlayer } from '../composables/usePlayer';
 import { useI18n } from '../composables/useI18n';
 import { isAndroidRuntime } from '../composables/usePlatform';
 import { activeHoliday, holidayModalOpen } from '../composables/useHoliday';
+import { useUpdater } from '../composables/useUpdater';
 import { holidayBadgeSvg } from '../utils/holidayArt';
 import { splitArtistsList } from '../utils/format';
 import { vLiveWidth } from '../directives/live';
@@ -31,7 +32,13 @@ interface AudioFeatureProgressPayload {
 const win = getCurrentWindow();
 const { settings } = useSettings();
 const { t } = useI18n();
-const { currentTrack } = usePlayer();
+const { currentTrack, saveState } = usePlayer();
+const updater = useUpdater();
+
+// The installer closes the app, so the player position is saved first.
+function installUpdate() {
+    updater.install(saveState);
+}
 
 // Joint artists ("A; B") read like everywhere else: split by the user's separators, joined with commas.
 const headerArtist = computed(() => {
@@ -325,6 +332,23 @@ const closeWindow = () => win.close();
                 <span class="holidayBadgeIcon" v-html="holidayBadgeSvg(activeHoliday)"></span>
                 <span>{{ t(`holiday.${activeHoliday}`) }}</span>
             </button>
+            <button
+                v-if="updater.supported.value && updater.availableVersion.value"
+                type="button"
+                class="holidayBadge updateBadge"
+                :disabled="updater.status.value === 'downloading'"
+                @click="installUpdate"
+            >
+                <span class="holidayBadgeIcon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 4v11" />
+                        <path d="m7 10 5 5 5-5" />
+                        <path d="M5 20h14" />
+                    </svg>
+                </span>
+                <span v-if="updater.status.value === 'downloading'" class="updateBadgeProgress">{{ updater.progress.value }}%</span>
+                <span v-else>{{ t('updater.badge', { version: updater.availableVersion.value }) }}</span>
+            </button>
             <a v-if="settings.show_github_badge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
             <button class="controlsButton" @click="minimizeWindow"><MinimizeIcon /></button>
             <button class="controlsButton" @click="maximizeWindow"><MaximizeIcon /></button>
@@ -485,9 +509,6 @@ const closeWindow = () => win.close();
     background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 25%, 1), hsla(var(--accent-h), var(--accent-s), 15%, 1));
     transition: .24s ease;
 }
-.winControls a svg {
-    color: hsl(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%);
-}
 /* Same hover as .holidayBadge. */
 .winControls a:hover {
     color: #fff;
@@ -514,8 +535,17 @@ const closeWindow = () => win.close();
     color: #fff;
     filter: brightness(1.15);
 }
-.holidayBadge:has(+ a) {
+.holidayBadge:has(+ a),
+.holidayBadge:has(+ .updateBadge) {
     margin-right: 8px;
+}
+.updateBadge:disabled {
+    cursor: default;
+}
+.updateBadgeProgress {
+    min-width: 3ch;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
 }
 .holidayBadgeIcon {
     width: 20px;
@@ -523,7 +553,6 @@ const closeWindow = () => win.close();
     display: flex;
     align-items: center;
     justify-content: center;
-    color: hsl(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%);
 }
 .controlsButton {
     cursor: pointer;

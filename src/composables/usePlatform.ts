@@ -18,6 +18,11 @@ export function isLinuxDesktop(): boolean {
     return /Linux/.test(ua) && !/android/i.test(ua)
 }
 
+export function isWindowsDesktop(): boolean {
+    if (typeof navigator === 'undefined') return false
+    return /Windows/.test(navigator.userAgent)
+}
+
 export function isPhoneViewport(): boolean {
     if (typeof window === 'undefined') return false
     return window.matchMedia(

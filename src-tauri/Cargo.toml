@@ -1,6 +1,6 @@
 [package]
 name = "lfmusic"
-version = "0.1.0"
+version = "1.0.0"
 description = "Desktop Music App for local saved library"
 authors = ["melix"]
 edition = "2021"
@@ -58,6 +58,8 @@ tar = "0.4"
 lzma-rs = "0.3"
 
 [target.'cfg(windows)'.dependencies]
+# In-app updates from GitHub releases (signed NSIS/MSI installers + latest.json).
+tauri-plugin-updater = "2"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",

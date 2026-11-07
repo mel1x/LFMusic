@@ -20,6 +20,7 @@ pub mod statistics;
 mod taskbar;
 mod thumbnails;
 mod track_covers;
+mod updater;
 mod util;
 mod window_state;
 
@@ -2327,6 +2328,12 @@ pub fn run() {
             snippets::protocol_handler(ctx, request, responder);
         })
         .setup(move |app| {
+            #[cfg(target_os = "windows")]
+            {
+                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.manage(updater::PendingUpdate::default());
+            }
+
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -2533,6 +2540,8 @@ pub fn run() {
             dev_open_data_dir,
             dev_open_devtools,
             restart_app,
+            updater::update_check,
+            updater::update_install,
             // Player state
             save_player_state,
             load_player_state,
