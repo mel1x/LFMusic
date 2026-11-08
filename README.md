@@ -1,16 +1,63 @@
-# Tauri + Vue + TypeScript
+<p align="center">
+  <img src="docs/banner.png" alt="LFMusic - a fast player for your local music" width="100%">
+</p>
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+<p align="center">
+  <img src="https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20Android-0b0b0d?style=flat-square" alt="Windows | Linux | Android">
+  <img src="https://img.shields.io/badge/Tauri%202-Rust%20%2B%20Vue-0b0b0d?style=flat-square" alt="Tauri 2, Rust + Vue">
+  <img src="https://img.shields.io/badge/works%20offline-0b0b0d?style=flat-square" alt="Works offline">
+  <img src="https://img.shields.io/badge/no%20telemetry-0b0b0d?style=flat-square" alt="No telemetry">
+</p>
 
-## Recommended IDE Setup
+## Features
 
-- [VS Code](https://code.visualstudio.com/) + [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- **Your collection, not a folder.** Albums, artists, playlists and pins in the sidebar, built from the tags of your own files. Big libraries scroll smoothly.
+- **Colors from the cover.** The whole app takes the accent color of the track that is playing.
+- **My mix.** An endless stream from your library by mood, built from what you listen to and the sound of each track (tempo, energy, key).
+- **Music profile.** Listening time, time of day, most played tracks and the sound of your taste.
+- **Sound.** FLAC, ALAC, WAV, MP3, AAC, OGG and more; crossfade, equalizer, synced lyrics from `.lrc` files.
+- **Grow the library.** Find a track, album or artist and download it straight into the library (desktop, optional, through yt-dlp). Covers and artist photos from free open sources.
+- **Desktop and phone.** Windows, Linux and Android; taskbar buttons on Windows, MPRIS on Linux, a notification player on Android, Discord status.
+- **Local first.** The library, stats and settings stay on your device. No account, no AI, no telemetry.
 
-## Type Support For `.vue` Imports in TS
+## Screenshots
 
-Since TypeScript cannot handle type information for `.vue` imports, they are shimmed to be a generic Vue component type by default. In most cases this is fine if you don't really care about component prop types outside of templates. However, if you wish to get actual prop types in `.vue` imports (for example to get props validation when using manual `h(...)` calls), you can enable Volar's Take Over mode by following these steps:
+<table>
+  <tr>
+    <td align="center"><img src="docs/screens/mix.png" alt="My mix" width="420"><br>My mix</td>
+    <td align="center"><img src="docs/screens/album.png" alt="Album" width="420"><br>Album</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screens/catalog.png" alt="Catalog" width="420"><br>Catalog</td>
+    <td align="center"><img src="docs/screens/stats.png" alt="Music profile" width="420"><br>Music profile</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screens/collection.png" alt="Collection" width="420"><br>Collection</td>
+    <td align="center"><img src="docs/screens/fullscreen.png" alt="Fullscreen" width="420"><br>Fullscreen</td>
+  </tr>
+</table>
 
-1. Run `Extensions: Show Built-in Extensions` from VS Code's command palette, look for `TypeScript and JavaScript Language Features`, then right click and select `Disable (Workspace)`. By default, Take Over mode will enable itself if the default TypeScript extension is disabled.
-2. Reload the VS Code window by running `Developer: Reload Window` from the command palette.
+<p align="center">
+  <img src="docs/screens/phone-mix.png" alt="My mix on Android" width="240">
+  &nbsp;&nbsp;
+  <img src="docs/screens/phone-album.png" alt="Album on Android" width="240">
+</p>
 
-You can learn more about Take Over mode [here](https://github.com/johnsoncodehk/volar/discussions/471).
+## Installation
+
+Download from the [Releases](https://github.com/mel1x/LFMusic/releases) page:
+
+- **Windows** (x64 and ARM64): `LFMusic_*-setup.exe` installer, `.msi`, or `*_portable.exe` with no installation. Updates itself.
+- **Linux**: `.AppImage`, `.deb` or `.rpm`.
+- **Android**: `LFMusic_*_universal.apk`. Updates itself.
+
+## Build
+
+```
+pnpm install
+pnpm tauri dev           run with hot reload (dev.bat)
+pnpm tauri build         release build (build.bat)
+pnpm tauri android build --apk
+```
+
+Needs Node.js with pnpm and Rust. Screenshots and the banner: `docs/tools/screens.mjs` and `docs/tools/make-banner.py`.
