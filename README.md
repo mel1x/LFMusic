@@ -5,6 +5,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20Android-0b0b0d?style=flat-square" alt="Windows | Linux | Android">
   <img src="https://img.shields.io/badge/Tauri%202-Rust%20%2B%20Vue-0b0b0d?style=flat-square" alt="Tauri 2, Rust + Vue">
+  <img src="https://img.shields.io/badge/installer-~12%20MB-0b0b0d?style=flat-square" alt="Installer ~12 MB">
+  <img src="https://img.shields.io/badge/RAM-~185%20MB-0b0b0d?style=flat-square" alt="~185 MB RAM">
   <img src="https://img.shields.io/badge/works%20offline-0b0b0d?style=flat-square" alt="Works offline">
   <img src="https://img.shields.io/badge/no%20telemetry-0b0b0d?style=flat-square" alt="No telemetry">
 </p>
@@ -42,6 +44,15 @@
   &nbsp;&nbsp;
   <img src="docs/screens/phone-album.png" alt="Album on Android" width="240">
 </p>
+
+## Resources
+
+Windows 11, Ryzen 5 5600X, a library of 3,689 tracks. Memory is the Task Manager value for the app together with its WebView2 processes.
+
+- **Installer:** 12 MB (`setup.exe`), 23 MB portable `.exe`.
+- **Window open:** 0.7 s from launch.
+- **Memory:** ~185 MB, of which ~20 MB is the Rust core.
+- **CPU:** ~0% when paused, ~3% of the CPU (12 threads) while playing FLAC.
 
 ## Installation
 
