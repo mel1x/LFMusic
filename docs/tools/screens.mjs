@@ -1,7 +1,8 @@
-// Takes the README screenshots: the real LFMusic UI on the fake demo library
-// (onboarding-videos/demo/mock.ts), no real music or artwork involved.
+// Takes the README screenshots: the real LFMusic UI on a fake backend
+// (onboarding-videos/demo/mock.ts) fed with the English part of the local library.
 //
-// Usage: start the dev server (`npx vite`), then `node docs/tools/screens.mjs [name]`.
+// Usage: `python onboarding-videos/demo/export-real.py`, start the dev server (`npx vite`),
+// then `node docs/tools/screens.mjs [name]`.
 // Output: docs/screens/<name>.png
 import { chromium } from 'playwright-core'
 import fs from 'node:fs'
@@ -16,28 +17,30 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 const DESKTOP = { width: 1460, height: 860 }
 const PHONE = { width: 390, height: 844 }
 
+const album = (name) => '/album/' + encodeURIComponent(name)
+
 const SHOTS = {
-  mix: { route: '/', track: 38 },
-  catalog: { route: '/catalog', track: 2 },
-  album: { route: '/album/' + encodeURIComponent('Gravity Assist'), track: 35 },
+  mix: { route: '/', play: 'Weep' },
+  catalog: { route: '/catalog', play: 'Fire Escape' },
+  album: { route: album('Overnight'), play: 'Megitsune' },
   stats: {
-    route: '/', track: 22,
+    route: '/', play: 'Dead Body',
     async prepare(page) {
       await page.click('.statsBtn')
       await sleep(1800)
     },
   },
-  collection: { route: '/collections', track: 14 },
+  collection: { route: '/collections', play: 'Arms Tonite' },
   fullscreen: {
-    route: '/', track: 8,
+    route: '/', play: 'Bubbly',
     async prepare(page) {
       await page.click('.fullscreenBtn')
       await sleep(1500)
     },
     mouse: { x: 730, y: 700 },
   },
-  'phone-mix': { route: '/', track: 38, viewport: PHONE },
-  'phone-album': { route: '/album/' + encodeURIComponent('Afterglow City'), track: 1, viewport: PHONE },
+  'phone-mix': { route: '/', play: 'Alaska', viewport: PHONE },
+  'phone-album': { route: album('How To Be A Human Being'), play: 'Take A Slice', viewport: PHONE },
 }
 
 async function shoot(browser, name) {
@@ -49,7 +52,10 @@ async function shoot(browser, name) {
     isMobile: phone, hasTouch: phone,
   })
   page.on('console', m => { if (m.type() === 'error') console.log(`  [${name}]`, m.text()) })
-  const params = new URLSearchParams({ lang: 'en', track: String(s.track), route: s.route })
+  const params = new URLSearchParams({
+    lang: 'en', library: 'real', play: s.play, route: s.route,
+    pinAlbum: 'Inside (Deluxe)', pinArtist: 'Glass Animals',
+  })
   await page.goto(`${BASE}/onboarding-videos/demo.html?${params}`)
   await sleep(3500)
   // start playback so the accent and the visualizer come alive, then pause at a nice spot
