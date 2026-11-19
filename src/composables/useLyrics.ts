@@ -3,16 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { usePlayer } from "./usePlayer";
 
-// Lyrics of the current track from a sidecar file (.lrc / .txt next to it).
-// Synced .lrc gets per-line times; anything else is shown as plain text.
-
 export interface LyricLine {
     time: number | null;
     text: string;
 }
 
 const TIME_TAG = /\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]/g;
-// [ar:...], [ti:...], [offset:...] and other header tags.
 const META_TAG = /^\[[a-z]+:.*\]$/i;
 
 export function parseLyrics(raw: string): { synced: boolean; lines: LyricLine[] } {
@@ -27,7 +23,6 @@ export function parseLyrics(raw: string): { synced: boolean; lines: LyricLine[] 
         for (const m of line.matchAll(TIME_TAG)) {
             times.push(Number(m[1]) * 60 + Number(m[2].replace(":", ".")) - offset);
         }
-        // Word-level <mm:ss.xx> tags of enhanced LRC are dropped.
         const text = line.replace(TIME_TAG, "").replace(/<\d+:\d+(?:\.\d+)?>/g, "").trim();
         if (times.length) {
             for (const time of times) timed.push({ time: Math.max(0, time), text });
@@ -38,11 +33,9 @@ export function parseLyrics(raw: string): { synced: boolean; lines: LyricLine[] 
 
     if (timed.length) {
         timed.sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
-        // Instrumental gaps are empty timed lines: keep them for timing, drop leading ones.
         while (timed.length && !timed[0].text) timed.shift();
         return { synced: true, lines: timed };
     }
-    // Collapse runs of blank lines into one stanza break.
     const lines = plain.filter((l, i) => l.text || (i > 0 && plain[i - 1].text));
     while (lines.length && !lines[lines.length - 1].text) lines.pop();
     return { synced: false, lines };
@@ -84,7 +77,6 @@ function createLyrics() {
         lines.value = parsed.lines;
     }, { immediate: true });
 
-    // Index of the line being sung (-1 before the first one).
     const activeIndex = computed(() => {
         if (!synced.value) return -1;
         const pos = positionSecs.value + 0.15;

@@ -50,9 +50,7 @@ async function load(id: number) {
     } finally {
         loading.value = false
     }
-    // observe() must run only after loading=false, otherwise the albums section
-    // isn't in the DOM yet (spinner shown), the row never measures, and cards
-    // stay visibility:hidden, looking like an empty albums block.
+    // observe() only after loading=false, or the albums row never measures.
     await nextTick()
     albumsLine.observe()
 }
@@ -74,9 +72,6 @@ function openAllTracks() {
     router.push({ path: `/downloads/artist/${d.id}/tracks`, query: { name: d.name } })
 }
 
-// Download popular: top-3 most popular tracks. Downloads whichever of the top-3
-// aren't already in the library or queued; if all three are already downloaded,
-// asks for confirmation and force-redownloads them.
 const POPULAR_COUNT = 3
 const busyPopular = ref(false)
 const donePopular = ref(false)
@@ -104,8 +99,6 @@ async function downloadPopular() {
         }
         return
     }
-    // Nothing missing. If all three are actually in the library, ask about a
-    // redownload; otherwise the rest are already queued, so do nothing.
     if (tracks.every(tr => tr.in_library)) {
         popularRedownloadOpen.value = true
     } else {
@@ -128,7 +121,6 @@ async function confirmPopularRedownload() {
     }
 }
 
-// Redownload confirmation (track already in library)
 const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm()
 </script>
 
@@ -177,7 +169,6 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
                 </div>
             </div>
 
-            <!-- Popular tracks -->
             <div v-if="detail.top_tracks.length" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle" @click="openAllTracks">
@@ -196,7 +187,6 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
                 <button class="showMoreBtn" @click="openAllTracks">{{ t('downloads.showMore') }}</button>
             </div>
 
-            <!-- Albums (section hidden if none) -->
             <div v-if="detail.albums.length" class="pageLine">
                 <div class="lineHat">
                     <div class="lineTitle nonClickable">{{ t('downloads.albumsTitle') }}</div>
@@ -246,7 +236,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
     overflow-y: scroll;
@@ -272,14 +262,14 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     width: fit-content;
 }
 .backBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
     color: hsla(0, 0%, 100%, 1);
 }
-.backBtn svg { color: hsla(0, 0%, 100%, 0.6); transition: .24s ease; }
+.backBtn svg { color: hsla(0, 0%, 100%, 0.6); transition: var(--duration-hover) var(--ease-smooth); }
 .backBtn:hover svg { color: hsla(0, 0%, 100%, 1); }
 
 .pageHat {
@@ -377,7 +367,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     font-size: 12px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .playListBtn:hover { background-color: hsla(0, 0%, 100%, 0.86); }
 .playListBtn:disabled {
@@ -424,9 +414,9 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     display: flex;
     align-items: center;
     gap: 2px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
-.lineTitle svg { color: hsla(0, 0%, 100%, 0.5); transition: .24s ease; }
+.lineTitle svg { color: hsla(0, 0%, 100%, 0.5); transition: var(--duration-hover) var(--ease-smooth); }
 .lineTitle:hover { color: hsla(0, 0%, 100%, 1); }
 .lineTitle:hover svg { color: hsla(0, 0%, 100%, 0.9); transform: translateX(2px); }
 .lineTitle.nonClickable { cursor: default; }
@@ -440,7 +430,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     color: hsla(0, 0%, 100%, 0.75);
     font-size: 13px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .showMoreBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
@@ -460,7 +450,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     background-color: var(--light-bg);
     color: hsla(0, 0%, 100%, 0.6);
     opacity: 0;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .lineControls button:hover {
     border: 2px solid hsla(0, 0%, 100%, 0.4);
@@ -518,7 +508,6 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.7);
 }
-/* Album cards bleed 8px for their hover background — give them room. */
 .lineList {
     padding: 8px;
     margin: -8px;

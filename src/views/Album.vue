@@ -59,7 +59,6 @@ const albumName = computed(() => {
 
 const { loadOrder: loadAlbumOrder, applyOrder: applyAlbumOrder, setOrder: setAlbumOrder } = useAlbumTrackOrder()
 
-// Load saved order from DB on album open / route change.
 watch(albumName, (name) => { if (name) loadAlbumOrder(name) }, { immediate: true })
 
 const albumPlaylistForTracks = computed(() =>
@@ -75,8 +74,6 @@ async function loadAlbumTracks() {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
         if (albumName.value === name) {
-            // Use live cache objects, not raw ones — otherwise covers loaded
-            // earlier into the cache object won't show on the raw copy. See cacheTrack.
             albumTracksRaw.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
             tracksLoadedFor.value = name
         }
@@ -99,7 +96,6 @@ const albumArtist = computed(() =>
 
 const sourceId = computed(() => `album:${albumName.value}`)
 
-// External track order + phantom (not downloaded) tracks
 const { settings } = useSettings()
 const { getAlbumLayout } = useExternalSources()
 
@@ -112,8 +108,6 @@ const layoutOk = computed(() =>
 const externalOrderActive = computed(() => settings.value.external_album_order && layoutOk.value)
 const supplementActive = computed(() => settings.value.external_supplement_missing && layoutOk.value)
 
-// Phantom is clickable only if yt-dlp is installed and downloads page is enabled;
-// otherwise it's purely informational.
 const { ytdlpMissing } = useDownloads()
 const phantomClickable = computed(() => !ytdlpMissing.value && settings.value.show_downloads_page)
 const layoutNeeded = computed(() =>
@@ -126,7 +120,6 @@ async function refreshAlbumLayout() {
     layoutSettledFor.value = null
     if (!layoutNeeded.value || !name) return
     const layout = await getAlbumLayout(name)
-    // Guard against race: album may have changed while the request was in flight.
     if (albumName.value === name) {
         albumLayout.value = layout
         layoutSettledFor.value = name
@@ -138,8 +131,6 @@ watch(
     { immediate: true },
 )
 
-// First-paint gate: wait for tracks (and external layout, if enabled) to load
-// before showing the album, so order/phantoms appear without a jump. Capped at 2.5s.
 const PAGE_LOAD_TIMEOUT_MS = 2500
 
 const tracksReady = computed(() => tracksLoadedFor.value === albumName.value)
@@ -167,8 +158,6 @@ watch([tracksReady, layoutReady], () => {
     }
 }, { immediate: true })
 
-// A row is either a real local track or a "phantom" (present in the canonical
-// album but missing from the library — rendered semi-transparent).
 interface AlbumRow {
     phantom: boolean
     key: string
@@ -182,8 +171,7 @@ function filenameOf(t: TrackMetadata): string {
     return t.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || ''
 }
 
-// Port of TITLE_NOISE_TOKENS from src-tauri/src/external.rs. A bracketed group
-// containing any of these is stripped entirely; version tags (remix/live/…) stay.
+// Port of TITLE_NOISE_TOKENS from src-tauri/src/external.rs.
 const TITLE_NOISE_TOKENS = new Set([
     'feat', 'ft', 'featuring', 'prod', 'produced', 'official', 'lyric', 'lyrics',
     'visualizer', 'remaster', 'remastered', 'explicit', 'mv',
@@ -195,14 +183,9 @@ function groupIsNoise(buf: string): boolean {
         .some(w => w.length > 0 && TITLE_NOISE_TOKENS.has(w))
 }
 
-// Mirrors `external::title_match_key` = normalize(strip_title_noise(title)) on the
-// backend. Must stay identical: a prior mismatch (frontend stripped only feat.
-// markers, backend stripped ALL noise groups) left "Believer (Official Video)"
-// unmatched against local "Believer", so a downloaded track stayed a phantom.
+// Mirrors external::title_match_key; must stay identical, or downloaded tracks stay phantoms.
 function albumNormalizeTitle(s: string): string {
     const lower = (s || '').toLowerCase()
-    // 1) strip_title_noise: strip noise bracket groups char by char, keeping
-    //    meaningful ones (remix/live/…).
     let stripped = ''
     let buf = ''
     let depth = 0
@@ -223,14 +206,11 @@ function albumNormalizeTitle(s: string): string {
             stripped += ch
         }
     }
-    // Unclosed bracket — keep the remainder if it's not noise.
     if (buf.length > 0 && !groupIsNoise(buf)) stripped += buf
-    // Trailing credits outside brackets.
     for (const marker of [' feat.', ' feat ', ' ft.', ' ft ', ' featuring ', ' prod.', ' prod ']) {
         const i = stripped.indexOf(marker)
         if (i !== -1) stripped = stripped.slice(0, i)
     }
-    // 2) normalize: letters/digits only, everything else collapses to single spaces.
     let out = ''
     let prevSpace = true
     for (const ch of stripped) {
@@ -268,8 +248,6 @@ const rawByPath = computed(() => {
     return m
 })
 
-// Full ordered row list (before search filtering). Depends on two independent
-// settings: external order (reorders local tracks) and supplement (shows phantoms).
 const orderedRows = computed<AlbumRow[]>(() => {
     const layout = albumLayout.value
     const order = externalOrderActive.value
@@ -279,9 +257,6 @@ const orderedRows = computed<AlbumRow[]>(() => {
         return albumTracks.value.map(realRow)
     }
 
-    // Pool of local tracks by normalized title, so a just-downloaded track (not
-    // yet in the cached layout by file_path) can take its canonical slot and
-    // replace a phantom.
     const localByTitle = new Map<string, TrackMetadata[]>()
     for (const t of albumTracks.value) {
         const k = albumNormalizeTitle(t.title || filenameOf(t))
@@ -290,8 +265,6 @@ const orderedRows = computed<AlbumRow[]>(() => {
         if (arr) arr.push(t); else localByTitle.set(k, [t])
     }
     const used = new Set<string>()
-    // Match canon entry to a local track: exact file_path from layout first,
-    // then normalized title (for freshly downloaded tracks).
     const matchLocal = (e: AlbumLayoutEntry): TrackMetadata | undefined => {
         if (e.file_path) {
             const t = rawByPath.value.get(e.file_path)
@@ -305,7 +278,6 @@ const orderedRows = computed<AlbumRow[]>(() => {
     }
 
     if (order) {
-        // Canonical order; phantoms only if supplement is enabled.
         const rows: AlbumRow[] = []
         for (const e of layout.entries) {
             const local = matchLocal(e)
@@ -316,19 +288,15 @@ const orderedRows = computed<AlbumRow[]>(() => {
                 rows.push(phantomRow(e, rows.length))
             }
         }
-        // Local tracks not in canon (bonus tracks etc.) go at the end.
         for (const t of albumTracks.value) {
             if (!used.has(t.file_path)) rows.push(realRow(t))
         }
         return rows
     }
 
-    // Supplement without reordering: local order + missing tracks appended.
     const rows = albumTracks.value.map(realRow)
     let idx = rows.length
     for (const e of layout.entries) {
-        // Phantom only if no local track matches by path or title (otherwise a
-        // freshly downloaded track would show twice).
         if (!matchLocal(e)) {
             rows.push(phantomRow(e, idx++))
         }
@@ -338,8 +306,6 @@ const orderedRows = computed<AlbumRow[]>(() => {
 
 const { getCustomCover } = useCustomCovers()
 
-// The canonical "first" track comes from the playlist, same as the grid card
-// (PlaylistInfo.first_file_path) — keeps the header cover in sync with the grid.
 const albumPlaylist = computed(() =>
     albumPlaylists.value.find(p => p.name === albumName.value) || null
 )
@@ -353,25 +319,18 @@ const albumFirstTrack = computed<TrackMetadata | null>(() => {
 const albumCover = computed(() => {
     const custom = getCustomCover('album', albumName.value)
     if (custom) return custom
-    // Prefer the "first" track's cover; fall back to any loaded track cover,
-    // then the default — keeps this in sync with the grid.
     return albumFirstTrack.value?.cover_art
         || albumTracks.value.find(t => t.cover_art)?.cover_art
         || defaultTrackCover
 })
 
-// Force-load the "first" track's cover, otherwise the header shows the default
-// until the user scrolls that track into view.
 watch(albumFirstTrack, (t) => {
     if (t && !t.cover_art) loadCoversForTracks([t])
 }, { immediate: true })
 
-// Playlists may not be loaded yet on direct URL navigation.
 onMounted(() => {
     if (!albumPlaylists.value.length) loadPlaylists()
 })
-
-// ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 import { menuAnchorBelow } from '../utils/menu'
@@ -415,12 +374,9 @@ const displayRows = computed<AlbumRow[]>(() => {
     )
 })
 
-// Playable (real) tracks only — for the queue and the "Listen" button.
 const playableTracks = computed<TrackMetadata[]>(() =>
     displayRows.value.filter(r => !r.phantom).map(r => r.track!)
 )
-
-// ── Header height ──
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
@@ -443,8 +399,6 @@ onUnmounted(() => {
     clearPageReadyTimer()
 })
 
-// ── Virtual scroll ──
-
 const {
     containerEl: trackListEl,
     onScroll,
@@ -459,8 +413,6 @@ watch(albumName, () => resetScroll())
 
 const isScrollingToTop = ref(false)
 
-// Hold back first paint until the first 20 covers have resolved. Only armed once
-// tracks are loaded — otherwise it'd open on an empty list (content would flash).
 const { ready: coversReady } = useCoverGate(
     () => displayRows.value.filter(r => !r.phantom).slice(0, 20).map(r => r.track!),
     { armed: () => tracksReady.value },
@@ -471,8 +423,6 @@ watch(visibleTracks, (rows) => {
         loadCoversForTracks(rows.filter(r => !r.phantom).map(r => r.track!))
     }
 }, { immediate: true })
-
-// ── Play button ──
 
 const isAlbumActive = computed(() =>
     activePlaylistSource.value === sourceId.value
@@ -487,8 +437,6 @@ function onPlayAlbum() {
         playTrack(playableTracks.value[0])
     }
 }
-
-// ── Sticky header ──
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -508,8 +456,6 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// ── Track click ──
-
 function onRowClick(e: MouseEvent, row: AlbumRow) {
     if (row.phantom || !row.track) return
     if (isPhoneViewport()) {
@@ -519,9 +465,6 @@ function onRowClick(e: MouseEvent, row: AlbumRow) {
     createRipple(e)
 }
 
-// Phantom click: seed the downloads page search with "artist title" and navigate
-// there. dlArtist/dlTitle are passed separately for an exact Deezer field search —
-// a generic title (e.g. "Intro") would otherwise get lost in free-text search.
 function onPhantomClick(row: AlbumRow) {
     if (!phantomClickable.value) return
     const q = [row.title, row.artist].map(s => (s || '').trim()).filter(Boolean).join(' ')
@@ -537,8 +480,6 @@ function onCoverClick(track: TrackMetadata) {
     playTrack(track, { manualListStart: true })
 }
 
-// ── Context menu ──
-
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
 function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
@@ -551,8 +492,6 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     const rect = btn.getBoundingClientRect()
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
-
-// ── Album page context menu (more button) ──
 
 const { isPinned: isPinnedFn, togglePin } = usePins()
 const isPinned = computed(() => isPinnedFn('album', albumName.value))
@@ -571,8 +510,6 @@ function onTogglePin() {
     togglePin({ kind: 'album', key: albumName.value, name: albumName.value })
 }
 
-// ── Move track to top of album ──
-
 async function moveTrackToTopOfAlbum(track: TrackMetadata) {
     const paths = albumTracks.value.map(t => t.file_path)
     const idx = paths.indexOf(track.file_path)
@@ -581,12 +518,9 @@ async function moveTrackToTopOfAlbum(track: TrackMetadata) {
     paths.unshift(track.file_path)
     await setAlbumOrder(albumName.value, paths)
     if (isAlbumActive.value) {
-        // Rebuild the queue source from the reordered album tracks.
         setPlaylistSource(sourceId.value, albumTracks.value.slice())
     }
 }
-
-// ── Back ──
 
 function goBack() {
     goBackOrHome(router)
@@ -674,8 +608,6 @@ function onCoverImgClick() {
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
             <template v-for="row in visibleTracks" :key="row.key">
-                <!-- Phantom (not downloaded) track: semi-transparent, clickable
-                     to search the downloads page if yt-dlp is installed. -->
                 <div
                     v-if="row.phantom"
                     class="trackElem phantom"
@@ -758,11 +690,11 @@ function onCoverImgClick() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     overflow-y: scroll;
 }
@@ -786,7 +718,7 @@ function onCoverImgClick() {
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
@@ -794,7 +726,7 @@ function onCoverImgClick() {
 }
 .backBtn svg {
     color: hsla(0, 0%, 100%, 0.6);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
     color: hsla(0, 0%, 100%, 1);
@@ -820,7 +752,7 @@ function onCoverImgClick() {
     height: 200px;
     background-color: transparent;
     border-radius: 18px;
-    transition: width .24s ease, height .24s ease, margin .24s ease, filter .28s ease;
+    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
@@ -849,7 +781,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.4);
     width: fit-content;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -891,7 +823,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.7);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     max-width: 100%;
     white-space: nowrap;
     overflow: hidden;
@@ -920,7 +852,7 @@ function onCoverImgClick() {
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     font-size: 12px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.8);
@@ -945,7 +877,7 @@ function onCoverImgClick() {
     background-color: transparent;
     color: hsla(0, 0%, 100%, 0.6);
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .moreBtn:hover,
 .moreBtn.menuOpen {
@@ -966,7 +898,7 @@ function onCoverImgClick() {
     left: 12px;
     transform: translateY(-50%);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
@@ -989,7 +921,7 @@ function onCoverImgClick() {
     justify-content: center;
     padding: 6px;
     border-radius: 50%;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -1026,7 +958,7 @@ function onCoverImgClick() {
     padding: 8px 16px 8px 8px;
     border-radius: 9px;
     background-color: hsla(0, 0%, 100%, 0);
-    transition: .31s ease-in-out;
+    transition: .31s var(--ease-smooth-in-out);
     height: 58px;
     box-sizing: border-box;
     overflow: hidden;
@@ -1040,7 +972,7 @@ function onCoverImgClick() {
     height: 42px;
     background-color: #202020;
     border-radius: 5px;
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
 }
@@ -1075,7 +1007,7 @@ function onCoverImgClick() {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -1088,7 +1020,7 @@ function onCoverImgClick() {
     font-weight: 500;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
 
     opacity: 1;
@@ -1117,7 +1049,7 @@ function onCoverImgClick() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -1132,7 +1064,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -1158,7 +1090,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.7);
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -1173,9 +1105,6 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.3);
 }
 
-/* ── Phantom (not downloaded) tracks ── */
-/* Don't fade the whole row (would be confused with the active-track look, which
-   also dims the cover) — fade the cover more, text less, so text stays readable. */
 .trackElem.phantom {
     cursor: default;
 }
@@ -1204,7 +1133,6 @@ function onCoverImgClick() {
 .trackElem.phantom .trackTime {
     margin-left: 0;
 }
-/* Clickable phantom (yt-dlp available): hint that the track can be downloaded. */
 .trackElem.phantom.downloadable {
     cursor: pointer;
 }
@@ -1227,7 +1155,7 @@ function onCoverImgClick() {
     color: #fff;
     background-color: hsla(0, 0%, 0%, 0.45);
     opacity: 0;
-    transition: opacity .2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .trackElem.phantom.downloadable:hover .phantomDlIcon {
     opacity: 1;

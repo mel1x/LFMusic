@@ -41,8 +41,8 @@ function trackTitle(track: TrackMetadata): string {
   return track.title || fileName || 'LFMusic'
 }
 
-// The native side decodes only base64 data URLs, while covers are protocol URLs
-// (lfmusic-cover / lfmusic-external), so the image is fetched and inlined here.
+// The native side decodes only base64 data URLs; covers are protocol URLs, so the image is inlined
+// here.
 let artworkSource = ''
 let artworkData = ''
 
@@ -110,7 +110,6 @@ export function useAndroidMediaSession(options: AndroidMediaSessionOptions) {
       const source = options.currentCoverArt.value || ''
       const includeArtwork = forceArtwork || source !== lastArtworkSent
       const artwork = includeArtwork ? await artworkDataUrl(source) : undefined
-      // The cover changed while it was loading; the newer call sends it.
       if ((options.currentCoverArt.value || '') !== source) return
       const delivered = sendUpdate(options, artwork)
       if (delivered && includeArtwork) lastArtworkSent = source

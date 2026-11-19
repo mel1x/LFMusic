@@ -1,5 +1,5 @@
 <template>
-  <svg
+  <svg class="lfi lfi-pause"
     width="20px"
     height="20px"
     viewBox="0 0 24 24"

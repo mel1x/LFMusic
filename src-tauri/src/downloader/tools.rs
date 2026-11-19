@@ -1,12 +1,6 @@
-//! External binaries the downloader shells out to: **yt-dlp** (required),
-//! **Deno** (yt-dlp's JS runtime — YouTube's signature challenge can't be
-//! solved without one) and **ffmpeg** (optional; converts streams the player
-//! can't decode, e.g. Opus, into m4a).
-//!
-//! Everything lives in `<app_data_dir>/bin`. A binary on the system `PATH`
-//! is used when there is no app-managed copy. Installs download into a staging
-//! file, verify it (SHA256 for yt-dlp/ffmpeg, `--version` for all), then swap
-//! it in with a rename, so a failed install never breaks a working tool.
+//! External binaries: yt-dlp (required), Deno (yt-dlp's JS runtime for YouTube), ffmpeg (optional).
+//! Installs go through a staging file and a rename, so a failed install never breaks a working
+//! tool.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -53,8 +47,7 @@ impl Tool {
         }
     }
 
-    /// Whether a newer release can be detected. ffmpeg comes from a rolling
-    /// build without comparable versions, so it is only ever installed/removed.
+    /// Whether a newer release can be detected.
     fn tracks_updates(self) -> bool {
         !matches!(self, Tool::Ffmpeg)
     }
@@ -117,8 +110,7 @@ pub fn command(program: &Path) -> Command {
     cmd
 }
 
-/// yt-dlp parses some path arguments itself, where a backslash may be eaten
-/// as an escape — forward slashes work everywhere, including Windows.
+/// yt-dlp may eat backslashes in paths: forward slashes work everywhere.
 pub fn path_arg(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
@@ -149,7 +141,7 @@ fn version_of(program: &Path, tool: Tool) -> Option<String> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let first = text.lines().next()?.trim();
-    // "2026.09.01" | "deno 2.5.1 (stable, …)" | "ffmpeg version N-1234-g… Copyright …"
+    // "2026.09.01" | "deno 2.5.1 (stable, ...)" | "ffmpeg version N-1234-g... Copyright ..."
     let v = match tool {
         Tool::Ytdlp => first.to_string(),
         Tool::Deno => first.trim_start_matches("deno ").split_whitespace().next()?.to_string(),
@@ -162,17 +154,16 @@ fn version_of(program: &Path, tool: Tool) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
-/// App-managed binary first, then `PATH`. Returns the path and its version.
+/// App-managed binary first, then `PATH`.
 fn locate(data_dir: &Path, tool: Tool) -> Option<(PathBuf, bool, String)> {
     if !platform_supported() {
         return None;
     }
     let managed = managed_path(data_dir, tool);
-    if managed.is_file() {
-        if let Some(v) = version_of(&managed, tool) {
+    if managed.is_file()
+        && let Some(v) = version_of(&managed, tool) {
             return Some((managed, true, v));
         }
-    }
     let system = PathBuf::from(tool.exe_name());
     version_of(&system, tool).map(|v| (system, false, v))
 }
@@ -186,8 +177,7 @@ pub fn resolve(data_dir: &Path) -> Option<Resolved> {
     })
 }
 
-/// Local status (no network). `latest` values from the last update check are
-/// merged in from the metadata file.
+/// Local status (no network).
 pub fn info(data_dir: &Path) -> ToolsInfo {
     let mut out = ToolsInfo {
         unsupported: !platform_supported(),
@@ -215,8 +205,6 @@ pub fn info(data_dir: &Path) -> ToolsInfo {
 fn normalize_version(v: &str) -> &str {
     v.trim().trim_start_matches('v')
 }
-
-// ── Metadata: last update check ─────────────────────────────────────────────
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Meta {
@@ -254,10 +242,6 @@ pub fn secs_since_update_check(data_dir: &Path) -> u64 {
     crate::util::unix_secs().saturating_sub(Meta::load(data_dir).checked_at)
 }
 
-// ── Network ─────────────────────────────────────────────────────────────────
-
-/// Built once per redirect policy: building a rustls client re-loads the root
-/// store, and reusing it keeps the connection pool across update-check requests.
 fn client(follow_redirects: bool) -> Result<reqwest::blocking::Client, String> {
     use std::sync::OnceLock;
     static FOLLOW: OnceLock<reqwest::blocking::Client> = OnceLock::new();
@@ -267,6 +251,7 @@ fn client(follow_redirects: bool) -> Result<reqwest::blocking::Client, String> {
         return Ok(c.clone());
     }
     let mut b = reqwest::blocking::Client::builder()
+        .tls_backend_preconfigured(crate::util::http_tls())
         .user_agent("LFMusic (+https://github.com/mel1x/LFMusic)")
         .connect_timeout(Duration::from_secs(20));
     if !follow_redirects {
@@ -276,8 +261,7 @@ fn client(follow_redirects: bool) -> Result<reqwest::blocking::Client, String> {
     Ok(cell.get_or_init(|| built).clone())
 }
 
-/// GitHub intermittently answers 503/429 under load; retry with backoff
-/// before giving up.
+/// GitHub intermittently answers 503/429 under load; retry with backoff before giving up.
 fn retrying<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
     let mut last = String::new();
     for attempt in 0..4u32 {
@@ -292,8 +276,7 @@ fn retrying<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
     Err(last)
 }
 
-/// Latest release tag of a GitHub repo. The `/releases/latest` redirect is
-/// tried first (no rate limit), the REST API (60 req/h) as a fallback.
+/// Latest release tag of a GitHub repo.
 fn latest_github_tag(repo: &str) -> Result<String, String> {
     let via_redirect = || -> Result<String, String> {
         let resp = client(false)?
@@ -362,19 +345,26 @@ fn download(url: &str, target: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Re
         progress(done, total);
     }
     file.flush().map_err(|e| e.to_string())?;
-    if let Some(t) = total {
-        if done != t {
+    if let Some(t) = total
+        && done != t {
             return Err("Файл скачался не полностью".into());
         }
-    }
     Ok(())
 }
 
 fn sha256_hex(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
+    use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     Ok(hasher
         .finalize()
         .iter()
@@ -399,8 +389,6 @@ fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
-// ── Release assets per platform ─────────────────────────────────────────────
 
 fn arm64() -> bool {
     std::env::consts::ARCH == "aarch64"
@@ -429,7 +417,7 @@ fn deno_asset() -> &'static str {
     }
 }
 
-/// yt-dlp/FFmpeg-Builds asset (Windows/Linux). macOS uses evermeet.cx.
+/// yt-dlp/FFmpeg-Builds asset (Windows/Linux).
 fn ffmpeg_asset() -> &'static str {
     match (cfg!(windows), arm64()) {
         (true, true) => "ffmpeg-master-latest-winarm64-gpl.zip",
@@ -439,8 +427,6 @@ fn ffmpeg_asset() -> &'static str {
     }
 }
 
-// ── Archive extraction ──────────────────────────────────────────────────────
-
 /// Extracts the entry whose file name is `name` (anywhere in the archive) to `out`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn extract_from_zip(archive: &Path, name: &str, out: &Path) -> Result<(), String> {
@@ -448,7 +434,7 @@ fn extract_from_zip(archive: &Path, name: &str, out: &Path) -> Result<(), String
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("Архив повреждён: {}", e))?;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-        let entry_name = entry.name().replace('\\', "/");
+        let entry_name = entry.name().map_err(|e| e.to_string())?.replace('\\', "/");
         if !entry.is_dir() && entry_name.rsplit('/').next() == Some(name) {
             let mut dst = std::fs::File::create(out).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut dst).map_err(|e| e.to_string())?;
@@ -506,8 +492,6 @@ fn make_executable(_p: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// ── Install / remove ────────────────────────────────────────────────────────
-
 /// Progress callback: (tool, human-readable message, fraction 0..1 if known).
 pub type Progress<'a> = &'a (dyn Fn(Tool, String, Option<f64>) + Sync);
 
@@ -536,9 +520,8 @@ impl Drop for Staging {
     }
 }
 
-/// Moves `new` over `target`. A running executable can't be deleted on
-/// Windows but can be renamed, so the old copy is moved aside first and only
-/// then removed (best-effort; leftovers are swept on the next install).
+/// A running exe cannot be deleted on Windows but can be renamed: the old copy is moved aside
+/// first.
 fn swap_in(new: &Path, target: &Path) -> Result<(), String> {
     let old = target.with_extension("old");
     let _ = std::fs::remove_file(&old);
@@ -556,8 +539,7 @@ fn swap_in(new: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Fetches the tool into staging, verifies it and swaps it in. Returns the
-/// installed version.
+/// Fetches the tool into staging, verifies it and swaps it in.
 pub fn install(data_dir: &Path, tool: Tool, progress: Progress) -> Result<String, String> {
     if !platform_supported() {
         return Err("Скачивание не поддерживается на этой платформе".into());
@@ -629,7 +611,6 @@ fn install_ffmpeg_into(
 ) -> Result<(), String> {
     let base = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest";
     let asset = ffmpeg_asset();
-    // Checksums are published alongside the rolling build; verify when present.
     let expected = fetch_text(&format!("{}/checksums.sha256", base))
         .ok()
         .and_then(|s| hash_from_listing(&s, asset));
@@ -672,8 +653,6 @@ pub fn remove(data_dir: &Path, tool: Tool) -> Result<(), String> {
     Ok(())
 }
 
-/// Network check for newer yt-dlp / Deno releases; stores the result so the
-/// local [`info`] can report `update_available` without the network.
 pub fn check_updates(data_dir: &Path) -> Result<ToolsInfo, String> {
     let ytdlp = latest_github_tag("yt-dlp/yt-dlp")?;
     let deno = latest_github_tag("denoland/deno").ok();

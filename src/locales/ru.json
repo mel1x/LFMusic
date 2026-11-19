@@ -12,7 +12,6 @@
       }
     },
     "language": "Язык интерфейса",
-    "languageDescription": "Переключение языка приложения",
     "russian": "Русский",
     "english": "English",
     "crossfadeOnSeek": "Плавная перемотка трека",
@@ -29,7 +28,6 @@
     "extraBlockNextTrack": "Следующий трек"
   },
   "player": {
-    "now": "Сейчас",
     "nextTrack": "Следующий трек",
     "noTrack": "Нет трека",
     "untitled": "Без названия",
@@ -42,12 +40,12 @@
     "progressActiveTitle": "Фоновая подготовка рекомендаций",
     "progressStarting": "Запускается первый анализ аудио. Треки уже можно слушать.",
     "progressDone": "Готово: обработано {total} треков.",
-    "progressActive": "Обработано {current} из {total} треков. Это единоразовый фоновый анализ для будущих рекомендаций. Сильно нагружает CPU!",
+    "progressActive": "Обработано {current} из {total} треков. Это единоразовый фоновый анализ для будущих рекомендаций. Сильно нагружает CPU.",
     "progressDonePrefix": "Готово: обработано",
     "progressDoneSuffix": "треков.",
     "progressActivePrefix": "Обработано",
     "progressActiveMiddle": "из",
-    "progressActiveSuffix": "треков. Это единоразовый фоновый анализ для будущих рекомендаций. Сильно нагружает CPU!",
+    "progressActiveSuffix": "треков. Это единоразовый фоновый анализ для будущих рекомендаций. Сильно нагружает CPU.",
     "externalActiveTitle": "Получение данных из интернета",
     "externalActive": "Получено {current} из {total} элементов из внешних источников (обложки, аватарки, порядок треков).",
     "externalActivePrefix": "Получено",
@@ -58,13 +56,12 @@
     "downloadActivePrefix": "Скачано",
     "downloadActiveMiddle": "из",
     "downloadActiveSuffix": "треков.",
-    "tracksReadyTitle": "Треки уже можно слушать!",
-    "tracksReadyText": "Сканирование треков завершено. В фоне первый раз идет подготовка к рекомендациям, это не мешает воспроизведению, но сильно нагружает CPU!",
+    "tracksReadyTitle": "Треки уже можно слушать",
+    "tracksReadyText": "Сканирование треков завершено. В фоне первый раз идет подготовка к рекомендациям, это не мешает воспроизведению, но сильно нагружает CPU.",
     "tracksReadyButton": "Понятно"
   },
   "downloads": {
     "title": "Скачивание",
-    "subtitle": "Найдите трек в каталоге или вставьте ссылку - LFMusic подберёт лучший источник, добавит обложку, теги и текст песни",
     "searchPlaceholder": "Трек, альбом, исполнитель или ссылка",
     "searchDisabledPlaceholder": "Сначала установите компоненты для скачивания",
     "linkTag": "Ссылка",
@@ -85,19 +82,11 @@
     "recentTitle": "Недавние запросы",
     "clearRecent": "Очистить",
     "recentDownloads": "Недавно скачанные",
-    "tips": {
-      "searchTitle": "Поиск по каталогу",
-      "searchText": "Названия, исполнители и альбомы из Deezer - с обложками и точной длительностью",
-      "linkTitle": "Скачивание по ссылке",
-      "linkText": "YouTube, YouTube Music, SoundCloud, Bandcamp и сотни других сайтов, включая плейлисты",
-      "albumTitle": "Альбомы целиком",
-      "albumText": "Откройте альбом или исполнителя и скачайте всё одной кнопкой"
-    },
     "emptyNothingTitle": "Ничего не найдено",
     "emptyNothingDesc": "Проверьте написание или добавьте имя исполнителя",
     "searchError": "Поиск не удался - проверьте подключение к интернету",
     "link": {
-      "resolving": "Получаем информацию по ссылке…",
+      "resolving": "Получаем информацию по ссылке...",
       "errorTitle": "Не удалось открыть ссылку",
       "single": "Трек по ссылке",
       "collection": "Плейлист по ссылке",
@@ -109,7 +98,7 @@
       "denoTitle": "Не хватает движка Deno",
       "denoText": "Без него YouTube не отдаёт аудио. Установка займёт меньше минуты.",
       "install": "Установить",
-      "installing": "Установка…",
+      "installing": "Установка...",
       "optional": "по желанию",
       "confirmTitle": "Скачать компоненты?",
       "confirmText": "yt-dlp, Deno и ffmpeg будут скачаны из их официальных репозиториев на GitHub и проверены по контрольным суммам.",
@@ -131,9 +120,9 @@
     },
     "stage": {
       "queued": "В очереди",
-      "searching": "Поиск источника…",
-      "searchingOn": "Ищем на {source}…",
-      "processing": "Теги и обложка…",
+      "searching": "Поиск источника...",
+      "searchingOn": "Ищем на {source}...",
+      "processing": "Теги и обложка...",
       "done": "Готово",
       "doneFrom": "Скачано с {source}"
     },
@@ -197,11 +186,11 @@
       "stateReady": "Готово",
       "stateMissing": "Не установлено",
       "stateUpdate": "Есть обновление",
-      "stateBusy": "Установка…",
+      "stateBusy": "Установка...",
       "install": "Установить",
       "update": "Обновить",
       "check": "Проверить обновления",
-      "checking": "Проверка…",
+      "checking": "Проверка...",
       "remove": "Удалить",
       "removeTooltip": "Удаляет только копии, скачанные приложением",
       "system": "системный",
@@ -246,6 +235,23 @@
     "deleteErrorTitle": "Не удалось удалить трек",
     "deleteErrorDismiss": "Понятно",
     "noTitle": "Без названия"
+  },
+  "globalSearch": {
+    "pill": "Поиск",
+    "placeholder": "Поиск по библиотеке",
+    "clear": "Очистить",
+    "nothing": "Ничего не найдено",
+    "showMore": "Показать больше",
+    "artist": "Исполнитель",
+    "album": "Альбом",
+    "playlist": "Плейлист",
+    "filter": {
+      "all": "Все",
+      "tracks": "Треки",
+      "artists": "Исполнители",
+      "albums": "Альбомы",
+      "playlists": "Плейлисты"
+    }
   },
   "searchPage": {
     "topArtists": "Вы часто слушаете",
@@ -488,7 +494,6 @@
     }
   },
   "onboarding": {
-    "kicker": "Добро пожаловать в LFMusic",
     "step": "Шаг {n} из {total}",
     "skip": "Пропустить",
     "back": "Назад",
@@ -509,6 +514,7 @@
     "mixLabel": "Микс"
   },
   "donate": {
+    "badge": "Поддержать",
     "title": "Поддержать автора",
     "desc": "LFMusic бесплатный и без рекламы",
     "linkSub": "Карта, СБП и другие способы",

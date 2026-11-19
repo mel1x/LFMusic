@@ -1,20 +1,5 @@
-//! Track downloader: catalog search results (Deezer) or pasted links are
-//! turned into audio files via yt-dlp, tagged, and imported into the library.
-//!
-//! Pipeline per job:
-//! 1. **Find a source** — search YouTube (then SoundCloud as a fallback) and
-//!    pick the hit that really is the requested recording ([`matching`]),
-//!    skipping covers/live versions and checking the duration.
-//! 2. **Download** the best audio-only stream into a private temp folder,
-//!    retrying transient network failures; unavailable/age-gated hits fall
-//!    through to the next candidate, a YouTube bot-check to the next source.
-//! 3. **Post-process** — convert to m4a if the player can't decode the stream,
-//!    write tags/cover/lyrics ([`postprocess`]).
-//! 4. **Import** — move to `Artist - Title.ext` in the downloads folder and
-//!    UPSERT that one file into the library.
-//!
-//! Queue state is pushed to the frontend as a full snapshot on the
-//! `downloads_queue` event; tool status on `downloads_tools`.
+//! Track downloader: finds a source with yt-dlp (YouTube, then SoundCloud), downloads, tags and
+//! imports into the library.
 
 mod matching;
 mod postprocess;
@@ -33,16 +18,13 @@ use matching::{Candidate, Target};
 use tools::{Resolved, Tool, ToolsInfo};
 use ytdlp::{Control, Cookies, NetOptions, Source};
 
-/// Parallel downloads. Two keeps a batch moving while one job is searching
-/// or tagging, without looking like a scraper to YouTube.
+/// Parallel downloads: two keep a batch moving without looking like a scraper.
 const MAX_WORKERS: usize = 2;
 /// Candidates tried per source before moving on.
 const CANDIDATES_PER_SOURCE: usize = 3;
 const AUTO_UPDATE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const QUEUE_FILE: &str = "downloads.json";
 const TEMP_DIR: &str = ".lfm-tmp";
-
-// ── Public types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,8 +46,8 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    /// Which failure to report when several sources failed differently —
-    /// the one the user can act on wins.
+    /// Which failure to report when several sources failed differently - the one the user can act
+    /// on wins.
     fn priority(self) -> u8 {
         match self {
             ErrorKind::Cookies => 12,
@@ -212,15 +194,13 @@ pub struct LinkResult {
     pub tracks: Vec<LinkTrack>,
 }
 
-// ── State ───────────────────────────────────────────────────────────────────
-
 #[derive(Default)]
 struct Manager {
     items: Vec<DownloadItem>,
     next_id: u64,
     loaded: bool,
     workers: usize,
-    /// Auto-update running before the batch starts — workers wait for it.
+    /// Auto-update running before the batch starts - workers wait for it.
     updating: bool,
     last_auto_update_attempt: Option<Instant>,
     controls: HashMap<u64, Arc<Control>>,
@@ -258,19 +238,15 @@ fn settings(app: &AppHandle) -> crate::settings::DownloaderSettings {
         .unwrap_or_default()
 }
 
-// ── Persistence ─────────────────────────────────────────────────────────────
-
 #[derive(Serialize, Deserialize, Default)]
 struct SavedQueue {
     next_id: u64,
     items: Vec<DownloadItem>,
 }
 
-/// Restores unfinished/failed jobs from the last session. Jobs that were
-/// mid-flight are re-queued from scratch (their temp folder is gone).
+/// Restores unfinished/failed jobs from the last session.
 fn load_queue(app: &AppHandle, m: &mut Manager) {
     cleanup_legacy_files(app);
-    // No worker can be running yet: anything here is left over from a crash.
     let _ = std::fs::remove_dir_all(downloads_dir(app).join(TEMP_DIR));
     let path = data_dir(app).join(QUEUE_FILE);
     let saved: SavedQueue = std::fs::read_to_string(&path)
@@ -326,8 +302,6 @@ fn cleanup_legacy_files(app: &AppHandle) {
     }
 }
 
-// ── Events ──────────────────────────────────────────────────────────────────
-
 fn emit_queue(app: &AppHandle) {
     let snap = with(app, |m| QueueSnapshot { items: m.items.clone() });
     let _ = app.emit("downloads_queue", snap);
@@ -347,12 +321,9 @@ fn report_titlebar(app: &AppHandle) {
 
 pub fn snapshot(app: &AppHandle) -> QueueSnapshot {
     let snap = with(app, |m| QueueSnapshot { items: m.items.clone() });
-    // Resume whatever was left queued last session.
     pump(app);
     snap
 }
-
-// ── Queue operations ────────────────────────────────────────────────────────
 
 fn identity(artist: &str, title: &str, album: Option<&str>, url: Option<&str>) -> String {
     match url {
@@ -437,7 +408,7 @@ fn reset_for_retry(item: &mut DownloadItem) {
 
 /// Cancels an active job or removes a finished one from the list.
 pub fn cancel(app: &AppHandle, id: u64) {
-    // Killing the process tree takes a moment — don't hold the queue lock for it.
+    // Killing the process tree takes a moment: do not hold the queue lock for it.
     if let Some(control) = with(app, |m| m.controls.get(&id).cloned()) {
         control.cancel();
     }
@@ -513,10 +484,6 @@ pub fn shutdown(app: &AppHandle) {
     }
 }
 
-// ── Worker pool ─────────────────────────────────────────────────────────────
-
-/// Starts workers for queued jobs (up to [`MAX_WORKERS`]), running the daily
-/// tool auto-update first when a new batch begins.
 fn pump(app: &AppHandle) {
     if !tools::platform_supported() {
         with(app, |m| {
@@ -575,8 +542,6 @@ fn auto_update_due(app: &AppHandle, m: &Manager) -> bool {
     if !settings(app).auto_update || !tools::is_managed(&data_dir(app), Tool::Ytdlp) {
         return false;
     }
-    // Once per session window even when offline, so a failing check doesn't
-    // delay every batch.
     if m.last_auto_update_attempt
         .map(|t| t.elapsed() < Duration::from_secs(6 * 60 * 60))
         .unwrap_or(false)
@@ -586,9 +551,7 @@ fn auto_update_due(app: &AppHandle, m: &Manager) -> bool {
     tools::secs_since_update_check(&data_dir(app)) >= AUTO_UPDATE_INTERVAL_SECS
 }
 
-/// Updates app-managed yt-dlp/Deno when a newer release exists. yt-dlp has to
-/// track YouTube's changes closely — a weeks-old build is the most common
-/// reason downloads stop working.
+/// yt-dlp must track YouTube closely: a weeks-old build is the usual reason downloads break.
 fn auto_update(app: &AppHandle) {
     let dir = data_dir(app);
     let Ok(info) = tools::check_updates(&dir) else { return };
@@ -605,8 +568,7 @@ fn auto_update(app: &AppHandle) {
     let _ = run_install(app, outdated);
 }
 
-/// Takes the next queued job; when there is none, retires this worker under
-/// the same lock (so an `enqueue` racing with it always sees a free slot).
+/// Retires the worker under the same lock, so a racing `enqueue` always sees a free slot.
 fn take_job(app: &AppHandle) -> Option<(DownloadItem, Arc<Control>)> {
     with(app, |m| {
         let Some(item) = m.items.iter_mut().find(|i| i.stage == Stage::Queued) else {
@@ -632,7 +594,6 @@ fn worker_loop(app: AppHandle) {
         m.workers == 0 && !m.items.iter().any(|i| i.stage == Stage::Queued || i.stage.is_active())
     });
     if idle {
-        // Analyze the new tracks' audio features once per batch, not per track.
         if let Ok(lib) = app.state::<crate::LibraryState>().0.lock() {
             let _ = lib.resume_pending_audio_feature_analysis(None);
         }
@@ -651,7 +612,6 @@ fn finish_job(app: &AppHandle, id: u64, result: Result<PathBuf, JobError>) {
     with(app, |m| {
         m.controls.remove(&id);
         m.fractions.remove(&id);
-        // Removed by the user meanwhile (cancel) — nothing to record.
         let Some(item) = m.items.iter_mut().find(|i| i.id == id) else { return };
         item.speed_bps = None;
         item.eta_secs = None;
@@ -677,8 +637,6 @@ fn finish_job(app: &AppHandle, id: u64, result: Result<PathBuf, JobError>) {
     emit_queue(app);
     report_titlebar(app);
 }
-
-// ── Job execution ───────────────────────────────────────────────────────────
 
 fn update_item(app: &AppHandle, id: u64, f: impl FnOnce(&mut DownloadItem)) {
     with(app, |m| {
@@ -722,8 +680,8 @@ fn net_options(app: &AppHandle) -> NetOptions {
     NetOptions { proxy, cookies }
 }
 
-/// Per-job scratch folder inside the downloads dir (same volume, so the
-/// final move is a cheap rename). Removed on drop, whatever happened.
+/// Per-job scratch folder inside the downloads dir (same volume, so the final move is a cheap
+/// rename).
 struct WorkDir(PathBuf);
 
 impl WorkDir {
@@ -749,7 +707,6 @@ impl WorkDir {
 impl Drop for WorkDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
-        // Drop the parent too once the last job is gone.
         if let Some(parent) = self.0.parent() {
             let _ = std::fs::remove_dir(parent);
         }
@@ -797,7 +754,6 @@ fn run_job(app: &AppHandle, job: &DownloadItem, control: &Control) -> Result<Pat
     control.check()?;
 
     let target = unique_path(&downloads, &job.artist, &job.title, ext);
-    // `target` is an empty placeholder reserved by unique_path; rename replaces it.
     std::fs::rename(&playable, &target)
         .or_else(|_| std::fs::copy(&playable, &target).map(|_| ()))
         .map_err(|e| {
@@ -893,7 +849,6 @@ fn find_and_download(
                 Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
                 Err(e) => {
                     work.clear();
-                    // This particular upload is gone/gated — another one may work.
                     let next_candidate =
                         matches!(e.kind, ErrorKind::Unavailable | ErrorKind::AuthRequired | ErrorKind::Format);
                     let fatal = matches!(e.kind, ErrorKind::Cookies | ErrorKind::Disk | ErrorKind::ToolMissing);
@@ -953,8 +908,8 @@ fn download_with_retries(
     }
 }
 
-/// Progress updates arrive many times a second; the queue snapshot is
-/// re-emitted at most every 200 ms.
+/// Progress updates arrive many times a second; the queue snapshot is re-emitted at most every 200
+/// ms.
 fn on_progress(app: &AppHandle, id: u64, p: ytdlp::Progress) {
     let emit = with(app, |m| {
         if let Some(item) = m.items.iter_mut().find(|i| i.id == id) {
@@ -979,8 +934,6 @@ fn on_progress(app: &AppHandle, id: u64, p: ytdlp::Progress) {
         report_titlebar(app);
     }
 }
-
-// ── Links ───────────────────────────────────────────────────────────────────
 
 /// Probes a pasted link (single video or playlist) for its tracks.
 pub fn resolve_link(app: &AppHandle, url: &str) -> Result<LinkResult, String> {
@@ -1015,8 +968,6 @@ fn link_error_message(e: &JobError) -> String {
         _ => e.message.clone(),
     }
 }
-
-// ── Tools ───────────────────────────────────────────────────────────────────
 
 pub fn tools_state(app: &AppHandle) -> ToolsState {
     let info = tools::info(&data_dir(app));
@@ -1119,7 +1070,6 @@ fn run_install(app: &AppHandle, list: Vec<Tool>) -> Result<(), String> {
     });
     emit_tools(app);
     emit_queue(app);
-    // Jobs may have been waiting for the tools.
     pump(app);
     match first_error {
         Some(e) => Err(e),
@@ -1147,8 +1097,6 @@ pub fn remove_tools(app: &AppHandle) -> Result<ToolsState, String> {
     }
 }
 
-// ── Settings ────────────────────────────────────────────────────────────────
-
 pub fn get_settings(app: &AppHandle) -> crate::settings::DownloaderSettings {
     settings(app)
 }
@@ -1172,8 +1120,6 @@ pub fn set_settings(app: &AppHandle, mut s: crate::settings::DownloaderSettings)
     crate::settings::save(&path, &guard.0)
 }
 
-// ── Downloads folder ────────────────────────────────────────────────────────
-
 fn default_downloads_dir(app: &AppHandle) -> PathBuf {
     app.path()
         .audio_dir()
@@ -1195,18 +1141,16 @@ fn configured_downloads_dir(app: &AppHandle) -> Option<PathBuf> {
 
 /// The configured folder, or the default one if it can't be created.
 pub fn downloads_dir(app: &AppHandle) -> PathBuf {
-    if let Some(dir) = configured_downloads_dir(app) {
-        if std::fs::create_dir_all(&dir).is_ok() {
+    if let Some(dir) = configured_downloads_dir(app)
+        && std::fs::create_dir_all(&dir).is_ok() {
             return dir;
         }
-    }
     let dir = default_downloads_dir(app);
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
 
-/// Saves a new downloads folder (`None` = default). Returns `(old, new)`;
-/// re-registering library folders is the caller's job.
+/// Saves a new downloads folder (`None` = default).
 pub fn set_downloads_dir(app: &AppHandle, requested: Option<String>) -> (PathBuf, PathBuf) {
     let old = downloads_dir(app);
     let value = requested
@@ -1260,22 +1204,19 @@ fn is_inside(dir: &Path, file: &Path) -> bool {
     key(file).starts_with(&d)
 }
 
-/// Removes an app-downloaded track from disk and the library. Refuses files
-/// outside the downloads folder.
+/// Removes an app-downloaded track from disk and the library.
 pub fn delete_downloaded_track(app: &AppHandle, file_path: &str) -> Result<(), String> {
     let path = PathBuf::from(file_path);
     if !is_inside(&downloads_dir(app), &path) {
         return Err("Удалять можно только треки, скачанные приложением".into());
     }
-    // The decoder holds the file open while playing; Windows won't delete it.
-    if let Ok(mut player) = app.state::<crate::PlayerState>().0.write() {
-        if player.current_file_path().as_deref() == Some(file_path) {
+    // The decoder holds the file open while playing; Windows will not delete it.
+    if let Ok(mut player) = app.state::<crate::PlayerState>().0.write()
+        && player.current_file_path().as_deref() == Some(file_path) {
             player.stop();
         }
-    }
-    // The audio thread may need a moment to release the handle. The file goes
-    // first: dropping the library row for a file that stays on disk would just
-    // bring it back (without its statistics) on the next rescan.
+    // The file goes first: a library row dropped for a file still on disk would return on rescan
+    // without its statistics.
     let mut last_err = None;
     for _ in 0..20 {
         match std::fs::remove_file(&path) {
@@ -1326,9 +1267,8 @@ fn sanitize_component(s: &str) -> String {
     }
 }
 
-/// `Artist - Title.ext`, with " (2)", " (3)"... when taken. The name is reserved by
-/// creating an empty file atomically, so two workers finishing same-named tracks
-/// can't pick one path (the later rename would silently overwrite on Unix).
+/// `Artist - Title.ext`, with " (2)"... when taken; reserved by creating an empty file, so two
+/// workers cannot share a path.
 fn unique_path(dir: &Path, artist: &str, title: &str, ext: &str) -> PathBuf {
     let base = match (artist.trim().is_empty(), title.trim().is_empty()) {
         (false, false) => format!("{} - {}", sanitize_component(artist), sanitize_component(title)),
@@ -1344,7 +1284,6 @@ fn unique_path(dir: &Path, artist: &str, title: &str, ext: &str) -> PathBuf {
                 candidate = dir.join(format!("{} ({}).{}", base, n, ext));
                 n += 1;
             }
-            // Created, or an unrelated error the following rename will report.
             _ => return candidate,
         }
     }
@@ -1395,10 +1334,8 @@ mod tests {
         assert_eq!(slot.unwrap().kind, ErrorKind::BotCheck);
     }
 
-    /// End-to-end check against the real services: installs the tools into
-    /// `LFM_LIVE_DIR` (or a temp folder), then searches, matches, downloads and
-    /// tags a few tracks. Network-heavy, so ignored by default:
-    /// `LFM_LIVE_DIR=... cargo test --lib live_pipeline -- --ignored --nocapture`
+    /// Network-heavy, ignored by default: `LFM_LIVE_DIR=... cargo test --lib live_pipeline --
+    /// --ignored --nocapture`
     #[test]
     #[ignore]
     fn live_pipeline() {
@@ -1461,7 +1398,6 @@ mod tests {
                     last = f;
                 }
             };
-            // Same source walk as a real job, minus the AppHandle plumbing.
             let mut outcome = Err(JobError::new(ErrorKind::NotFound, "no candidates"));
             'sources: for source in [Source::YouTube, Source::SoundCloud] {
                 let Ok(cands) = ytdlp::search(&resolved, &net, source, &query, 8, &control) else { continue };

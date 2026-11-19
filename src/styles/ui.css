@@ -1,0 +1,119 @@
+body:not(.lfmusic-phone) .ctx-menu,
+body:not(.lfmusic-phone) .ctx-submenu-list {
+  padding: 6px;
+  border-radius: 16px;
+  background-color: hsl(var(--accent-h), min(var(--accent-s), 12%), 11%);
+  backdrop-filter: none;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+  min-width: 220px;
+}
+
+body:not(.lfmusic-phone) .ctx-menu .ctx-item,
+body:not(.lfmusic-phone) .ctx-submenu-list .ctx-item {
+  gap: 12px;
+  padding: 5px 12px 5px 5px;
+  border-radius: 11px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: hsla(0, 0%, 100%, 0.88);
+  transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
+}
+
+body:not(.lfmusic-phone) .ctx-menu .ctx-item > svg:first-child,
+body:not(.lfmusic-phone) .ctx-submenu-list .ctx-item > svg:first-child {
+  box-sizing: content-box;
+  width: 16px;
+  height: 16px;
+  padding: 7px;
+  border-radius: 9px;
+  background-color: hsla(0, 0%, 100%, 0.06);
+  color: hsla(0, 0%, 100%, 0.7);
+  transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
+}
+
+body:not(.lfmusic-phone) .ctx-menu .ctx-item:hover:not(:disabled),
+body:not(.lfmusic-phone) .ctx-submenu-list .ctx-item:hover:not(:disabled) {
+  background-color: hsla(0, 0%, 100%, 0.06);
+  color: #fff;
+}
+
+body:not(.lfmusic-phone) .ctx-menu .ctx-item:hover:not(:disabled) > svg:first-child,
+body:not(.lfmusic-phone) .ctx-submenu-list .ctx-item:hover:not(:disabled) > svg:first-child {
+  background-color: hsla(0, 0%, 100%, 0.1);
+  color: #fff;
+}
+
+body:not(.lfmusic-phone) .ctx-menu .ctx-item-danger,
+body:not(.lfmusic-phone) .ctx-menu .ctx-item-danger:hover {
+  color: hsl(2, 75%, 74%);
+}
+body:not(.lfmusic-phone) .ctx-menu .ctx-item-danger > svg:first-child,
+body:not(.lfmusic-phone) .ctx-menu .ctx-item-danger:hover > svg:first-child {
+  background-color: hsla(2, 70%, 55%, 0.16);
+  color: hsl(2, 75%, 72%);
+}
+
+body:not(.lfmusic-phone) .ctx-menu .ctx-separator {
+  height: 6px;
+  margin: 0;
+  background-color: transparent;
+}
+
+body:not(.lfmusic-phone) .ctx-menu .ctx-chevron {
+  color: hsla(0, 0%, 100%, 0.4);
+}
+
+.lfSettingsBody > :is(.settingBlock, .settingsBlock) {
+  margin: 0 0 14px;
+  padding: 14px 20px;
+  max-width: none;
+  border-radius: 20px;
+  background-color: hsla(0, 0%, 100%, 0.035);
+}
+.lfSettingsBody > .settingBlock > .settingsBlock {
+  margin-top: 6px;
+  max-width: none;
+}
+.lfSettingsBody > .settingBlock > .settingTitle,
+.lfSettingsBody .sectionTitle {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  padding-top: 4px;
+}
+.lfSettingsBody > .settingBlock > .settingDesc {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: hsla(0, 0%, 100%, 0.45);
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+  .lfSettingsBody > :is(.settingBlock, .settingsBlock) {
+    padding: 10px 14px;
+    border-radius: 18px;
+  }
+}
+
+.lfFound {
+  position: relative;
+  isolation: isolate;
+}
+.lfFound::before {
+  content: "";
+  position: absolute;
+  inset: 2px -10px;
+  z-index: -1;
+  border-radius: 12px;
+  background-color: hsla(var(--accent-h), min(var(--accent-s), 70%), 60%, calc(0.08 + 0.1 * var(--accent-k, 1)));
+  pointer-events: none;
+  animation: lf-found-in .35s var(--ease-smooth);
+}
+@keyframes lf-found-in {
+  from { opacity: 0; }
+}
+
+/* An endless animation keeps the compositor busy: pause it with playback. */
+html:not(.lf-playing) .playingAnim {
+  animation-play-state: paused;
+}

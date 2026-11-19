@@ -15,9 +15,6 @@ export interface PlaylistInfo {
 
 const playlists = ref<PlaylistInfo[]>([]);
 const loading = ref(false);
-// Reactive membership of the "Мне нравится" playlist, keyed by file_path. Shared
-// so every heart button (context menu + all track rows) reflects the same state
-// and updates live on toggle. Vue 3 makes Set add/delete/has reactive.
 const favoritePaths = ref<Set<string>>(new Set());
 let favoritesLoadedOnce = false;
 const topOrder = ref<number[]>([]);
@@ -63,7 +60,6 @@ watch(
   { deep: true },
 );
 
-// Singleton: computed filters are created once per app, not per calling component.
 let playlistsInstance: ReturnType<typeof createPlaylists> | null = null;
 
 export function usePlaylists() {
@@ -76,7 +72,6 @@ export function usePlaylists() {
 function createPlaylists() {
   const albums = computed(() => playlists.value.filter((p) => p.kind === "Album"));
   const artists = computed(() => playlists.value.filter((p) => p.kind === "Artist"));
-  // The built-in "Мне нравится" playlist (created on first launch by the backend).
   const favoritesPlaylist = computed(() => playlists.value.find((p) => p.kind === "Favorites") ?? null);
   const userPlaylists = computed(() => {
     const all = playlists.value.filter((p) => p.kind === "User");
@@ -146,8 +141,6 @@ function createPlaylists() {
     }
   }
 
-  // Guarantees favorites membership is hydrated for views that render hearts but
-  // don't otherwise call loadPlaylists (catalog, album, artist, search).
   async function ensureFavoritesLoaded() {
     if (favoritesLoadedOnce) return;
     if (!playlists.value.length) await loadPlaylists();
@@ -158,8 +151,6 @@ function createPlaylists() {
     return favoritePaths.value.has(filePath);
   }
 
-  // Add/remove the track from the favorites playlist. Optimistic: the heart
-  // flips at once and flips back if the backend call fails.
   async function toggleFavorite(filePath: string) {
     await ensureFavoritesLoaded();
     const fav = favoritesPlaylist.value;
@@ -169,7 +160,6 @@ function createPlaylists() {
       if (!(await removeTrackFromPlaylist(fav.id, filePath))) favoritePaths.value.add(filePath);
     } else {
       favoritePaths.value.add(filePath);
-      // New likes go to the top of the favorites playlist.
       if (!(await addTrackToPlaylist(fav.id, filePath, true))) favoritePaths.value.delete(filePath);
     }
   }
@@ -178,8 +168,6 @@ function createPlaylists() {
     const tracks = await invoke<TrackMetadata[]>("playlist_get_tracks", { playlistId });
     const playlist = playlists.value.find((p) => p.id === playlistId);
     if (playlist && playlist.kind === "Album") {
-      // Same order the album page shows (user's saved order, else by file path),
-      // so a card's play button and a restored queue match the page.
       const { loadOrder, applyOrder } = useAlbumTrackOrder();
       await loadOrder(playlist.name);
       return applyOrder(playlist.name, tracks);
@@ -210,7 +198,6 @@ function createPlaylists() {
 
   async function deletePlaylist(playlistId: number) {
     try {
-      // Backend's delete_playlist decrements playlist_add_count for each track, symmetric to remove_track.
       await invoke("playlist_delete", { playlistId });
       playlists.value = playlists.value.filter((p) => p.id !== playlistId);
       const idx = topOrder.value.indexOf(playlistId);
@@ -223,7 +210,6 @@ function createPlaylists() {
   /** Resolves to false when the backend call failed (callers roll back their UI). */
   async function addTrackToPlaylist(playlistId: number, filePath: string, prepend = false): Promise<boolean> {
     try {
-      // false = the track was already in the playlist, so the count stays.
       const added = await invoke<boolean>("playlist_add_track", { playlistId, filePath, prepend });
       const idx = playlists.value.findIndex((p) => p.id === playlistId);
       if (added && idx !== -1) playlists.value[idx].track_count++;

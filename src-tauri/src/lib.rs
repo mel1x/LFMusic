@@ -7,6 +7,7 @@ mod discord_rpc;
 mod downloader;
 mod enhance;
 mod external;
+mod fx;
 mod json_store;
 mod library;
 mod mpris;
@@ -49,7 +50,8 @@ struct AudioFeatureProgress {
     total: usize,
     percent: f64,
     active: bool,
-    /// Current phase: "analysis" | "external" | "download" | "done" — frontend picks progress text by this.
+    /// Current phase: "analysis" | "external" | "download" | "done" - frontend picks progress text
+    /// by this.
     phase: &'static str,
 }
 
@@ -114,8 +116,6 @@ fn emit_audio_feature_progress(
     );
 }
 
-/// Combined "prep" progress bar (TitleBar.vue): audio-feature analysis (`f_*`),
-/// external-source fetch (`e_*`), and downloads (`d_*`) phases in one bar.
 #[derive(Clone, Copy)]
 struct PrepCounts {
     f_done: usize,
@@ -124,8 +124,6 @@ struct PrepCounts {
     e_total: usize,
     d_done: usize,
     d_total: usize,
-    /// Fractional progress (0..1) of the track currently downloading; only affects the
-    /// displayed percent (not the done/total count), so the bar moves smoothly instead of jumping per-track.
     d_frac: f64,
 }
 
@@ -154,8 +152,6 @@ fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCou
         let current = p.f_done + p.e_done + p.d_done;
         let total = p.f_total + p.e_total + p.d_total;
         let done = total == 0 || current >= total;
-        // Phase priority: external > analysis > download (download shows last,
-        // only once analysis and external sources are done).
         let phase = if p.e_total > 0 && p.e_done < p.e_total {
             "external"
         } else if p.f_total > 0 && p.f_done < p.f_total {
@@ -165,23 +161,14 @@ fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCou
         } else {
             "done"
         };
-        // Add the current track's fractional progress so the bar doesn't jump 0 -> done per track.
         let percent = if total > 0 {
             ((current as f64 + p.d_frac.clamp(0.0, 1.0)) / total as f64 * 100.0).clamp(0.0, 100.0)
         } else {
             100.0
         };
 
-        // Each phase clears only its OWN counters once it individually reaches
-        // its own 100%, instead of a combined reset gated on the summed total.
-        // The old combined reset only fired once every *concurrently active*
-        // phase happened to be done at once — a phase that finished earlier
-        // (e.g. external prep) while another was still running (e.g. analysis)
-        // stayed at "100/100" indefinitely, sitting in the sum. With analysis/
-        // downloads now finishing faster, phases interleave and hand off to each
-        // other far more often, so a finished-but-not-yet-cleared phase's stale
-        // total kept getting added back into the combined bar on every update
-        // from an unrelated phase — the "jumps between unrelated numbers" bug.
+        // Each phase clears its own counters when it reaches 100%: a finished phase must not stay
+        // in the combined total.
         if p.f_total > 0 && p.f_done >= p.f_total {
             p.f_total = 0;
             p.f_done = 0;
@@ -234,13 +221,10 @@ pub(crate) fn report_download_progress(app: &tauri::AppHandle, done: usize, tota
     report_prep_progress(app, |p| {
         p.d_total = total;
         p.d_done = done.min(total);
-        // Reset stale fraction from a previous download.
         p.d_frac = 0.0;
     });
 }
 
-/// Same as above but with the current track's fractional progress (`frac` in [0,1])
-/// for a smooth percent while downloading; done/total stay whole track counts.
 pub(crate) fn report_download_progress_frac(
     app: &tauri::AppHandle,
     done: usize,
@@ -253,8 +237,6 @@ pub(crate) fn report_download_progress_frac(
         p.d_frac = frac.clamp(0.0, 1.0);
     });
 }
-
-// ── State types ──────────────────────────────────────────────────────────────
 
 pub struct PlayerState(pub RwLock<AudioPlayer>);
 pub struct LibraryState(pub Mutex<MusicLibrary>);
@@ -297,10 +279,6 @@ async fn run_blocking<T: Send + 'static>(
         .map_err(|e| format!("Task error: {}", e))?
 }
 
-// ── Player commands ──────────────────────────────────────────────────────────
-
-/// Apply cached accent_color (or save a newly computed one) and overlay user
-/// track overrides (title/artist/cover) onto the metadata.
 fn apply_accent_color(
     library: &State<LibraryState>,
     file_path: &str,
@@ -325,7 +303,6 @@ fn apply_accent_color(
         metadata.spectral_centroid = t.spectral_centroid;
         metadata.key = t.key.clone();
         metadata.audio_fingerprint = t.audio_fingerprint.clone();
-        // Override cover takes priority over the embedded one.
         if let Some(sig) = lib.get_override_cover_sig(file_path) {
             metadata.cover_art = Some(thumbnails::cover_protocol_url(file_path, &sig));
         }
@@ -343,19 +320,12 @@ fn apply_accent_color(
     }
 }
 
-// (async): opening the file, probing tags, and extracting/decoding the embedded
-// cover for accent-color computation can take tens to hundreds of ms on a slow
-// disk or large image — off the main/event-loop thread so window interaction
-// doesn't stutter on every track change. Tauri runs a non-`async fn` command
-// marked `(async)` via spawn_blocking; the RwLock<AudioPlayer> locking is unchanged.
 #[tauri::command(async)]
 fn player_play(
     state: State<PlayerState>,
     library: State<LibraryState>,
     file_path: String,
 ) -> Result<TrackMetadata, String> {
-    // Tags + cover/accent parsing happen before the write lock, so status and
-    // spectrum polls aren't blocked behind file I/O on every track change.
     let metadata = AudioPlayer::get_metadata(&file_path)?;
     let mut player = state.write()?;
     let mut metadata = player.play_preloaded(&file_path, metadata)?;
@@ -439,7 +409,6 @@ fn player_seek_crossfade(
 }
 
 /// Lyrics from a sidecar next to the track (`song.lrc`, then `song.txt`).
-/// Extension case is ignored; `None` when there is no non-empty file.
 #[tauri::command(async)]
 fn get_track_lyrics(file_path: String) -> Option<String> {
     let path = std::path::Path::new(&file_path);
@@ -467,9 +436,7 @@ fn get_track_lyrics(file_path: String) -> Option<String> {
     })
 }
 
-// Polled reads are `(async)`: on the main thread they would stall the window
-// whenever player_play holds the write lock while opening/probing a file.
-// Control commands (pause/volume/seek) stay sync so they keep their call order.
+// Polled reads are async, so they do not stall the window while player_play holds the write lock.
 #[tauri::command(async)]
 fn player_get_status(state: State<PlayerState>) -> Result<PlayerStatus, String> {
     let mut player = state.write()?;
@@ -491,7 +458,6 @@ fn player_set_spectrum_enabled(state: State<PlayerState>, enabled: bool) -> Resu
     Ok(())
 }
 
-// (async): runs on the thread pool so tag/cover reads don't block the window's event loop.
 #[tauri::command(async)]
 fn get_track_metadata(
     library: State<LibraryState>,
@@ -502,8 +468,6 @@ fn get_track_metadata(
     Ok(metadata)
 }
 
-/// Cover URL (`lfmusic-cover` protocol) or null; the thumbnail itself is generated
-/// lazily by the protocol handler on display, so this is a cheap DB/tag lookup.
 #[tauri::command(async)]
 fn get_cover_art(
     library: State<LibraryState>,
@@ -513,8 +477,6 @@ fn get_cover_art(
     Ok(thumbnails::cover_url(&lib, &file_path))
 }
 
-/// Reads the cover straight from file tags, ignoring user overrides (used by the
-/// edit modal's "reset cover" preview).
 #[tauri::command(async)]
 fn get_original_cover_art(file_path: String) -> Result<Option<String>, String> {
     Ok(AudioPlayer::extract_cover_art(&file_path))
@@ -548,11 +510,8 @@ fn get_original_track(
     })
 }
 
-// ── Library commands ─────────────────────────────────────────────────────────
-//
-// Every command that takes the library lock is `(async)`: a plain `#[command]`
-// runs on the main thread, and the lock can be held for seconds by a rescan or
-// folder add, which would freeze the whole window while the call waits.
+// Commands that take the library lock are `(async)`: a sync command runs on the main thread and
+// would freeze the window while a rescan holds the lock.
 
 #[tauri::command(async)]
 fn library_get_folders(state: State<LibraryState>) -> Result<Vec<FolderInfo>, String> {
@@ -666,8 +625,6 @@ fn library_remove_folder(
     )
 }
 
-/// Ordered catalog paths filtered by genre/search; returns just `file_path` for
-/// virtual scroll + playback ordering (lightweight identity list).
 #[tauri::command(async)]
 fn library_get_catalog_paths(
     state: State<LibraryState>,
@@ -678,8 +635,6 @@ fn library_get_catalog_paths(
     Ok(library.get_catalog_paths(genre.as_deref(), search.as_deref()))
 }
 
-/// Batch-materializes metadata for the given paths (catalog viewport / cache-miss
-/// fetch); result order matches `paths`.
 #[tauri::command(async)]
 fn library_get_tracks_by_paths(
     state: State<LibraryState>,
@@ -777,8 +732,6 @@ fn library_rebuild_artists(
     library.rebuild_artist_playlists(&separators)
 }
 
-// ── Playlist commands ────────────────────────────────────────────────────────
-
 #[tauri::command(async)]
 fn playlist_get_all(state: State<LibraryState>) -> Result<Vec<PlaylistInfo>, String> {
     let library = state.lock()?;
@@ -865,8 +818,6 @@ fn playlist_get_track_paths(
     Ok(library.get_playlist_track_paths(playlist_id))
 }
 
-// ── Album track order ────────────────────────────────────────────────────────
-
 #[tauri::command(async)]
 fn album_get_track_order(
     state: State<LibraryState>,
@@ -886,10 +837,6 @@ fn album_set_track_order(
     library.set_album_track_order(&album_name, &track_paths)
 }
 
-// ── External-source commands ─────────────────────────────────────────────────
-
-/// Canonical track order + "phantom" (not-in-library) tracks for an album,
-/// sourced externally and cached in the DB (repeat opens skip the network).
 #[tauri::command]
 async fn external_album_layout(
     app: tauri::AppHandle,
@@ -899,8 +846,7 @@ async fn external_album_layout(
     run_blocking(move || run_album_layout(&app, &album_name, refresh)).await
 }
 
-/// Sync core of [`external_album_layout`], shared with the batch prep pass.
-/// Library lock is NOT held during the network request; DB cache never expires.
+/// Sync core of external_album_layout; the library lock is not held during the network request.
 fn run_album_layout(
     app: &tauri::AppHandle,
     album_name: &str,
@@ -916,7 +862,6 @@ fn run_album_layout(
 
     let now = util::unix_secs();
 
-    // Phase 1 (locked): read local tracks + cache, decide whether the network is needed.
     let (local, query_artist, album_key, decision) = {
         let library = state.lock()?;
         let local = library.get_album_local_tracks(album_name);
@@ -924,7 +869,6 @@ fn run_album_layout(
             return Ok(none_layout());
         }
 
-        // Most common artist among local tracks is used for the query.
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (_, _, artist) in &local {
             if !artist.is_empty() {
@@ -937,11 +881,8 @@ fn run_album_layout(
             .map(|(a, _)| a)
             .unwrap_or_default();
 
-        // Cache key includes the artist too, so same-titled albums by different
-        // artists don't collide.
         let album_key = external::album_cache_key(album_name, &query_artist);
 
-        // 0 = cache hit; 1 = need network; 2 = negative cache (permanent).
         let decision: (u8, Vec<external::ExternalTrack>, Option<String>) =
             match library.get_external_album(&album_key) {
                 Some((src, status, _, tracks)) if !refresh && status == "ok" => (0, tracks, src),
@@ -971,10 +912,8 @@ fn run_album_layout(
         });
     }
 
-    // Phase 2 (unlocked): network.
     let fetched = external::fetch_album_tracklist(&query_artist, album_name);
 
-    // Phase 3 (locked): persist result to cache.
     let library = state.lock()?;
     match fetched {
         external::FetchOutcome::Found(album) if !album.tracks.is_empty() => {
@@ -992,13 +931,11 @@ fn run_album_layout(
                 entries,
             })
         }
-        // All sources genuinely returned nothing — cache negative to avoid retrying.
         external::FetchOutcome::Found(_) | external::FetchOutcome::NotFound => {
             let _ = library.set_external_album(&album_key, None, "none", &[], now);
             Ok(none_layout())
         }
-        // Transient provider error (network/parse/rate-limit) — don't cache "none",
-        // or the album would be stuck without external ordering forever.
+        // Transient error: do not cache "none", or the album would never get its external order.
         external::FetchOutcome::TemporaryError => Ok(none_layout()),
     }
 }
@@ -1043,23 +980,17 @@ async fn external_load_cached_artist_images(
     .await
 }
 
-// ── Batch prep of external sources (one pass, permanent cache) ──────────────
-
-/// Bumped on every call so a new prep pass cancels any in-flight one (e.g. on
-/// settings toggle).
+/// Bumped on every call so a new prep pass cancels any in-flight one (e.g. on settings toggle).
 static EXTERNAL_PREP_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn external_prep_current(generation: u64) -> bool {
     EXTERNAL_PREP_GENERATION.load(Ordering::SeqCst) == generation
 }
 
-/// (Re)start background prep: one pass over the library that pre-fetches and
-/// caches covers/avatars/album order for enabled sources. Already-settled
-/// entries (ok/none) aren't retried. Safe to call on startup or any settings toggle.
+/// (Re)starts the background prep pass for enabled sources; settled entries are skipped.
 #[tauri::command]
 fn external_prepare(app: tauri::AppHandle) -> Result<(), String> {
-    // External sources are a desktop-only feature (no settings UI to enable
-    // them on Android) — never run the background fetch pass there.
+    // External sources are desktop-only.
     if cfg!(target_os = "android") {
         return Ok(());
     }
@@ -1107,13 +1038,10 @@ enum PrepTask {
     Album(String),
 }
 
-/// Tasks hit different hosts (Deezer/iTunes/MusicBrainz/CAA/Wikipedia) and each
-/// host is separately rate-limited (`external::send_throttled`), so concurrent
-/// threads are safe and multiply throughput instead of summing latencies.
+/// Hosts are rate-limited separately, so parallel workers multiply throughput.
 const EXTERNAL_PREP_CONCURRENCY: usize = 6;
 
-/// Pulls tasks from a shared cursor until exhausted or the pass is cancelled
-/// (generation changed).
+/// Pulls tasks from a shared cursor until exhausted or the pass is cancelled (generation changed).
 #[allow(clippy::too_many_arguments)]
 fn external_prep_worker(
     app: tauri::AppHandle,
@@ -1140,9 +1068,6 @@ fn external_prep_worker(
                 let _ = external::get_or_fetch_artist_image(&dir, name, false);
             }
             PrepTask::Cover(g) => {
-                // Needs an external cover if at least one track lacks both override and
-                // embedded art. cover_present_paths is a precomputed snapshot (see
-                // run_external_preparation) instead of re-parsing tags per path here.
                 let needs_external = g
                     .paths
                     .iter()
@@ -1151,7 +1076,6 @@ fn external_prep_worker(
                     let _ =
                         external::get_or_fetch_track_cover(&dir, &g.artist, &g.album, &g.title, false);
                 } else {
-                    // Fully covered locally — mark "none" (batched) so next startup skips re-reading tags.
                     none_keys
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -1175,25 +1099,24 @@ fn run_external_preparation(
     albums_on: bool,
     generation: u64,
 ) {
-    // ── Collect tasks (short library locks) ──
     let artists: Vec<String> = if avatars_on {
         let state = app.state::<LibraryState>();
-        let names = match state.0.lock() {
+        
+        match state.0.lock() {
             Ok(lib) => lib.get_artists().into_iter().map(|p| p.name).collect(),
             Err(_) => Vec::new(),
-        };
-        names
+        }
     } else {
         Vec::new()
     };
 
     let albums: Vec<String> = if albums_on {
         let state = app.state::<LibraryState>();
-        let names = match state.0.lock() {
+        
+        match state.0.lock() {
             Ok(lib) => lib.pending_external_album_names(),
             Err(_) => Vec::new(),
-        };
-        names
+        }
     } else {
         Vec::new()
     };
@@ -1204,11 +1127,10 @@ fn run_external_preparation(
         HashSet<String>,
     ) = if covers_on {
         let state = app.state::<LibraryState>();
-        let built = match state.0.lock() {
+        
+        match state.0.lock() {
             Ok(lib) => {
                 let overrides = lib.override_cover_paths();
-                // Snapshot once up front instead of re-parsing tags per path inside
-                // the worker pool (see external_prep_worker's needs_external check).
                 let present = lib.cover_present_paths();
                 let mut by_key: std::collections::HashMap<String, CoverGroup> =
                     std::collections::HashMap::new();
@@ -1234,13 +1156,11 @@ fn run_external_preparation(
                 (by_key.into_values().collect(), overrides, present)
             }
             Err(_) => (Vec::new(), HashSet::new(), HashSet::new()),
-        };
-        built
+        }
     } else {
         (Vec::new(), HashSet::new(), HashSet::new())
     };
 
-    // ── Filter out already-settled entries, compute total ──
     let artist_settled = if avatars_on {
         external::artist_settled_keys(&dir)
     } else {
@@ -1265,7 +1185,6 @@ fn run_external_preparation(
             if cover_settled.contains(&key) {
                 return false;
             }
-            // Marked as locally covered: skip while that still holds.
             let all_local = g
                 .paths
                 .iter()
@@ -1282,8 +1201,6 @@ fn run_external_preparation(
 
     report_external_progress(&app, 0, total);
 
-    // Interleave task types (artist/cover/album) so the pool hits different hosts
-    // at once instead of piling onto one.
     let mut tasks: Vec<PrepTask> = Vec::with_capacity(total);
     {
         let mut ai = pending_artists.into_iter();
@@ -1317,8 +1234,6 @@ fn run_external_preparation(
     let cover_present_paths = Arc::new(cover_present_paths);
     let dir = Arc::new(dir);
 
-    // N-1 background threads + current thread as one more worker, so progress
-    // continues even if some spawns fail.
     let worker_count = EXTERNAL_PREP_CONCURRENCY.min(tasks.len()).max(1);
     let mut handles = Vec::with_capacity(worker_count.saturating_sub(1));
     for i in 1..worker_count {
@@ -1366,7 +1281,6 @@ fn run_external_preparation(
         let _ = h.join();
     }
 
-    // Batch-save "no external cover" markers once all workers finished collecting keys.
     if external_prep_current(generation) {
         let keys = none_keys.lock().unwrap_or_else(|e| e.into_inner());
         external::mark_track_covers_local(&dir, &keys);
@@ -1410,8 +1324,6 @@ fn statistics_add_collection_full_listen(
     library.add_collection_full_listen(kind, &key)
 }
 
-/// Buffers a finished (or, before closing, the still playing) play session;
-/// the disk write happens in batches, see `statistics::HistoryBuffer`.
 #[tauri::command(async)]
 fn statistics_log_listen(
     state: State<LibraryState>,
@@ -1511,24 +1423,19 @@ fn statistics_get_taste_profile(
     Ok(library.taste_profile())
 }
 
-// ── Equalizer commands ───────────────────────────────────────────────────────
-
 /// Bumped by every deferred settings save; only the latest one writes.
 static SETTINGS_SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(400);
 
 fn save_settings_now(app: &tauri::AppHandle) {
-    if let Some(state) = app.try_state::<SettingsState>() {
-        if let Ok(s) = state.lock() {
-            if let Err(e) = settings::save(&s.1, &s.0) {
+    if let Some(state) = app.try_state::<SettingsState>()
+        && let Ok(s) = state.lock()
+            && let Err(e) = settings::save(&s.1, &s.0) {
                 eprintln!("Settings save error: {}", e);
             }
-        }
-    }
 }
 
-/// Writes settings.json once the burst of changes is over: EQ sliders call
-/// their command on every input event, and each call used to hit the disk.
+/// Writes settings.json once a burst of changes is over (EQ sliders call on every input).
 fn schedule_settings_save(app: &tauri::AppHandle) {
     let generation = SETTINGS_SAVE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let app = app.clone();
@@ -1600,7 +1507,26 @@ fn eq_get_settings(state: State<PlayerState>) -> Result<EqSettings, String> {
     Ok(player.get_eq_settings())
 }
 
-// ── Auto enhancement commands ────────────────────────────────────────────────
+#[tauri::command]
+fn fx_get_settings(state: State<PlayerState>) -> Result<fx::FxSettings, String> {
+    Ok(state.read()?.fx_settings())
+}
+
+#[tauri::command]
+fn fx_set_settings(
+    app: tauri::AppHandle,
+    player_state: State<PlayerState>,
+    settings_state: State<SettingsState>,
+    settings: fx::FxSettings,
+) -> Result<fx::FxSettings, String> {
+    let mut player = player_state.write()?;
+    player.set_fx_settings(settings);
+    let applied = player.fx_settings();
+    drop(player);
+    settings_state.lock()?.0.fx_settings = applied.clone();
+    schedule_settings_save(&app);
+    Ok(applied)
+}
 
 fn enhance_update(
     player_state: &State<PlayerState>,
@@ -1641,8 +1567,6 @@ fn enhance_set_device(
     enhance_update(&player_state, &settings_state, |s| s.device = device)
 }
 
-// ── Settings commands ────────────────────────────────────────────────────────
-
 /// Options are freeform (bool/string/etc.), stored as JSON values.
 #[tauri::command]
 fn get_settings(
@@ -1661,8 +1585,6 @@ fn save_settings(
     state.0.options = settings;
     settings::save(&state.1, &state.0)
 }
-
-// ── Dev mode ─────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
 struct DevInfo {
@@ -1703,8 +1625,6 @@ fn restart_app(app: tauri::AppHandle) {
     app.restart();
 }
 
-// ── Player state persistence ─────────────────────────────────────────────────
-
 #[tauri::command]
 fn save_player_state(
     state: State<SettingsState>,
@@ -1720,8 +1640,6 @@ fn load_player_state(state: State<SettingsState>) -> Result<SavedPlayerState, St
     Ok(player_state::load(&settings.1))
 }
 
-// ── Pins commands ─────────────────────────────────────────────────────────────
-
 #[tauri::command]
 fn pins_load(state: State<SettingsState>) -> Result<pins::PinsState, String> {
     let settings = state.lock()?;
@@ -1733,8 +1651,6 @@ fn pins_save(state: State<SettingsState>, pins_state: pins::PinsState) -> Result
     let settings = state.lock()?;
     pins::save(&settings.1, &pins_state)
 }
-
-// ── Track metadata override commands ─────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1765,8 +1681,7 @@ fn read_cover_as_data_url(source_path: &str) -> Result<(String, Option<String>),
     Ok((data_url, accent))
 }
 
-/// title/artist: empty string means "revert to original". cover: None leaves the
-/// current cover untouched; `reset: true` reverts to the file's tagged cover.
+/// title/artist: empty string means "revert to original".
 #[tauri::command(async)]
 fn track_set_override(
     library: State<LibraryState>,
@@ -1797,7 +1712,6 @@ fn track_set_override(
         accent_color.as_deref(),
         keep_existing_cover,
     )?;
-    // Artist playlists are built from the effective (overridden) artist.
     if lib.get_track(&file_path).and_then(|t| t.artist) != artist_before {
         lib.rebuild_artist_playlists(&separators)?;
     }
@@ -1823,12 +1737,9 @@ fn fetch_track_with_override(
     library: &State<LibraryState>,
     file_path: &str,
 ) -> Result<TrackMetadata, String> {
-    // Prefer the library row (overrides already applied); fall back to reading
-    // tags from disk if the track isn't in the library (e.g. playing an unsaved file).
     let from_lib = {
         let lib = library.lock()?;
         lib.get_track(file_path).map(|mut t| {
-            // Mapper only fills cover_art for override covers; backfill embedded cover URL.
             if t.cover_art.is_none() && lib.has_cover(file_path) {
                 t.cover_art = Some(thumbnails::cover_protocol_url(
                     file_path,
@@ -1852,8 +1763,6 @@ fn fetch_track_with_override(
     }
     Ok(metadata)
 }
-
-// ── Custom cover commands ─────────────────────────────────────────────────────
 
 #[tauri::command(async)]
 fn cover_set_custom(
@@ -1882,13 +1791,11 @@ fn cover_load_all(state: State<SettingsState>) -> Result<Vec<covers::CustomCover
     Ok(covers::load_all(&settings.1))
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-
 #[cfg(target_os = "windows")]
 fn set_windows_priority_class() {
     unsafe {
         #[link(name = "kernel32")]
-        extern "system" {
+        unsafe extern "system" {
             fn GetCurrentProcess() -> *mut std::ffi::c_void;
             fn SetPriorityClass(h_process: *mut std::ffi::c_void, dw_priority_class: u32) -> i32;
         }
@@ -1918,8 +1825,6 @@ fn taskbar_set_covers(
     taskbar::set_covers(&app, prev, current, next, transition);
 }
 
-// ── System media integration (MPRIS, Linux) ──────────────────────────────────
-
 #[tauri::command]
 fn mpris_update_metadata(
     app: tauri::AppHandle,
@@ -1937,9 +1842,6 @@ fn mpris_update_playback(state: String, position_secs: f64) {
     mpris::update_playback(&state, position_secs);
 }
 
-// ── Discord Rich Presence ─────────────────────────────────────────────────────
-
-// async — Discord client IPC (pipe/socket) must not block the main thread.
 #[tauri::command(async)]
 fn discord_update_presence(payload: discord_rpc::PresencePayload) -> bool {
     discord_rpc::update_presence(payload)
@@ -1950,15 +1852,11 @@ fn discord_clear_presence() {
     discord_rpc::clear_presence();
 }
 
-// ── Track downloads ("Downloads" page) ───────────────────────────────────────
-
 /// Paginated catalog search (Deezer, iTunes fill-in); marks `in_library`.
 #[tauri::command]
 async fn downloads_search(
     app: tauri::AppHandle,
     query: String,
-    // Exact artist/title (clicking a "phantom" track in an album) enable exact
-    // Deezer field search; absent for a plain string search.
     artist: Option<String>,
     title: Option<String>,
     index: Option<u32>,
@@ -1983,8 +1881,6 @@ async fn downloads_search(
     .await
 }
 
-/// "Paste a link": probes a yt-dlp-supported URL (single video or playlist)
-/// without downloading; the tracks are then queued with their `source_url`.
 #[tauri::command]
 async fn downloads_resolve_link(
     app: tauri::AppHandle,
@@ -2004,9 +1900,7 @@ async fn downloads_resolve_link(
     .await
 }
 
-/// Sets `in_library` when the title matches, at least one artist overlaps
-/// (multi-artist aware) and albums are compatible (either side untagged, or
-/// equal) — a same-titled track from a different album isn't a match.
+/// `in_library`: same title, an overlapping artist and compatible albums.
 fn mark_in_library<'a>(
     app: &tauri::AppHandle,
     tracks: impl Iterator<Item = (&'a str, &'a str, Option<&'a str>, &'a mut bool)>,
@@ -2136,9 +2030,6 @@ fn downloads_dir_path(app: tauri::AppHandle) -> String {
 }
 
 /// `folder_path` = None/empty resets to the default "LFMusic Downloads" folder.
-/// The old folder is unregistered from the library (unless it was nested in a
-/// user folder) and the new one scanned, unless already covered. Returns the
-/// path actually applied (the default if the chosen one couldn't be created).
 #[tauri::command]
 async fn downloads_set_dir(
     app: tauri::AppHandle,
@@ -2164,8 +2055,6 @@ async fn downloads_set_dir(
                 }
                 library.covering_folder(&new).is_none()
             };
-            // The scan itself runs without holding the library lock, so the catalog,
-            // playlists and statistics stay readable while a big folder is scanned.
             if needs_add {
                 MusicLibrary::add_folder_unlocked(
                     &state.0,
@@ -2183,8 +2072,6 @@ async fn downloads_set_dir(
     .await
 }
 
-/// Windows: opens via `ShellExecuteW` (verb "open") rather than calling `explorer.exe`
-/// directly, so a user-registered third-party file manager isn't bypassed.
 #[tauri::command]
 fn open_folder_in_explorer(path: String) -> Result<(), String> {
     if !std::path::Path::new(&path).is_dir() {
@@ -2195,7 +2082,6 @@ fn open_folder_in_explorer(path: String) -> Result<(), String> {
         use windows::core::{w, PCWSTR};
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        // Null-terminated wide string; kept alive for the duration of the call.
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let hinst = unsafe {
             ShellExecuteW(
@@ -2207,7 +2093,7 @@ fn open_folder_in_explorer(path: String) -> Result<(), String> {
                 SW_SHOWNORMAL,
             )
         };
-        // ShellExecute returns HINSTANCE > 32 on success (legacy API semantics).
+        // ShellExecute returns HINSTANCE > 32 on success.
         if hinst.0 as isize <= 32 {
             return Err("Не удалось открыть папку".to_string());
         }
@@ -2244,8 +2130,6 @@ fn downloads_set_settings(
     downloader::set_settings(&app, settings)
 }
 
-// ── Download tools (yt-dlp / Deno / ffmpeg) ──────────────────────────────────
-
 /// Local status, no network.
 #[tauri::command]
 async fn tools_status(app: tauri::AppHandle) -> Result<downloader::ToolsState, String> {
@@ -2258,7 +2142,6 @@ async fn tools_check_updates(app: tauri::AppHandle) -> Result<downloader::ToolsS
 }
 
 /// `tools` omitted = install everything missing and update what's outdated.
-/// Progress arrives on the `downloads_tools` event.
 #[tauri::command]
 async fn tools_install(
     app: tauri::AppHandle,
@@ -2273,10 +2156,6 @@ async fn tools_remove(app: tauri::AppHandle) -> Result<downloader::ToolsState, S
     run_blocking(move || downloader::remove_tools(&app)).await
 }
 
-/// Blocks on `signal` (near-instant wakeup on natural EOF, 500ms safety-net
-/// fallback otherwise) and emits `track_ended` with the finished file's path —
-/// replaces relying on the frontend's 500ms status poll to notice playback
-/// stopped, which added up to half a second of dead air between tracks.
 fn spawn_track_end_watcher(app: tauri::AppHandle, signal: Arc<SinkEndSignal>) {
     std::thread::Builder::new()
         .name("track-end-watcher".into())
@@ -2299,31 +2178,24 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     set_windows_priority_class();
 
-    // WebKitGTK's Skia layer compositor shows the end value of an
-    // opacity/transform transition for one frame before animating it (fades
-    // and hovers blink and jump; seen on WebKitGTK 2.54, Wayland). The older
-    // TextureMapper compositor has no such glitch and keeps GPU rendering
-    // (disabling the DMABUF renderer also hides it, but drops the frame rate).
-    // Set before GTK/WebKit init; an explicit value from the user wins.
+    // WebKitGTK's Skia compositor flashes the end state of transitions (2.54, Wayland);
+    // TextureMapper does not. An explicit user value wins.
     #[cfg(target_os = "linux")]
     if std::env::var_os("WEBKIT_USE_SKIA_FOR_COMPOSITION").is_none() {
-        std::env::set_var("WEBKIT_USE_SKIA_FOR_COMPOSITION", "0");
+        // SAFETY: runs at startup, before any other thread is spawned.
+        unsafe { std::env::set_var("WEBKIT_USE_SKIA_FOR_COMPOSITION", "0") };
     }
 
     let player = AudioPlayer::new().expect("Не удалось инициализировать аудиоплеер");
     let track_end_signal = player.sink_end_signal();
 
     tauri::Builder::default()
-        // Serves lazily-generated, disk-cached WebP thumbnails by file_path, avoiding base64 over IPC.
         .register_asynchronous_uri_scheme_protocol("lfmusic-cover", |ctx, request, responder| {
             thumbnails::protocol_handler(ctx, request, responder);
         })
-        // Same pattern as lfmusic-cover, for cached external artist/cover images
-        // at lfmusic-external://{artist|cover}/<hash>.
         .register_asynchronous_uri_scheme_protocol("lfmusic-external", |ctx, request, responder| {
             external::protocol_handler(ctx, request, responder);
         })
-        // Short track fragments for the year recap cards, decoded in memory.
         .register_asynchronous_uri_scheme_protocol("lfmusic-snippet", |ctx, request, responder| {
             snippets::protocol_handler(ctx, request, responder);
         })
@@ -2345,6 +2217,7 @@ pub fn run() {
             player.set_eq_settings(app_settings.eq_settings.clone());
             player.set_enhance_settings(&app_settings.enhance_settings);
             drop(player);
+            player_state.write().expect("Lock error").set_fx_settings(app_settings.fx_settings.clone());
 
             let dev_mode = settings::option_bool(&app_settings, "dev_mode", false);
 
@@ -2358,7 +2231,6 @@ pub fn run() {
             let mut library =
                 MusicLibrary::new(app_data_dir.clone()).expect("Не удалось инициализировать библиотеку");
 
-            // Rebuild once on startup so existing libraries get artist playlists without waiting for a rescan.
             let separators = {
                 let s = app.state::<SettingsState>();
                 settings::get_artist_separators(&s)
@@ -2367,13 +2239,10 @@ pub fn run() {
                 eprintln!("Ошибка инициализации плейлистов исполнителей: {}", e);
             }
 
-            // Create the built-in "Мне нравится" playlist on first launch.
             if let Err(e) = library.ensure_favorites_playlist() {
                 eprintln!("Ошибка инициализации плейлиста избранного: {}", e);
             }
 
-            // One-time migration: clear the external-album negative cache, since old
-            // "none" entries could have been cached from transient errors (no longer the case).
             {
                 let marker = external_marker_dir.join("external_album.version");
                 let current = std::fs::read_to_string(&marker)
@@ -2391,11 +2260,8 @@ pub fn run() {
 
             spawn_track_end_watcher(app.handle().clone(), track_end_signal.clone());
 
-            // Built after every state is managed: a command arriving from the page
-            // must find SettingsState/LibraryState (on Android the WebView can
-            // call in while setup is still running).
-            // The main window has `create: false` in tauri.conf.json and is built
-            // here, so WebView devtools (Ctrl+Shift+I) exist only in dev mode.
+            // Built after every state is managed: on Android the WebView can call in during setup.
+            // The window has `create: false`, so devtools exist only in dev mode.
             let window_config = app
                 .config()
                 .app
@@ -2411,11 +2277,10 @@ pub fn run() {
             window_state::restore_main_window_geometry(app, &app_data_dir);
 
             #[cfg(windows)]
-            if let Some(window) = app.get_webview_window("main") {
-                if let Ok(hwnd) = window.hwnd() {
+            if let Some(window) = app.get_webview_window("main")
+                && let Ok(hwnd) = window.hwnd() {
                     taskbar::init(&app.handle().clone(), hwnd.0 as isize);
                 }
-            }
 
             #[cfg(target_os = "linux")]
             {
@@ -2438,7 +2303,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            // Player
             player_play,
             player_play_crossfade,
             player_play_paused,
@@ -2455,7 +2319,6 @@ pub fn run() {
             get_cover_art,
             get_original_cover_art,
             get_track_lyrics,
-            // Library
             library_get_folders,
             library_add_folder,
             library_add_android_music_folders,
@@ -2470,7 +2333,6 @@ pub fn run() {
             library_cleanup,
             library_rescan,
             library_rebuild_artists,
-            // Playlists
             playlist_get_all,
             playlist_get_tracks,
             playlist_create,
@@ -2483,13 +2345,11 @@ pub fn run() {
             playlist_get_track_paths,
             album_get_track_order,
             album_set_track_order,
-            // External sources
             external_album_layout,
             external_artist_image,
             external_track_cover,
             external_load_cached_artist_images,
             external_prepare,
-            // Downloads
             downloads_search,
             downloads_resolve_link,
             downloads_album,
@@ -2524,15 +2384,15 @@ pub fn run() {
             statistics_get_summary_stats,
             statistics_get_recommendations,
             statistics_get_taste_profile,
-            // Equalizer
             eq_set_bands,
             eq_set_gain,
             eq_set_enabled,
             eq_get_settings,
+            fx_get_settings,
+            fx_set_settings,
             enhance_get_status,
             enhance_set_enabled,
             enhance_set_device,
-            // Settings
             get_settings,
             save_settings,
             dev_info,
@@ -2541,33 +2401,25 @@ pub fn run() {
             restart_app,
             updater::update_check,
             updater::update_install,
-            // Player state
             save_player_state,
             load_player_state,
-            // Pins
             pins_load,
             pins_save,
-            // Custom covers
             cover_set_custom,
             cover_remove_custom,
             cover_load_all,
-            // Track metadata overrides
             track_set_override,
             track_clear_all_overrides,
             get_original_track,
             read_image_as_data_url,
-            // Window
             window_state::toggle_window_fullscreen,
             window_state::toggle_window_maximize,
             open_folder_in_explorer,
-            // Taskbar (Windows)
             taskbar_set_playing,
             taskbar_set_modes,
             taskbar_set_covers,
-            // System media integration (MPRIS, Linux)
             mpris_update_metadata,
             mpris_update_playback,
-            // Discord Rich Presence
             discord_update_presence,
             discord_clear_presence,
         ])
@@ -2575,19 +2427,16 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                // Kill any running yt-dlp/ffmpeg, or they'd outlive the app.
+                // Kill any running yt-dlp/ffmpeg, or they would outlive the app.
                 downloader::shutdown(app_handle);
-                // A deferred settings save may still be waiting.
                 if SETTINGS_SAVE_GENERATION.load(Ordering::SeqCst) > 0 {
                     save_settings_now(app_handle);
                 }
-                if let Some(state) = app_handle.try_state::<LibraryState>() {
-                    if let Ok(library) = state.0.lock() {
-                        if let Err(e) = library.shutdown() {
+                if let Some(state) = app_handle.try_state::<LibraryState>()
+                    && let Ok(library) = state.0.lock()
+                        && let Err(e) = library.shutdown() {
                             eprintln!("Library shutdown error: {}", e);
                         }
-                    }
-                }
             }
         });
 }

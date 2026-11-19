@@ -36,8 +36,7 @@ pub enum PlaylistKind {
     Album,
     Artist,
     User,
-    /// The singleton "Мне нравится" system playlist. Accepts manual add/remove
-    /// like a user playlist, but can't be renamed or deleted.
+    /// The singleton "Мне нравится" system playlist.
     Favorites,
 }
 
@@ -83,7 +82,8 @@ pub struct SummaryStats {
     pub night_listens: i64,
 }
 
-/// Split an artist string by a list of separators, applied in sequence; trims and drops empty pieces.
+/// Split an artist string by a list of separators, applied in sequence; trims and drops empty
+/// pieces.
 pub fn split_artists(artist: &str, separators: &[String]) -> Vec<String> {
     let mut parts: Vec<String> = vec![artist.to_string()];
     for sep in separators {
@@ -105,13 +105,11 @@ pub fn split_artists(artist: &str, separators: &[String]) -> Vec<String> {
 pub struct MusicLibrary {
     conn: Connection,
     db_path: PathBuf,
-    /// Taste-centroid accumulator cache ("my mix"): lazy O(N) build once, then
-    /// updated incrementally per listen (see `update_centroid_for_listen`).
     centroid_cache: RefCell<Option<CentroidAccumulators>>,
-    /// In-memory catalog search index (lowercased fields), lazily rebuilt when `SEARCH_INDEX_DIRTY`.
+    /// In-memory catalog search index (lowercased fields), lazily rebuilt when
+    /// `SEARCH_INDEX_DIRTY`.
     search_index: RefCell<Option<Vec<crate::catalog_search::SearchEntry>>>,
     /// "Already downloaded" index cache for the Downloads page (title -> local matches).
-    /// Keyed by the separators it was built with since debounced search re-queries it per keystroke.
     catalog_index_cache: RefCell<Option<(Vec<String>, CatalogIndex)>>,
     /// Listening history waiting for its batched write (see `statistics::HistoryBuffer`).
     history: RefCell<HistoryBuffer>,
@@ -127,10 +125,6 @@ fn lock_library(lib: &Mutex<MusicLibrary>) -> Result<std::sync::MutexGuard<'_, M
 /// Title key -> local matches, see `catalog_index_cache`.
 type CatalogIndex = Arc<HashMap<String, Vec<LibraryTrackMatch>>>;
 
-/// One local file's identity for album-aware "already downloaded" matching on the
-/// Downloads page: normalized artists + normalized album key (empty if untagged).
-/// Multiple entries can share a title key to distinguish same-named tracks from
-/// different albums.
 #[derive(Debug, Clone)]
 pub struct LibraryTrackMatch {
     pub artists: HashSet<String>,
@@ -145,8 +139,6 @@ static AUDIO_FEATURE_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CENTROID_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
 /// Set when track composition or fields change; starts `true` since the index is lazily built.
 static SEARCH_INDEX_DIRTY: AtomicBool = AtomicBool::new(true);
-/// Separate from SEARCH_INDEX_DIRTY so each cache's consumer can `swap(false)`
-/// independently without one invalidation being silently consumed by the other.
 static DOWNLOADS_INDEX_DIRTY: AtomicBool = AtomicBool::new(true);
 
 fn mark_track_indexes_dirty() {
@@ -155,9 +147,7 @@ fn mark_track_indexes_dirty() {
     }
 }
 
-/// Only invalidates the catalog search index (ordered by `sort_order`). The
-/// "already downloaded" index depends only on title/artist/album, not order,
-/// so reordering (move-to-top etc.) must not force it to rebuild.
+/// Only invalidates the search index: the downloaded index does not depend on order.
 fn mark_search_index_dirty() {
     SEARCH_INDEX_DIRTY.store(true, Ordering::SeqCst);
 }
@@ -226,13 +216,6 @@ fn spawn_audio_feature_analysis(
                 }
             };
 
-            // Single unchunked parallel pass: rayon work-steals across the whole job
-            // list, so one slow file no longer stalls every other thread the way a
-            // fixed-size chunk-then-barrier loop used to (each chunk previously had to
-            // fully finish, including its slowest file, before the next chunk started).
-            // Results stream to this thread over a channel and are written in small
-            // batches as they arrive, so progress stays live and partial work survives
-            // an app close mid-run, instead of only ever writing at chunk boundaries.
             let (tx, rx) = mpsc::channel::<(String, u64, Option<AudioFeatures>)>();
             let analysis_thread = std::thread::spawn(move || {
                 pool.install(|| {
@@ -277,8 +260,6 @@ fn spawn_audio_feature_analysis(
 }
 
 /// Writes a batch of analysis results in one transaction and clears `pending`.
-/// Used by [`spawn_audio_feature_analysis`] to commit incrementally as results
-/// stream in, instead of waiting for the whole job list to finish.
 fn flush_audio_features(
     conn: &mut Connection,
     pending: &mut Vec<(String, u64, Option<AudioFeatures>)>,
@@ -322,14 +303,10 @@ fn flush_audio_features(
         let _ = tx.commit();
     }
     pending.clear();
-    // New audio features may change the centroid; search/downloaded indexes
-    // depend on title/artist/album/genre/order, none of which features touch.
     CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
 }
 
-/// SELECT list read by [`MusicLibrary::row_to_metadata_with_override`] over tracks `t`,
-/// overrides `o` and audio features `af`. `$cover` is the cover-signature column:
-/// `"o.cover_sig"`, or `"NULL"` when the caller doesn't need it.
+/// SELECT list for row_to_metadata_with_override; `$cover` is "o.cover_sig" or "NULL".
 macro_rules! track_select {
     ($cover:literal) => {
         concat!(
@@ -368,8 +345,6 @@ impl MusicLibrary {
              PRAGMA temp_store=MEMORY;",
         )
         .map_err(|e| format!("Ошибка PRAGMA: {}", e))?;
-        // Hot single-row lookups (cover protocol, accent color, overrides) go
-        // through prepare_cached; the default capacity of 16 is too small.
         conn.set_prepared_statement_cache_capacity(64);
 
         conn.execute_batch(
@@ -459,12 +434,8 @@ impl MusicLibrary {
         )
         .map_err(|e| format!("Ошибка создания таблиц: {}", e))?;
 
-        // tracks.has_cover was added after initial release; there's no migration
-        // system (see module docs), so a fresh CREATE TABLE already defines it but
-        // an existing DB needs it added explicitly. Errors (column already exists)
-        // are expected on every run after the first and are ignored. Existing rows
-        // land as NULL ("unknown"); MusicLibrary::has_cover resolves and caches
-        // those lazily instead of assuming "no cover" and silently losing art.
+        // No migration system: add the column to old DBs; the error on later runs (column exists)
+        // is expected.
         let _ = conn.execute("ALTER TABLE tracks ADD COLUMN has_cover INTEGER", []);
 
         statistics::create_tables(&conn)
@@ -564,8 +535,7 @@ impl MusicLibrary {
         ).map_err(|e| format!("Ошибка подсчёта прогресса audio features: {}", e))
     }
 
-    /// WAL stays enabled here (not disabled on shutdown): background DSP threads
-    /// may still hold their own SQLite connection while the window closes.
+    /// WAL stays enabled: background DSP threads may still hold a connection at shutdown.
     pub fn shutdown(&self) -> Result<(), String> {
         if let Err(e) = self.flush_history(true) {
             eprintln!("{}", e);
@@ -701,7 +671,7 @@ impl MusicLibrary {
 
         let rows = match stmt.query_map([], |row| {
             let path: String = row.get(0)?;
-            let track_count: usize = row.get(1)?;
+            let track_count = row.get::<_, i64>(1)? as usize;
             let exists = if check_exists { PathBuf::from(&path).is_dir() } else { true };
             Ok(FolderInfo {
                 path,
@@ -746,9 +716,7 @@ impl MusicLibrary {
         Ok(self.get_all_tracks_light())
     }
 
-    /// [`Self::add_folder`] that holds `lib` only for DB reads/writes: listing
-    /// files and reading tags (the slow part) runs unlocked, so other commands
-    /// (and the main thread waiting on them) aren't blocked during the scan.
+    /// add_folder that holds `lib` only for DB work: listing files and reading tags run unlocked.
     pub fn add_folder_unlocked<F>(
         lib: &Mutex<MusicLibrary>,
         folder: String,
@@ -851,10 +819,6 @@ impl MusicLibrary {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Registered library folder that equals or contains `dir`, compared via
-    /// canonicalized paths (case/separator-safe on Windows). Returns the stored
-    /// path of the covering folder, so a downloads folder nested inside an
-    /// already-added folder isn't registered (and scanned) twice.
     pub fn covering_folder(&self, dir: &str) -> Option<String> {
         let target = std::fs::canonicalize(dir).ok()?;
         let folders: Vec<String> = {
@@ -865,17 +829,14 @@ impl MusicLibrary {
             rows.filter_map(|r| r.ok()).collect()
         };
         for f in folders {
-            if let Ok(fp) = std::fs::canonicalize(&f) {
-                if target.starts_with(&fp) {
+            if let Ok(fp) = std::fs::canonicalize(&f)
+                && target.starts_with(&fp) {
                     return Some(f);
                 }
-            }
         }
         None
     }
 
-    /// Adds a single downloaded file without a full folder scan: reads only
-    /// this file's metadata and UPSERTs it, so cost doesn't grow with library size.
     pub fn insert_downloaded_track(
         &mut self,
         file_path: &str,
@@ -897,8 +858,6 @@ impl MusicLibrary {
 
         let m = AudioPlayer::get_metadata_light(file_path)?;
         let mtime = Self::get_mtime(&PathBuf::from(file_path));
-        // Catalog sorts by sort_order DESC, so a downloaded track goes to the top;
-        // re-downloads (DO UPDATE branch) also bump it, as an explicit user action.
         let new_sort_order: i64 = self
             .conn
             .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
@@ -952,25 +911,20 @@ impl MusicLibrary {
 
         self.rebuild_album_playlists()?;
         self.rebuild_artist_playlists(artist_separators)?;
-        // Feature analysis is intentionally NOT restarted here: during batch downloads
-        // that would cancel+restart the background worker per track. The caller
-        // (download worker) triggers it once after the batch via resume_pending_audio_feature_analysis.
+        // Feature analysis is not restarted here: the download worker triggers it once after the
+        // batch.
         CENTROID_CACHE_DIRTY.store(true, Ordering::SeqCst);
         mark_track_indexes_dirty();
         Ok(())
     }
 
-    /// Removes one track (DB row + dependent data) and rebuilds playlists. Does NOT
-    /// touch the file on disk (caller's job, see `downloads::delete_downloaded_track`).
-    /// FK cascade handles playlist_tracks/track_audio_features; track_overrides/
-    /// track_statistics are cleaned explicitly since they have no FK.
+    /// Removes one track and its data (not the file); track_overrides/track_statistics have no FK
+    /// and are cleaned explicitly.
     pub fn remove_track(
         &mut self,
         file_path: &str,
         artist_separators: &[String],
     ) -> Result<(), String> {
-        // Grab the cover signature before deleting the override row, so the
-        // orphaned track_covers/ file (if any) can be cleaned up after commit.
         let cover_sig = self.get_override_cover_sig(file_path);
         {
             let tx = self
@@ -995,10 +949,8 @@ impl MusicLibrary {
             self.remove_orphan_cover_file(&sig, file_path);
         }
 
-        // Best-effort, errors not propagated: the tracks row is already committed
-        // deleted, so failing here shouldn't make the caller think removal failed
-        // (that could un-quarantine a file whose DB row is gone). Stale playlists
-        // self-heal on the next rebuild.
+        // Best effort: the track row is already deleted, failing here must not look like a failed
+        // removal.
         if let Err(e) = self.rebuild_album_playlists() {
             eprintln!("[library] remove_track: не удалось перестроить альбомы: {}", e);
         }
@@ -1023,7 +975,6 @@ impl MusicLibrary {
             .transaction()
             .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-        // Overrides are only reset when a folder leaves the app's scope entirely.
         tx.execute(
             "DELETE FROM track_overrides
              WHERE file_path IN (SELECT file_path FROM tracks WHERE folder_path = ?1)",
@@ -1069,9 +1020,8 @@ impl MusicLibrary {
             rows.filter_map(|r| r.ok()).collect()
         };
 
-        // A library folder on an unplugged/unmounted drive makes every track in it
-        // look missing. Deleting them would cascade-drop statistics, playlist
-        // membership and overrides, so tracks of unavailable folders are kept.
+        // Tracks of unavailable folders (unplugged drive) are kept: deleting them would drop their
+        // stats, playlists and overrides.
         let available_roots: HashSet<String> = all_paths
             .iter()
             .map(|(_, folder)| folder.clone())
@@ -1080,8 +1030,6 @@ impl MusicLibrary {
             .filter(|folder| Path::new(folder).is_dir())
             .collect();
 
-        // Existence checks are IO-bound; parallelized since a serial walk is
-        // very slow for large libraries / network drives.
         let dead: Vec<String> = all_paths
             .into_par_iter()
             .filter(|(p, folder)| available_roots.contains(folder) && !PathBuf::from(p).exists())
@@ -1090,9 +1038,8 @@ impl MusicLibrary {
 
         let count = dead.len();
         if !dead.is_empty() {
-            // track_overrides has no FK to tracks (unlike track_audio_features/
-            // playlist_tracks/track_statistics, cleaned by ON DELETE CASCADE), so it
-            // must be deleted explicitly here too, same as remove_track() does.
+            // track_overrides has no FK to tracks, so it is deleted explicitly (like
+            // remove_track).
             let cover_sigs: Vec<String> = dead
                 .iter()
                 .filter_map(|p| self.get_override_cover_sig(p))
@@ -1141,24 +1088,17 @@ impl MusicLibrary {
         self.get_all_tracks_inner(true)
     }
 
-    /// Title -> local matches ([`LibraryTrackMatch`]) index for the Downloads page:
-    /// a remote track counts as "already downloaded" if the title matches (noise
-    /// like `(prod. by ...)` stripped), artist sets intersect, and the album is
-    /// compatible (see `downloads_search`) — so a same-named track from a
-    /// different album isn't marked as owned.
     pub fn catalog_artist_title_index(
         &self,
         separators: &[String],
     ) -> CatalogIndex {
-        // Cached: debounced search on the Downloads page re-queries this per keystroke.
         if DOWNLOADS_INDEX_DIRTY.swap(false, Ordering::SeqCst) {
             self.catalog_index_cache.borrow_mut().take();
         }
-        if let Some((sep, idx)) = self.catalog_index_cache.borrow().as_ref() {
-            if sep.as_slice() == separators {
+        if let Some((sep, idx)) = self.catalog_index_cache.borrow().as_ref()
+            && sep.as_slice() == separators {
                 return Arc::clone(idx);
             }
-        }
         let built = Arc::new(self.build_catalog_artist_title_index(separators));
         *self.catalog_index_cache.borrow_mut() =
             Some((separators.to_vec(), Arc::clone(&built)));
@@ -1178,7 +1118,6 @@ impl MusicLibrary {
         ) else {
             return index;
         };
-        // Prepared once, not per track, to avoid thousands of reallocations on large libraries.
         let prepared_seps = crate::external::prepare_artist_separators(separators);
         let rows = stmt.query_map([], |row| {
             let title: Option<String> = row.get(0)?;
@@ -1256,9 +1195,6 @@ impl MusicLibrary {
 
     fn row_to_metadata_with_override(row: &rusqlite::Row) -> rusqlite::Result<TrackMetadata> {
         let file_path: String = row.get(0)?;
-        // Override cover is served as a WebP thumbnail via the `lfmusic-cover` protocol
-        // (no base64 in the list); embedded cover loads lazily elsewhere, so None here.
-        // Column 13 is the cover_sig, not raw bytes: URL is built without hashing.
         let cover_art = row
             .get::<_, Option<String>>(13)?
             .map(|sig| crate::thumbnails::cover_protocol_url(&file_path, &sig));
@@ -1284,9 +1220,7 @@ impl MusicLibrary {
             spectral_centroid: row.get(18)?,
             key: row.get(19)?,
             audio_fingerprint: row.get(20)?,
-            // Not selected here (internal-only field, see TrackMetadata::has_cover) —
-            // this row mapper's output never feeds back into a tracks INSERT, so a
-            // placeholder is correct; use MusicLibrary::has_cover for the real value.
+            // Placeholder: use MusicLibrary::has_cover for the real value.
             has_cover: false,
         })
     }
@@ -1367,7 +1301,6 @@ impl MusicLibrary {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        // query_map closures differ by arity/type per branch, so each collects separately.
         match genre {
             Some(g) => match stmt.query_map(params![g], |row| row.get::<_, String>(0)) {
                 Ok(rows) => rows.filter_map(|x| x.ok()).collect(),
@@ -1488,7 +1421,6 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка обновления sort_order: {}", e))?;
 
         if changed > 0 {
-            // sort_order changed, which the search index bakes in; the "downloaded" index doesn't depend on order.
             mark_search_index_dirty();
             self.add_track_statistics_delta(TrackStatisticsDelta {
                 file_path: file_path.to_string(),
@@ -1579,8 +1511,7 @@ impl MusicLibrary {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Reads tags of new/changed files. No DB access, so callers can run it
-    /// without holding the library lock (see [`Self::add_folder_unlocked`]).
+    /// Reads tags of new/changed files.
     fn read_changed_files<F>(
         files: &[PathBuf],
         cached_mtimes: &HashMap<String, u64>,
@@ -1594,18 +1525,16 @@ impl MusicLibrary {
             return Ok(Vec::new());
         }
 
-        // mtime reads are IO-bound, parallelized; par_iter preserves file order.
         let to_scan: Vec<(String, u64)> = files
             .par_iter()
             .filter_map(|file_path| {
                 let path_str = file_path.to_string_lossy().to_string();
                 let mtime = Self::get_mtime(file_path);
 
-                if let Some(&cached) = cached_mtimes.get(&path_str) {
-                    if cached == mtime {
+                if let Some(&cached) = cached_mtimes.get(&path_str)
+                    && cached == mtime {
                         return None;
                     }
-                }
 
                 Some((path_str, mtime))
             })
@@ -1659,10 +1588,7 @@ impl MusicLibrary {
                 .transaction()
                 .map_err(|e| format!("Ошибка транзакции: {}", e))?;
 
-            // Catalog sorts by sort_order DESC; newly-seen files this scan share one
-            // value above the current max (grouped at top). Already-known tracks hit
-            // the DO UPDATE branch and keep their sort_order, so a bare mtime change
-            // doesn't bump them to the top.
+            // Known tracks keep their sort_order: an mtime change must not move them to the top.
             let new_sort_order: i64 = tx
                 .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM tracks", [], |r| r.get(0))
                 .unwrap_or(0)
@@ -1754,7 +1680,7 @@ impl MusicLibrary {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 kind,
-                track_count: row.get(3)?,
+                track_count: row.get::<_, i64>(3)? as usize,
                 first_file_path: row.get::<_, Option<String>>(4)?,
             })
         }) {
@@ -1831,9 +1757,6 @@ impl MusicLibrary {
         })
     }
 
-    /// Creates the favorites ("Мне нравится") playlist if it doesn't exist yet,
-    /// returning its id either way. Called once on startup so it's present on
-    /// first launch without waiting for the user to open collections.
     pub fn ensure_favorites_playlist(&self) -> Result<i64, String> {
         if let Ok(id) = self.conn.query_row(
             "SELECT id FROM playlists WHERE kind = 'favorites' LIMIT 1",
@@ -1878,7 +1801,6 @@ impl MusicLibrary {
             return Err("Нельзя удалять системные плейлисты".into());
         }
 
-        // Mirrors remove_track_from_playlist: -1 playlist_add_count per track.
         let removed_paths: Vec<String> = {
             let mut stmt = self.conn
                 .prepare("SELECT file_path FROM playlist_tracks WHERE playlist_id = ?1")
@@ -1911,9 +1833,7 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Adds a track to a playlist. `prepend` puts it at the top (used for new
-    /// likes on the favorites playlist); otherwise it's appended to the bottom.
-    /// Returns whether the track was added (false if it was already there).
+    /// Adds a track to a playlist.
     pub fn add_track_to_playlist(&self, playlist_id: i64, file_path: &str, prepend: bool) -> Result<bool, String> {
         let kind: String = self.conn
             .query_row("SELECT kind FROM playlists WHERE id = ?1", params![playlist_id], |r| r.get(0))
@@ -1987,8 +1907,7 @@ impl MusicLibrary {
         Ok(changed > 0)
     }
 
-    /// File paths of a playlist's tracks, in order. Lighter than
-    /// `get_playlist_tracks` — used to hydrate the reactive favorites set.
+    /// File paths of a playlist's tracks, in order.
     pub fn get_playlist_track_paths(&self, playlist_id: i64) -> Vec<String> {
         let mut stmt = match self.conn.prepare(
             "SELECT file_path FROM playlist_tracks
@@ -2005,8 +1924,7 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// Playlists (user-created and the favorites playlist) that contain the
-    /// track. Excludes album/artist playlists, which are auto-managed.
+    /// Playlists (user-created and the favorites playlist) that contain the track.
     pub fn get_user_playlist_ids_for_track(&self, file_path: &str) -> Vec<i64> {
         let mut stmt = match self.conn.prepare(
             "SELECT pt.playlist_id
@@ -2027,8 +1945,6 @@ impl MusicLibrary {
     }
 
     pub fn add_track_statistics_delta(&self, delta: TrackStatisticsDelta) -> Result<(), String> {
-        // A listen changes the taste centroid; update its cache incrementally
-        // instead of an O(N) history rescan on every "mix" request.
         let listen_changed = delta.listen_count_delta != 0 && !delta.file_path.trim().is_empty();
         let old_count = if listen_changed {
             statistics::get_track_statistics(&self.conn, &delta.file_path)
@@ -2050,11 +1966,10 @@ impl MusicLibrary {
 
     pub fn log_listen(&self, event: ListenEvent) {
         let due = self.history.borrow_mut().push_listen(event);
-        if due {
-            if let Err(e) = self.flush_history(false) {
+        if due
+            && let Err(e) = self.flush_history(false) {
                 eprintln!("{}", e);
             }
-        }
     }
 
     fn log_library_event(&self, kind: LibraryEventKind, file_path: Option<&str>, ref_id: Option<i64>) {
@@ -2064,16 +1979,12 @@ impl MusicLibrary {
             file_path: file_path.map(str::to_string),
             ref_id,
         });
-        if due {
-            if let Err(e) = self.flush_history(false) {
+        if due
+            && let Err(e) = self.flush_history(false) {
                 eprintln!("{}", e);
             }
-        }
     }
 
-    /// Writes buffered history; `include_open` also writes the session of the
-    /// track still playing (shutdown only). A failed batch is dropped rather
-    /// than retried forever.
     pub fn flush_history(&self, include_open: bool) -> Result<(), String> {
         let (listens, library) = self.history.borrow_mut().take(include_open);
         statistics::write_history(&self.conn, &listens, &library)
@@ -2087,9 +1998,6 @@ impl MusicLibrary {
             .map_err(|e| format!("Ошибка подсчета итогов года: {}", e))?;
         recap.attach_media(
             |path| crate::thumbnails::cover_url(self, path),
-            // Accents are normally cached on first playback; recap tracks may never
-            // have been played in this install, so compute (and cache) them here.
-            // Custom covers are skipped: their accent lives in track_overrides.
             |path| {
                 if self.get_override_cover_sig(path).is_some() {
                     return None;
@@ -2155,10 +2063,7 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Incremental update: diffs each album against its existing playlist and
-    /// applies only the delta; unchanged albums aren't touched.
     pub fn rebuild_album_playlists(&mut self) -> Result<(), String> {
-        // Current albums from tracks, with >1 track.
         let actual_albums: HashMap<String, HashSet<String>> = {
             let mut stmt = self.conn.prepare(
                 "SELECT album, file_path FROM tracks
@@ -2178,7 +2083,6 @@ impl MusicLibrary {
             map
         };
 
-        // Existing album playlists: name -> (id, Set<file_path>)
         let existing_albums: HashMap<String, (i64, HashSet<String>)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT p.id, p.name, pt.file_path
@@ -2269,8 +2173,6 @@ impl MusicLibrary {
     }
 
     /// Splits each track's artist by `separators`; one playlist (kind='artist') per name.
-    /// Names are grouped case-insensitively (so "MZLFF"/"mzlff" merge); per key we keep a
-    /// spelling-variant counter (to pick a canonical name for new playlists) plus the track set.
     pub fn rebuild_artist_playlists(&mut self, separators: &[String]) -> Result<(), String> {
         let actual_artists: HashMap<String, (HashMap<String, usize>, HashSet<String>)> = {
             let mut stmt = self.conn.prepare(
@@ -2298,8 +2200,6 @@ impl MusicLibrary {
             map
         };
 
-        // Grouped by lowercased name; a key can hold multiple legacy case-variant
-        // playlists that need merging into one.
         let existing_by_key: HashMap<String, Vec<(i64, String, HashSet<String>)>> = {
             let mut stmt = self.conn.prepare(
                 "SELECT p.id, p.name, pt.file_path
@@ -2343,10 +2243,8 @@ impl MusicLibrary {
         }
 
         for (key, (variants, new_set)) in &actual_artists {
-            // If a key has multiple legacy duplicates, keep the largest (by track
-            // count, ties by oldest id) and merge the rest into it, preserving its
-            // existing name so pins/covers/top-order aren't broken. A canonical name
-            // (most common spelling) is only chosen when creating a brand-new playlist.
+            // Legacy case-variant duplicates merge into the largest, keeping its name so
+            // pins/covers/top order survive.
             let (playlist_id, current_set) = match existing_by_key.get(key) {
                 Some(playlists) if !playlists.is_empty() => {
                     let mut sorted: Vec<&(i64, String, HashSet<String>)> = playlists.iter().collect();
@@ -2414,9 +2312,7 @@ impl MusicLibrary {
         self.db_path.parent().unwrap_or_else(|| Path::new("."))
     }
 
-    /// Overrides survive rescans and reset only when the track's folder leaves the
-    /// app's scope. `keep_existing_cover = true` leaves cover/accent untouched;
-    /// otherwise both are replaced by the passed values (None clears them).
+    /// Overrides survive rescans and reset only when the track's folder leaves the app's scope.
     pub fn set_track_override(
         &self,
         file_path: &str,
@@ -2427,7 +2323,6 @@ impl MusicLibrary {
         keep_existing_cover: bool,
     ) -> Result<(), String> {
         mark_track_indexes_dirty();
-        // Empty string means "use the original".
         let title = title.filter(|&s| !s.trim().is_empty());
         let artist = artist.filter(|&s| !s.trim().is_empty());
 
@@ -2441,7 +2336,6 @@ impl MusicLibrary {
             .ok();
         let old_sig = existing.as_ref().and_then(|(s, _)| s.clone());
 
-        // New cover (data URL) is written to track_covers/; only its signature goes in the DB.
         let (final_sig, final_accent) = if keep_existing_cover {
             (old_sig.clone(), existing.and_then(|(_, a)| a))
         } else {
@@ -2459,14 +2353,11 @@ impl MusicLibrary {
             }
         };
 
-        // Covers are deduplicated by signature, so clean up the old file if it changed/cleared.
-        if old_sig != final_sig {
-            if let Some(ref sig) = old_sig {
+        if old_sig != final_sig
+            && let Some(ref sig) = old_sig {
                 self.remove_orphan_cover_file(sig, file_path);
             }
-        }
 
-        // All fields empty -> delete the row so the LEFT JOIN falls back to the original.
         if title.is_none() && artist.is_none() && final_sig.is_none() && final_accent.is_none() {
             self.conn
                 .execute(
@@ -2508,8 +2399,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Also resets cached accent_color so the next playback recomputes it from
-    /// the track's original embedded cover.
     pub fn clear_all_track_overrides(&self) -> Result<usize, String> {
         mark_track_indexes_dirty();
         let count = self
@@ -2531,7 +2420,8 @@ impl MusicLibrary {
             .unwrap_or(false)
     }
 
-    /// Override accent_color wins if set, otherwise falls back to the one cached from the original cover.
+    /// Override accent_color wins if set, otherwise falls back to the one cached from the original
+    /// cover.
     pub fn get_accent_color(&self, file_path: &str) -> Option<String> {
         self.conn
             .prepare_cached(
@@ -2564,12 +2454,8 @@ impl MusicLibrary {
         crate::track_covers::read_cover(self.app_data_dir(), &sig)
     }
 
-    /// Whether `file_path` has an embedded cover picture, from the cached
-    /// `tracks.has_cover` column instead of re-opening/re-parsing tags on every
-    /// call (the old path — see [`AudioPlayer::has_embedded_cover`], still used
-    /// as the one-time resolver here). A pre-existing row from before this
-    /// column existed reads as NULL ("unknown"); resolved once here and written
-    /// back, so later calls take the fast DB-only path.
+    /// Cover presence from the cached `tracks.has_cover`; NULL rows are resolved once and written
+    /// back.
     pub fn has_cover(&self, file_path: &str) -> bool {
         let cached: Option<Option<i64>> = self
             .conn
@@ -2592,12 +2478,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Paths confirmed (cached) to have an embedded cover — for the external-prep
-    /// batch pass, which needs this per-track for many tracks at once and would
-    /// otherwise re-parse tags per group (see `external_prep_worker`). Rows still
-    /// NULL ("unknown", not yet resolved by [`Self::has_cover`]) are excluded
-    /// rather than resolved here, so this stays a cheap indexed scan; a false
-    /// negative just costs one extra (cached, rate-limited) external lookup.
     pub fn cover_present_paths(&self) -> HashSet<String> {
         let mut stmt = match self
             .conn
@@ -2689,9 +2569,6 @@ impl MusicLibrary {
     }
 
     pub fn get_top_artists(&self, limit: usize, separators: &[String]) -> Vec<TopArtist> {
-        // Grouped by exact spelling in SQL, then split into single artists by the
-        // user's separators ("A; B" counts for both A and B, like artist playlists)
-        // and merged case-insensitively in Rust so "MZLFF"/"mzlff" count as one artist.
         let sql = "SELECT COALESCE(o.artist, t.artist) AS artist_name,
                           SUM(s.listen_count) AS total_listens,
                           SUM(s.total_listened_secs) AS total_secs,
@@ -2799,10 +2676,10 @@ impl MusicLibrary {
 
     pub fn get_summary_stats(&self) -> SummaryStats {
         let total_tracks: usize = self.conn
-            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0).map(|n| n as usize))
             .unwrap_or(0);
         let total_folders: usize = self.conn
-            .query_row("SELECT COUNT(*) FROM folders", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM folders", [], |r| r.get::<_, i64>(0).map(|n| n as usize))
             .unwrap_or(0);
         let (total_listened_secs, total_listens, morning, day, evening, night) = self.conn
             .query_row(
@@ -2839,9 +2716,6 @@ impl MusicLibrary {
         }
     }
 
-    /// Listen-weighted mean/variance of audio features, used to pick similar
-    /// ("favorite") or dissimilar ("fresh") tracks. Backed by the accumulator
-    /// cache, so repeated calls don't rescan the whole history.
     fn listening_centroid(&self) -> Option<ListeningCentroid> {
         self.centroid_accumulators().to_centroid()
     }
@@ -2895,12 +2769,10 @@ impl MusicLibrary {
 
     /// Called from `add_track_statistics_delta` when a listen completes.
     fn update_centroid_for_listen(&self, file_path: &str, old_count: i64, new_count: i64) {
-        // Cache not loaded yet: skip, it will be rebuilt lazily in full.
         if self.centroid_cache.borrow().is_none() {
             return;
         }
 
-        // Track weight = its listen count; tracks with none don't contribute.
         let old_w = if old_count > 0 { old_count.max(1) as f64 } else { 0.0 };
         let new_w = if new_count > 0 { new_count.max(1) as f64 } else { 0.0 };
         let dw = new_w - old_w;
@@ -2908,7 +2780,6 @@ impl MusicLibrary {
             return;
         }
 
-        // Must have all features computed, matching what the full recompute requires.
         let feats: Option<(f64, f64, f64, f64, f64)> = self
             .conn
             .query_row(
@@ -2988,14 +2859,13 @@ impl MusicLibrary {
             clauses.join(" AND ")
         };
 
-        // favorite = close to the taste centroid, fresh = farthest from it, balanced = random.
         let centroid = match familiarity {
             "favorite" | "fresh" => self.listening_centroid(),
             _ => None,
         };
 
-        // Numeric literals are parenthesized so a negative value (loudness) can't
-        // turn `--` into a SQL line comment.
+        // Numeric literals are parenthesized so a negative value cannot turn `--` into a SQL
+        // comment.
         let order_by = match centroid {
             Some(ct) => {
                 let ke = 1.0 / ct.e_var.max(1e-4);
@@ -3014,7 +2884,6 @@ impl MusicLibrary {
                 );
                 let jitter = "(0.5 + (ABS(RANDOM()) % 1000) / 1000.0)";
                 let dir = if familiarity == "favorite" { "ASC" } else { "DESC" };
-                // Tracks without audio features sort last, used to fill any remaining slots.
                 format!("(af.energy IS NULL) ASC, {dist} * {jitter} {dir}")
             }
             None => "RANDOM()".to_string(),
@@ -3075,8 +2944,6 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Local album tracks for matching against an external list: (file_path,
-    /// effective title, effective artist), with overrides applied.
     pub fn get_album_local_tracks(&self, album_name: &str) -> Vec<(String, String, String)> {
         let mut stmt = match self.conn.prepare(
             "SELECT t.file_path,
@@ -3122,9 +2989,6 @@ impl MusicLibrary {
         }
     }
 
-    /// One-time cleanup: old "none" results may have been cached from transient
-    /// network/parse errors that are no longer cached today, so they're worth
-    /// re-fetching (see `FetchOutcome` in external.rs).
     pub fn clear_external_album_negative_cache(&self) -> Result<usize, String> {
         self.conn
             .execute("DELETE FROM external_album WHERE status = 'none'", [])
@@ -3156,8 +3020,6 @@ impl MusicLibrary {
         Ok(())
     }
 
-    /// Tracks with an override cover, used by the external-cover batch pass to
-    /// skip ones that are already locally covered.
     pub fn override_cover_paths(&self) -> std::collections::HashSet<String> {
         let mut stmt = match self
             .conn
@@ -3173,8 +3035,7 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// Albums with no settled external layout (status ok/none) yet. Uses the
-    /// same most-common-artist rule as the layout lookup, so cache keys match.
+    /// Albums with no settled external layout (status ok/none) yet.
     pub fn pending_external_album_names(&self) -> Vec<String> {
         let mut best_artist: std::collections::HashMap<String, (String, i64)> =
             std::collections::HashMap::new();
@@ -3206,11 +3067,9 @@ impl MusicLibrary {
         if let Ok(mut stmt) = self
             .conn
             .prepare("SELECT album_key FROM external_album WHERE status IN ('ok','none')")
-        {
-            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            && let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
                 settled = rows.filter_map(|r| r.ok()).collect();
             }
-        }
 
         best_artist
             .into_iter()
@@ -3223,8 +3082,6 @@ impl MusicLibrary {
     }
 }
 
-/// Weighted sums and sums-of-squares of audio features (weight = listen count),
-/// for incremental centroid updates; see [`CentroidAccumulators::to_centroid`].
 #[derive(Clone, Default)]
 struct CentroidAccumulators {
     /// Number of unique tracks in the centroid.
@@ -3412,9 +3269,6 @@ mod tests {
 
     #[test]
     fn flush_audio_features_second_batch_overwrites_the_first_for_the_same_track() {
-        // Regression check for the streaming rewrite: results now arrive (and get
-        // flushed) in small batches instead of one chunk per file, so a later
-        // batch for an already-written track must upsert, not error/duplicate.
         let dir = temp_library_dir("flush_audio_features_upsert");
         let mut library = MusicLibrary::new(dir.clone()).expect("library init");
         insert_bare_track(&library, "/m/a.flac", 100);
@@ -3479,8 +3333,6 @@ mod tests {
         let mut library = MusicLibrary::new(dir.clone()).expect("library init");
         let mut pending: Vec<(String, u64, Option<AudioFeatures>)> = Vec::new();
 
-        // Must not panic/error on an empty batch — spawn_audio_feature_analysis
-        // calls this unconditionally after draining the results channel.
         flush_audio_features(&mut library.conn, &mut pending);
         assert!(pending.is_empty());
 
@@ -3509,8 +3361,6 @@ mod tests {
                 .expect("track insert");
         }
 
-        // The file under an available folder is really gone; the one under a
-        // missing folder may just be on a drive that isn't plugged in.
         assert_eq!(library.cleanup_missing_tracks().unwrap(), 1);
         let left: Vec<String> = library
             .conn
@@ -3686,10 +3536,6 @@ mod tests {
             .unwrap();
         assert_eq!(stats, 0, "track_statistics has an FK and must cascade");
 
-        // track_overrides is the one table with NO FK to tracks (by design — see
-        // delete_missing_tracks, which cleans it explicitly for that reason). A raw
-        // DELETE FROM tracks, unlike remove_track()/rescan, does NOT clean it up;
-        // documenting this so the asymmetry isn't "rediscovered" as a bug.
         let overrides: i64 = library
             .conn
             .query_row(
@@ -3777,7 +3623,6 @@ mod tests {
         insert_listened_track(&library, "/music/a.flac", 2, (0.8, 0.6, 128.0, 3200.0, -8.0));
         insert_listened_track(&library, "/music/b.flac", 5, (0.3, 0.4, 90.0, 1500.0, -14.0));
 
-        // First call loads the accumulator cache (O(N) scan).
         let _ = library.taste_profile();
 
         library
@@ -3787,7 +3632,6 @@ mod tests {
                 ..Default::default()
             })
             .expect("delta a");
-        // New track not previously in the centroid (listen_count 0 -> 1).
         insert_listened_track(&library, "/music/c.flac", 0, (0.5, 0.55, 110.0, 2400.0, -11.0));
         library
             .add_track_statistics_delta(TrackStatisticsDelta {
@@ -3799,7 +3643,6 @@ mod tests {
 
         let incremental = library.taste_profile();
 
-        // Reset cache and recompute from scratch; should match.
         library.centroid_cache.borrow_mut().take();
         let full = library.taste_profile();
 
@@ -3831,9 +3674,6 @@ mod tests {
             .expect("insert track row");
     }
 
-    /// Writes a minimal valid 16-bit PCM WAV for tests that need a real
-    /// readable audio file on disk (insert_downloaded_track/add_folder read
-    /// metadata via AudioPlayer::get_metadata_light).
     fn write_test_wav(path: &Path, sample_rate: u32, channels: u16, num_frames: u32) {
         let bits_per_sample: u16 = 16;
         let block_align: u16 = channels * (bits_per_sample / 8);
@@ -3939,7 +3779,6 @@ mod tests {
             .insert_downloaded_track(track_path.to_str().unwrap(), sub.to_str().unwrap(), &[])
             .expect("insert into subfolder");
 
-        // Subfolder is already covered by the root folder — no new entry expected.
         assert_eq!(library.get_folders().len(), 1, "не должно появиться дублирующей папки");
 
         let folder_path: String = library
@@ -4012,8 +3851,6 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Bumps mtime by whole seconds (get_mtime only tracks second granularity),
-    /// so the "file changed" branch is deterministic on a fast filesystem.
     fn bump_mtime(path: &Path, delta_secs: u64) {
         let file = fs::OpenOptions::new()
             .write(true)
@@ -4076,13 +3913,11 @@ mod tests {
             )
             .expect("read sort_order");
 
-        // File appears after the first scan — new tracks get sort_order above the current max.
         write_test_wav(&music.join("b.wav"), 44_100, 2, 44_100);
         library
             .rescan_all(&[], None, |_, _| {})
             .expect("rescan should pick up the new file");
 
-        // Change content and mtime of an already-tracked file.
         write_test_wav(&music.join("a.wav"), 44_100, 2, 22_050);
         bump_mtime(&music.join("a.wav"), 120);
 
@@ -4238,7 +4073,6 @@ mod tests {
         insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
         insert_track_row(&library, "/m/b.flac", Some("B"), Some("Y"), None, None, 2);
 
-        // B has a higher sort_order -> comes first by default.
         let before = library.get_all_tracks();
         assert_eq!(before[0].file_path, "/m/b.flac");
 
@@ -4384,7 +4218,6 @@ mod tests {
         insert_track_row(&library, "/m/a.flac", Some("A"), Some("X"), None, None, 1);
         insert_track_row(&library, "/m/b.flac", Some("B"), Some("X"), None, None, 2);
 
-        // Idempotent: two ensure calls yield the same singleton playlist.
         let fav_id = library.ensure_favorites_playlist().expect("ensure favorites");
         assert_eq!(fav_id, library.ensure_favorites_playlist().expect("ensure again"));
 
@@ -4395,10 +4228,8 @@ mod tests {
             .collect();
         assert_eq!(favorites.len(), 1);
         assert_eq!(favorites[0].name, FAVORITES_PLAYLIST_NAME);
-        // Not a "user" playlist, so it stays out of the user-playlist list.
         assert!(library.get_user_playlists().is_empty());
 
-        // Accepts manual add/remove; new likes are prepended to the top.
         library.add_track_to_playlist(fav_id, "/m/a.flac", false).expect("add to favorites");
         library.add_track_to_playlist(fav_id, "/m/b.flac", true).expect("prepend to favorites");
         assert_eq!(
@@ -4411,7 +4242,6 @@ mod tests {
         library.remove_track_from_playlist(fav_id, "/m/b.flac").expect("remove from favorites");
         assert!(library.get_playlist_tracks(fav_id).is_empty());
 
-        // ...but can't be renamed or deleted.
         let mut library = library;
         assert!(library.rename_playlist(fav_id, "Hacked".to_string()).is_err());
         assert!(library.delete_playlist(fav_id).is_err());
@@ -4475,8 +4305,6 @@ mod tests {
 
     #[test]
     fn rebuild_artist_playlists_creates_playlist_even_for_single_track_artist() {
-        // Unlike albums, artist playlists have no ">1 track" filter — intentional
-        // asymmetry (see rebuild_album_playlists/rebuild_artist_playlists).
         let dir = temp_library_dir("artist_single_track");
         let mut library = MusicLibrary::new(dir.clone()).expect("library init");
         insert_track_row(&library, "/m/1.flac", Some("Solo"), Some("Solo Artist"), None, None, 1);
@@ -4630,7 +4458,6 @@ mod tests {
         library.flush_history(false).unwrap();
         assert_eq!(listen_rows(&library), 0, "a regular flush leaves the playing track alone");
 
-        // Finishing the same session drops the open copy: one row, not two.
         library.log_listen(finished_listen("/m/a.flac", 50));
         library.shutdown().unwrap();
         assert_eq!(listen_rows(&library), 1);
@@ -4650,7 +4477,6 @@ mod tests {
         insert_track_row(&library, "/m/a.flac", Some("A"), Some("X feat. Y"), Some("Al"), Some("Rock"), 1);
         insert_track_row(&library, "/m/b.flac", Some("B"), Some("Z"), None, Some("Jazz"), 2);
 
-        // Local noon of 2025-03-10 and the next day, whatever the test machine's zone.
         let day1: i64 = library
             .conn
             .query_row("SELECT CAST(strftime('%s', '2025-03-10 12:00:00', 'utc') AS INTEGER)", [], |r| r.get(0))
@@ -4667,7 +4493,6 @@ mod tests {
         assert_eq!(recap.unique_tracks, 2);
         assert_eq!(recap.top_tracks[0].file_path, "/m/a.flac");
         assert_eq!(recap.top_tracks[0].plays, 3);
-        // "X feat. Y" is split, so both artists get the track's 3 plays.
         let mut leaders: Vec<&str> = recap.top_artists[..2].iter().map(|a| a.name.as_str()).collect();
         leaders.sort_unstable();
         assert_eq!(leaders, ["X", "Y"]);
@@ -4745,7 +4570,6 @@ mod tests {
             .unwrap();
         assert_eq!(library.get_track("/m/a.flac").unwrap().title.as_deref(), Some("Custom"));
 
-        // All None/empty without keep_existing_cover -> the override row should be deleted.
         library
             .set_track_override("/m/a.flac", None, None, None, None, false)
             .unwrap();
@@ -4966,8 +4790,6 @@ mod tests {
     fn get_recommendations_by_mood_respects_lossless_only_filter() {
         let dir = temp_library_dir("mood_lossless");
         let library = MusicLibrary::new(dir.clone()).expect("library init");
-        // insert_listened_track always sets format='flac', is_lossless=0 — patch
-        // manually to get exactly one lossless and one lossy track.
         insert_listened_track(&library, "/m/lossless.flac", 1, (0.8, 0.7, 128.0, 3000.0, -6.0));
         library
             .conn
@@ -5081,15 +4903,12 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    // ── override_cover_paths / catalog_artist_title_index / album_local_tracks
-
     #[test]
     fn override_cover_paths_only_returns_tracks_with_nonempty_cover_sig() {
         let dir = temp_library_dir("override_cover_paths");
         let library = MusicLibrary::new(dir.clone()).expect("library init");
         insert_track_row(&library, "/m/a.flac", Some("A"), None, None, None, 1);
         insert_track_row(&library, "/m/b.flac", Some("B"), None, None, None, 2);
-        // a.flac gets a real cover via override (data URL -> cover_sig).
         library
             .set_track_override(
                 "/m/a.flac",
@@ -5100,7 +4919,6 @@ mod tests {
                 false,
             )
             .unwrap();
-        // b.flac — title-only override, no cover.
         library.set_track_override("/m/b.flac", Some("B2"), None, None, None, false).unwrap();
 
         let paths = library.override_cover_paths();
@@ -5124,8 +4942,6 @@ mod tests {
             )
             .expect("set has_cover");
 
-        // The path doesn't exist on disk, so a `true` result can only come from
-        // the cached column — a real tag re-parse would fail and yield `false`.
         assert!(library.has_cover("/m/missing.flac"));
 
         drop(library);
@@ -5136,8 +4952,6 @@ mod tests {
     fn has_cover_resolves_unknown_row_once_and_caches_the_result() {
         let dir = temp_library_dir("has_cover_unknown");
         let library = MusicLibrary::new(dir.clone()).expect("library init");
-        // insert_bare_track doesn't set has_cover, so it lands as NULL ("unknown"),
-        // matching a pre-existing row from before this column existed.
         insert_bare_track(&library, "/m/missing.flac", 1);
 
         assert!(
@@ -5180,7 +4994,6 @@ mod tests {
                 params!["/m/none.flac"],
             )
             .expect("set has_cover false");
-        // /m/unknown.flac stays NULL.
 
         let present = library.cover_present_paths();
         assert!(present.contains("/m/has.flac"));

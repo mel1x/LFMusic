@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 
-// Shimmer placeholder until the image fully loads, then swap in with a fade;
-// falls back to `fallback` on error.
 const props = defineProps<{ src: string | null; fallback: string; alt?: string }>()
 defineOptions({ inheritAttrs: false })
 
@@ -11,7 +9,6 @@ const failed = ref(false)
 
 const effectiveSrc = computed(() => (failed.value || !props.src) ? props.fallback : props.src)
 
-// New src resets to shimmer until it loads again.
 watch(() => props.src, () => { loaded.value = false; failed.value = false })
 
 function onLoad() { loaded.value = true }
@@ -51,7 +48,7 @@ function onError() { failed.value = true; loaded.value = true }
         hsla(0, 0%, 100%, 0.04) 63%
     );
     background-size: 400% 100%;
-    animation: coverShimmer 1.4s ease infinite;
+    animation: coverShimmer 1.4s var(--ease-smooth-in-out) infinite;
 }
 @keyframes coverShimmer {
     0% { background-position: 100% 0; }
@@ -64,7 +61,7 @@ function onError() { failed.value = true; loaded.value = true }
     display: block;
     user-select: none;
     opacity: 0;
-    transition: opacity 0.25s ease;
+    transition: opacity 0.25s var(--ease-smooth);
 }
 .coverImg.ready {
     opacity: 1;

@@ -40,8 +40,7 @@ interface ArtistEntry {
     trackCount: number;
 }
 
-// Don't read track fields in this computed — looking them up at render time
-// keeps a single cover load from invalidating the whole list.
+// Do not read track fields here: a cover load then re-renders only its card.
 const artists = computed<ArtistEntry[]>(() => {
     return artistPlaylists.value
         .map(pl => ({
@@ -69,9 +68,6 @@ function artistCoverFor(artist: ArtistEntry): string {
     return coverFor(artist.firstPath) || defaultTrackCover;
 }
 
-// Data source ready (artists loaded). Before this the cover gate must not
-// open, or it'd open on an empty list, content would flash, and the loader
-// would appear after covers already loaded (backwards order).
 const dataReady = ref(false);
 
 onMounted(async () => {
@@ -115,7 +111,6 @@ const filteredArtists = computed(() => {
     return searchRanked(sortedArtists.value, q, (a) => [a.name]);
 });
 
-// Hold back first paint until the first 30 covers have resolved.
 const { ready: coversReady } = useCoverGate(() =>
     filteredArtists.value
         .slice(0, 30)
@@ -169,10 +164,6 @@ function onMoveArtistToTopFromMenu(artist: ArtistEntry) {
     moveArtistToTop(artist.name);
 }
 
-// Render every card up-front so the document height stays constant; off-screen
-// cards are skipped via CSS `content-visibility: auto`. A single
-// IntersectionObserver whose `root` is the actual scroll container
-// (.pageRoot) and whose bottom rootMargin equals exactly 2 card rows.
 const gridEl = ref<HTMLElement | null>(null);
 let coverObs: IntersectionObserver | null = null;
 let resizeObs: ResizeObserver | null = null;
@@ -196,7 +187,6 @@ function onIntersect(entries: IntersectionObserverEntry[]) {
     const pending: TrackMetadata[] = [];
     for (const entry of entries) {
         if (!entry.isIntersecting) continue;
-        // Visible card — bump priority of its external avatar (if enabled).
         const name = elArtist.get(entry.target as HTMLElement);
         if (name) avatarFor(name);
         const path = elPath.get(entry.target as HTMLElement);
@@ -220,9 +210,7 @@ function ensureObserver() {
     if (!coverObs) buildObserver();
 }
 
-// bindCard runs as a v-for function ref *during render*, before onMounted —
-// so the observer must be created lazily here, not in onMounted, otherwise
-// most cards never get registered.
+// Runs as a v-for function ref during render, before onMounted: create the observer lazily.
 function bindCard(el: any, artist: ArtistEntry) {
     if (!el) return;
     if (!artist.firstPath) return;
@@ -402,7 +390,7 @@ function scrollToTop() {
         <div class="emptyState" v-else>
             <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
             <div class="emptyText">Пока нет исполнителей</div>
-            <div class="emptyDesc">Исполнители формируются автоматически из вашей библиотеки.</div>
+            <div class="emptyDesc">Добавьте папки с треками в настройках, чтобы они появились здесь.</div>
         </div>
         <PlaylistContextMenu
             v-if="artistMenu"
@@ -430,7 +418,7 @@ function scrollToTop() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
@@ -465,7 +453,7 @@ function scrollToTop() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -480,7 +468,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -500,7 +488,7 @@ function scrollToTop() {
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     width: fit-content;
 }
 .backBtn:hover {
@@ -509,7 +497,7 @@ function scrollToTop() {
 }
 .backBtn svg {
     color: hsla(0, 0%, 100%, 0.6);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
     color: hsla(0, 0%, 100%, 1);
@@ -534,7 +522,7 @@ function scrollToTop() {
     left: 12px;
     transform: translateY(-50%);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
@@ -557,7 +545,7 @@ function scrollToTop() {
     justify-content: center;
     padding: 6px;
     border-radius: 50%;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -598,7 +586,7 @@ function scrollToTop() {
     grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr));
     gap: 24px 16px;
     padding-bottom: 24px;
-    transition: opacity 0.24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .grid.gateHidden {
     opacity: 0;
@@ -612,7 +600,6 @@ function scrollToTop() {
     gap: 8px;
     user-select: none;
     min-width: 0;
-    /* Skip paint/layout for off-screen cards while preserving full document height. */
     content-visibility: auto;
     contain-intrinsic-size: 170px 220px;
 }
@@ -629,7 +616,7 @@ function scrollToTop() {
     object-fit: cover;
     user-select: none;
     background-color: #202020;
-    transition: filter .24s ease;
+    transition: filter var(--duration-hover) var(--ease-smooth);
 }
 .artistItem:hover .artistCover,
 .artistCoverWrap.menuOpen .artistCover {
@@ -647,7 +634,7 @@ function scrollToTop() {
     backdrop-filter: blur(8px);
     opacity: 0;
     transform: translateY(4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .artistItem .overlayBtn:hover {

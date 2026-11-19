@@ -21,101 +21,101 @@ export const EQ_PRESETS: EqPreset[] = [
     },
 
     {
-        name: 'Bass Boost',     // Moderate bass boost, no distortion
+        name: 'Bass Boost',
         bands: [4.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     },
     {
-        name: 'Deep Bass',      // Deep, controlled bass
+        name: 'Deep Bass',
         bands: [5.0, 3.5, 1.0, -0.5, -0.5, 0.0, 1.0, 1.5, 2.0, 2.0]
     },
     {
-        name: 'Sub Bass',       // Emphasis on sub-bass only (60Hz)
+        name: 'Sub Bass',
         bands: [4.5, 2.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     },
 
     {
-        name: 'Treble Boost',   // Clarity and detail
+        name: 'Treble Boost',
         bands: [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.5, 3.0]
     },
     {
-        name: 'Air & Sparkle',  // Airiness and shimmer for acoustic tracks
+        name: 'Air & Sparkle',
         bands: [-1.0, 0.0, 0.5, 1.0, 1.0, 1.5, 2.0, 3.0, 4.0, 4.5]
     },
 
     {
-        name: 'Modern V-Shape', // Balanced V-curve
+        name: 'Modern V-Shape',
         bands: [4.0, 2.5, 0.0, -1.5, -1.5, 0.0, 2.0, 3.5, 4.0, 4.0]
     },
     {
-        name: 'Electronic',     // For EDM, House, Techno
+        name: 'Electronic',
         bands: [4.5, 3.0, 0.5, -1.0, -1.0, 0.5, 2.0, 3.5, 4.0, 4.5]
     },
     {
-        name: 'Bass & Treble',  // Simple boosted bass and highs
+        name: 'Bass & Treble',
         bands: [3.5, 2.5, 0.5, 0.0, 0.0, 0.0, 1.0, 2.5, 3.0, 3.0]
     },
 
     {
-        name: 'Rock',           // Tight drums, clear guitars
+        name: 'Rock',
         bands: [3.5, 2.0, -1.0, -1.5, 1.0, 2.5, 3.5, 4.0, 3.5, 2.5]
     },
     {
-        name: 'Metal',          // Aggressive mids, sharp highs
+        name: 'Metal',
         bands: [3.0, 1.5, -0.5, 1.0, 2.5, 4.0, 4.5, 4.0, 3.5, 2.5]
     },
     {
-        name: 'Jazz',           // Warm, natural sound
+        name: 'Jazz',
         bands: [2.5, 2.0, 1.5, 1.0, 0.0, 1.0, 2.0, 2.5, 2.0, 1.5]
     },
     {
-        name: 'Classical',      // Natural tone, airy
+        name: 'Classical',
         bands: [2.0, 1.0, 0.5, 0.0, 0.0, 1.0, 1.5, 2.5, 3.0, 3.5]
     },
     {
-        name: 'Acoustic',       // Natural strings
+        name: 'Acoustic',
         bands: [1.5, 1.5, 1.0, 0.5, 0.0, 1.5, 2.5, 3.5, 3.5, 3.0]
     },
     {
-        name: 'Hip-Hop',        // Powerful bass, clear vocals
+        name: 'Hip-Hop',
         bands: [5.0, 3.5, 1.0, -0.5, 0.5, 2.0, 2.0, 2.0, 2.5, 2.5]
     },
 
     {
-        name: 'Vocal',          // Vocal emphasis
+        name: 'Vocal',
         bands: [-2.0, -1.0, 0.5, 2.0, 3.5, 2.5, 1.0, 0.0, 0.0, -1.0]
     },
     {
-        name: 'Podcast',        // Speech clarity
+        name: 'Podcast',
         bands: [-3.0, -1.5, 1.0, 2.5, 4.0, 3.0, 1.5, 0.0, -1.0, -2.0]
     },
 
     {
-        name: 'Loudness',       // Fletcher-Munson compensation
+        name: 'Loudness',
         bands: [3.5, 2.5, 0.5, -0.5, -0.5, 0.0, 1.5, 2.5, 3.0, 3.5]
     },
     {
-        name: 'Night Mode',     // Gentle, low-fatigue listening
+        name: 'Night Mode',
         bands: [-2.5, -1.5, -0.5, 0.5, 1.0, 0.5, 0.0, -1.0, -1.5, -2.0]
     },
     {
-        name: 'Chill',          // Relaxed, warm and enveloping
+        name: 'Chill',
         bands: [2.5, 3.0, 2.0, 0.5, -0.5, -1.0, -2.0, -3.0, -3.5, -3.5]
     },
     {
-        name: 'Cinematic',      // Theater-like experience
+        name: 'Cinematic',
         bands: [4.5, 2.5, 0.0, -1.0, 0.0, 1.5, 2.5, 3.5, 4.0, 4.0]
     },
 
     {
-        name: 'Bass Reduction', // For cheap headphones with boomy bass
+        name: 'Bass Reduction',
         bands: [-2.0, -1.0, 0.5, 1.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0]
     },
     {
-        name: 'Harshness Fix',  // Removes harshness at 3-6K
+        name: 'Harshness Fix',
         bands: [1.0, 1.0, 1.5, 1.5, 1.0, -1.5, -2.5, -1.0, 0.0, 0.5]
     },
     {
-        name: 'Muddy Fix',      // Cleans up muddiness in low-mids
+        name: 'Muddy Fix',
         bands: [0.0, -1.5, -2.0, -1.0, 0.5, 1.0, 1.0, 1.0, 0.5, 0.0]
     },
 ];

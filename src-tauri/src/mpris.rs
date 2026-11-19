@@ -1,10 +1,5 @@
-//! Linux system media integration via MPRIS (souvlaki): shows the current
-//! track (title/artist/album/cover) in GNOME/KDE panels and lock screen, and
-//! forwards system play/pause/next/prev/stop buttons to the player.
-//!
-//! Frontend sends metadata/state; incoming commands are emitted as the
-//! `mpris_media` event, listened to by Player.vue. No-op on non-Linux (see
-//! stubs at the end of this file).
+//! Linux MPRIS (souvlaki): the current track in system panels; media buttons are emitted as
+//! `mpris_media`.
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -18,7 +13,6 @@ mod imp {
     };
     use tauri::{AppHandle, Emitter};
 
-    // Holds souvlaki's dbus thread; created once at startup.
     static CONTROLS: OnceLock<Mutex<MediaControls>> = OnceLock::new();
 
     pub fn init(app: &AppHandle, _cover_dir: PathBuf) {
@@ -69,8 +63,6 @@ mod imp {
         duration_secs: f64,
     ) {
         let Some(lock) = CONTROLS.get() else { return };
-        // file:// URL to the lazily-generated cached WebP thumbnail; the path
-        // changes with the cover signature, so MPRIS clients refresh artwork correctly.
         let cover_url = file_path
             .as_deref()
             .and_then(|fp| crate::thumbnails::cover_file(app, fp, 512))

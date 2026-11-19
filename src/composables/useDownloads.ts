@@ -6,8 +6,6 @@ import { useFolders } from './useFolders'
 import { useI18n } from './useI18n'
 import { isAndroidRuntime } from './usePlatform'
 
-// Types mirroring the serde structs in src-tauri/src/{external.rs, downloader/}
-
 /** Catalog search hit (Deezer/iTunes) or a pasted-link entry. */
 export interface ExternalSearchTrack {
   title: string
@@ -159,8 +157,6 @@ export interface DownloaderSettings {
   auto_update: boolean
 }
 
-// ── Singleton state ─────────────────────────────────────────────────────────
-
 const emptyTool = (): ToolInfo => ({ installed: false, managed: false, version: null, latest: null, update_available: false })
 
 const queue = ref<DownloadItem[]>([])
@@ -170,7 +166,6 @@ const tools = ref<ToolsState>({
   progress: null,
   error: null,
 })
-// Optimistic until the first local check, so the page doesn't flash a setup card.
 const toolsLoaded = ref(false)
 const dlSettings = ref<DownloaderSettings>({
   proxy_mode: 'system',
@@ -181,12 +176,11 @@ const dlSettings = ref<DownloaderSettings>({
   auto_update: true,
 })
 
-// Seeded from the last known value so settings render without a shimmer.
 const DOWNLOADS_DIR_CACHE_KEY = 'lfmusic:downloads-dir'
 const downloadsDir = ref<string>(localStorage.getItem(DOWNLOADS_DIR_CACHE_KEY) ?? '')
 watch(downloadsDir, (dir) => { if (dir) localStorage.setItem(DOWNLOADS_DIR_CACHE_KEY, dir) })
 
-// The downloader needs yt-dlp as a subprocess — never available on Android.
+// No yt-dlp on Android.
 const ytdlpMissing = computed(() => isAndroidRuntime() || (toolsLoaded.value && !tools.value.info.ytdlp.installed))
 /** Without Deno, YouTube's signature challenge can't be solved. */
 const denoMissing = computed(() => toolsLoaded.value && tools.value.info.ytdlp.installed && !tools.value.info.deno.installed)
@@ -198,18 +192,14 @@ const activeCount = computed(() =>
   queue.value.filter(i => i.stage !== 'done' && i.stage !== 'error').length,
 )
 
-/**
- * Port of Rust `external::normalize` / `track_identity_key` — must stay
- * identical so queue lookups agree with the backend's dedup.
- */
-// Rust `char::is_alphanumeric` = Alphabetic or Numeric (letters plus
-// combining vowel signs etc.), not just \p{L}.
+/** Port of Rust external::normalize / track_identity_key: must stay identical. */
+// Rust char::is_alphanumeric = Alphabetic or Numeric, not just \p{L}.
 const ALNUM_RE = /[\p{Alphabetic}\p{N}]/u
 function normalizeKey(s: string): string {
   let out = ''
   let prevSpace = true
-  // Lowercase per character like Rust's `chars().flat_map(to_lowercase)`:
-  // whole-string toLowerCase is context-sensitive (Greek final sigma).
+  // Per-char lowercase like Rust: whole-string toLowerCase is context-sensitive (Greek final
+  // sigma).
   for (const orig of s) {
     for (const ch of orig.toLowerCase()) {
       if (ALNUM_RE.test(ch)) {
@@ -239,12 +229,9 @@ const queueIndex = computed(() => {
   return map
 })
 
-// ── Init ────────────────────────────────────────────────────────────────────
-
 let initialized = false
 let libraryRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
-// `downloads_library_updated` fires per finished track; one catalog reload per burst.
 function scheduleLibraryRefresh(): void {
   if (libraryRefreshTimer) clearTimeout(libraryRefreshTimer)
   libraryRefreshTimer = setTimeout(() => {
@@ -260,7 +247,6 @@ async function refreshTools(): Promise<ToolsState> {
   return state
 }
 
-// Update checks hit GitHub — at most once per TTL from page visits.
 const UPDATE_CHECK_TTL_MS = 30 * 60 * 1000
 let lastUpdateCheck = 0
 async function checkUpdates(force = false): Promise<void> {
@@ -278,7 +264,6 @@ async function init(): Promise<void> {
   if (initialized || isAndroidRuntime()) return
   initialized = true
   try {
-    // App-lifetime singleton — never unsubscribed.
     await listen<{ items: DownloadItem[] }>('downloads_queue', (e) => { queue.value = e.payload.items })
     await listen<ToolsState>('downloads_tools', (e) => {
       tools.value = e.payload
@@ -294,11 +279,9 @@ async function init(): Promise<void> {
     console.error('Ошибка загрузки очереди:', e)
   }
   try { await refreshTools() } catch (e) { console.error('Ошибка проверки компонентов:', e) }
-  try { downloadsDir.value = await invoke<string>('downloads_dir_path') } catch { /* keep cached */ }
-  try { dlSettings.value = await invoke<DownloaderSettings>('downloads_get_settings') } catch { /* defaults */ }
+  try { downloadsDir.value = await invoke<string>('downloads_dir_path') } catch {}
+  try { dlSettings.value = await invoke<DownloaderSettings>('downloads_get_settings') } catch {}
 }
-
-// ── Operations ──────────────────────────────────────────────────────────────
 
 function toRequest(t: ExternalSearchTrack, force: boolean) {
   return {
@@ -384,8 +367,8 @@ function isDownloadedTrack(filePath: string): boolean {
 }
 
 async function deleteDownloadedTrack(filePath: string): Promise<void> {
-  // Stop through the player first: the backend would stop it too, but the status
-  // poll would then read that as a natural end and count a full listen.
+  // Stop through the player first: otherwise the status poll reads it as a natural end and counts
+  // a full listen.
   const player = usePlayer()
   if (player.currentTrack.value?.file_path === filePath) await player.stop()
   await invoke('downloads_delete_track', { filePath })
@@ -395,8 +378,8 @@ async function deleteDownloadedTrack(filePath: string): Promise<void> {
 async function setDownloadsDir(folderPath?: string | null): Promise<string> {
   const resolved = await invoke<string>('downloads_set_dir', { folderPath: folderPath ?? null })
   downloadsDir.value = resolved
-  try { await useFolders().refreshFolders() } catch { /* not initialized yet */ }
-  try { await usePlayer().refreshLibrary() } catch { /* refreshes via event */ }
+  try { await useFolders().refreshFolders() } catch {}
+  try { await usePlayer().refreshLibrary() } catch {}
   return resolved
 }
 
@@ -404,8 +387,6 @@ async function setDownloadsDir(folderPath?: string | null): Promise<string> {
 function itemFor(t: ExternalSearchTrack): DownloadItem | undefined {
   return queueIndex.value.get(keyOf(t))
 }
-
-// ── Page helpers ────────────────────────────────────────────────────────────
 
 type KeyedTrack = { artist: string; title: string; album: string | null }
 
@@ -419,11 +400,6 @@ function notQueued(tracks: ExternalSearchTrack[]): ExternalSearchTrack[] {
   return tracks.filter(tr => !tr.in_library && !queued.has(trackKeyOf(tr)))
 }
 
-/**
- * Marks tracks as "in library" once their download finishes, so a row stays
- * "Downloaded" after the queue's "done" entry is cleared (`in_library` is a
- * one-shot snapshot from the initial fetch, never refreshed on its own).
- */
 export function useKeepDownloadedInLibrary(lists: () => ExternalSearchTrack[][]) {
   watch(queue, (items) => {
     const done = new Set(items.filter(i => i.stage === 'done').map(trackKeyOf))
@@ -450,8 +426,6 @@ export function useRedownloadConfirm(beforeEnqueue?: () => void) {
   }
   return { confirmTrack, confirmMessage, confirmRedownload }
 }
-
-// ── Display helpers ─────────────────────────────────────────────────────────
 
 function formatBytes(bps: number): string {
   if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} МБ/с`

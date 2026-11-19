@@ -1,8 +1,5 @@
 import type { HolidayId } from '../composables/useHoliday'
 
-// Artwork for holiday events: 24x24 glyphs shared by the background pattern
-// (SVG tile used as a CSS mask) and the canvas particles (Path2D).
-
 type Pt = [number, number]
 
 function rotate([x, y]: Pt, deg: number): Pt {
@@ -58,7 +55,6 @@ export const PATHS = {
     dot: ellipse(12, 12, 1.8, 1.8),
 } as const
 
-// Outline-only parts (drawn with stroke in the pattern).
 const STROKES: Partial<Record<Glyph, string>> = {
     flake: PATHS.flake,
     planet: 'M12 12m-10.5 0a10.5 3.4 0 1 0 21 0a10.5 3.4 0 1 0 -21 0',
@@ -68,7 +64,6 @@ const STROKES: Partial<Record<Glyph, string>> = {
 type Glyph = keyof typeof PATHS
 
 function glyphMarkup(g: Glyph, color = '#fff'): string {
-    // evenodd cuts the rocket window out of its body.
     const rule = g === 'rocket' ? ' fill-rule="evenodd"' : ''
     const fill = g !== 'flake' ? `<path d="${PATHS[g]}" fill="${color}"${rule}/>` : ''
     const strokeD = STROKES[g]
@@ -80,12 +75,8 @@ function glyphMarkup(g: Glyph, color = '#fff'): string {
 
 export const TILE_SIZE = 140
 
-// Pattern tile is drawn this much larger than its SVG.
 export const TILE_SCALE = 1.7
 
-// Hand-placed slots of one tile: [cx, cy, size, rotation]. Two big, three mid,
-// one small glyph and dots keep the dense pattern from reading as a grid and
-// leave something in the thin gaps between app surfaces.
 const SLOTS: [number, number, number, number][] = [
     [22, 24, 18, -14], [76, 16, 10, 18], [118, 36, 14, 10], [50, 64, 5, 0],
     [100, 82, 17, -8], [22, 104, 11, 12], [64, 120, 14, -22], [126, 122, 6, 0],

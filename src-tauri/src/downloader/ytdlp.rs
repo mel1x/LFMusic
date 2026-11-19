@@ -1,6 +1,3 @@
-//! yt-dlp invocations: candidate search, link probing and the audio download
-//! itself, plus classification of its error output into [`ErrorKind`].
-
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -84,9 +81,8 @@ impl Control {
     }
 }
 
-/// Kills a process together with its children. The PyInstaller-built yt-dlp
-/// is a bootloader process plus the real interpreter, and it spawns ffmpeg —
-/// killing only the top PID would leave those running.
+/// Kills the whole process tree: PyInstaller yt-dlp is a bootloader plus interpreter, and it spawns
+/// ffmpeg.
 pub fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
@@ -99,8 +95,8 @@ pub fn kill_tree(pid: u32) {
     }
     #[cfg(unix)]
     {
-        // Processes are started in their own group (see `spawn`), so the
-        // negative PID targets the whole group.
+        // Processes run in their own group (see `spawn`), so the negative PID targets the whole
+        // group.
         let _ = std::process::Command::new("kill")
             .arg("-KILL")
             .arg(format!("-{}", pid))
@@ -160,7 +156,6 @@ fn spawn(mut cmd: std::process::Command, control: &Control) -> Result<Child, Job
         JobError::new(ErrorKind::ToolMissing, format!("Не удалось запустить yt-dlp: {}", e))
     })?;
     *control.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child.id());
-    // A cancel that raced with the spawn wouldn't have seen the PID.
     if control.is_cancelled() {
         kill_tree(child.id());
     }
@@ -198,8 +193,6 @@ fn run_capture(cmd: std::process::Command, control: &Control) -> Result<String, 
     Ok(stdout)
 }
 
-// ── Search ──────────────────────────────────────────────────────────────────
-
 fn str_field(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .filter_map(|k| v.get(*k).and_then(Value::as_str))
@@ -221,12 +214,8 @@ fn entry_to_candidate(v: &Value) -> Option<Candidate> {
     })
 }
 
-/// Searches `source` for `query`, returning up to `count` candidates.
-///
-/// YouTube uses `--flat-playlist`: one request to the search page, which
-/// already carries title/channel/duration and never touches the (bot-walled)
-/// player endpoint. SoundCloud's flat entries lack durations, so its results
-/// are fully extracted instead (a few cheap API calls).
+/// YouTube uses --flat-playlist (one search page request, no bot-walled player endpoint);
+/// SoundCloud flat entries lack durations, so they are fully extracted.
 pub fn search(
     tools: &Resolved,
     net: &NetOptions,
@@ -246,8 +235,7 @@ pub fn search(
             cmd.arg(format!("scsearch{}:{}", count, query));
         }
     }
-    // --ignore-errors makes yt-dlp exit non-zero if any single entry failed,
-    // even though the others were printed — keep whatever parsed.
+    // --ignore-errors exits non-zero if any entry failed: keep whatever parsed.
     let mut child = spawn(cmd, control)?;
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
@@ -264,8 +252,6 @@ pub fn search(
     }
     Ok(found)
 }
-
-// ── Link probing ────────────────────────────────────────────────────────────
 
 /// Metadata for one entry behind a pasted link.
 #[derive(Debug, Clone)]
@@ -287,7 +273,7 @@ fn clean_uploader(s: &str) -> String {
         .to_string()
 }
 
-/// "Artist - Title (Official Video)" → ("Artist", "Title").
+/// "Artist - Title (Official Video)" -> ("Artist", "Title").
 pub fn split_artist_title(raw: &str) -> Option<(String, String)> {
     for sep in [" - ", " – ", " — ", " | "] {
         if let Some((a, t)) = raw.split_once(sep) {
@@ -300,8 +286,6 @@ pub fn split_artist_title(raw: &str) -> Option<(String, String)> {
     None
 }
 
-/// Drops "(Official Video)", "[Lyrics]", "(Audio)" and similar decorations
-/// that describe the upload rather than the song.
 pub fn strip_video_noise(title: &str) -> String {
     const NOISE: &[&str] = &[
         "official", "video", "audio", "lyric", "lyrics", "visualizer", "music video", "mv", "hd",
@@ -324,8 +308,8 @@ pub fn strip_video_noise(title: &str) -> String {
 }
 
 fn best_thumbnail(v: &Value) -> Option<String> {
-    if let Some(list) = v.get("thumbnails").and_then(Value::as_array) {
-        if let Some(url) = list
+    if let Some(list) = v.get("thumbnails").and_then(Value::as_array)
+        && let Some(url) = list
             .iter()
             .rev()
             .filter_map(|t| t.get("url").and_then(Value::as_str))
@@ -333,14 +317,12 @@ fn best_thumbnail(v: &Value) -> Option<String> {
         {
             return Some(url.to_string());
         }
-    }
     str_field(v, &["thumbnail"])
 }
 
 fn entry_to_link(v: &Value) -> Option<LinkEntry> {
     let url = entry_url(v)?;
     let raw_title = str_field(v, &["title"])?;
-    // YouTube Music / SoundCloud expose proper music metadata — prefer it.
     let (artist, title) = match (str_field(v, &["artist", "creator"]), str_field(v, &["track"])) {
         (Some(a), Some(t)) => (a, t),
         _ => split_artist_title(&raw_title).unwrap_or_else(|| {
@@ -361,8 +343,7 @@ fn entry_to_link(v: &Value) -> Option<LinkEntry> {
     })
 }
 
-/// Probes a link without downloading. A playlist/album link yields all of its
-/// entries (capped), a single video yields one.
+/// Probes a link without downloading.
 pub fn probe_link(
     tools: &Resolved,
     net: &NetOptions,
@@ -385,8 +366,6 @@ pub fn probe_link(
     }
     Ok((collection, entries))
 }
-
-// ── Download ────────────────────────────────────────────────────────────────
 
 /// Progress update from a running download.
 pub struct Progress {
@@ -425,8 +404,7 @@ fn parse_progress(line: &str) -> Option<Progress> {
     })
 }
 
-/// Downloads `url`'s audio into `dir` (an empty per-job folder) and returns
-/// the produced file.
+/// Downloads `url`'s audio into `dir` (an empty per-job folder) and returns the produced file.
 pub fn download(
     tools: &Resolved,
     net: &NetOptions,
@@ -448,11 +426,10 @@ pub fn download(
         .arg(FORMAT_SELECTOR)
         .arg("-o")
         .arg(dir.join("audio.%(ext)s"));
-    if let Some(ff) = &tools.ffmpeg {
-        if let Some(parent) = ff.parent().filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(ff) = &tools.ffmpeg
+        && let Some(parent) = ff.parent().filter(|p| !p.as_os_str().is_empty()) {
             cmd.arg("--ffmpeg-location").arg(parent);
         }
-    }
     cmd.arg("--").arg(url);
 
     let mut child = spawn(cmd, control)?;
@@ -486,7 +463,6 @@ pub fn download(
     reported
         .filter(|p| p.is_file())
         .or_else(|| {
-            // Fallback: the only non-temp file in the job folder.
             std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
                 p.is_file()
                     && p.file_name()
@@ -497,8 +473,6 @@ pub fn download(
         })
         .ok_or_else(|| JobError::new(ErrorKind::Unknown, "yt-dlp не сохранил файл"))
 }
-
-// ── Error classification ────────────────────────────────────────────────────
 
 /// Last `ERROR:` line, without yt-dlp's `[extractor] id:` prefix noise.
 fn error_line(stderr: &str) -> String {
@@ -524,9 +498,7 @@ fn error_line(stderr: &str) -> String {
 pub fn classify(stderr: &str) -> JobError {
     let s = stderr.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| s.contains(n));
-    // Order matters: YouTube's age/bot messages also mention cookies, so the
-    // specific cases go first and the cookie check only matches yt-dlp's own
-    // cookie-loading failures.
+    // Order matters: YouTube age/bot messages also mention cookies.
     let kind = if has(&["not a bot", "confirm you're not", "confirm you’re not"]) {
         ErrorKind::BotCheck
     } else if has(&[

@@ -4,6 +4,8 @@ import { useSettings, type SettingKey } from '../../composables/useSettings';
 import { useEqualizer, EQ_PRESETS, EQ_BAND_LABELS } from '../../composables/useEqualizer';
 import SettingsShell from '../../components/SettingsShell.vue';
 import SettingToggle from '../../components/SettingToggle.vue';
+import SoundFxControls, { type SoundSection } from '../../components/SoundFxControls.vue';
+import { useSoundFx } from '../../composables/useSoundFx';
 import { useEnhance, DEVICE_PROFILES, type DeviceProfile } from '../../composables/useEnhance';
 import { useI18n } from '../../composables/useI18n';
 
@@ -47,6 +49,15 @@ const playbackKeys: SettingKey[] = ['crossfade_on_seek', 'crossfade_between_trac
 const playbackItems = computed(() => playbackKeys.map(key => settingItems.find(i => i.key === key)!));
 const eqToggleItem = { label: 'Включить эквалайзер' };
 
+const { load: loadFx } = useSoundFx();
+const fxSections: { id: SoundSection; title: string }[] = [
+    { id: 'space', title: 'Пространство' },
+    { id: 'crusher', title: 'Биткрашер' },
+    { id: 'vinyl', title: 'Винил' },
+    { id: 'speed', title: 'Скорость' },
+    { id: 'sleep', title: 'Таймер сна' },
+];
+
 async function toggle(key: SettingKey) {
     settings.value[key] = !settings.value[key];
     await save();
@@ -56,6 +67,7 @@ onMounted(async () => {
     await load();
     await loadEq();
     await loadEnhance();
+    await loadFx();
 });
 
 function onBandInput(index: number, event: Event) {
@@ -75,7 +87,7 @@ function formatBandValue(value: number): string {
 </script>
 
 <template>
-    <SettingsShell title="Воспроизведение" description="Поведение плеера и эквалайзер">
+    <SettingsShell title="Воспроизведение">
         <div class="settingBlock">
             <div class="settingsBlock">
                 <SettingToggle
@@ -127,7 +139,6 @@ function formatBandValue(value: number): string {
 
         <div class="settingBlock">
             <div class="settingTitle">Эквалайзер</div>
-            <div class="settingDesc">Настройка частотных полос аудио</div>
 
             <div class="eqBlock">
                 <div class="eqHeader">
@@ -181,6 +192,13 @@ function formatBandValue(value: number): string {
                 </div>
             </div>
         </div>
+
+        <div v-for="sec in fxSections" :key="sec.id" class="settingBlock">
+            <div class="settingTitle">{{ sec.title }}</div>
+            <div class="fxBlock">
+                <SoundFxControls :section="sec.id" />
+            </div>
+        </div>
     </SettingsShell>
 </template>
 
@@ -198,13 +216,6 @@ function formatBandValue(value: number): string {
     font-weight: 700;
     font-size: 18px;
     color: #ffffff;
-}
-.settingDesc {
-    user-select: none;
-    margin-top: 3px;
-    font-weight: 600;
-    font-size: 15px;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
 }
 .settingsBlock {
     display: flex;
@@ -224,7 +235,7 @@ function formatBandValue(value: number): string {
 .deviceDropdown {
     position: relative;
     min-width: 200px;
-    transition: opacity .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 
     &.disabled {
         opacity: 0.35;
@@ -242,7 +253,7 @@ function formatBandValue(value: number): string {
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .deviceTrigger:hover:not(:disabled),
 .deviceTrigger.open {
@@ -261,7 +272,7 @@ function formatBandValue(value: number): string {
 .deviceChevron {
     flex-shrink: 0;
     color: hsla(0, 0%, 100%, 0.48);
-    transition: transform .18s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .deviceTrigger.open .deviceChevron {
     transform: rotate(180deg);
@@ -291,7 +302,7 @@ function formatBandValue(value: number): string {
     font-weight: 600;
     text-align: left;
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .deviceOption:hover,
 .deviceOption.active {
@@ -300,13 +311,18 @@ function formatBandValue(value: number): string {
 }
 .deviceMenu-enter-active,
 .deviceMenu-leave-active {
-    transition: opacity .16s ease, transform .16s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     transform-origin: top right;
 }
 .deviceMenu-enter-from,
 .deviceMenu-leave-to {
     opacity: 0;
     transform: translateY(-4px) scale(0.98);
+}
+.fxBlock {
+    margin-top: 16px;
+    max-width: 800px;
+    width: 100%;
 }
 .eqBlock {
     margin-top: 16px;
@@ -331,7 +347,7 @@ function formatBandValue(value: number): string {
     font-weight: 500;
     font-size: 13px;
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.08);
@@ -356,7 +372,7 @@ function formatBandValue(value: number): string {
     font-weight: 500;
     font-size: 13px;
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
@@ -379,7 +395,7 @@ function formatBandValue(value: number): string {
     padding: 12px 16px;
     background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
     border-radius: 10px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &.disabled {
         opacity: 0.35;
@@ -407,7 +423,7 @@ function formatBandValue(value: number): string {
     border-radius: 50%;
     background: #ffffff;
     cursor: pointer;
-    transition: transform 0.15s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .eqGainSlider::-webkit-slider-thumb:hover {
     transform: scale(1.2);
@@ -429,7 +445,7 @@ function formatBandValue(value: number): string {
     padding: 16px 12px;
     background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
     border-radius: 10px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &.disabled {
         opacity: 0.35;
@@ -481,7 +497,7 @@ function formatBandValue(value: number): string {
     border-radius: 50%;
     background: #ffffff;
     cursor: pointer;
-    transition: transform 0.15s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .eqSlider::-webkit-slider-thumb:hover {
     transform: scale(1.2);

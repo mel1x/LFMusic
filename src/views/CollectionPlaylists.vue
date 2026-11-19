@@ -48,8 +48,6 @@ function playlistCoverFor(pl: PlaylistInfo): string {
     return coverFor(pl.first_file_path) || defaultCover;
 }
 
-// Gate must stay closed until playlists load, or it opens on an empty list
-// (content flashes in, then the loader reappears over cover loading).
 const dataReady = ref(false);
 
 onMounted(async () => {
@@ -91,8 +89,6 @@ const filteredPlaylists = computed(() => {
     return searchRanked(userPlaylists.value, q, (p) => [p.name]);
 });
 
-// The favorites playlist is pinned to the front and hidden while searching
-// (it isn't part of the searchable user-playlist set).
 const gridPlaylists = computed<PlaylistInfo[]>(() => {
     const fav = favoritesPlaylist.value;
     if (!fav || debouncedSearch.value.trim()) return filteredPlaylists.value;
@@ -103,7 +99,6 @@ function isFavoritesPl(pl: PlaylistInfo): boolean {
     return pl.kind === 'Favorites';
 }
 
-// Hold back first paint until the first 30 covers have resolved.
 const { ready: coversReady } = useCoverGate(() =>
     filteredPlaylists.value
         .slice(0, 30)
@@ -112,7 +107,6 @@ const { ready: coversReady } = useCoverGate(() =>
     { armed: () => dataReady.value },
 );
 
-// Single IntersectionObserver rooted at .pageRoot; bottom rootMargin = 2 card rows.
 const gridEl = ref<HTMLElement | null>(null);
 let coverObs: IntersectionObserver | null = null;
 let resizeObs: ResizeObserver | null = null;
@@ -156,8 +150,7 @@ function ensureObserver() {
     if (!coverObs) buildObserver();
 }
 
-// Runs as a v-for function ref during render, before onMounted — observer
-// must be created lazily here or most cards never get registered.
+// Runs as a v-for function ref during render, before onMounted: create the observer lazily.
 function bindCard(el: any, pl: PlaylistInfo) {
     if (!el) return;
     if (!pl.first_file_path) return;
@@ -471,7 +464,7 @@ function scrollToTop() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
@@ -506,7 +499,7 @@ function scrollToTop() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -521,7 +514,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -541,7 +534,7 @@ function scrollToTop() {
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     width: fit-content;
 }
 .backBtn:hover {
@@ -550,7 +543,7 @@ function scrollToTop() {
 }
 .backBtn svg {
     color: hsla(0, 0%, 100%, 0.6);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
     color: hsla(0, 0%, 100%, 1);
@@ -575,7 +568,7 @@ function scrollToTop() {
     left: 12px;
     transform: translateY(-50%);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
@@ -598,7 +591,7 @@ function scrollToTop() {
     justify-content: center;
     padding: 6px;
     border-radius: 50%;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -639,7 +632,7 @@ function scrollToTop() {
     grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr));
     gap: 24px 16px;
     padding-bottom: 24px;
-    transition: opacity 0.24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .grid.gateHidden {
     opacity: 0;
@@ -661,10 +654,10 @@ function scrollToTop() {
     width: 100%;
     aspect-ratio: 1 / 1;
     border-radius: 18px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .createPlaylistItem .cover svg {
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     color: hsla(0, 0%, 100%, 0.4);
 }
 .createPlaylistItem:hover .cover {
@@ -688,21 +681,21 @@ function scrollToTop() {
     min-width: 0;
 }
 .playlist-enter-active {
-    transition: opacity .28s ease, transform .28s ease;
+    transition: opacity .28s var(--ease-smooth), transform .28s var(--ease-smooth);
 }
 .playlist-enter-from {
     opacity: 0;
     transform: scale(0.85);
 }
 .playlist-leave-active {
-    transition: opacity .2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
     pointer-events: none;
 }
 .playlist-leave-to {
     opacity: 0;
 }
 .playlist-move {
-    transition: transform .28s ease;
+    transition: transform .28s var(--ease-smooth);
 }
 .playlistItem .coverWrap {
     position: relative;
@@ -717,7 +710,7 @@ function scrollToTop() {
     height: 100%;
     border-radius: 18px;
     object-fit: cover;
-    transition: filter .24s ease, transform .24s ease;
+    transition: filter var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
 .playlistItem:hover .cover,
@@ -736,7 +729,7 @@ function scrollToTop() {
     backdrop-filter: blur(8px);
     opacity: 0;
     transform: translateY(4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .playlistItem .overlayBtn:hover {

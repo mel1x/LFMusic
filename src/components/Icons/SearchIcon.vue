@@ -1,24 +1,17 @@
 <template>
   <svg
-    width="20px"
-    height="20px"
-    viewBox="0 0 24 24"
-    stroke-width="2"
-    fill="none"
     xmlns="http://www.w3.org/2000/svg"
-    color="currentColor"
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    class="lfi lfi-search"
   >
-    <path
-      d="M17 17L21 21"
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-    ></path>
-    <path
-      d="M3 11C3 15.4183 6.58172 19 11 19C13.213 19 15.2161 18.1015 16.6644 16.6493C18.1077 15.2022 19 13.2053 19 11C19 6.58172 15.4183 3 11 3C6.58172 3 3 6.58172 3 11Z"
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-    ></path>
+    <path d="m21 21-4.34-4.34" />
+    <circle cx="11" cy="11" r="8" />
   </svg>
 </template>

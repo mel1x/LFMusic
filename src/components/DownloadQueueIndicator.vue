@@ -7,8 +7,6 @@ import defaultTrackCover from '../assets/trackCover.webp'
 import { useDownloads, type DownloadItem } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 
-// Titlebar download indicator: a ring with the batch progress; hovering opens
-// the queue with live statuses and per-item cancel/retry.
 const { t } = useI18n()
 const { queue, activeCount, cancel, retry, clearFinished, cancelAll, stageText } = useDownloads()
 
@@ -21,7 +19,6 @@ const items = computed(() =>
 const failedCount = computed(() => queue.value.filter(i => i.stage === 'error').length)
 const finishedCount = computed(() => queue.value.filter(i => i.stage === 'done' || i.stage === 'error').length)
 
-// Overall progress across unfinished items (finished ones count as complete).
 const overall = computed(() => {
     const list = queue.value.filter(i => i.stage !== 'error')
     if (list.length === 0) return 0
@@ -138,7 +135,7 @@ async function run(fn: () => Promise<unknown>) {
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.8);
     background: hsla(var(--accent-h), var(--accent-s), 22%, 1);
-    transition: color .2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .dlButton:hover { color: #fff; }
 .dlRing {
@@ -151,14 +148,14 @@ async function run(fn: () => Promise<unknown>) {
 .dlRingTrack { fill: none; stroke: hsla(0, 0%, 100%, 0.1); stroke-width: 2; }
 .dlRingFill {
     fill: none;
-    stroke: hsla(var(--accent-h), min(calc(var(--accent-s) + 20%), 100%), 70%, 1);
+    stroke: hsla(var(--accent-h), min(calc(var(--accent-s) + 20% * var(--accent-k, 1)), 100%), 70%, 1);
     stroke-width: 2;
     stroke-linecap: round;
-    transition: stroke-dashoffset .4s ease;
+    transition: stroke-dashoffset .4s var(--ease-smooth);
 }
 .dlButton.hasError .dlRingFill { stroke: hsla(2, 75%, 64%, 1); }
 .dlArrow { transform-box: fill-box; transform-origin: center; }
-.dlButton.busy .dlArrow { animation: arrowFloat 1.4s ease-in-out infinite; }
+.dlButton.busy .dlArrow { animation: arrowFloat 1.4s var(--ease-smooth-in-out) infinite; }
 @keyframes arrowFloat {
     0%, 100% { transform: translateY(-1px); }
     50% { transform: translateY(2px); }
@@ -179,7 +176,7 @@ async function run(fn: () => Promise<unknown>) {
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     color: #fff;
-    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 52%, 1);
+    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16% * var(--accent-k, 1)), 100%), 52%, 1);
     border: 1.5px solid var(--dark-bg);
     user-select: none;
 }
@@ -193,7 +190,7 @@ async function run(fn: () => Promise<unknown>) {
     opacity: 0;
     pointer-events: none;
     transform: translateY(-4px);
-    transition: opacity .16s ease, transform .16s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     z-index: 30;
 }
 .dlIndicator:hover .dlPopover,
@@ -228,7 +225,7 @@ async function run(fn: () => Promise<unknown>) {
     font-weight: 700;
     color: hsla(0, 0%, 100%, 0.65);
     background-color: hsla(0, 0%, 100%, 0.06);
-    transition: .18s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .chip:hover { color: #fff; background-color: hsla(0, 0%, 100%, 0.12); }
 .chip.danger:hover { color: hsla(2, 85%, 78%, 1); background-color: hsla(2, 70%, 55%, 0.16); }
@@ -249,7 +246,7 @@ async function run(fn: () => Promise<unknown>) {
     gap: 10px;
     padding: 7px 6px;
     border-radius: 10px;
-    transition: background-color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .dlItem:hover { background-color: hsla(0, 0%, 100%, 0.04); }
 .dlCover {
@@ -274,7 +271,7 @@ async function run(fn: () => Promise<unknown>) {
     font-size: 11.5px;
     font-weight: 500;
     font-variant-numeric: tabular-nums;
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15%), 100%), 78%, 0.9);
+    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15% * var(--accent-k, 1)), 100%), 78%, 0.9);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -293,12 +290,12 @@ async function run(fn: () => Promise<unknown>) {
     position: absolute;
     inset: 0 auto 0 0;
     border-radius: 2px;
-    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 20%), 100%), 66%, 1);
-    transition: width .3s ease;
+    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 20% * var(--accent-k, 1)), 100%), 66%, 1);
+    transition: width .3s var(--ease-smooth);
 }
 .dlBarFill.indeterminate {
     width: 30%;
-    animation: slide 1.2s ease-in-out infinite;
+    animation: slide 1.2s var(--ease-smooth-in-out) infinite;
 }
 .dlItem.queued .dlBarFill.indeterminate { animation: none; width: 0; }
 @keyframes slide {
@@ -316,7 +313,7 @@ async function run(fn: () => Promise<unknown>) {
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.6);
     background-color: hsla(0, 0%, 100%, 0.05);
-    transition: .18s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .iconBtn:hover { color: #fff; background-color: hsla(0, 0%, 100%, 0.12); }
 .iconBtn.remove { opacity: 0; }

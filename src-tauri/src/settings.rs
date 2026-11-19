@@ -5,6 +5,7 @@ use tauri::State;
 
 use crate::audio_player::EqSettings;
 use crate::enhance::EnhanceSettings;
+use crate::fx::FxSettings;
 use crate::json_store;
 use crate::SettingsState;
 
@@ -12,8 +13,6 @@ pub const DEFAULT_ARTIST_SEPARATORS: &[&str] = &["; ", ", "];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct AppSettings {
-    /// Free-form frontend options (bool/string/...): crossfade_on_seek,
-    /// show_github_badge, static_accent_color, etc.
     #[serde(flatten)]
     pub options: HashMap<String, serde_json::Value>,
 
@@ -24,21 +23,21 @@ pub struct AppSettings {
     #[serde(default)]
     pub enhance_settings: EnhanceSettings,
 
-    /// Download folder for external sources; empty/None uses the default
-    /// "LFMusic Downloads" under the system music dir. Kept as its own field
-    /// (not inside `options`) so `save_settings`, which replaces `options`
-    /// wholesale from the frontend, doesn't wipe it.
+    /// Sound menu effects: speed, space, bitcrusher, vinyl.
+    #[serde(default)]
+    pub fx_settings: FxSettings,
+
+    /// Download folder; own field (not in `options`) because save_settings replaces `options`
+    /// wholesale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<String>,
 
-    /// Legacy proxy fields from the previous downloader; read once to seed
-    /// `downloader` and then dropped on the next save.
     #[serde(default, skip_serializing)]
     pub proxy_mode: Option<String>,
     #[serde(default, skip_serializing)]
     pub proxy_url: Option<String>,
 
-    /// Track downloader options. Own field for the same reason as `download_dir`.
+    /// Track downloader options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloader: Option<DownloaderSettings>,
 }
@@ -57,8 +56,6 @@ pub struct DownloaderSettings {
     pub cookies_browser: String,
     /// Netscape-format cookies.txt path.
     pub cookies_file: String,
-    /// Keep the app-managed yt-dlp/Deno current (checked at most once a day,
-    /// right before a download batch starts).
     pub auto_update: bool,
 }
 
@@ -76,8 +73,8 @@ impl Default for DownloaderSettings {
 }
 
 impl AppSettings {
-    /// Downloader options, seeded from the legacy proxy fields when the new
-    /// block has never been saved.
+    /// Downloader options, seeded from the legacy proxy fields when the new block has never been
+    /// saved.
     pub fn downloader(&self) -> DownloaderSettings {
         if let Some(d) = &self.downloader {
             return d.clone();
@@ -95,8 +92,8 @@ impl AppSettings {
 
 pub fn load(app_data_dir: &Path) -> AppSettings {
     let mut settings: AppSettings = json_store::load_or_default(&app_data_dir.join("settings.json"));
-    // Legacy proxy fields aren't written back, so fold them into the
-    // downloader block now or they'd be lost on the next save.
+    // Legacy proxy fields are not written back: fold them into the downloader block or they would
+    // be lost.
     if settings.downloader.is_none() && settings.proxy_mode.is_some() {
         settings.downloader = Some(settings.downloader());
     }
@@ -115,8 +112,7 @@ pub fn option_bool(settings: &AppSettings, key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Reads artist separators from settings, falling back to the default if
-/// missing or malformed.
+/// Reads artist separators from settings, falling back to the default if missing or malformed.
 pub fn get_artist_separators(state: &State<SettingsState>) -> Vec<String> {
     let guard = match state.0.lock() {
         Ok(g) => g,
@@ -147,8 +143,7 @@ pub fn get_artist_separators(state: &State<SettingsState>) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// `download_dir` must not leak into `options` on deserialization, or
-    /// the frontend's full-`options` replacement in `save_settings` would wipe it.
+    /// `download_dir` must not leak into `options`, or save_settings would wipe it.
     #[test]
     fn download_dir_is_separate_from_options() {
         let json = r##"{
@@ -216,7 +211,6 @@ mod tests {
         assert!(!option_bool(&s, "missing_key", false));
         assert!(option_bool(&s, "missing_key", true));
 
-        // Wrong type (string instead of bool) treated as absent -> default.
         s.options.insert(
             "static_accent_color".to_string(),
             serde_json::Value::String("#3D3D3D".to_string()),
@@ -234,7 +228,6 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // Directory intentionally not created — settings.json can't exist there.
         let s = load(&dir);
         assert!(s.options.is_empty());
         assert_eq!(s.download_dir, None);
@@ -296,7 +289,6 @@ mod tests {
         assert_eq!(d.proxy_url, "socks5://127.0.0.1:1080");
         assert!(d.auto_update);
 
-        // Survives a save/load cycle even though the legacy fields aren't written back.
         save(&dir, &loaded).expect("save");
         assert_eq!(load(&dir).downloader().proxy_url, "socks5://127.0.0.1:1080");
 

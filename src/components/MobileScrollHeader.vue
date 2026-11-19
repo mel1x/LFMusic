@@ -82,7 +82,7 @@ function openSearch() {
         background: hsla(var(--accent-h), min(var(--accent-s), 42%), 10%, 0);
         -webkit-backdrop-filter: blur(0);
         backdrop-filter: blur(0);
-        transition: background-color .22s ease, -webkit-backdrop-filter .22s ease, backdrop-filter .22s ease, box-shadow .22s ease;
+        transition: background-color var(--duration-hover) var(--ease-smooth), -webkit-backdrop-filter var(--duration-hover) var(--ease-smooth), backdrop-filter var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
     }
 
     .mobileScrollHeader.scrolled {
@@ -103,21 +103,20 @@ function openSearch() {
         background: transparent;
         color: hsla(0, 0%, 100%, 0.96);
         cursor: pointer;
-        transition: color .18s ease, transform .18s ease;
+        transition: color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     }
 
     .mobileScrollButton:active {
         transform: scale(0.94);
+        transition-duration: 80ms;
     }
 
-    /* "Up" only makes sense once the page is scrolled. Collapsed while hidden
-       and placed before search, so search always stays in the corner. */
     .upBtn {
         width: 0;
         overflow: hidden;
         opacity: 0;
         pointer-events: none;
-        transition: width .22s ease, opacity .22s ease, transform .18s ease;
+        transition: width var(--duration-hover) var(--ease-smooth), opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     }
 
     .mobileScrollHeader.scrolled .upBtn {
@@ -139,7 +138,7 @@ function openSearch() {
         text-overflow: ellipsis;
         opacity: 0;
         transform: translateY(3px);
-        transition: opacity .22s ease, transform .22s ease;
+        transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
         user-select: none;
     }
 

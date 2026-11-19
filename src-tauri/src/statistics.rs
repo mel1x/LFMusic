@@ -292,13 +292,6 @@ pub fn apply_collection_full_listen(
     Ok(())
 }
 
-// ── Listening history ────────────────────────────────────────────────────────
-//
-// One compact row per play session (`listen_history`) plus rare library events
-// (`library_history`), the raw material for year recap cards. Events are kept in
-// memory and written in one transaction per batch, so playback adds no disk
-// writes of its own: a batch lands about once an hour of music.
-
 /// Bits of `listen_history.flags`.
 pub const LISTEN_COUNTED: i64 = 1;
 pub const LISTEN_FULL: i64 = 1 << 1;
@@ -415,9 +408,8 @@ pub struct LibraryEvent {
 #[derive(Debug, Default)]
 pub struct HistoryBuffer {
     listens: Vec<ListenEvent>,
-    /// Session of the track that is still playing, refreshed on every forced
-    /// progress save. Written only by a shutdown flush, so closing the app
-    /// mid-track keeps that listen without logging it twice otherwise.
+    /// Session of the still playing track; written only by a shutdown flush, so it is not logged
+    /// twice.
     open_listen: Option<ListenEvent>,
     library: Vec<LibraryEvent>,
     first_buffered: Option<Instant>,
@@ -433,7 +425,6 @@ impl HistoryBuffer {
         if self.open_listen.as_ref().is_some_and(|open| open.same_session(&event)) {
             self.open_listen = None;
         }
-        // Sub-second sessions are just clicking through the queue.
         if event.file_path.trim().is_empty() || (event.listened_secs < 1.0 && !event.skipped) {
             return false;
         }
@@ -463,8 +454,6 @@ impl HistoryBuffer {
     }
 }
 
-/// Id of the track in `history_tracks`, refreshing its metadata snapshot so the
-/// recap can still name tracks removed from the library later in the year.
 fn history_track_id(
     conn: &Connection,
     ids: &mut HashMap<String, i64>,
@@ -473,7 +462,6 @@ fn history_track_id(
     if let Some(id) = ids.get(file_path) {
         return Ok(*id);
     }
-    // The WHERE on the update skips the page write when nothing changed.
     conn.prepare_cached(
         "INSERT INTO history_tracks (file_path, title, artist, album, genre, duration_secs)
          SELECT t.file_path, COALESCE(o.title, t.title), COALESCE(o.artist, t.artist),
@@ -591,15 +579,12 @@ mod tests {
 
     #[test]
     fn day_part_wraps_hours_above_24() {
-        // 29 % 24 == 5 -> morning, same as hour 5.
         assert_eq!(day_part_for_hour(29), DayPart::Morning);
         assert_eq!(day_part_for_hour(24), day_part_for_hour(0));
     }
 
     fn memory_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory db");
-        // track_statistics.file_path has an FK to tracks; this SQLite build
-        // enforces it even without PRAGMA foreign_keys=ON, so a stub table is needed.
         conn.execute_batch("CREATE TABLE tracks (file_path TEXT PRIMARY KEY NOT NULL);")
             .expect("create stub tracks table");
         create_tables(&conn).expect("create tables");
@@ -654,8 +639,6 @@ mod tests {
 
     #[test]
     fn apply_track_delta_clamps_counters_at_zero() {
-        // Removing from a playlist on zeroed stats must not go negative, or
-        // the UI would show negative counters.
         let conn = memory_conn();
         let path = "/music/b.flac".to_string();
         stub_track(&conn, &path);

@@ -1,3 +1,7 @@
+<script lang="ts">
+let collectionsLoadedOnce = false;
+</script>
+
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
@@ -41,8 +45,6 @@ const {
     moveArtistToTop,
 } = usePlaylists();
 
-// Favorites is pinned to the front of the playlists line and rendered with its
-// own accent-tinted cover.
 const linePlaylists = computed<PlaylistInfo[]>(() => {
     const fav = favoritesPlaylist.value;
     return fav ? [fav, ...userPlaylists.value] : userPlaylists.value;
@@ -184,7 +186,6 @@ function onArtistsScroll() {
     }
 }
 
-// Cover requests only for currently rendered cards.
 function requestCoversForCards() {
     const pending: TrackMetadata[] = [];
     for (const a of visibleSortedAlbums.value) {
@@ -200,16 +201,14 @@ function requestCoversForCards() {
     if (pending.length) loadCoversForTracks(pending);
 }
 
-// Data source ready (playlists/albums/artists loaded). Before this the cover
-// gate must not open, or it'd open on an empty list, content would flash, and
-// the loader would appear after loading (backwards order).
-const dataReady = ref(false);
+const dataReady = ref(collectionsLoadedOnce);
 
 onMounted(async () => {
     playlistsLine.observe();
     albumsLine.observe();
     artistsLine.observe();
     await loadPlaylists();
+    collectionsLoadedOnce = true;
     dataReady.value = true;
     refreshAllCovers();
     requestCoversForCards();
@@ -368,11 +367,8 @@ const visibleArtists = computed(() => sortedArtists.value.slice(0, visibleArtist
 
 watch([visibleSortedAlbums, visibleArtists], () => requestCoversForCards());
 
-// Gate "arms" only once data is loaded AND the track cache starts returning
-// objects. On first launch playlists can load before the catalog (usePlayer
-// is still filling trackCache), so getTrackByPath returns undefined -> gate
-// targets are empty -> it would open prematurely (content flashes, loader
-// shows only after loading). Wait until the first track resolves.
+// Arm only once the track cache returns objects: on first launch playlists can load before the
+// catalog.
 const gateArmed = computed(() => {
     if (!dataReady.value) return false;
     const firstPath =
@@ -380,13 +376,10 @@ const gateArmed = computed(() => {
         sortedArtists.value[0]?.firstPath ||
         userPlaylists.value[0]?.first_file_path ||
         null;
-    if (!firstPath) return true; // collection is empty, nothing to wait for
+    if (!firstPath) return true;
     return !!getTrackByPath(firstPath);
 });
 
-// Hold back first paint until the first covers of each line have resolved, so
-// the cards don't visibly resize/flash while their covers stream in. The lines
-// stay mounted (just hidden) so they measure & request covers during the hold.
 const { ready: coversReady } = useCoverGate(() => {
     const out: TrackMetadata[] = [];
     const pushFirst = (path: string | null) => {
@@ -394,8 +387,6 @@ const { ready: coversReady } = useCoverGate(() => {
         const t = getTrackByPath(path);
         if (t) out.push(t);
     };
-    // Cover enough of each row to fill a wide viewport so no cards visibly
-    // stream their covers in after the reveal.
     for (const a of sortedAlbums.value.slice(0, 16)) pushFirst(a.firstPath);
     for (const a of sortedArtists.value.slice(0, 16)) pushFirst(a.firstPath);
     for (const pl of userPlaylists.value.slice(0, 16)) pushFirst(pl.first_file_path);
@@ -502,12 +493,9 @@ function scrollToTop() {
         <div class="linesContent" :class="{ gateHidden: !coversReady }">
         <div class="pageLine">
             <div class="lineHat">
-                <div class="lineTitleCol">
-                    <div class="lineTitle" @click="router.push('/collections/playlists')">
-                        Мои плейлисты
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                    </div>
-                    <div class="lineDesc">Подборки треков, собранные вами вручную</div>
+                <div class="lineTitle" @click="router.push('/collections/playlists')">
+                    Мои плейлисты
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
                 </div>
                 <div class="lineControls">
                     <button class="prevBtn" :disabled="!playlistsLine.canPrev.value" @click="playlistsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
@@ -570,12 +558,9 @@ function scrollToTop() {
         </div>
         <div class="pageLine">
             <div class="lineHat">
-                <div class="lineTitleCol">
-                    <div class="lineTitle" @click="router.push('/collections/albums')">
-                        Альбомы
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                    </div>
-                    <div class="lineDesc">Альбомы, найденные в вашей медиатеке</div>
+                <div class="lineTitle" @click="router.push('/collections/albums')">
+                    Альбомы
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
                 </div>
                 <div class="lineControls">
                     <button class="prevBtn" :disabled="!albumsLine.canPrev.value" @click="albumsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
@@ -633,12 +618,9 @@ function scrollToTop() {
         </div>
         <div class="pageLine">
             <div class="lineHat">
-                <div class="lineTitleCol">
-                    <div class="lineTitle" @click="router.push('/collections/artists')">
-                        Исполнители
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                    </div>
-                    <div class="lineDesc">Исполнители, найденные в вашей медиатеке</div>
+                <div class="lineTitle" @click="router.push('/collections/artists')">
+                    Исполнители
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
                 </div>
                 <div class="lineControls">
                     <button class="prevBtn" :disabled="!artistsLine.canPrev.value" @click="artistsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
@@ -763,7 +745,7 @@ function scrollToTop() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
@@ -803,7 +785,7 @@ function scrollToTop() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -818,7 +800,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -840,13 +822,11 @@ function scrollToTop() {
 .linesContent {
     display: flex;
     flex-direction: column;
-    transition: opacity 0.24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .linesContent.gateHidden {
     opacity: 0;
     pointer-events: none;
-    /* Take the content out of flow while hidden so .linesGate collapses to the
-       visible viewport height and the spinner centers in the viewframe. */
     position: absolute;
     inset: 0;
 }
@@ -866,20 +846,6 @@ function scrollToTop() {
     align-items: center;
     justify-content: space-between;
 }
-.lineTitleCol {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-}
-.lineDesc {
-    user-select: none;
-    color: hsla(0, 0%, 100%, 0.4);
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 1.3;
-    margin-bottom: 6px;
-}
 .lineTitle {
     display: flex;
     flex-direction: row;
@@ -891,7 +857,7 @@ function scrollToTop() {
     font-weight: 800;
     font-size: 24px;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 1);
@@ -902,7 +868,7 @@ function scrollToTop() {
     display: block;
     color: hsla(0, 0%, 100%, 0.4);
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .lineTitle:hover svg {
     margin-left: 12px;
@@ -923,7 +889,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 0.6);
     opacity: 0;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         border: 2px solid hsla(0, 0%, 100%, 0.4);
@@ -980,10 +946,10 @@ function scrollToTop() {
     width: var(--card-w, 240px);
     height: var(--card-w, 240px);
     border-radius: 18px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .createPlaylistItem .cover svg {
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     color: hsla(0, 0%, 100%, 0.4);
 }
 .createPlaylistItem:hover .cover {
@@ -1006,21 +972,21 @@ function scrollToTop() {
     gap: 8px;
 }
 .playlist-enter-active {
-    transition: opacity .28s ease, transform .28s ease;
+    transition: opacity .28s var(--ease-smooth), transform .28s var(--ease-smooth);
 }
 .playlist-enter-from {
     opacity: 0;
     transform: scale(0.85);
 }
 .playlist-leave-active {
-    transition: opacity .2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
     pointer-events: none;
 }
 .playlist-leave-to {
     opacity: 0;
 }
 .playlist-move {
-    transition: transform .28s ease;
+    transition: transform .28s var(--ease-smooth);
 }
 .playlistItem .coverWrap {
     position: relative;
@@ -1035,7 +1001,7 @@ function scrollToTop() {
     height: var(--card-w, 240px);
     border-radius: 18px;
     object-fit: cover;
-    transition: filter .24s ease, transform .24s ease;
+    transition: filter var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
 .playlistItem:hover .cover,
@@ -1054,7 +1020,7 @@ function scrollToTop() {
     backdrop-filter: blur(8px);
     opacity: 0;
     transform: translateY(4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .playlistItem .overlayBtn:hover {
@@ -1129,7 +1095,6 @@ function scrollToTop() {
     text-overflow: ellipsis;
 }
 
-/* Artists ── circular covers with hover overlay (mirrors album cards) */
 .artistLineList {
     padding-bottom: 16px;
 }
@@ -1154,7 +1119,7 @@ function scrollToTop() {
     object-fit: cover;
     user-select: none;
     background-color: #202020;
-    transition: filter .24s ease;
+    transition: filter var(--duration-hover) var(--ease-smooth);
 }
 .artistItem:hover .artistCover,
 .artistCoverWrap.menuOpen .artistCover {
@@ -1172,7 +1137,7 @@ function scrollToTop() {
     backdrop-filter: blur(8px);
     opacity: 0;
     transform: translateY(4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .artistItem .overlayBtn:hover {

@@ -36,8 +36,6 @@ const props = defineProps<{
     submenuRight?: boolean
     inPlaylist?: boolean
     canMoveToTop?: boolean
-    /** Hide "Удалить из плейлиста" (e.g. on the favorites page, where the
-     *  like toggle already removes the track). */
     hideRemoveFromPlaylist?: boolean
 }>()
 
@@ -56,10 +54,8 @@ const { openTrackEdit } = useTrackEditModal()
 const { isDownloadedTrack, deleteDownloadedTrack } = useDownloads()
 const { t } = useI18n()
 
-// Only downloaded tracks get the "Delete track" action (removes file + library entry).
 const isDownloaded = computed(() => isDownloadedTrack(props.track.file_path))
 const showDeleteConfirm = ref(false)
-// Surface delete errors (file locked/no permission) instead of swallowing them.
 const deleteError = ref<string | null>(null)
 const deleteMessage = computed(() =>
     t('trackMenu.deleteConfirmMessage', { title: props.track.title || t('trackMenu.noTitle') }),
@@ -87,8 +83,6 @@ function dismissDeleteError() {
     emit('close')
 }
 
-// "Go to album" only makes sense if the backend created an album playlist for it,
-// which only happens when the album has more than one track.
 const trackAlbumName = computed(() => (props.track.album || '').trim())
 const hasAlbum = computed(() => {
     const name = trackAlbumName.value
@@ -97,8 +91,6 @@ const hasAlbum = computed(() => {
 })
 
 const trackPlaylistIds = ref<Set<number>>(new Set())
-// Whether the track is in the built-in "Мне нравится" playlist (drives the
-// like/unlike toggle label + icon). Reads from the shared reactive set.
 const isFavorite = computed(() => isFavoriteFn(props.track.file_path))
 
 onMounted(async () => {
@@ -541,7 +533,7 @@ function onAbout() {
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: 0.24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     user-select: none;
     white-space: nowrap;
     text-align: left;
@@ -565,14 +557,13 @@ function onAbout() {
     color: hsla(0, 0%, 100%, 0.25);
 }
 .ctx-item svg {
-    transition: 0.24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
     color: hsla(0, 0%, 100%, 0.5);
 }
 .ctx-item:hover svg {
     color: hsla(0, 0%, 100%, 0.8);
 }
-/* Liked state: fill the heart (mirrors the pin-active pattern). */
 .ctx-fav-item.liked,
 .ctx-fav-item.liked:hover {
     color: hsla(0, 0%, 100%, 1);
@@ -583,7 +574,6 @@ function onAbout() {
 .ctx-fav-item.liked :deep(svg path) {
     fill: currentColor;
 }
-/* Destructive action (file deletion) gets a red accent. */
 .ctx-item-danger {
     color: hsla(2, 60%, 72%, 0.9);
 }
@@ -613,7 +603,7 @@ function onAbout() {
 }
 .ctx-chevron {
     margin-left: auto;
-    transition: transform 0.2s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .ctx-chevron.open {
     transform: rotate(-90deg);
@@ -658,7 +648,7 @@ function onAbout() {
 }
 .sub-enter-active,
 .sub-leave-active {
-    transition: opacity 0.12s ease, transform 0.12s ease;
+    transition: opacity 0.12s var(--ease-smooth), transform 0.12s var(--ease-smooth);
 }
 .sub-enter-from,
 .sub-leave-to {
@@ -750,7 +740,7 @@ function onAbout() {
         box-shadow: 0 -22px 60px rgba(0, 0, 0, 0.46);
         overflow: hidden;
         touch-action: pan-y;
-        transition: transform .2s ease;
+        transition: transform var(--duration-hover) var(--ease-smooth);
         will-change: transform;
     }
 
@@ -853,15 +843,17 @@ function onAbout() {
         white-space: nowrap;
     }
 
-    .playlist-sheet-enter-active,
+    .playlist-sheet-enter-active {
+        transition: transform var(--duration-modal) var(--ease-smooth);
+    }
+
     .playlist-sheet-leave-active {
-        transition: transform .2s ease, opacity .2s ease;
+        transition: transform .5s var(--ease-sheet);
     }
 
     .playlist-sheet-enter-from,
     .playlist-sheet-leave-to {
-        opacity: 0;
-        transform: translateY(20px);
+        transform: translateY(100%);
     }
 }
 </style>

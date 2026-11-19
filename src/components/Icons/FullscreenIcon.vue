@@ -9,7 +9,7 @@
     stroke-width="2"
     stroke-linecap="round"
     stroke-linejoin="round"
-    class="lucide lucide-maximize2-icon lucide-maximize-2"
+    class="lfi lfi-fullscreen"
   >
     <path d="M15 3h6v6" />
     <path d="m21 3-7 7" />

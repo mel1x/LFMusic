@@ -89,7 +89,6 @@ pub fn set_custom_cover(
     key: &str,
     source_path: &str,
 ) -> Result<String, String> {
-    // Read the source first so a failed read leaves the current cover intact.
     let data = fs::read(source_path).map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
 
     let dir = covers_dir(app_data_dir);
@@ -99,7 +98,6 @@ pub fn set_custom_cover(
     let filename = format!("{:016x}.{}", key_hash(kind, key), ext);
     let target = dir.join(&filename);
 
-    // Remove previous file (if any, with another extension) to avoid orphans.
     if let Some(prev) = manifest.get(&id).filter(|prev| **prev != filename) {
         let _ = fs::remove_file(dir.join(prev));
     }
@@ -184,10 +182,6 @@ mod tests {
         assert_eq!(entry_id("artist", "Queen"), "artist:Queen");
     }
 
-    /// `entry_id` doesn't escape `:` in kind/key, so different kind+key pairs
-    /// could theoretically collide (e.g. kind="a", key="b:c" vs kind="a:b",
-    /// key="c"). Not exploitable in practice: `kind` is always one of 4 fixed
-    /// literals, never user input. Documents the intentional limitation.
     #[test]
     fn entry_id_is_not_collision_proof_for_arbitrary_kind_values() {
         assert_eq!(entry_id("a", "b:c"), entry_id("a:b", "c"));

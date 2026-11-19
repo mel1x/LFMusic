@@ -157,7 +157,7 @@ export const vTooltip: Directive<HTMLElement, unknown> = {
             showTimer = window.setTimeout(() => {
                 showTimer = null
                 show(el, text, placementMap.get(el) ?? 'top')
-            }, 250)
+            }, 450)
         }
         const leave = () => hide(el)
         el.addEventListener('mouseenter', enter)

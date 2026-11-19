@@ -39,7 +39,6 @@ async function confirmResetEdits() {
     resettingEdits.value = true;
     try {
         await invoke<number>('track_clear_all_overrides');
-        // Artist playlists still hold the renamed names — rebuild from tracks.artist.
         await rebuildArtists();
         await refreshLibrary();
     } catch (e) {
@@ -50,7 +49,6 @@ async function confirmResetEdits() {
 }
 
 const newSeparator = ref('');
-const separatorInput = ref<HTMLInputElement | null>(null);
 
 function visibleSeparator(sep: string): string {
     return `"${sep} "`;
@@ -94,7 +92,7 @@ async function openFolder(path: string) {
 </script>
 
 <template>
-    <SettingsShell title="Библиотека" description="Папки с музыкой и обработка имён исполнителей">
+    <SettingsShell title="Библиотека">
         <div class="settingBlock">
             <div class="settingTitle">Разделители исполнителей</div>
             <div class="settingDesc">Строки, по которым имена исполнителей разбиваются на несколько (например «; » или «, »)</div>
@@ -113,7 +111,6 @@ async function openFolder(path: string) {
                     </div>
                     <div class="separatorAddRow">
                         <input
-                            ref="separatorInput"
                             type="text"
                             class="separatorInput"
                             placeholder="Новый разделитель"
@@ -132,7 +129,6 @@ async function openFolder(path: string) {
 
         <div class="settingBlock">
             <div class="settingTitle">Локальные папки</div>
-            <div class="settingDesc">Папки сканируемые на аудио файлы</div>
             <div class="foldersBlock">
                 <div class="foldersHat">
                     <button class="addFolder" @click="addFolder" :disabled="isScanning"><PlusIcon />Добавить папку</button>
@@ -144,7 +140,7 @@ async function openFolder(path: string) {
                         v-tooltip="'Вернуть всем трекам оригинальные название, исполнителя и обложку'"
                     >
                         <DeleteIcon width="16" height="16" />
-                        {{ resettingEdits ? 'Сброс…' : 'Сбросить редактирование' }}
+                        {{ resettingEdits ? 'Сброс...' : 'Сбросить редактирование' }}
                     </button>
                 </div>
 
@@ -253,7 +249,7 @@ async function openFolder(path: string) {
     font-family: "JetBrains Mono", "Consolas", monospace;
     font-size: 13px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .separatorChip:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
@@ -272,7 +268,7 @@ async function openFolder(path: string) {
     border-radius: 50%;
     color: hsla(0, 0%, 100%, 0.45);
     background-color: transparent;
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .separatorRemove:hover {
     color: #ff6467;
@@ -293,7 +289,7 @@ async function openFolder(path: string) {
     font-weight: 500;
     width: 160px;
     box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.04);
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .separatorInput:focus {
     box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.18);
@@ -314,7 +310,7 @@ async function openFolder(path: string) {
     font-weight: 500;
     font-size: 13px;
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .separatorAddBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.08);
@@ -341,7 +337,7 @@ async function openFolder(path: string) {
     border-radius: 8px;
     padding: 6px 8px 4px;
     background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(var(--accent-h), var(--accent-s), 17%, 1);
@@ -352,7 +348,7 @@ async function openFolder(path: string) {
     background: transparent;
     cursor: pointer;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
-    transition: .24s ease-in-out;
+    transition: var(--duration-hover) var(--ease-smooth-in-out);
 
     &:hover {
         color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.62);
@@ -376,7 +372,7 @@ async function openFolder(path: string) {
     font-weight: 600;
     font-size: 12px;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
-    transition: .24s ease-in-out;
+    transition: var(--duration-hover) var(--ease-smooth-in-out);
 
     &:hover {
         color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 90%, 0.62);
@@ -393,7 +389,7 @@ async function openFolder(path: string) {
     padding: 4px;
     background-color: hsla(var(--accent-h), var(--accent-s), 21%, 1);
     margin-left: auto;
-    transition: .3s ease;
+    transition: .3s var(--ease-smooth);
 
     &:hover {
         color: #ff6467;
@@ -420,7 +416,7 @@ async function openFolder(path: string) {
     font-weight: 500;
     font-size: 15px;
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.08);
@@ -440,7 +436,7 @@ async function openFolder(path: string) {
     font-weight: 500;
     font-size: 15px;
     cursor: pointer;
-    transition: .2s;
+    transition: var(--duration-hover);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.08);
@@ -466,7 +462,7 @@ async function openFolder(path: string) {
     font-weight: 500;
     font-size: 15px;
     cursor: pointer;
-    transition: .2s;
+    transition: var(--duration-hover);
 }
 .resetEditsBtn:hover:not(:disabled) {
     background-color: hsla(0, 70%, 50%, 0.12);
@@ -509,7 +505,7 @@ async function openFolder(path: string) {
     height: 100%;
     background: #ffffff;
     border-radius: 999px;
-    transition: width 0.15s linear;
+    transition: width var(--duration-hover) linear;
 }
 .folderAddError {
     padding: 11px 14px;

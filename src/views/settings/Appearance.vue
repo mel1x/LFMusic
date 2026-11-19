@@ -11,6 +11,7 @@ const { t } = useI18n();
 const dynamicItem = computed(() => settingItems.find(i => i.key === 'dynamic_accent_color')!);
 const extraBlockItem = computed(() => settingItems.find(i => i.key === 'show_player_extra_block')!);
 const githubItem = computed(() => settingItems.find(i => i.key === 'show_github_badge')!);
+const donateItem = computed(() => settingItems.find(i => i.key === 'show_donate_badge')!);
 const holidayItem = computed(() => settingItems.find(i => i.key === 'holiday_events')!);
 
 async function toggle(key: SettingKey) {
@@ -86,7 +87,7 @@ function hsvToHex(h: number, s: number, v: number): string {
     return rgbToHex(r, g, b);
 }
 
-// Mirrors the theme formulas in App.vue (--light-bg / --dark-bg / card surface).
+// Mirrors the theme formulas in App.vue.
 function hexToHsl(hex: string): { h: number; s: number; l: number } {
     const { r, g, b } = hexToRgb(hex);
     const rn = r / 255, gn = g / 255, bn = b / 255;
@@ -126,7 +127,6 @@ const hueArea = ref<HTMLElement | null>(null);
 function syncHSVFromHex(hex: string) {
     const { r, g, b } = hexToRgb(hex);
     const hsv = rgbToHsv(r, g, b);
-    // Keep the previous hue for achromatic colors so the marker doesn't jump to 0
     if (hsv.s > 0) hue.value = hsv.h;
     sat.value = hsv.s;
     val.value = hsv.v;
@@ -210,7 +210,6 @@ onUnmounted(() => {
     document.removeEventListener('keydown', onDocKey);
 });
 
-// Sync HSV when the hex changes externally (hex input / presets)
 watch(() => settings.value.static_accent_color, (newHex) => {
     if (!pickerOpen.value) return;
     const currentHex = hsvToHex(hue.value, sat.value, val.value).toLowerCase();
@@ -218,7 +217,6 @@ watch(() => settings.value.static_accent_color, (newHex) => {
     syncHSVFromHex(newHex);
 });
 
-// Close the popup if static mode gets turned off
 watch(() => settings.value.dynamic_accent_color, (isDynamic) => {
     if (isDynamic) pickerOpen.value = false;
 });
@@ -259,11 +257,17 @@ async function selectPreset(color: string) {
 </script>
 
 <template>
-    <SettingsShell title="Оформление" description="Внешний вид интерфейса и цветовая тема">
+    <SettingsShell title="Оформление">
         <div class="settingBlock">
             <div class="settingTitle">Интерфейс</div>
-            <div class="settingDesc">Дополнительные элементы интерфейса приложения</div>
             <div class="settingsBlock">
+                <SettingToggle
+                    :item="donateItem"
+                    :checked="settings.show_donate_badge"
+                    phoneHidden
+                    @toggle="toggle('show_donate_badge')"
+                />
+
                 <SettingToggle
                     :item="githubItem"
                     :checked="settings.show_github_badge"
@@ -307,7 +311,6 @@ async function selectPreset(color: string) {
 
         <div class="settingBlock">
             <div class="settingTitle">Цветовая тема</div>
-            <div class="settingDesc">Акцентные цвета и фон приложения</div>
             <div class="settingsBlock">
                 <SettingToggle
                     :item="dynamicItem"
@@ -397,13 +400,6 @@ async function selectPreset(color: string) {
     font-size: 18px;
     color: #ffffff;
 }
-.settingDesc {
-    user-select: none;
-    margin-top: 3px;
-    font-weight: 600;
-    font-size: 15px;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
-}
 .settingsBlock {
     margin-top: 16px;
     display: flex;
@@ -414,8 +410,8 @@ async function selectPreset(color: string) {
 }
 
 .extraModePanel {
-    margin: -4px 0 8px 48px;
-    display: inline-flex;
+    margin: -2px 0 8px 50px;
+    display: flex;
     align-items: center;
     gap: 12px;
     width: fit-content;
@@ -435,8 +431,7 @@ async function selectPreset(color: string) {
     gap: 2px;
     padding: 3px;
     border-radius: 16px;
-    background-color: var(--dark-bg);
-    box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.06);
+    background-color: hsla(0, 0%, 100%, 0.05);
 }
 .extraModeBtn {
     user-select: none;
@@ -454,7 +449,7 @@ async function selectPreset(color: string) {
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .extraModeBtn:hover {
     color: hsla(0, 0%, 100%, 0.82);
@@ -465,16 +460,15 @@ async function selectPreset(color: string) {
 }
 .extraModePanel-enter-active,
 .extraModePanel-leave-active {
-    transition: opacity .18s ease, transform .18s ease, max-height .18s ease;
-    max-height: 36px;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), max-height var(--duration-hover) var(--ease-smooth), margin-bottom var(--duration-hover) var(--ease-smooth);
+    max-height: 40px;
 }
 .extraModePanel-enter-from,
 .extraModePanel-leave-to {
     opacity: 0;
     transform: translateY(-4px);
     max-height: 0;
-    margin-top: -10px;
-    margin-bottom: -4px;
+    margin-bottom: 0;
 }
 
 .accentPicker {
@@ -485,7 +479,7 @@ async function selectPreset(color: string) {
     gap: 14px;
     background-color: hsla(var(--accent-h), min(calc(var(--accent-s) * 1.25), 50%), 16%, 1);
     border-radius: 14px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .accentPickerHead {
     display: flex;
@@ -500,7 +494,7 @@ async function selectPreset(color: string) {
     border-radius: 14px;
     cursor: pointer;
     overflow: hidden;
-    transition: transform 0.18s ease, box-shadow 0.24s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
     padding: 0;
     border: 0;
@@ -589,7 +583,7 @@ async function selectPreset(color: string) {
 }
 .colorPickerPop-enter-active,
 .colorPickerPop-leave-active {
-    transition: opacity 0.18s ease, transform 0.18s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     transform-origin: top left;
 }
 .colorPickerPop-enter-from,
@@ -622,7 +616,7 @@ async function selectPreset(color: string) {
     border-radius: 8px;
     width: fit-content;
     box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.04);
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:focus-within {
         box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.18);
@@ -674,7 +668,7 @@ async function selectPreset(color: string) {
     border: 0;
     appearance: none;
     background-color: transparent;
-    transition: transform 0.18s ease, box-shadow 0.24s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         transform: translateY(-1px);

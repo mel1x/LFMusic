@@ -27,12 +27,12 @@ const route = useRoute();
 const router = useRouter();
 const isCollectionsActive = computed(() => route.path.startsWith('/playlist') || route.path.startsWith('/album') || route.path.startsWith('/collections'));
 const isSettingsActive = computed(() => route.path.startsWith('/settings'));
+const pageKey = (path: string) => path.startsWith('/settings') ? '/settings' : path;
 
 const { resolvedPins, unpin, movePinToTop, loadPins } = usePins();
 const { favoritesPlaylist } = usePlaylists();
 const { loadCoversForTracks, getTrackByPath } = usePlayer();
 
-// The favorites pin uses its own accent-tinted cover instead of a track thumbnail.
 function isFavoritesPin(p: ResolvedPin): boolean {
     return p.kind === 'playlist' && favoritesPlaylist.value?.id === Number(p.key);
 }
@@ -40,7 +40,6 @@ const { settings } = useSettings();
 const { getCustomCover } = useCustomCovers();
 const { avatarFor } = useExternalSources();
 
-// Player bar is 84px; when its extra block is off, stretch aside to the window bottom.
 const asideBottom = computed(() => settings.value.show_player_extra_block ? '84px' : '0px');
 
 function pinCover(p: ResolvedPin): string {
@@ -115,12 +114,12 @@ watch(resolvedPins, () => requestPinCovers());
     <div class="asideSpacer"></div>
     <aside class="navAside" :style="{ '--mainblock-aside-bottom': asideBottom }">
       <nav class="navList">
-        <RouterLink to="/downloads" class="navLink downloadsLink" :class="{ downloadsHidden: !settings.show_downloads_page }"><DownloadIcon width="24" height="24" stroke-width="2.25" /><span>Скачивание</span></RouterLink>
-        <RouterLink to="/search" class="navLink"><SearchIcon width="24" height="24" stroke-width="2.25" /><span>Поиск</span></RouterLink>
-        <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2.25" /><span>Рекомендации</span></RouterLink>
-        <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2.25" /><span>Коллекция</span></RouterLink>
-        <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2.25" /><span>Каталог</span></RouterLink>
-        <RouterLink to="/settings" class="navLink" :class="{ 'router-link-active': isSettingsActive }"><SettingsIcon width="24" height="24" stroke-width="2.25" /><span>Настройки</span></RouterLink>
+        <RouterLink to="/downloads" class="navLink downloadsLink" :class="{ downloadsHidden: !settings.show_downloads_page }"><DownloadIcon width="24" height="24" stroke-width="2" /><span>Скачивание</span></RouterLink>
+        <RouterLink to="/search" class="navLink searchLink"><SearchIcon width="24" height="24" stroke-width="2" /><span>Поиск</span></RouterLink>
+        <RouterLink to="/" class="navLink"><HomeIcon width="24" height="24" stroke-width="2" /><span>Рекомендации</span></RouterLink>
+        <RouterLink to="/collections" class="navLink" :class="{ 'router-link-active': isCollectionsActive }"><CollectionIcon width="24" height="24" stroke-width="2" /><span>Коллекция</span></RouterLink>
+        <RouterLink to="/catalog" class="navLink"><CatalogIcon width="24" height="24" stroke-width="2" /><span>Каталог</span></RouterLink>
+        <RouterLink to="/settings" class="navLink" :class="{ 'router-link-active': isSettingsActive }"><SettingsIcon width="24" height="24" stroke-width="2" /><span>Настройки</span></RouterLink>
       </nav>
 
       <div class="pinsBlock" v-if="resolvedPins.length > 0">
@@ -163,7 +162,7 @@ watch(resolvedPins, () => requestPinCovers());
       <ViewFrame>
         <RouterView v-slot="{ Component, route }">
           <Transition name="fade" mode="out-in">
-            <component :is="Component" :key="route.fullPath" />
+            <component :is="Component" :key="pageKey(route.fullPath)" />
           </Transition>
         </RouterView>
       </ViewFrame>
@@ -187,14 +186,16 @@ watch(resolvedPins, () => requestPinCovers());
 </template>
 
 <style scoped>
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.24s ease;
+.fade-enter-active {
+  transition: opacity var(--duration-page) var(--ease-smooth);
 }
 
-.fade-enter-from,
-.fade-leave-to {
+.fade-enter-from {
   opacity: 0;
+}
+
+.fade-leave-active {
+  transition: none !important;
 }
 
 .mainWrapper {
@@ -210,22 +211,22 @@ watch(resolvedPins, () => requestPinCovers());
 }
 .navAside {
   position: fixed;
-  top: 38px;
+  top: var(--hat-height, 52px);
   left: 0;
   bottom: var(--mainblock-aside-bottom, 84px);
   width: 240px;
   display: flex;
   flex-direction: column;
-  padding: 32px 14px 20px;
+  padding: 20px 12px 20px;
   gap: 8px;
   box-sizing: border-box;
   z-index: 5;
-  transition: bottom 0.24s ease;
+  transition: bottom var(--duration-hover) var(--ease-smooth);
 }
 .navList {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
   flex-shrink: 0;
 }
 .navLink {
@@ -234,38 +235,44 @@ watch(resolvedPins, () => requestPinCovers());
   flex-direction: row;
   align-items: center;
   gap: 12px;
-  color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
+  color: hsla(0, 0%, 100%, 0.55);
   width: 100%;
   font-weight: 600;
-  padding: 10px 14px;
+  padding: 9px 12px;
+  border-radius: 12px;
   font-size: 14px;
   box-sizing: border-box;
 
-  transition: .2s ease;
+  transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 
   &:hover {
     color: hsla(0, 0%, 100%, 0.95);
+    background-color: hsla(0, 0%, 100%, 0.04);
   }
 }
 .navLink svg {
-  color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
-  transition: .2s ease;
+  width: 20px;
+  height: 20px;
+  color: hsla(0, 0%, 100%, 0.55);
+  transition: color var(--duration-hover) var(--ease-smooth);
 }
 .navLink:hover svg {
   color: #fff;
 }
 .navLink.router-link-active {
-  color: hsla(0, 0%, 100%, 0.95);
+  color: hsla(0, 0%, 100%, 0.98);
+  background-color: hsla(0, 0%, 100%, 0.075);
 }
 .navLink.router-link-active svg {
-  color: #fff;
+  color: hsl(var(--accent-h), min(var(--accent-s), 80%), 78%);
 }
-/* Hidden via display (not v-if) to keep nth-child mobile ordering stable. */
+/* display, not v-if: keeps the nth-child order stable. */
 .navLink.downloadsHidden {
   display: none;
 }
-
-/* Pinned items */
+.navLink.searchLink {
+  display: none;
+}
 
 .pinsBlock {
   display: flex;
@@ -277,8 +284,8 @@ watch(resolvedPins, () => requestPinCovers());
 }
 .pinsDivider {
   height: 1px;
-  margin: 4px 14px 6px;
-  background-color: hsla(0, 0%, 100%, 0.06);
+  margin: 8px 14px 6px;
+  background-color: transparent;
   flex-shrink: 0;
 }
 .pinsList {
@@ -300,7 +307,7 @@ watch(resolvedPins, () => requestPinCovers());
 .pinsList::-webkit-scrollbar-thumb {
   background-color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 70%, 0.1);
   border-radius: 9999px;
-  transition: background-color 0.2s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .pinsList:hover::-webkit-scrollbar-thumb {
   background-color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 75%, 0.15);
@@ -319,7 +326,7 @@ watch(resolvedPins, () => requestPinCovers());
   cursor: pointer;
   user-select: none;
   background-color: transparent;
-  transition: background-color 0.2s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth);
   min-width: 0;
 }
 .pinItem:hover,
@@ -377,7 +384,7 @@ watch(resolvedPins, () => requestPinCovers());
   background-color: transparent;
   border: none;
   opacity: 0;
-  transition: opacity 0.2s ease, color 0.2s ease, background-color 0.2s ease;
+  transition: opacity var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
   flex-shrink: 0;
 }
 .pinMoreBtn:hover {
@@ -392,12 +399,12 @@ watch(resolvedPins, () => requestPinCovers());
 .frameWrapper {
   border-radius: 16px;
   background-color: var(--light-bg);
-  background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+  background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
   background-repeat: no-repeat;
   background-attachment: local;
   width: calc(100% - 240px - 12px);
   height: 100%;
-  transition: .24s ease;
+  transition: var(--duration-hover) var(--ease-smooth);
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
@@ -447,20 +454,22 @@ watch(resolvedPins, () => requestPinCovers());
     font-size: 10px;
     line-height: 1.1;
     text-align: center;
-    transition: transform 0.14s ease, background-color 0.2s ease, color 0.2s ease;
+    transition: transform 0.14s var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
   }
 
   .navLink span {
     display: none;
   }
 
-  /* Downloads link is desktop-only, hidden on phone (stays 1st child). */
+  .navLink.searchLink {
+    display: flex;
+  }
+
   .downloadsLink {
     display: none;
   }
 
-  /* Mobile order: Home, Collection, Search, Catalog, Settings.
-     nth-child indices are shifted +1 since the hidden 1st child (Downloads) still counts. */
+  /* nth-child indices are +1: the hidden Downloads link still counts. */
   .navLink:nth-child(3) {
     order: 1;
   }
@@ -479,12 +488,17 @@ watch(resolvedPins, () => requestPinCovers());
 
   .navLink:active {
     transform: scale(0.96);
+    transition-duration: 80ms;
+  }
+
+  .navLink:hover {
+    background-color: transparent;
   }
 
   .navLink svg {
     width: 24px;
     height: 24px;
-    transition: color 0.2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
   }
 
   .navLink.router-link-active {

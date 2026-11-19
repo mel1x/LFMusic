@@ -7,8 +7,6 @@ const props = withDefaults(defineProps<{
     message?: string
     confirmText?: string
     cancelText?: string
-    /** Hide the cancel button for single-action notification modals (e.g. an
-     *  error message), where "Cancel" would just duplicate "OK". */
     hideCancel?: boolean
 }>(), {
     confirmText: 'Подтвердить',
@@ -129,7 +127,7 @@ onUnmounted(() => {
     font-weight: 500;
     font-size: 14px;
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .modalBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.08);
@@ -145,16 +143,16 @@ onUnmounted(() => {
 }
 
 .modal-enter-active, .modal-leave-active {
-    transition: opacity .18s ease;
+    transition: opacity var(--duration-modal) var(--ease-smooth);
 }
 .modal-enter-active .modalCard, .modal-leave-active .modalCard {
-    transition: transform .18s ease, opacity .18s ease;
+    transition: transform var(--duration-modal) var(--ease-smooth), opacity var(--duration-modal) var(--ease-smooth);
 }
 .modal-enter-from, .modal-leave-to {
     opacity: 0;
 }
 .modal-enter-from .modalCard, .modal-leave-to .modalCard {
-    transform: scale(0.96) translateY(4px);
+    transform: translateY(8px) scale(.98);
     opacity: 0;
 }
 </style>

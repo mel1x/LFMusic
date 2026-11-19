@@ -4,10 +4,6 @@ import { isPhoneViewport } from './usePlatform'
 /** Drag distance (px) past which releasing the sheet handle closes the modal. */
 const CLOSE_THRESHOLD = 76
 
-/**
- * Shared modal behavior: on desktop a click on the backdrop closes it, on phones
- * the card is a bottom sheet that closes when dragged down by its handle.
- */
 export function useSheetModal(cardEl: Ref<HTMLElement | null>, close: () => void) {
     let dragStartY = 0
     let dragging = false
@@ -48,6 +44,10 @@ export function useSheetModal(cardEl: Ref<HTMLElement | null>, close: () => void
         removeListeners()
         const delta = Math.max(0, e.clientY - dragStartY)
         if (delta > CLOSE_THRESHOLD) {
+            if (cardEl.value) {
+                cardEl.value.style.transition = 'transform .5s var(--ease-sheet)'
+                cardEl.value.style.transform = 'translateY(100%)'
+            }
             close()
             return
         }

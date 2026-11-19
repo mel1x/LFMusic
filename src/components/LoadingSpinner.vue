@@ -9,10 +9,9 @@ defineOptions({ inheritAttrs: false })
 </template>
 
 <style>
-/* Global (unscoped) transition used by cover-gate swaps across views. */
 .gate-fade-enter-active,
 .gate-fade-leave-active {
-    transition: opacity 0.24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .gate-fade-enter-from,
 .gate-fade-leave-to {

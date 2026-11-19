@@ -4,7 +4,6 @@ import { listen } from '@tauri-apps/api/event'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { isAndroidRuntime, isWindowsDesktop } from './usePlatform'
 
-// Updates come from the latest GitHub release (Windows and Android, see src-tauri/src/updater.rs).
 export const RELEASES_URL = 'https://github.com/mel1x/LFMusic/releases/latest'
 
 interface UpdateCheck {
@@ -24,7 +23,6 @@ const status = ref<UpdateStatus>('idle')
 const progress = ref(0)
 
 let progressListening = false
-// Android: APK already downloaded for availableVersion (retry after allowing installs).
 let downloadedApk: string | null = null
 
 async function check() {
@@ -43,10 +41,6 @@ async function check() {
     }
 }
 
-// Windows: installed builds download and run the installer (it closes the app);
-// the portable exe opens the release page instead.
-// Android: the APK is downloaded, then the system installer is opened. If installs
-// from the app aren't allowed yet, Android opens that setting and the user retries.
 async function install(beforeInstall?: () => Promise<void>) {
     if (!availableVersion.value || status.value === 'downloading') return
     if (portable.value) {

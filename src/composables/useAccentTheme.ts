@@ -4,33 +4,11 @@ import { usePlayer } from "./usePlayer";
 import { activeHoliday } from "./useHoliday";
 import { HOLIDAY_ART } from "../utils/holidayArt";
 
-// Dynamic theming: derives --accent-* CSS vars on :root from the current track's
-// accent color (or the static setting, replaced by the holiday color during a
-// holiday event); also sets the Android/mobile system bar color.
-
-/** Accent of a track that is about to become current (mini player swipe): the theme
- *  switches right away instead of waiting for playback to start. */
 export const accentPreview = ref<string | null>(null);
 
-export function hexToHSL(hex: string) {
-    const r = parseInt(hex.slice(1, 3), 16) / 255;
-    const g = parseInt(hex.slice(3, 5), 16) / 255;
-    const b = parseInt(hex.slice(5, 7), 16) / 255;
+import { hexToHSL } from '../utils/color';
+export { hexToHSL };
 
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    const l = (max + min) / 2;
-    let h = 0, s = 0;
-
-    if (max !== min) {
-        const d = max - min;
-        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-        else if (max === g) h = ((b - r) / d + 2) / 6;
-        else h = ((r - g) / d + 4) / 6;
-    }
-
-    return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
-}
 
 function hexToRgb(hex: string) {
     return {
@@ -82,7 +60,6 @@ function hslToHex(h: number, s: number, l: number) {
 type Rgb = { r: number; g: number; b: number };
 
 const ACCENT_TRANSITION_MS = 350;
-// Player bar leads the color change with its own shorter timing.
 const PLAYER_TRANSITION_MS = 150;
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -92,14 +69,9 @@ export function useAccentTheme() {
     const { settings } = useSettings();
     const { currentAccentColor } = usePlayer();
 
-    // Animate in RGB space via requestAnimationFrame rather than lerping HSL directly:
-    // interpolating hue (--accent-h) linearly arcs through the color wheel, so
-    // blue->beige would pass through saturated green/purple. RGB lerp avoids that.
-    // Each frame the intermediate RGB is converted back to HSL for --accent-*.
+    // Lerp in RGB: a linear hue lerp arcs through the color wheel (blue -> beige via green).
     const root = document.documentElement.style;
 
-    // Displayed colors: base (-> --accent-h/s/l), accent (-> --accent-color),
-    // and player (-> --player-accent-h/s/l, same target but faster).
     let curBase: Rgb | null = null;
     let curAccent: Rgb | null = null;
     let curPlayer: Rgb | null = null;
@@ -110,6 +82,7 @@ export function useAccentTheme() {
         root.setProperty("--accent-h", `${h}`);
         root.setProperty("--accent-s", `${s}%`);
         root.setProperty("--accent-l", `${l}%`);
+        root.setProperty("--accent-k", `${Math.min(1, s / 14).toFixed(3)}`);
         const chromeHex = hslToHex(h, Math.min(s, 50), 8);
         root.setProperty("--mobile-chrome-color", chromeHex);
         window.LFMusicAndroid?.updateSystemBars?.(chromeHex);
@@ -130,7 +103,6 @@ export function useAccentTheme() {
     const animateTo = (targetBase: Rgb, targetAccent: Rgb) => {
         if (rafId !== null) cancelAnimationFrame(rafId);
 
-        // First run: apply instantly instead of animating from black.
         if (!curBase || !curAccent || !curPlayer) {
             curBase = targetBase;
             curAccent = targetAccent;
@@ -154,7 +126,6 @@ export function useAccentTheme() {
 
         const step = (now: number) => {
             const elapsed = now - start;
-            // Two timelines sharing a start time; player finishes first (shorter).
             const eBase = easeInOut(Math.min(elapsed / ACCENT_TRANSITION_MS, 1));
             const ePlayer = easeInOut(Math.min(elapsed / PLAYER_TRANSITION_MS, 1));
 
@@ -180,7 +151,6 @@ export function useAccentTheme() {
             ? (accentPreview.value ?? currentAccentColor.value ?? "#1a1a1a")
             : (holiday ? HOLIDAY_ART[holiday].accent : settings.value.static_accent_color);
         const { h, s } = hexToHSL(hex);
-        // Near-black gray fallback: lighten to #353535 so it doesn't match the base color.
         const accentHex = h === 0 && s === 0 ? "#353535" : hex;
         animateTo(hexToRgb(hex), hexToRgb(accentHex));
     });

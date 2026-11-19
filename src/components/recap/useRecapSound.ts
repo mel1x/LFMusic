@@ -1,9 +1,5 @@
 import { ref, watch } from 'vue'
 
-// Looping track fragments behind the recap cards (Web Audio: gapless loop and
-// smooth crossfades between cards). Fragments come from the lfmusic-snippet
-// protocol and are decoded once per recap session.
-
 const DEFAULT_VOLUME = 0.85
 const VOLUME_KEY = 'lfmusic_recap_volume'
 const FADE_IN = 0.9
@@ -62,7 +58,6 @@ export function useRecapSound() {
   function load(url: string): Promise<AudioBuffer | null> {
     let pending = buffers.get(url)
     if (pending) {
-      // Map order is the LRU order: move the hit to the end.
       buffers.delete(url)
       buffers.set(url, pending)
     } else {
@@ -76,7 +71,6 @@ export function useRecapSound() {
         })
         .catch(() => null)
       buffers.set(url, pending)
-      // A playing voice holds its own buffer, so evicting it here is safe.
       for (const key of buffers.keys()) {
         if (buffers.size <= MAX_BUFFERS) break
         if (key !== url && key !== playingUrl.value) buffers.delete(key)
@@ -94,7 +88,7 @@ export function useRecapSound() {
     v.source.stop(now + FADE_OUT + 0.05)
   }
 
-  /** Crossfades to `url` (or to silence with null). Repeated calls for the same url are no-ops. */
+  /** Crossfades to `url` (or to silence with null). */
   async function play(url: string | null) {
     if (!ctx || !master || playingUrl.value === url) return
     playingUrl.value = url
@@ -104,7 +98,6 @@ export function useRecapSound() {
     }
     if (!url) return
     const buffer = await load(url)
-    // Another card may have taken over while the fragment was decoding.
     if (!buffer || !ctx || !master || playingUrl.value !== url) return
 
     const source = ctx.createBufferSource()
@@ -160,7 +153,6 @@ export function useRecapSound() {
     try {
       localStorage.setItem(VOLUME_KEY, String(value))
     } catch {
-      // Not saved; the default comes back next time.
     }
   })
 

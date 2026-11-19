@@ -85,7 +85,6 @@ watch(
   { deep: true },
 );
 
-// Singleton: resolvedPins and closures are created once.
 let pinsInstance: ReturnType<typeof createPins> | null = null;
 
 export function usePins() {

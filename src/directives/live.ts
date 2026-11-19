@@ -1,8 +1,7 @@
 import { watchEffect, type Directive, type WatchStopHandle } from 'vue'
 
-// Per-frame values (playback position) written straight to the DOM. The binding is a
-// getter, so the owning component's render never reads the reactive source and the
-// whole template is not re-rendered on every animation frame.
+// Per-frame values written straight to the DOM: the binding is a getter, so the owner's template
+// never re-renders per frame.
 type Getter = () => number
 
 function liveDirective(apply: (el: HTMLElement, v: number) => void): Directive<HTMLElement, Getter> {
@@ -11,8 +10,7 @@ function liveDirective(apply: (el: HTMLElement, v: number) => void): Directive<H
     return {
         mounted(el, binding) {
             getters.set(el, binding.value)
-            // 'post': runs after the component patch, so e.g. a new `max` on a range
-            // input is already applied before the value is written.
+            // 'post': runs after the patch, so a new `max` is applied before the value.
             stops.set(el, watchEffect(() => {
                 const get = getters.get(el)
                 if (get) apply(el, get())

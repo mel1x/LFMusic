@@ -232,7 +232,7 @@ onUnmounted(() => {
 }
 .ctx-menu.visible {
     opacity: 1;
-    animation: ctx-appear 0.15s ease;
+    animation: ctx-appear 0.15s var(--ease-smooth);
 }
 
 @keyframes ctx-appear {
@@ -255,7 +255,7 @@ onUnmounted(() => {
         background: transparent;
         opacity: 0;
         pointer-events: auto;
-        transition: opacity .18s ease;
+        transition: opacity var(--duration-hover) var(--ease-smooth);
     }
 
     .ctx-mobile-backdrop.visible {
@@ -279,7 +279,7 @@ onUnmounted(() => {
         display: flex;
         flex-direction: column;
         touch-action: pan-y;
-        transition: transform .2s ease;
+        transition: transform var(--duration-hover) var(--ease-smooth);
         will-change: transform;
     }
 
@@ -301,7 +301,7 @@ onUnmounted(() => {
         display: flex;
         flex-direction: column;
         touch-action: pan-y;
-        transition: transform .2s ease;
+        transition: transform var(--duration-hover) var(--ease-smooth);
         will-change: transform;
     }
 
@@ -330,16 +330,14 @@ onUnmounted(() => {
     }
 
     .ctx-menu.visible {
-        animation: ctx-mobile-appear 0.18s ease;
+        animation: ctx-mobile-appear var(--duration-modal) var(--ease-smooth);
     }
 
     @keyframes ctx-mobile-appear {
         from {
-            opacity: 0;
-            transform: translateY(12px);
+            transform: translateY(100%);
         }
         to {
-            opacity: 1;
             transform: translateY(0);
         }
     }

@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
-// https://vitejs.dev/config/
 export default defineConfig(async () => ({
   plugins: [vue()],
 
@@ -20,21 +19,16 @@ export default defineConfig(async () => ({
   },
 
   build: {
-    // WebView2 на Windows / WKWebView на macOS-iOS — современные движки,
-    // транспиляция под старые браузеры не нужна (меньше и быстрее бандл)
+    // WebView2 / WKWebView are modern engines: no legacy transpiling.
     target:
       process.env.TAURI_ENV_PLATFORM === "windows" || process.env.TAURI_ENV_PLATFORM === "android"
         ? "chrome105"
         : "safari13",
-    minify: !process.env.TAURI_ENV_DEBUG ? ("esbuild" as const) : false,
+    minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
 
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
-  //
-  // 1. prevent vite from obscuring rust errors
   clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,
     strictPort: true,
@@ -47,7 +41,6 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
   },

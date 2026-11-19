@@ -59,8 +59,6 @@ function getTooltip(): HTMLElement {
     return tooltipEl
 }
 
-// Text can be clipped by width (single-line ellipsis) or height (-webkit-line-clamp);
-// check both so the directive works for single- and multi-line truncation.
 function isOverflowing(el: HTMLElement): boolean {
     return el.scrollWidth - el.clientWidth > 1 || el.scrollHeight - el.clientHeight > 1
 }
@@ -69,9 +67,7 @@ type Placement = 'auto' | 'top' | 'bottom'
 
 const placementMap = new WeakMap<HTMLElement, Placement>()
 
-// In Chromium (WebView2), body is scaled via `zoom` and getBoundingClientRect returns
-// visual (zoomed) coordinates. The tooltip lives in that zoomed body, so its left/top
-// (CSS px) must be divided by scale or it drifts under zoom (e.g. downward when forced to top).
+// Rects are in zoomed coordinates; divide by scale since the tooltip lives in the zoomed body.
 function position(el: HTMLElement, tt: HTMLElement) {
     const rect = el.getBoundingClientRect()
     const ttRect = tt.getBoundingClientRect()
@@ -82,8 +78,6 @@ function position(el: HTMLElement, tt: HTMLElement) {
     if (left > maxLeft) left = Math.max(margin, maxLeft)
 
     const placement = placementMap.get(el) ?? 'auto'
-    // Forced placement (player bar) keeps the tooltip closer to the element, otherwise
-    // it hangs too high above long titles/artists.
     const gap = placement === 'auto' ? margin : 3
     const above = rect.top - ttRect.height - gap
     const below = rect.bottom + gap
@@ -117,13 +111,32 @@ function show(el: HTMLElement) {
     })
 }
 
+const SHOW_DELAY_MS = 450
+let showTimer: number | null = null
+
+function scheduleShow(el: HTMLElement) {
+    if (showTimer !== null) window.clearTimeout(showTimer)
+    showTimer = window.setTimeout(() => {
+        showTimer = null
+        show(el)
+    }, SHOW_DELAY_MS)
+}
+
 function hide(el: HTMLElement) {
+    if (showTimer !== null) {
+        window.clearTimeout(showTimer)
+        showTimer = null
+    }
     if (activeTarget !== el) return
     activeTarget = null
     if (tooltipEl) tooltipEl.classList.remove('visible')
 }
 
 function hideAny() {
+    if (showTimer !== null) {
+        window.clearTimeout(showTimer)
+        showTimer = null
+    }
     if (activeTarget) hide(activeTarget)
 }
 
@@ -147,7 +160,7 @@ export const vTruncate: Directive<HTMLElement> = {
         installGlobalListeners()
         const arg = binding.arg
         if (arg === 'top' || arg === 'bottom') placementMap.set(el, arg)
-        const enter = () => show(el)
+        const enter = () => scheduleShow(el)
         const leave = () => hide(el)
         el.addEventListener('mouseenter', enter)
         el.addEventListener('mouseleave', leave)

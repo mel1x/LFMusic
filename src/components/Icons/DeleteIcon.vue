@@ -9,7 +9,7 @@
     stroke-width="2"
     stroke-linecap="round"
     stroke-linejoin="round"
-    class="lucide lucide-x-icon lucide-x"
+    class="lfi lfi-delete"
   >
     <path d="M18 6 6 18" />
     <path d="m6 6 12 12" />

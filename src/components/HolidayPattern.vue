@@ -3,10 +3,6 @@ import { computed } from 'vue';
 import { activeHoliday } from '../composables/useHoliday';
 import { TILE_SCALE, TILE_SIZE, holidayTile } from '../utils/holidayArt';
 
-// Holiday background of the app shell: a dense, faint glyph pattern on the dark
-// base. It sits under every surface (#app isolates it), so it only shows on the
-// dark parts: behind the titlebar, sidebar and the gaps around the frame and player.
-
 const style = computed(() => {
   const id = activeHoliday.value;
   if (!id) return null;
@@ -39,9 +35,7 @@ const style = computed(() => {
 .holidayTile {
   position: absolute;
   inset: 0;
-  /* Theme highlight, not the holiday's own hue: the pattern follows the current
-     accent (a static holiday color or the track color). */
-  background: hsl(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%);
+  background: hsl(var(--accent-h), min(calc(var(--accent-s) + 16% * var(--accent-k, 1)), 100%), 68%);
   opacity: 0.075;
   -webkit-mask-image: var(--holiday-tile);
   mask-image: var(--holiday-tile);
@@ -53,7 +47,7 @@ const style = computed(() => {
 
 .holidayFade-enter-active,
 .holidayFade-leave-active {
-  transition: opacity 0.6s ease;
+  transition: opacity 0.6s var(--ease-smooth);
 }
 .holidayFade-enter-from,
 .holidayFade-leave-to {

@@ -1,11 +1,5 @@
-//! WebP thumbnail cache + the custom `lfmusic-cover` URI protocol.
-//!
-//! Instead of shipping full-size covers as base64 data-URLs over IPC, the
-//! frontend gets a short URL `…/lfmusic-cover/<base64url(file_path)>?s=<sig>&size=<n>`
-//! for `<img :src>`. The protocol handler lazily generates the thumbnail
-//! (downscale -> WebP lossless) and caches it to disk; repeat requests are
-//! served instantly from cache. Avoids base64 CPU cost, keeps RAM down, and
-//! avoids re-reading multi-MB source images on every render.
+//! WebP thumbnail cache behind the `lfmusic-cover` protocol: covers reach the webview as URLs, not
+//! base64 over IPC.
 
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -47,8 +41,6 @@ pub fn embedded_sig(file_path: &str) -> String {
     format!("e{}", mtime)
 }
 
-/// Override-cover signature from a content hash; changes on cover change,
-/// invalidating both the webview and on-disk cache.
 pub fn override_sig(cover_data: &str) -> String {
     format!("o{:016x}", hash_str(cover_data))
 }
@@ -64,16 +56,12 @@ fn scheme_origin() -> String {
     }
 }
 
-/// Builds the cover URL for `<img :src>` (no I/O). `file_path` is base64url
-/// encoded to survive Windows path chars (`\`, `:`, spaces).
+/// Builds the cover URL for `<img :src>` (no I/O).
 pub fn cover_protocol_url(file_path: &str, sig: &str) -> String {
     let key = URL_SAFE_NO_PAD.encode(file_path.as_bytes());
     format!("{}/{}?s={}&size={}", scheme_origin(), key, sig, THUMB_SIZE)
 }
 
-/// Cover URL preferring override over embedded, or `None` if there's no cover
-/// at all (frontend falls back to a default). Doesn't decode any image, and
-/// doesn't re-parse tags — presence comes from the cached `tracks.has_cover`.
 pub fn cover_url(lib: &MusicLibrary, file_path: &str) -> Option<String> {
     if let Some(sig) = lib.get_override_cover_sig(file_path) {
         return Some(cover_protocol_url(file_path, &sig));
@@ -120,7 +108,6 @@ fn thumb_cache_file<R: Runtime>(
 }
 
 /// Encodes the thumbnail from its source and stores it at `cache_file`.
-/// Source is the override cover (DB) if present, else the embedded cover.
 fn generate_thumbnail<R: Runtime>(
     app: &AppHandle<R>,
     file_path: &str,
@@ -128,17 +115,9 @@ fn generate_thumbnail<R: Runtime>(
     sig: &str,
     cache_file: &Path,
 ) -> Option<Vec<u8>> {
-    // A smaller size (e.g. the blur background) decodes from the already-cached
-    // full-size WebP instead of re-reading and re-decoding the original embedded
-    // cover a second time — the original can be several MB, the cached WebP a
-    // few KB, and the full-size cache almost always exists already by the time
-    // a blur variant is requested (the UI loads the regular cover first).
     let source = if size != THUMB_SIZE {
         thumbnail_bytes(app, file_path, THUMB_SIZE, sig)?
     } else if sig.starts_with('e') {
-        // Signature prefix picks the source: `e…` forces the embedded tag cover
-        // (used to preview the "original" even with an override set); anything
-        // else prefers the override, falling back to embedded.
         AudioPlayer::extract_cover_bytes(file_path)?
     } else {
         let override_bytes = {
@@ -157,9 +136,7 @@ fn generate_thumbnail<R: Runtime>(
     Some(webp)
 }
 
-/// Atomic write via a unique temp file + rename, so concurrent requests for the
-/// same cover (regular + blur load at once) never read or rename a half-written
-/// file. Failures only cost a regeneration next time.
+/// Atomic write via a unique temp file: concurrent requests never read a half-written file.
 fn write_cache_file(cache_file: &Path, bytes: &[u8]) {
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let Some(dir) = cache_file.parent() else { return };
@@ -190,8 +167,6 @@ pub fn ensure_thumbnail<R: Runtime>(
     Some(cache_file)
 }
 
-/// Thumbnail bytes: a cache hit is a single read (no separate exists check), and a
-/// fresh thumbnail is returned straight from memory instead of being read back.
 pub fn thumbnail_bytes<R: Runtime>(
     app: &AppHandle<R>,
     file_path: &str,
@@ -205,8 +180,6 @@ pub fn thumbnail_bytes<R: Runtime>(
     generate_thumbnail(app, file_path, size, sig, &cache_file)
 }
 
-/// Cached thumbnail path for native integrations (MPRIS); signature computed
-/// internally like `cover_url`.
 pub fn cover_file<R: Runtime>(app: &AppHandle<R>, file_path: &str, size: u32) -> Option<PathBuf> {
     let sig = {
         let lib_state = app.state::<crate::LibraryState>();
@@ -224,7 +197,7 @@ pub fn cover_file<R: Runtime>(app: &AppHandle<R>, file_path: &str, size: u32) ->
     ensure_thumbnail(app, file_path, size, &sig)
 }
 
-/// Cached thumbnail bytes for the taskbar integration. See `cover_file`.
+/// Cached thumbnail bytes for the taskbar integration.
 pub fn cover_bytes<R: Runtime>(app: &AppHandle<R>, file_path: &str, size: u32) -> Option<Vec<u8>> {
     let path = cover_file(app, file_path, size)?;
     fs::read(path).ok()
@@ -239,7 +212,6 @@ fn not_found() -> Response<Vec<u8>> {
 }
 
 fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Response<Vec<u8>> {
-    // Path segment is base64url(file_path).
     let path_seg = uri.path().trim_start_matches('/');
     let Some(file_path) = URL_SAFE_NO_PAD
         .decode(path_seg)
@@ -249,7 +221,6 @@ fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Res
         return not_found();
     };
 
-    // Query params: size (512|blur|<n>), s (signature).
     let mut size = THUMB_SIZE;
     let mut sig = String::new();
     if let Some(query) = uri.query() {
@@ -282,8 +253,7 @@ fn build_response<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Res
 
 type PoolJob = Box<dyn FnOnce() + Send>;
 
-/// Fixed worker pool fed by a channel. Protocol requests used to spawn a fresh OS
-/// thread each, which meant dozens of live threads while scrolling a large catalog.
+/// Fixed worker pool fed by a channel.
 fn worker_pool(name: &'static str, workers: usize) -> mpsc::Sender<PoolJob> {
     let (tx, rx) = mpsc::channel::<PoolJob>();
     let rx = Arc::new(Mutex::new(rx));
@@ -313,8 +283,6 @@ fn thumbnail_pool() -> &'static mpsc::Sender<PoolJob> {
     })
 }
 
-/// Async `lfmusic-cover` protocol handler; generation runs on the shared
-/// thumbnail pool so it doesn't block the webview.
 pub fn protocol_handler<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
@@ -327,8 +295,7 @@ pub fn protocol_handler<R: Runtime>(
     }));
 }
 
-/// Cached-file reads for other image protocols (`lfmusic-external`). A separate
-/// pool so quick reads never queue behind slow thumbnail encodes.
+/// Cached-file reads for other image protocols (`lfmusic-external`).
 pub(crate) fn spawn_file_read(job: impl FnOnce() + Send + 'static) {
     static POOL: OnceLock<mpsc::Sender<PoolJob>> = OnceLock::new();
     let _ = POOL
@@ -367,7 +334,6 @@ mod tests {
         let sig1 = embedded_sig(file.to_str().unwrap());
         assert!(sig1.starts_with('e'));
 
-        // Missing file must not panic, falls back to "e0".
         let missing_sig = embedded_sig(dir.join("missing.flac").to_str().unwrap());
         assert_eq!(missing_sig, "e0");
 
@@ -379,8 +345,6 @@ mod tests {
         let url = cover_protocol_url("C:\\Music\\Artist\\Track.flac", "o1234567890abcdef");
         assert!(url.contains("s=o1234567890abcdef"));
         assert!(url.contains(&format!("size={}", THUMB_SIZE)));
-        // Path segment must be pure base64url — raw Windows path chars would
-        // break webview URL parsing.
         let path_segment = url.rsplit('/').next().unwrap().split('?').next().unwrap();
         assert!(!path_segment.contains('\\'));
         assert!(!path_segment.contains(':'));
@@ -396,7 +360,6 @@ mod tests {
 
     #[test]
     fn decode_data_url_extracts_base64_payload() {
-        // "hello" base64-encoded.
         let data_url = "data:image/jpeg;base64,aGVsbG8=";
         let bytes = decode_data_url(data_url).expect("should decode");
         assert_eq!(bytes, b"hello");

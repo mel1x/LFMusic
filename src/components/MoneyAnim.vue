@@ -25,7 +25,7 @@
     inset: -6px;
     border: 1.5px solid hsla(var(--accent-h), var(--accent-s), 72%, 0.3);
     border-radius: 50%;
-    animation: ringPulse 2.5s infinite ease-out;
+    animation: ringPulse 2.5s infinite var(--ease-smooth-in-out);
 }
 @keyframes ringPulse {
     0% { transform: scale(0.9); opacity: 0.9; }

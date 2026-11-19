@@ -1,5 +1,4 @@
-// Search utilities: exact match, fuzzy match (>=80%), RU/EN keyboard-layout
-// translation, audio-format filter.
+// Ranking is mirrored in Rust (catalog_search.rs): keep both in sync.
 
 const EN_TO_RU: Record<string, string> = {
     'q': 'й', 'w': 'ц', 'e': 'у', 'r': 'к', 't': 'е', 'y': 'н', 'u': 'г',
@@ -26,7 +25,6 @@ export function switchLayout(input: string): string {
     return out;
 }
 
-// Audio formats for the extension-based filter
 export const LOSSLESS_FORMATS = ['flac', 'wav', 'alac', 'ape', 'dsd', 'dsf', 'aiff', 'aif', 'wv', 'tak'];
 export const LOSSY_FORMATS = ['mp3', 'aac', 'ogg', 'm4a', 'wma', 'opus'];
 export const ALL_FORMATS = [...LOSSLESS_FORMATS, ...LOSSY_FORMATS];
@@ -47,12 +45,10 @@ export function matchesFormat(filePath: string, query: string): boolean {
     const ext = getExtension(filePath);
     if (q === 'lossless') return LOSSLESS_FORMATS.includes(ext);
     if (q === 'lossy') return LOSSY_FORMATS.includes(ext);
-    // ALAC is often stored as .m4a, but most .m4a is AAC, so we treat it as lossy.
     if (ALL_FORMATS.includes(q)) return ext === q;
     return false;
 }
 
-// Levenshtein distance
 function levenshtein(a: string, b: string): number {
     if (a === b) return 0;
     if (!a.length) return b.length;
@@ -77,15 +73,11 @@ function levenshtein(a: string, b: string): number {
     return prev[n];
 }
 
-// Minimum distance from query to any substring of target with length ~= |query|.
-// DP allows free start/end offsets in target (substring matching).
 function approxSubstringDistance(query: string, target: string): number {
     const m = query.length;
     const n = target.length;
     if (m === 0) return 0;
     if (n === 0) return m;
-    // dp[j] = min distance matching query against a substring of target ending at j
-    // (classic approximate string matching algorithm).
     let prev = new Array(n + 1).fill(0);
     const curr = new Array(n + 1).fill(0);
     for (let i = 1; i <= m; i++) {
@@ -108,11 +100,9 @@ function approxSubstringDistance(query: string, target: string): number {
 
 export interface FuzzyOptions {
     minQueryLen?: number;
-    threshold?: number; // allowed error ratio (default 0.2 = 80% match)
+    threshold?: number;
 }
 
-// Fuzzy-matches query inside target: true if some substring of target
-// differs from query by no more than threshold * len(query) chars.
 export function fuzzyMatch(target: string, query: string, opts: FuzzyOptions = {}): boolean {
     const minLen = opts.minQueryLen ?? 4;
     const threshold = opts.threshold ?? 0.2;
@@ -120,14 +110,12 @@ export function fuzzyMatch(target: string, query: string, opts: FuzzyOptions = {
     if (!target) return false;
     const maxEdits = Math.floor(query.length * threshold);
     if (maxEdits <= 0) return false;
-    // Fast path: check per word first, more precise and predictable.
     const words = target.split(/\s+/);
     for (const w of words) {
         if (!w) continue;
         if (Math.abs(w.length - query.length) > maxEdits) continue;
         if (levenshtein(w, query) <= maxEdits) return true;
     }
-    // General substring search, for queries spanning multiple words.
     return approxSubstringDistance(query, target) <= maxEdits;
 }
 
@@ -136,12 +124,9 @@ export type FieldGetter<T> = (item: T) => string[];
 export interface SearchOptions<T> {
     fuzzyMinLen?: number;
     fuzzyThreshold?: number;
-    formatPath?: (item: T) => string | null; // file path, enables the format filter
+    formatPath?: (item: T) => string | null;
 }
 
-// Ranks results in tiers:
-// 1) exact match, 2) fuzzy >=80%, 3) exact match with layout swapped,
-// 4) fuzzy with layout swapped, 5) (optional) audio-format match.
 export function searchRanked<T>(
     items: T[],
     query: string,
@@ -157,16 +142,14 @@ export function searchRanked<T>(
     const switched = switchLayout(q);
     const useSwitched = switched !== q;
     const isFormat = !!formatPath && isFormatQuery(q);
-    // Fuzzy match on format keywords (lossy/lossless/flac/mp3/...) causes false
-    // positives (e.g. "lossy" -> "glossy"), so we only allow exact match plus
-    // the extension filter for those.
+    // No fuzzy match on format keywords: "lossy" would match "glossy".
     const allowFuzzy = !isFormat;
 
-    const tier1: T[] = []; // exact match on query
-    const tier2: T[] = []; // fuzzy on query
-    const tier3: T[] = []; // exact match with layout swapped
-    const tier4: T[] = []; // fuzzy with layout swapped
-    const tier5: T[] = []; // format match
+    const tier1: T[] = [];
+    const tier2: T[] = [];
+    const tier3: T[] = [];
+    const tier4: T[] = [];
+    const tier5: T[] = [];
 
     for (const item of items) {
         const fields = getFields(item).map(s => (s || '').toLowerCase());

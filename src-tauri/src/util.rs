@@ -1,5 +1,17 @@
 //! Small helpers shared across modules.
 
+/// TLS for every reqwest client: ring + bundled Mozilla roots, no platform verifier (it needs JNI
+/// on Android).
+pub fn http_tls() -> rustls::ClientConfig {
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
 /// Current Unix time in seconds (0 if the clock is before the epoch).
 pub fn unix_secs() -> u64 {
     std::time::SystemTime::now()

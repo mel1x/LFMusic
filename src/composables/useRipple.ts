@@ -1,9 +1,6 @@
 import { isPhoneViewport } from './usePlatform'
 
-/**
- * Создаёт ripple-эффект на элементе по координатам клика.
- * Требует CSS-класс `.ripple` с анимацией `ripple-expand`.
- */
+/** Ripple at the click point; needs the `.ripple` class with the `ripple-expand` animation. */
 export function createRipple(e: MouseEvent) {
     if (isPhoneViewport()) return
     const el = e.currentTarget as HTMLElement

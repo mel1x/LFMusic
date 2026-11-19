@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 
-// Cover for recap cards; a missing or deleted file falls back to a tinted note.
-
 const props = defineProps<{ url: string | null | undefined; round?: boolean }>()
 
 const failed = ref(false)

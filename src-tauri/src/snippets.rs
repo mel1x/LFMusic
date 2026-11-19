@@ -1,19 +1,12 @@
-//! `lfmusic-snippet` URI protocol: a short looping fragment of a track for the
-//! year recap cards. The fragment is decoded on request into an in-memory WAV,
-//! nothing is cached on disk. Only tracks of the library are served.
+//! `lfmusic-snippet` protocol: a short track fragment for recap cards, decoded into an in-memory
+//! WAV.
 
-use std::fs::File;
-use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use symphonia::core::audio::Signal;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::formats::SeekMode;
+
+use crate::audio_player::OpenedAudio;
 use tauri::http::{header, Response, StatusCode};
 use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
@@ -43,43 +36,19 @@ fn snippet_start(duration_secs: Option<f64>) -> f64 {
     }
 }
 
-/// Decodes the fragment to interleaved stereo i16 and returns (samples, rate).
-/// `known_duration` (from the library) is used when the container doesn't state
-/// its length (e.g. MP3 without a Xing header), so the fragment isn't the intro.
+/// Decodes the fragment to stereo i16. `known_duration` covers containers without a length (MP3
+/// without Xing).
 fn decode_snippet(file_path: &str, known_duration: Option<f64>) -> Result<(Vec<i16>, u32), String> {
-    let file = File::open(file_path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = Path::new(file_path).extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-        .map_err(|e| e.to_string())?;
-    let mut reader = probed.format;
-    let track = reader
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or("no audio track")?;
-    let track_id = track.id;
-    let rate = track.codec_params.sample_rate.unwrap_or(44_100).max(1);
-    let duration = track
-        .codec_params
-        .n_frames
+    let mut audio = OpenedAudio::open(file_path)?;
+    let rate = audio.sample_rate;
+    let duration = audio
+        .num_frames
         .map(|n| n as f64 / rate as f64)
         .or(known_duration.filter(|d| *d > 0.0));
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| e.to_string())?;
 
     let start = snippet_start(duration);
     if start > 0.0 {
-        let _ = reader.seek(
-            SeekMode::Coarse,
-            SeekTo::Time { time: Time::from(start), track_id: Some(track_id) },
-        );
-        decoder.reset();
+        let _ = audio.seek(start, SeekMode::Coarse);
     }
 
     let stride = rate.div_ceil(MAX_SAMPLE_RATE).max(1) as usize;
@@ -88,32 +57,19 @@ fn decode_snippet(file_path: &str, known_duration: Option<f64>) -> Result<(Vec<i
     let mut out: Vec<i16> = Vec::with_capacity(max_frames * 2);
     let mut pos = 0usize;
 
-    while out.len() < max_frames * 2 {
-        let Ok(packet) = reader.next_packet() else { break };
-        if packet.track_id() != track_id {
-            continue;
+    let channels = audio.channels as usize;
+    let mut packet_samples = Vec::new();
+
+    while out.len() < max_frames * 2 && audio.decode_next(&mut packet_samples) {
+        for frame in packet_samples.chunks_exact(channels) {
+            if pos.is_multiple_of(stride) && out.len() < max_frames * 2 {
+                let left = frame[0];
+                let right = if channels > 1 { frame[1] } else { left };
+                out.push((left.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                out.push((right.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+            }
+            pos += 1;
         }
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(_) => break,
-        };
-        macro_rules! push {
-            ($b:expr, $conv:expr) => {{
-                let b = $b;
-                let channels = b.spec().channels.count().max(1);
-                for frame in 0..b.frames() {
-                    if pos % stride == 0 && out.len() < max_frames * 2 {
-                        let left: f32 = $conv(b.chan(0)[frame]);
-                        let right: f32 = if channels > 1 { $conv(b.chan(1)[frame]) } else { left };
-                        out.push((left.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
-                        out.push((right.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
-                    }
-                    pos += 1;
-                }
-            }};
-        }
-        crate::audio_player::dispatch_f32!(decoded, push);
     }
 
     if out.is_empty() {
@@ -129,12 +85,12 @@ fn wav_bytes(samples: &[i16], rate: u32) -> Vec<u8> {
     wav.extend_from_slice(&(36 + data_len).to_le_bytes());
     wav.extend_from_slice(b"WAVEfmt ");
     wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    wav.extend_from_slice(&2u16.to_le_bytes()); // channels
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
     wav.extend_from_slice(&rate.to_le_bytes());
-    wav.extend_from_slice(&(rate * 4).to_le_bytes()); // byte rate
-    wav.extend_from_slice(&4u16.to_le_bytes()); // block align
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(&(rate * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
     for s in samples {
@@ -200,7 +156,6 @@ mod tests {
         assert_eq!(snippet_start(None), 0.0);
         assert_eq!(snippet_start(Some(20.0)), 0.0);
         assert_eq!(snippet_start(Some(300.0)), 99.0);
-        // 40s: a third in would be 13.2, but the fragment must end before the track does.
         assert!(snippet_start(Some(40.0)) + SNIPPET_SECS <= 40.0);
     }
 

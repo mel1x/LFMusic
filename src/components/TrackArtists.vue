@@ -91,8 +91,7 @@ async function tryShowTooltip() {
     await nextTick()
     const tt = tooltipEl.value
     if (!tt) return
-    // getBoundingClientRect returns visual (zoomed) coordinates, same as `rect` above;
-    // compute in that space, then divide by scale since the tooltip lives in the zoomed body.
+    // Rects are in zoomed coordinates; divide by scale since the tooltip lives in the zoomed body.
     const ttRect = tt.getBoundingClientRect()
     const ttW = ttRect.width
     const ttH = ttRect.height
@@ -102,8 +101,6 @@ async function tryShowTooltip() {
     const maxLeft = window.innerWidth - ttW - margin
     if (left > maxLeft) left = Math.max(margin, maxLeft)
 
-    // Forced placement (player bar) keeps the tooltip closer, otherwise it hangs too
-    // high above long artist names.
     const gap = props.tooltipPlacement === 'auto' ? margin : 3
     const above = rect.top - ttH - gap
     const below = rect.bottom + gap
@@ -191,7 +188,7 @@ onUnmounted(() => {
 .ta-link {
     cursor: pointer;
     color: inherit;
-    transition: color .2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .ta-link:hover {
     color: hsla(0, 0%, 100%, 1);
@@ -224,7 +221,7 @@ onUnmounted(() => {
 .ta-tt-link {
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.85);
-    transition: color .18s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .ta-tt-link:hover {
     color: #fff;
@@ -236,7 +233,7 @@ onUnmounted(() => {
 
 .ta-tt-enter-active,
 .ta-tt-leave-active {
-    transition: opacity .18s ease, transform .18s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .ta-tt-enter-from,
 .ta-tt-leave-to {

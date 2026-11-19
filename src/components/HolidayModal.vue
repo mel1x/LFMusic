@@ -6,9 +6,6 @@ import { useI18n } from '../composables/useI18n';
 import { HOLIDAY_ART, TILE_SIZE, holidayBadgeSvg, holidayTile } from '../utils/holidayArt';
 import CloseIcon from './Icons/CloseIcon.vue';
 
-// Holiday postcard opened from the titlebar badge: a hero in the holiday's own
-// color with its pattern and a centered solid icon, then dates, name and two sentences.
-
 const { t, language } = useI18n();
 
 const holiday = computed(() => activeHoliday.value);
@@ -29,7 +26,6 @@ const dates = computed(() => {
   const def = HOLIDAYS.find(h => h.id === holiday.value);
   if (!def) return '';
   const fmt = new Intl.DateTimeFormat(language.value === 'en' ? 'en-US' : 'ru-RU', { day: 'numeric', month: 'long' });
-  // Any leap year works: only day and month are shown.
   const day = ([m, d]: [number, number]) => fmt.format(new Date(2028, m - 1, d));
   return `${day(def.from)} - ${day(def.to)}`;
 });
@@ -49,7 +45,6 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
-// The holiday can end (or the setting be turned off) while the card is open.
 watch(holiday, id => {
   if (!id) close();
 });
@@ -118,7 +113,6 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
   );
 }
 
-/* The holiday's own pattern, fading out towards the icon. */
 .holidayHeroPattern {
   position: absolute;
   inset: 0;
@@ -147,7 +141,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
   color: hsla(0, 0%, 100%, 0.8);
   background: hsla(0, 0%, 0%, 0.22);
   cursor: pointer;
-  transition: background-color .2s ease, color .2s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .holidayClose:hover {
   background: hsla(0, 0%, 0%, 0.38);
@@ -212,7 +206,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
   font-size: 14px;
   font-weight: 700;
   cursor: pointer;
-  transition: background-color .2s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .holidayButton:hover {
   background: hsl(var(--hc-h), var(--hc-s), 50%);
@@ -220,16 +214,14 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
 
 .holidayModal-enter-active,
 .holidayModal-leave-active {
-  transition: opacity .22s ease;
+  transition: opacity var(--duration-modal) var(--ease-smooth);
 }
-.holidayModal-enter-active .holidayCard {
-  transition: transform .32s cubic-bezier(.2, .9, .3, 1.15), opacity .22s ease;
-}
+.holidayModal-enter-active .holidayCard,
 .holidayModal-leave-active .holidayCard {
-  transition: transform .18s ease, opacity .18s ease;
+  transition: transform var(--duration-modal) var(--ease-smooth), opacity var(--duration-modal) var(--ease-smooth);
 }
 .holidayModal-enter-active .holidayHeroIcon {
-  transition: transform .38s cubic-bezier(.2, .9, .3, 1.3) .06s;
+  transition: transform .38s var(--icon-ease) .06s;
 }
 .holidayModal-enter-from,
 .holidayModal-leave-to {
@@ -237,7 +229,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
 }
 .holidayModal-enter-from .holidayCard,
 .holidayModal-leave-to .holidayCard {
-  transform: scale(0.94) translateY(8px);
+  transform: translateY(8px) scale(.98);
   opacity: 0;
 }
 .holidayModal-enter-from .holidayHeroIcon {

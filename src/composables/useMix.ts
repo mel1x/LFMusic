@@ -1,10 +1,5 @@
 import { ref, watch } from "vue";
 
-// "My Mix" settings and queue: module-level singleton persisted to localStorage
-// so it survives page navigation and restart. The mix queue only exists on the
-// frontend, so it's persisted here too (as file_path list) and restored by
-// usePlayer.restoreState().
-
 export interface Mood {
   id: string;
   label: string;
@@ -67,8 +62,6 @@ watch([selectedMood, familiarity, losslessOnly], () => {
 export function useMixSettings() {
   return { selectedMood, familiarity, losslessOnly };
 }
-
-// Mix queue
 
 export function saveMixQueuePaths(paths: string[]) {
   try {

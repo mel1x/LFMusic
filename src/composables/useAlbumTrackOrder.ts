@@ -2,9 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { ref } from "vue";
 import type { TrackMetadata } from "./usePlayer";
 
-// Persisted in SQLite (album_track_order), cached in memory per session.
-// Missing key = not loaded yet; null value = loaded, no custom order (falls
-// back to file_path sort).
 const orderCache = ref<Record<string, string[] | null>>({});
 
 function byFilePath(a: TrackMetadata, b: TrackMetadata): number {
@@ -29,10 +26,6 @@ export function useAlbumTrackOrder() {
     }
   }
 
-  /**
-   * Applies the saved order: known tracks first (in saved order), new tracks
-   * not yet reordered appended after, sorted by file_path.
-   */
   function applyOrder(albumName: string, tracks: TrackMetadata[]): TrackMetadata[] {
     const order = orderCache.value[albumName];
     if (!order || order.length === 0) {

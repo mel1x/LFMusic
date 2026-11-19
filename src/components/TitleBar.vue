@@ -8,7 +8,10 @@ import MaximizeIcon from './Icons/MaximizeIcon.vue';
 import MinimizeIcon from './Icons/MinimizeIcon.vue';
 import CloseIcon from './Icons/CloseIcon.vue';
 import GithubIcon from './Icons/GithubIcon.vue';
+import HeartIcon from './Icons/HeartIcon.vue';
+import DonateModal from './DonateModal.vue';
 import DownloadQueueIndicator from './DownloadQueueIndicator.vue';
+import TitleSearch from './TitleSearch.vue';
 
 import { useSettings } from '../composables/useSettings';
 import { usePlayer } from '../composables/usePlayer';
@@ -19,13 +22,13 @@ import { useUpdater } from '../composables/useUpdater';
 import { holidayBadgeSvg } from '../utils/holidayArt';
 import { splitArtistsList } from '../utils/format';
 import { vLiveWidth } from '../directives/live';
+import { frameLoop } from '../utils/frameLoop';
 
 interface AudioFeatureProgressPayload {
     current: number;
     total: number;
     percent: number;
     active: boolean;
-    // Active phase, in order: recommendation analysis, external fetch, download.
     phase?: 'analysis' | 'external' | 'download' | 'done';
 }
 
@@ -34,20 +37,18 @@ const { settings } = useSettings();
 const { t } = useI18n();
 const { currentTrack, saveState } = usePlayer();
 const updater = useUpdater();
+const donateOpen = ref(false);
 
-// The installer closes the app, so the player position is saved first.
 function installUpdate() {
     updater.install(saveState);
 }
 
-// Joint artists ("A; B") read like everywhere else: split by the user's separators, joined with commas.
 const headerArtist = computed(() => {
     const artist = currentTrack.value?.artist;
     if (!artist) return 'Неизвестный исполнитель';
     return splitArtistsList(artist, settings.value.artist_separators).join(', ') || artist;
 });
 
-// Background audio-feature worker progress
 const featureProgressVisible = ref(false);
 const featureProgress = ref<AudioFeatureProgressPayload>({
     current: 0,
@@ -108,41 +109,27 @@ const featureProgressAriaLabel = computed(() => {
     return `${featureProgressTooltipHeading.value}. ${featureProgressTooltipText.value}`;
 });
 
-// Smooth progress bar. Real percent arrives in discrete jumps (yt-dlp reports
-// no progress while extracting the format, then the file downloads in bursts),
-// so we smooth client-side: exponential approach to the target, plus a slow
-// "trickle" during download phase capped at the current track's slot end
-// ((current+1)/total) so it never overtakes reality.
 const displayPercent = ref(0);
-// Bar width is written per frame via v-live-width; the label only re-renders on whole percents.
 const liveDisplayPercent = () => displayPercent.value;
 const displayPercentRounded = computed(() => Math.round(displayPercent.value));
-let progressRaf: number | null = null;
-let lastFrameTs = 0;
 let trickle = 0;
 let lastTarget = 0;
 let stalledMs = 0;
 
-function progressFrame(ts: number) {
-    progressRaf = requestAnimationFrame(progressFrame);
-    const dt = lastFrameTs ? Math.min(120, ts - lastFrameTs) : 16;
-    lastFrameTs = ts;
+const progressLoop = frameLoop((_ts, frameDt) => {
+    const dt = frameDt ? Math.min(120, frameDt) : 16;
 
     const p = featureProgress.value;
     const target = featureProgressPercent.value;
 
-    // New run: real target dropped sharply (backend reset counters) — restart
-    // smoothing from the bottom. Compare against lastTarget (the previous real
-    // target), not displayPercent, or the trickle overshoot would falsely
-    // trigger this reset and cycle the bar back to zero.
+    // Compare against lastTarget, not displayPercent: the trickle overshoot would falsely reset
+    // the bar.
     if (p.active && target < lastTarget - 25) {
         displayPercent.value = target;
         trickle = target;
         stalledMs = 0;
     }
 
-    // Track stalls in the real percent; if it stops updating (yt-dlp extracting
-    // format), the trickle keeps the bar from looking frozen.
     if (Math.abs(target - lastTarget) > 0.1) {
         stalledMs = 0;
     } else {
@@ -155,7 +142,6 @@ function progressFrame(ts: number) {
     if (!p.active) {
         goal = 100;
     } else if (featureProgressIsDownload.value) {
-        // Trickle only once stalled >350ms, capped at the current slot end.
         if (stalledMs > 350) {
             const slotEnd = p.total > 0
                 ? ((Math.min(p.current, p.total) + 1) / p.total) * 100
@@ -170,29 +156,21 @@ function progressFrame(ts: number) {
         goal = target;
     }
 
-    // Exponential approach, time constant ~0.25s.
     const k = 1 - Math.pow(0.018, dt / 1000);
     displayPercent.value += (goal - displayPercent.value) * k;
     if (Math.abs(goal - displayPercent.value) < 0.05) displayPercent.value = goal;
-}
+}, 33);
 
 function startProgressAnim(initial: number) {
     displayPercent.value = initial;
     trickle = initial;
     lastTarget = initial;
     stalledMs = 0;
-    if (progressRaf === null) {
-        lastFrameTs = 0;
-        progressRaf = requestAnimationFrame(progressFrame);
-    }
+    progressLoop.start();
 }
 
 function stopProgressAnim() {
-    if (progressRaf !== null) {
-        cancelAnimationFrame(progressRaf);
-        progressRaf = null;
-    }
-    lastFrameTs = 0;
+    progressLoop.stop();
 }
 
 watch(featureProgressVisible, (vis) => {
@@ -241,13 +219,9 @@ onMounted(() => {
         unlistenAudioFeatureProgress = unlisten;
         return invoke<number>('library_resume_audio_features');
     }).then(() => {
-        // Fetches enabled external sources in the background; its steps report
-        // to the same progress bar as the feature analysis. External sources
-        // are a desktop-only feature, unreachable from Android's settings.
         if (isAndroidRuntime()) return;
         return invoke('external_prepare');
     }).catch(() => {
-        // Background prep failing shouldn't block UI startup.
     });
 });
 
@@ -264,10 +238,7 @@ onUnmounted(() => {
 });
 
 const minimizeWindow = () => win.minimize();
-// Backend handles this: if in fullscreen (F11), click exits fullscreen and
-// maximizes; otherwise it's a normal maximize toggle.
 const maximizeWindow = () => invoke('toggle_window_maximize');
-// State is saved by the close-requested handler in usePlayer (any close path).
 const closeWindow = () => win.close();
 </script>
 
@@ -277,6 +248,7 @@ const closeWindow = () => win.close();
             <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
             <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? headerArtist : 'by mel1x' }}</div>
         </div>
+        <TitleSearch />
         <div class="winControls">
             <DownloadQueueIndicator />
             <div
@@ -326,20 +298,20 @@ const closeWindow = () => win.close();
             <button
                 v-if="activeHoliday"
                 type="button"
-                class="holidayBadge"
+                class="hatBadge"
                 @click="holidayModalOpen = true"
             >
-                <span class="holidayBadgeIcon" v-html="holidayBadgeSvg(activeHoliday)"></span>
+                <span class="hatBadgeIcon" v-html="holidayBadgeSvg(activeHoliday)"></span>
                 <span>{{ t(`holiday.${activeHoliday}`) }}</span>
             </button>
             <button
                 v-if="updater.supported.value && updater.availableVersion.value"
                 type="button"
-                class="holidayBadge updateBadge"
+                class="hatBadge updateBadge"
                 :disabled="updater.status.value === 'downloading'"
                 @click="installUpdate"
             >
-                <span class="holidayBadgeIcon">
+                <span class="hatBadgeIcon">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M12 4v11" />
                         <path d="m7 10 5 5 5-5" />
@@ -349,35 +321,47 @@ const closeWindow = () => win.close();
                 <span v-if="updater.status.value === 'downloading'" class="updateBadgeProgress">{{ updater.progress.value }}%</span>
                 <span v-else>{{ t('updater.badge', { version: updater.availableVersion.value }) }}</span>
             </button>
-            <a v-if="settings.show_github_badge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer"><GithubIcon/>Github</a>
+            <button v-if="settings.show_donate_badge" type="button" class="hatBadge" @click="donateOpen = true">
+                <span class="hatBadgeIcon"><HeartIcon width="16" height="16" /></span>
+                <span>{{ t('donate.badge') }}</span>
+            </button>
+            <a v-if="settings.show_github_badge" class="hatBadge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer">
+                <span class="hatBadgeIcon"><GithubIcon /></span>
+                <span>Github</span>
+            </a>
             <button class="controlsButton" @click="minimizeWindow"><MinimizeIcon /></button>
             <button class="controlsButton" @click="maximizeWindow"><MaximizeIcon /></button>
             <button class="controlsButton close" @click="closeWindow"><CloseIcon /></button>
         </div>
+        <DonateModal :open="donateOpen" @close="donateOpen = false" />
     </div>
 </template>
 
 <!-- Not scoped: class names are unique, and App.vue's global mobile overrides
      (.hat { display:none }) need to match these elements at the same specificity. -->
 <style>
+:root {
+    --hat-height: 52px;
+}
 .hat {
+    position: relative;
     display: flex;
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
     width: 100%;
-    height: 38px;
-    /* Transparent over the same --dark-bg body so the holiday pattern shows through. */
+    height: var(--hat-height);
     background: transparent;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
 }
 .winTitle {
-    margin-top: 8px;
     padding: 0px 20px;
     display: flex;
     flex-direction: column;
     gap: 3px;
+    min-width: 0;
+    max-width: calc(50% - min(170px, 17vw) - 12px);
 }
 .mainTitle {
     user-select: none;
@@ -396,7 +380,7 @@ const closeWindow = () => win.close();
     font-weight: 600;
     text-transform: uppercase;
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.55);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .winControls {
     height: 100%;
@@ -408,17 +392,17 @@ const closeWindow = () => win.close();
 .featureWorkerProgress {
     position: relative;
     width: 176px;
-    height: 25px;
-    margin-right: 10px;
-    padding: 0 8px;
+    height: 34px;
+    margin-right: 8px;
+    padding: 0 12px;
     border-radius: 999px;
     display: flex;
     align-items: center;
     gap: 8px;
-    background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 25%, 1), hsla(var(--accent-h), var(--accent-s), 15%, 1));
+    background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.84);
     cursor: help;
-    transition: background-color .24s ease, border-color .24s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), border-color var(--duration-hover) var(--ease-smooth);
 }
 .featureWorkerProgress:hover {
     border-color: hsla(0, 0%, 100%, 0.14);
@@ -435,10 +419,9 @@ const closeWindow = () => win.close();
     height: 100%;
     min-width: 4px;
     border-radius: inherit;
-    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16%), 100%), 68%, 0.95);
-    /* Width is driven frame-by-frame by the rAF smoothing in script; a CSS
-       transition on width would double up the smoothing. */
-    transition: background .24s ease;
+    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16% * var(--accent-k, 1)), 100%), 68%, 0.95);
+    /* Width is driven by script; a CSS width transition would double the smoothing. */
+    transition: background var(--duration-hover) var(--ease-smooth);
 }
 .featureWorkerPercent {
     min-width: 30px;
@@ -463,7 +446,7 @@ const closeWindow = () => win.close();
     opacity: 0;
     pointer-events: none;
     transform: translateY(-3px);
-    transition: opacity .16s ease, transform .16s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     z-index: 20;
 }
 .featureWorkerProgress:hover .featureWorkerTooltip {
@@ -494,50 +477,34 @@ const closeWindow = () => win.close();
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.82);
 }
-.winControls a {
+.hatBadge {
+    height: 34px;
+    margin-right: 8px;
+    padding: 0 14px 0 10px;
     display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 3px;
-    justify-content: center;
-    color: #ffffffd5;
-    font-size: 12px;
-    font-weight: 600;
-    margin-right: 20px;
-    padding: 2px 10px 3px 5px;
-    border-radius: 16px;
-    background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 25%, 1), hsla(var(--accent-h), var(--accent-s), 15%, 1));
-    transition: .24s ease;
-}
-/* Same hover as .holidayBadge. */
-.winControls a:hover {
-    color: #fff;
-    filter: brightness(1.15);
-}
-.holidayBadge {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 3px;
-    margin-right: 20px;
-    padding: 2px 10px 3px 5px;
-    border-radius: 16px;
-    color: #ffffffd5;
-    font-size: 12px;
+    gap: 7px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.75);
+    font-family: inherit;
+    font-size: 13px;
     font-weight: 600;
     white-space: nowrap;
     user-select: none;
     cursor: pointer;
-    background: linear-gradient(172deg, hsla(var(--accent-h), var(--accent-s), 25%, 1), hsla(var(--accent-h), var(--accent-s), 15%, 1));
-    transition: .24s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
-.holidayBadge:hover {
+.hatBadge:hover {
+    background-color: hsla(0, 0%, 100%, 0.1);
     color: #fff;
-    filter: brightness(1.15);
 }
-.holidayBadge:has(+ a),
-.holidayBadge:has(+ .updateBadge) {
-    margin-right: 8px;
+.hatBadge + .controlsButton {
+    margin-left: 4px;
+}
+.updateBadge {
+    color: hsl(var(--accent-h), min(var(--accent-s), 80%), 80%);
 }
 .updateBadge:disabled {
     cursor: default;
@@ -547,12 +514,20 @@ const closeWindow = () => win.close();
     text-align: right;
     font-variant-numeric: tabular-nums;
 }
-.holidayBadgeIcon {
-    width: 20px;
-    height: 20px;
+.hatBadgeIcon {
+    width: 18px;
+    height: 18px;
     display: flex;
     align-items: center;
     justify-content: center;
+}
+.hatBadgeIcon svg {
+    width: 16px;
+    height: 16px;
+}
+.hatBadgeIcon svg.lfi-github {
+    width: 19px;
+    height: 19px;
 }
 .controlsButton {
     cursor: pointer;
@@ -563,14 +538,14 @@ const closeWindow = () => win.close();
     justify-content: center;
     color: #fff;
     background-color: transparent;
-    transition: background-color 0.14s ease-in-out;
+    transition: background-color 0.14s var(--ease-smooth-in-out);
 
     &:hover {
         background-color: #ffffff0d;
     }
 }
 .controlsButton.close {
-    transition: background-color 0.19s ease-in-out;
+    transition: background-color var(--duration-hover) var(--ease-smooth-in-out);
 
     &:hover {
         background-color: #f23f42;

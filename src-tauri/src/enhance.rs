@@ -1,12 +1,5 @@
-//! Auto sound enhancement: a device-aware stage that runs after the user EQ.
-//!
-//! - Detects what the default output device is (headphones, laptop speakers,
-//!   external speakers, TV/HDMI) from its name and applies a gentle corrective
-//!   tone curve for it (rumble filter, bass/presence/air shelves, stereo width,
-//!   crossfeed on headphones).
-//! - Keeps loudness even between tracks: slow AGC towards a target level,
-//!   a soft-knee compressor for peaks and the shared soft limiter.
-//! - Toggling is click-free: dry and wet signals are crossfaded.
+//! Auto sound enhancement after the user EQ: device-aware tone curve, AGC and a soft-knee
+//! compressor. Toggling crossfades dry/wet.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
@@ -69,8 +62,6 @@ pub struct EnhanceShared {
     forced: AtomicU8,
     detected: AtomicU8,
     device_name: RwLock<Option<String>>,
-    /// AGC gain (dB, f32 bits) the previous source settled on; the next track
-    /// starts from it so consecutive tracks don't jump in level.
     last_gain_db: AtomicU32,
 }
 
@@ -131,17 +122,14 @@ impl EnhanceShared {
     }
 }
 
-// ── Device detection ─────────────────────────────────────────────────────────
-
-/// Name of the default output device (the one rodio's `OutputStream::try_default` opens)
-/// and its guessed profile. Call on the audio thread right after opening the stream.
 pub fn detect_output_device() -> (Option<String>, DeviceProfile) {
     use rodio::cpal::traits::HostTrait;
     use rodio::DeviceTrait;
 
     let name = rodio::cpal::default_host()
         .default_output_device()
-        .and_then(|d| d.name().ok());
+        .and_then(|d| d.description().ok())
+        .map(|d| d.name().to_string());
     let profile = classify_device(name.as_deref().unwrap_or(""), has_battery());
     (name, profile)
 }
@@ -170,7 +158,6 @@ fn classify_device(name: &str, has_battery: bool) -> DeviceProfile {
         return DeviceProfile::Speakers;
     }
     if has(&["speaker", "динамик"]) {
-        // On a laptop "Speakers (Realtek...)" are almost always the built-in ones.
         return if has_battery { DeviceProfile::Laptop } else { DeviceProfile::Speakers };
     }
     DeviceProfile::Universal
@@ -184,7 +171,6 @@ fn has_battery() -> bool {
     if unsafe { GetSystemPowerStatus(&mut status) }.is_err() {
         return false;
     }
-    // 128 = no system battery, 255 = unknown.
     status.BatteryFlag != 128 && status.BatteryFlag != 255
 }
 
@@ -205,8 +191,6 @@ fn has_battery() -> bool {
 fn has_battery() -> bool {
     false
 }
-
-// ── Profile tuning ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 struct Tuning {
@@ -229,7 +213,6 @@ struct Tuning {
 impl Tuning {
     fn for_profile(p: DeviceProfile) -> Self {
         match p {
-            // Slight warmth, tamed 3 kHz glare, crossfeed against "inside the head" fatigue.
             DeviceProfile::Headphones => Self {
                 highpass_hz: 20.0,
                 low_shelf: (105.0, 1.5),
@@ -241,8 +224,6 @@ impl Tuning {
                 width: 1.0,
                 crossfeed: 0.22,
             },
-            // Small drivers: cut what they can't play (less distortion), lift upper bass
-            // and presence so it sounds fuller and clearer, wider stage, tighter dynamics.
             DeviceProfile::Laptop => Self {
                 highpass_hz: 110.0,
                 low_shelf: (190.0, 3.0),
@@ -265,7 +246,6 @@ impl Tuning {
                 width: 1.1,
                 crossfeed: 0.0,
             },
-            // TV speakers: vocals forward, controlled bass, even level.
             DeviceProfile::Tv => Self {
                 highpass_hz: 50.0,
                 low_shelf: (120.0, 1.5),
@@ -291,8 +271,6 @@ impl Tuning {
         }
     }
 }
-
-// ── Filters (RBJ cookbook) ───────────────────────────────────────────────────
 
 fn clamp_freq(sample_rate: f32, f: f32) -> f32 {
     f.clamp(10.0, sample_rate * 0.45)
@@ -366,8 +344,6 @@ fn time_coeff(secs: f32, sample_rate: f32) -> f32 {
     1.0 - (-1.0 / (secs * sample_rate)).exp()
 }
 
-// ── Source ───────────────────────────────────────────────────────────────────
-
 const TONE_STAGES: usize = 4;
 const MAX_CHANNELS: usize = 8;
 const AGC_BLOCK: u32 = 64;
@@ -393,8 +369,6 @@ pub struct EnhanceSource<S: Source<Item = f32>> {
     detect: [BiquadCoeffs; 2],
     detect_states: [BiquadState; 2],
     mean_square: f32,
-    /// Detector smoothing per frame during the fast start and afterwards
-    /// (precomputed: an `exp()` per sample is the costliest op of the stage).
     ms_coeff_fast: f32,
     ms_coeff_slow: f32,
     fast_frames: u64,
@@ -403,8 +377,6 @@ pub struct EnhanceSource<S: Source<Item = f32>> {
     agc_counter: u32,
     frames_seen: u64,
     envelope: f32,
-    /// Envelope below this (linear) is under the compressor knee: no gain change,
-    /// so the per-sample log10 is skipped.
     comp_knee_lin: f32,
     attack: f32,
     release: f32,
@@ -420,8 +392,8 @@ pub struct EnhanceSource<S: Source<Item = f32>> {
 
 impl<S: Source<Item = f32>> EnhanceSource<S> {
     pub fn new(source: S, shared: Arc<EnhanceShared>) -> Self {
-        let channels = source.channels() as usize;
-        let sample_rate = source.sample_rate().max(1);
+        let channels = source.channels().get() as usize;
+        let sample_rate = source.sample_rate().get();
         let sr = sample_rate as f32;
         let profile = shared.active_profile();
         let tuning = Tuning::for_profile(profile);
@@ -440,7 +412,6 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
             crossfeed_states: [BiquadState::default(); 2],
             detect: [highpass(sr, 60.0, 0.5), shelf(sr, 1500.0, 4.0, true)],
             detect_states: [BiquadState::default(); 2],
-            // Start consistent with the initial gain so nothing moves until real data arrives.
             mean_square: 10.0_f32.powf((tuning.target_db - agc_gain_db) / 10.0),
             ms_coeff_fast: time_coeff(0.4, sr),
             ms_coeff_slow: time_coeff(3.0, sr),
@@ -499,12 +470,10 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
         let fast = self.frames_seen < self.fast_frames;
         let level_db = 10.0 * self.mean_square.max(1.0e-10).log10();
         if level_db < AGC_GATE_DB {
-            // Silence / fades: hold the gain instead of pumping it up.
             return;
         }
         let desired = (self.tuning.target_db - level_db).clamp(AGC_MAX_CUT_DB, AGC_MAX_BOOST_DB);
         let diff = desired - self.agc_gain_db;
-        // dB per second; turning down is quicker than turning up.
         let rate = match (fast, diff < 0.0) {
             (true, _) => 12.0,
             (false, true) => 4.0,
@@ -566,7 +535,6 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
             wet[1] = r;
         }
 
-        // Loudness detector + AGC
         let mono = wet[..ch].iter().sum::<f32>() / ch as f32;
         let d0 = self.detect_states[0].process(&self.detect[0], mono);
         let d = self.detect_states[1].process(&self.detect[1], d0);
@@ -579,7 +547,6 @@ impl<S: Source<Item = f32>> EnhanceSource<S> {
             self.update_agc();
         }
 
-        // Compressor (stereo-linked peak envelope)
         let mut peak = 0.0_f32;
         for x in wet.iter_mut().take(ch) {
             *x *= self.agc_gain;
@@ -612,7 +579,6 @@ impl<S: Source<Item = f32>> Iterator for EnhanceSource<S> {
             self.out_pos += 1;
             return Some(s);
         }
-        // Unusual layouts (>8 channels) are passed through untouched.
         if self.channels == 0 || self.channels > MAX_CHANNELS {
             return self.source.next();
         }
@@ -640,9 +606,9 @@ impl<S: Source<Item = f32>> Iterator for EnhanceSource<S> {
 }
 
 impl<S: Source<Item = f32>> Source for EnhanceSource<S> {
-    fn current_frame_len(&self) -> Option<usize> { self.source.current_frame_len() }
-    fn channels(&self) -> u16 { self.channels as u16 }
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn current_span_len(&self) -> Option<usize> { self.source.current_span_len() }
+    fn channels(&self) -> rodio::ChannelCount { crate::audio_player::nz_channels(self.channels as u16) }
+    fn sample_rate(&self) -> rodio::SampleRate { crate::audio_player::nz_rate(self.sample_rate) }
     fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
 }
 
@@ -668,7 +634,11 @@ mod tests {
     fn run(enabled: bool, input: Vec<f32>) -> Vec<f32> {
         let shared = Arc::new(EnhanceShared::new());
         shared.apply(&EnhanceSettings { enabled, device: Some(DeviceProfile::Universal) });
-        EnhanceSource::new(SamplesBuffer::new(2, 44_100, input), shared).collect()
+        EnhanceSource::new(
+            SamplesBuffer::new(crate::audio_player::nz_channels(2), crate::audio_player::nz_rate(44_100), input),
+            shared,
+        )
+        .collect()
     }
 
     #[test]
@@ -680,7 +650,7 @@ mod tests {
     #[test]
     fn keeps_sample_count() {
         let mut input = stereo_sine(0.3, 0.2, 44_100);
-        input.push(0.1); // dangling half frame
+        input.push(0.1);
         assert_eq!(run(true, input.clone()).len(), input.len());
     }
 

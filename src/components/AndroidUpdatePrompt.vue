@@ -6,7 +6,6 @@ import { usePlayer } from '../composables/usePlayer';
 import { useI18n } from '../composables/useI18n';
 import { isAndroidRuntime } from '../composables/usePlatform';
 
-// Android has no title bar badge, so a found update is offered once per version.
 const DISMISSED_KEY = 'lfmusic.updateDismissed';
 
 const { availableVersion, status, progress, install } = useUpdater();
@@ -38,7 +37,6 @@ function later() {
     try {
         localStorage.setItem(DISMISSED_KEY, dismissed.value);
     } catch {
-        // Not persisted: the prompt shows again on the next start.
     }
 }
 </script>

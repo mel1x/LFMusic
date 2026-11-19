@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{Monitor, WebviewWindow};
-// Window geometry (move/resize/fullscreen/maximize) is a desktop-only concept —
-// Android's single always-fullscreen activity has no window to manage.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::sync::{Arc, Mutex};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::time::{Duration, Instant};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent};
 
@@ -64,8 +66,8 @@ pub fn resolve_window_geometry(
     default_width: u32,
     default_height: u32,
 ) -> Option<ResolvedWindowGeometry> {
-    if let Some(saved) = saved {
-        if is_geometry_valid(saved.x, saved.y, saved.width, saved.height)
+    if let Some(saved) = saved
+        && is_geometry_valid(saved.x, saved.y, saved.width, saved.height)
             && monitors
                 .iter()
                 .any(|monitor| monitors_match(&saved.monitor, monitor))
@@ -77,7 +79,6 @@ pub fn resolve_window_geometry(
                     height: saved.height,
                 });
             }
-    }
 
     let first = monitors.first()?;
     let width = default_width.min(first.width);
@@ -142,11 +143,9 @@ fn current_window_geometry(
     let fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
     let maximized = window.is_maximized().map_err(|e| e.to_string())?;
 
-    // In fullscreen/maximized, physical position/size are screen-filling and
-    // must not overwrite the saved "normal" geometry (or there'd be nothing to
-    // restore to on exit) — keep the previous geometry, only update flags/monitor.
-    if fullscreen || maximized {
-        if let Some(mut state) = previous {
+    // Fullscreen/maximized: keep the previous normal geometry, only update flags and monitor.
+    if (fullscreen || maximized)
+        && let Some(mut state) = previous {
             state.fullscreen = fullscreen;
             state.maximized = maximized;
             if let Ok(Some(monitor)) = window.current_monitor() {
@@ -154,7 +153,6 @@ fn current_window_geometry(
             }
             return Ok(state);
         }
-    }
 
     let position = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
@@ -184,12 +182,8 @@ fn save_current_window_geometry(window: &WebviewWindow, app_data_dir: &Path) -> 
     Ok(())
 }
 
-/// Toggle main window fullscreen (F11).
-///
-/// Going straight from maximized to fullscreen on Windows desyncs window state
-/// (laggy/broken fullscreen), so maximized is cleared first, preserving
-/// position/size so the window doesn't jump on exit. Done as one Rust call to
-/// avoid several slow IPC round-trips.
+/// Toggles fullscreen (F11). Maximized is cleared first: maximized -> fullscreen breaks window
+/// state on Windows.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn toggle_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
@@ -214,8 +208,7 @@ pub fn toggle_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
     }
 }
 
-/// Toggle main window maximize. If in fullscreen (F11), exits it and maximizes
-/// instead of just toggling maximized.
+/// Toggle main window maximize.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn toggle_window_maximize(window: WebviewWindow) -> Result<(), String> {
@@ -275,21 +268,102 @@ pub fn restore_main_window_geometry(app: &tauri::App, app_data_dir: &Path) {
 
     let app_data_dir = app_data_dir.to_path_buf();
     let window_for_events = window.clone();
-    window.on_window_event(move |event| {
-        if matches!(
-            event,
-            WindowEvent::Moved(_)
-                | WindowEvent::Resized(_)
-                | WindowEvent::ScaleFactorChanged { .. }
-                | WindowEvent::CloseRequested { .. }
-        ) {
+    let save_due: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    window.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { .. } => {
+            *save_due.lock().unwrap_or_else(|e| e.into_inner()) = None;
             if let Err(e) = save_current_window_geometry(&window_for_events, &app_data_dir) {
                 eprintln!("Window state save error: {}", e);
             }
         }
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            #[cfg(windows)]
+            if matches!(event, WindowEvent::Resized(_)) {
+                webview_memory::follow_minimized(&window_for_events);
+            }
+            schedule_save(&save_due, &window_for_events, &app_data_dir);
+        }
+        _ => {}
     });
 
     let _ = window.show();
+}
+
+/// Moves/resizes come dozens of times a second while dragging; the file is written once the window
+/// is still.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(600);
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn schedule_save(due: &Arc<Mutex<Option<Instant>>>, window: &WebviewWindow, app_data_dir: &Path) {
+    let mut guard = due.lock().unwrap_or_else(|e| e.into_inner());
+    let idle = guard.is_none();
+    *guard = Some(Instant::now() + SAVE_DEBOUNCE);
+    drop(guard);
+    if !idle {
+        return;
+    }
+    let due = Arc::clone(due);
+    let window = window.clone();
+    let app_data_dir = app_data_dir.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("window-state-save".into())
+        .spawn(move || {
+            loop {
+                let wait = {
+                    let mut guard = due.lock().unwrap_or_else(|e| e.into_inner());
+                    match *guard {
+                        None => return,
+                        Some(deadline) => {
+                            let now = Instant::now();
+                            if deadline <= now {
+                                *guard = None;
+                                break;
+                            }
+                            deadline - now
+                        }
+                    }
+                };
+                std::thread::sleep(wait);
+            }
+            if let Err(e) = save_current_window_geometry(&window, &app_data_dir) {
+                eprintln!("Window state save error: {}", e);
+            }
+        });
+}
+
+/// WebView2 trims its memory while the window is minimized.
+#[cfg(windows)]
+mod webview_memory {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tauri::WebviewWindow;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows::core::Interface;
+
+    static LOW: AtomicBool = AtomicBool::new(false);
+
+    pub fn follow_minimized(window: &WebviewWindow) {
+        let minimized = window.is_minimized().unwrap_or(false);
+        if LOW.swap(minimized, Ordering::Relaxed) == minimized {
+            return;
+        }
+        let level = if minimized {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+        } else {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+        };
+        let _ = window.with_webview(move |webview| unsafe {
+            // ICoreWebView2_19 needs WebView2 Runtime 1.0.2210+; older runtimes skip this.
+            if let Ok(core) = webview.controller().CoreWebView2()
+                && let Ok(core19) = core.cast::<ICoreWebView2_19>()
+            {
+                let _ = core19.SetMemoryUsageTargetLevel(level);
+            }
+        });
+    }
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -405,7 +479,6 @@ mod tests {
 
     #[test]
     fn monitors_match_falls_back_to_position_when_name_present_only_on_one_side() {
-        // Name comparison requires Some on both sides; falls back to position.
         let saved = MonitorSnapshot {
             name: None,
             ..monitor("IGNORED", 0, 0, 1920, 1080)
@@ -416,7 +489,6 @@ mod tests {
 
     #[test]
     fn monitors_match_by_name_ignores_position_drift() {
-        // Both sides have a name, so matching is by name even if the monitor moved.
         let saved = monitor("DISPLAY2", 1920, 0, 2560, 1440);
         let current = monitor("DISPLAY2", 0, 0, 2560, 1440);
         assert!(monitors_match(&saved, &current));
@@ -457,7 +529,6 @@ mod tests {
         };
         let monitors = [monitor("DISPLAY1", 0, 0, 1920, 1080)];
         let resolved = resolve_window_geometry(Some(&saved), &monitors, 1460, 860).unwrap();
-        // 299 is invalid -> falls back to centering the default size.
         assert_eq!(resolved.width, 1460);
     }
 
@@ -486,7 +557,6 @@ mod tests {
 
         let resolved = resolve_window_geometry(Some(&saved), &monitors, 1460, 860).unwrap();
 
-        // Should center the default size on the first monitor instead of using saved geometry
         assert_eq!(
             resolved,
             ResolvedWindowGeometry {

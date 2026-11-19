@@ -6,8 +6,6 @@ import { usePlayer } from '../composables/usePlayer';
 import { isAndroidRuntime, isPhoneViewport } from '../composables/usePlatform';
 import { usePlayableUrl } from '../utils/mediaUrl';
 
-// First launch tour: four short explainer videos recorded from the real UI
-// (see onboarding-videos/record.mjs). Shown once, then remembered locally.
 const STORAGE_KEY = 'lfmusic.onboardingDone.v2';
 
 const videos = import.meta.glob('../assets/onboarding/*.{webm,mp4}', {
@@ -65,7 +63,6 @@ function finish() {
     try {
         localStorage.setItem(STORAGE_KEY, '1');
     } catch {
-        // Not critical: the tour just shows again next launch
     }
     if (catalogPaths.value.length === 0) router.push('/settings/library');
 }
@@ -75,7 +72,6 @@ function onTimeUpdate() {
     if (v && v.duration) progress.value = v.currentTime / v.duration;
 }
 
-// The last video loops, the others hand over to the next step
 function onEnded() {
     if (isLast.value) {
         videoEl.value?.play().catch(() => {});
@@ -111,8 +107,6 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
 
                 <div class="obCard">
                     <div class="obSide">
-                        <div class="obKicker">{{ t('onboarding.kicker') }}</div>
-
                         <Transition name="ob-text" mode="out-in">
                             <div class="obText" :key="step.id">
                                 <div class="obStep">{{ t('onboarding.step', { n: index + 1, total: STEPS.length }) }}</div>
@@ -193,15 +187,14 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
     user-select: none;
 }
 
-/* Two soft light pools in the step color, placed asymmetrically */
 .obGlow {
     position: absolute;
     border-radius: 50%;
     pointer-events: none;
     filter: blur(90px);
-    transition: background-color .9s ease;
+    transition: background-color .9s var(--ease-smooth);
     background-color: var(--ob-color);
-    animation: obBreathe 8s ease-in-out infinite;
+    animation: obBreathe 8s var(--ease-smooth-in-out) infinite;
 }
 .obGlowA {
     width: 46vw;
@@ -240,18 +233,6 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
     min-width: 0;
 }
 
-.obKicker {
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: .12em;
-    text-transform: uppercase;
-    color: var(--ob-color);
-    transition: color .9s ease;
-}
-
-.obText {
-    margin-top: 26px;
-}
 .obStep {
     font-size: 13px;
     font-weight: 600;
@@ -291,7 +272,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
     border-radius: 12px;
     background: transparent;
     cursor: pointer;
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .obStepBtn:hover {
     background: hsla(0, 0%, 100%, .05);
@@ -318,7 +299,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
     font-size: 13px;
     font-weight: 600;
     color: hsla(0, 0%, 100%, .4);
-    transition: color .2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .obStepBtn.active .obStepLabel,
 .obStepBtn:hover .obStepLabel {
@@ -346,7 +327,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
-    transition: color .2s ease, background-color .2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
 .obBack {
     margin-left: 0;
@@ -367,13 +348,14 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
     font-weight: 700;
     white-space: nowrap;
     cursor: pointer;
-    transition: transform .15s ease, box-shadow .2s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
 }
 .obNext:hover {
     box-shadow: 0 6px 22px hsla(0, 0%, 100%, .18);
 }
 .obNext:active {
     transform: scale(.97);
+    transition-duration: 80ms;
 }
 
 .obStage {
@@ -399,11 +381,11 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
 
 .onboarding-enter-active,
 .onboarding-leave-active {
-    transition: opacity .35s ease;
+    transition: opacity .35s var(--ease-smooth);
 }
 .onboarding-enter-active .obCard,
 .onboarding-leave-active .obCard {
-    transition: transform .45s cubic-bezier(.2, .8, .2, 1);
+    transition: transform .45s var(--ease-smooth);
 }
 .onboarding-enter-from,
 .onboarding-leave-to {
@@ -418,7 +400,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
 
 .ob-text-enter-active,
 .ob-text-leave-active {
-    transition: opacity .22s ease, transform .22s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .ob-text-enter-from {
     opacity: 0;
@@ -431,7 +413,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
 
 .ob-video-enter-active,
 .ob-video-leave-active {
-    transition: opacity .4s ease;
+    transition: opacity .4s var(--ease-smooth);
 }
 .ob-video-enter-from,
 .ob-video-leave-to {

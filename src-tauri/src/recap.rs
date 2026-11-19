@@ -1,8 +1,5 @@
-//! Year recap ("итоги года"): aggregates one year of `listen_history` into the
-//! numbers behind the recap cards. Runs only when the recap is opened, so it
-//! just loads the year's rows and folds them in memory. Rows are taken in
-//! time order: insert order can differ (an unfinished session is written at
-//! shutdown, imported history lands after newer rows).
+//! Year recap: folds one year of `listen_history` in memory. Rows are sorted by time, insert order
+//! can differ.
 
 use crate::library::split_artists;
 use crate::statistics::{
@@ -144,8 +141,6 @@ pub struct YearRecap {
 }
 
 impl YearRecap {
-    /// Fills cover and snippet URLs; `cover_url` resolves a library track's cover
-    /// and `accent` computes a missing cover accent color (cards are tinted by it).
     pub fn attach_media(
         &mut self,
         cover_url: impl Fn(&str) -> Option<String>,
@@ -216,7 +211,6 @@ fn non_empty(value: Option<String>) -> Option<String> {
 }
 
 /// Unix seconds of local midnight on January 1st of `year` and of the next year.
-/// Rows are filtered by this range instead of formatting every timestamp.
 fn year_bounds(conn: &Connection, year: i32) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
         "SELECT CAST(strftime('%s', ?1, 'utc') AS INTEGER), CAST(strftime('%s', ?2, 'utc') AS INTEGER)",
@@ -300,7 +294,6 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
     }
 
     let mut by_track: HashMap<i64, Totals> = HashMap::new();
-    // Artist key (lowercase) -> display name, totals, per-track plays.
     let mut artist_names: HashMap<String, String> = HashMap::new();
     let mut by_artist: HashMap<String, Totals> = HashMap::new();
     let mut artist_tracks: HashMap<String, HashMap<i64, i64>> = HashMap::new();
@@ -320,11 +313,10 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
     let mut session: Option<(RecapSession, i64)> = None;
     let mut marathon: Option<RecapSession> = None;
     let close_session = |session: Option<(RecapSession, i64)>, marathon: &mut Option<RecapSession>| {
-        if let Some((s, _)) = session {
-            if marathon.as_ref().is_none_or(|m| s.secs > m.secs) {
+        if let Some((s, _)) = session
+            && marathon.as_ref().is_none_or(|m| s.secs > m.secs) {
                 *marathon = Some(s);
             }
-        }
     };
 
     for row in &rows {
@@ -358,13 +350,11 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
         if row.flags & LISTEN_SEARCH_START != 0 {
             recap.search_starts += 1;
         }
-        if row.source_kind == SOURCE_PLAYLIST {
-            if let Some(id) = row.source_id {
+        if row.source_kind == SOURCE_PLAYLIST
+            && let Some(id) = row.source_id {
                 by_playlist.entry(id).or_default().add(row);
             }
-        }
 
-        // Sessions: consecutive plays with short gaps, timed by what was heard.
         let ends_at = row.started_at + row.secs;
         match session.as_mut() {
             Some((s, last_end)) if row.started_at - *last_end <= SESSION_GAP_SECS => {
@@ -493,7 +483,6 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
         })
         .collect();
 
-    // Days: count, busiest, longest run of consecutive days.
     recap.days_listened = by_day.len();
     let mut day_nums: Vec<i64> = by_day.values().map(|(n, _)| *n).collect();
     day_nums.sort_unstable();
@@ -568,8 +557,6 @@ pub fn year_recap(conn: &Connection, year: i32, separators: &[String]) -> rusqli
     Ok(recap)
 }
 
-/// Most played artist first heard this year: no history in earlier years and
-/// no listens before the history log existed (lifetime counters would be higher).
 fn find_discovery(
     conn: &Connection,
     year_start: i64,
@@ -619,7 +606,6 @@ fn find_discovery(
         }
     }
 
-    // The top artist is the "artist of the year" card already.
     Ok(candidates
         .into_iter()
         .skip(1)

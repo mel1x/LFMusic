@@ -9,7 +9,7 @@
     stroke-width="2"
     stroke-linecap="round"
     stroke-linejoin="round"
-    class="lucide lucide-list-music-icon lucide-list-music"
+    class="lfi lfi-list"
   >
     <path d="M16 5H3" />
     <path d="M11 12H3" />

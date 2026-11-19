@@ -1,0 +1,165 @@
+/* Only the shapes inside the <svg> move, never the <svg> itself: some icons sit on a tile. */
+
+.lfi {
+  overflow: visible;
+}
+.lfi > * {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-album > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-spin .52s var(--icon-ease); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-heart > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-beat .64s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover :is(.lfi-close, .lfi-delete, .lfi-plus) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-quarter .52s var(--icon-ease); }
+  :is(a, button, [role="button"], .lfi-host):hover :is(.lfi-arrowup, .lfi-back, .lfi-next, .lfi-prev, .lfi-play, .lfi-pause, .lfi-home) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-pop .48s var(--icon-ease); }
+  :is(a, button, [role="button"], .lfi-host):hover :is(.lfi-edit, .lfi-search) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-wiggle .56s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-pin > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-pin .56s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-refresh > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-spin .52s var(--icon-ease); }
+  :is(a, button, [role="button"], .lfi-host):hover :is(.lfi-folder, .lfi-catalog) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-tilt .56s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-settings > :nth-child(1) { animation: lfi-gear .52s var(--icon-ease); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-repeat > :nth-child(1) { animation: lfi-nudge-r .52s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-repeat > :nth-child(3) { animation: lfi-nudge-l .52s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-repeat > :nth-child(5) { animation: lfi-pop .48s var(--icon-ease) .1s; }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-home > :nth-child(1) { transform-origin: 50% 100%; animation: lfi-door .52s var(--icon-ease); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-download > :nth-child(2),
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-download > :nth-child(3) { animation: lfi-down .6s var(--ease-smooth-in-out); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-collection > :nth-child(1) { transform-origin: 50% 100%; animation: lfi-book .56s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-collection > :nth-child(2) { animation: lfi-down-sm .6s var(--ease-smooth-in-out) .05s; }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-collection > :nth-child(3) { animation: lfi-down-sm .6s var(--ease-smooth-in-out) .1s; }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-trash > :nth-child(1),
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-trash > :nth-child(3) { animation: lfi-lid .56s var(--ease-smooth-in-out); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-more > :nth-child(1) { animation: lfi-dot .6s var(--ease-smooth-in-out) .08s; }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-more > :nth-child(2) { animation: lfi-dot .6s var(--ease-smooth-in-out) .16s; }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-more > :nth-child(3) { animation: lfi-dot .6s var(--ease-smooth-in-out); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-tune > :nth-child(7) { animation: lfi-knob-up .6s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-tune > :nth-child(8) { animation: lfi-knob-down .6s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-tune > :nth-child(9) { animation: lfi-knob-up .6s var(--ease-smooth-in-out) .08s; }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-volume > :nth-child(2) { animation: lfi-wave .6s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-volume > :nth-child(3) { animation: lfi-wave .6s var(--ease-smooth-in-out) .1s; }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-volumezero > :nth-child(n + 2) { animation: lfi-quarter .52s var(--icon-ease); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-shuffle > :nth-child(1) { animation: lfi-nudge-r .52s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-shuffle > :nth-child(2) { animation: lfi-nudge-r .52s var(--ease-smooth-in-out) .08s; }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-playlist > :nth-child(4),
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-playlist > :nth-child(5) { animation: lfi-quarter .52s var(--icon-ease); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-list > :nth-child(1) { transform-origin: 0% 50%; animation: lfi-line .56s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-list > :nth-child(2) { transform-origin: 0% 50%; animation: lfi-line .56s var(--ease-smooth-in-out) .07s; }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-list > :nth-child(3) { transform-origin: 0% 50%; animation: lfi-line .56s var(--ease-smooth-in-out) .14s; }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-list > :nth-child(n + 4) { animation: lfi-dot .6s var(--ease-smooth-in-out) .1s; }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-lyrics > :nth-child(n + 3) { transform-origin: 0% 50%; animation: lfi-line .56s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-info > :nth-child(3) { animation: lfi-dot .6s var(--ease-smooth-in-out); }
+
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-fullscreen > :nth-child(-n + 2) { animation: lfi-out-tr .52s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-fullscreen > :nth-child(n + 3) { animation: lfi-out-bl .52s var(--ease-smooth-in-out); }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-minscreen > :nth-child(-n + 2) { animation: lfi-out-tr .52s var(--ease-smooth-in-out) reverse; }
+  :is(a, button, [role="button"], .lfi-host):hover .lfi-minscreen > :nth-child(n + 3) { animation: lfi-out-bl .52s var(--ease-smooth-in-out) reverse; }
+}
+
+@keyframes lfi-spin { to { transform: rotate(360deg); } }
+@keyframes lfi-quarter { from { transform: rotate(0); } to { transform: rotate(90deg); } }
+@keyframes lfi-gear { to { transform: rotate(120deg); } }
+@keyframes lfi-beat {
+  0%, 100% { transform: scale(1); }
+  25% { transform: scale(1.22); }
+  45% { transform: scale(.94); }
+  65% { transform: scale(1.1); }
+}
+@keyframes lfi-pop {
+  0%, 100% { transform: scale(1); }
+  40% { transform: scale(.82); }
+  70% { transform: scale(1.08); }
+}
+@keyframes lfi-down {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(3px); }
+  70% { transform: translateY(-1px); }
+}
+@keyframes lfi-down-sm {
+  0%, 100% { transform: translateY(0); }
+  45% { transform: translateY(1.5px); }
+}
+@keyframes lfi-nudge-r {
+  0%, 100% { transform: translateX(0); }
+  45% { transform: translateX(2.5px); }
+}
+@keyframes lfi-nudge-l {
+  0%, 100% { transform: translateX(0); }
+  45% { transform: translateX(-2.5px); }
+}
+@keyframes lfi-wiggle {
+  0%, 100% { transform: rotate(0); }
+  25% { transform: rotate(-14deg); }
+  55% { transform: rotate(10deg); }
+  80% { transform: rotate(-4deg); }
+}
+@keyframes lfi-tilt {
+  0%, 100% { transform: rotate(0); }
+  45% { transform: rotate(-9deg); }
+}
+@keyframes lfi-pin {
+  0%, 100% { transform: rotate(0); }
+  35% { transform: rotate(24deg); }
+  70% { transform: rotate(-6deg); }
+}
+@keyframes lfi-door {
+  0%, 100% { transform: scaleY(1); }
+  45% { transform: scaleY(.55); }
+}
+@keyframes lfi-book {
+  0%, 100% { transform: rotate(0); }
+  45% { transform: rotate(14deg); }
+  75% { transform: rotate(-4deg); }
+}
+@keyframes lfi-lid {
+  0%, 100% { transform: translateY(0) rotate(0); }
+  45% { transform: translateY(-2.5px) rotate(-10deg); }
+}
+@keyframes lfi-dot {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-3px); }
+}
+@keyframes lfi-line {
+  0%, 100% { transform: scaleX(1); }
+  45% { transform: scaleX(.55); }
+}
+@keyframes lfi-knob-up {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes lfi-knob-down {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+@keyframes lfi-wave {
+  0% { opacity: 1; }
+  30% { opacity: 0; }
+  100% { opacity: 1; }
+}
+@keyframes lfi-out-tr {
+  0%, 100% { transform: translate(0, 0); }
+  45% { transform: translate(1.5px, -1.5px); }
+}
+@keyframes lfi-out-bl {
+  0%, 100% { transform: translate(0, 0); }
+  45% { transform: translate(-1.5px, 1.5px); }
+}
+
+.coverEditBtn .lfi > *,
+.hatBadge .lfi > *,
+.trackFavBtn .lfi > *,
+.playerControlsWrapper .lfi > *,
+.asideWrapper .lfi > * {
+  animation: none !important;
+}

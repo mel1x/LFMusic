@@ -64,7 +64,7 @@ async function onReset(e: MouseEvent) {
     position: relative;
 }
 .cover-edit-host > img {
-    transition: filter .28s ease, transform .28s ease;
+    transition: filter .28s var(--ease-smooth), transform .28s var(--ease-smooth);
 }
 .cover-edit-host:has(.coverEditBtn:hover) > img {
     filter: brightness(0.55);
@@ -82,7 +82,7 @@ async function onReset(e: MouseEvent) {
     gap: 10px;
     opacity: 0;
     pointer-events: none;
-    transition: opacity .26s ease, transform .26s ease;
+    transition: opacity .26s var(--ease-smooth), transform .26s var(--ease-smooth);
 }
 .cover-edit-host:hover .coverEditButtons {
     opacity: 1;
@@ -100,7 +100,7 @@ async function onReset(e: MouseEvent) {
     background-color: hsla(0, 0%, 0%, 0.55);
     backdrop-filter: blur(8px);
     border: none;
-    transition: background-color .2s ease, color .2s ease, transform .15s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .coverEditBtn:hover {
     background-color: hsla(0, 0%, 0%, 0.75);
@@ -109,6 +109,7 @@ async function onReset(e: MouseEvent) {
 }
 .coverEditBtn:active {
     transform: scale(0.94);
+    transition-duration: 80ms;
 }
 
 .coverEditButtons.size-small .coverEditBtn { padding: 9px; }
@@ -123,7 +124,7 @@ async function onReset(e: MouseEvent) {
 
 .cover-edit-reset-enter-active,
 .cover-edit-reset-leave-active {
-    transition: opacity .22s ease, transform .22s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .cover-edit-reset-enter-from,
 .cover-edit-reset-leave-to {

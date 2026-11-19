@@ -31,19 +31,15 @@ const isAndroid = isAndroidRuntime();
 const externalKeys: SettingKey[] = ['external_album_order', 'external_supplement_missing', 'external_track_covers', 'external_artist_avatars', 'show_downloads_page'];
 const externalItems = computed(() => externalKeys.map(key => settingItems.find(i => i.key === key)!));
 
-// Toggling a network source restarts the background prepare pass: enabling
-// fetches data with progress, disabling stops the current pass (cache untouched).
 const networkSourceKeys: SettingKey[] = ['external_album_order', 'external_supplement_missing', 'external_track_covers', 'external_artist_avatars'];
 
 async function toggle(key: SettingKey) {
     settings.value[key] = !settings.value[key];
     await save();
     if (networkSourceKeys.includes(key)) {
-        invoke('external_prepare').catch(() => { /* don't block the UI */ });
+        invoke('external_prepare').catch(() => {});
     }
 }
-
-// ── Components (yt-dlp / Deno / ffmpeg) ─────────────────────────────────────
 
 const info = computed(() => tools.value.info);
 const toolError = ref<string | null>(null);
@@ -76,7 +72,7 @@ const cells = computed(() => [
 ]);
 const VER_MAX = 16;
 function shortVer(v: string): string {
-    return v.length > VER_MAX ? v.slice(0, VER_MAX) + '…' : v;
+    return v.length > VER_MAX ? v.slice(0, VER_MAX) + '...' : v;
 }
 
 const detail = computed(() => {
@@ -106,8 +102,6 @@ async function onRemove() {
 async function toggleAutoUpdate() {
     try { await saveSettings({ auto_update: !dlSettings.value.auto_update }); } catch (e) { toolError.value = String(e); }
 }
-
-// ── Cookies ─────────────────────────────────────────────────────────────────
 
 const cookieModes = computed<{ key: CookiesMode; label: string }[]>(() => [
     { key: 'none', label: t('downloads.cookies.modeNone') },
@@ -156,9 +150,6 @@ const cookieFileName = computed(() => {
     return f ? f.split(/[\\/]/).pop() : t('downloads.cookies.noFile');
 });
 
-// ── Download folder ─────────────────────────────────────────────────────────
-// Changing it re-registers the library folder (old unscanned, new scanned);
-// the backend falls back to the default if the chosen one can't be created.
 const folderBusy = ref(false);
 const folderFellBack = ref(false);
 const folderError = ref<string | null>(null);
@@ -215,8 +206,6 @@ async function openDownloadFolder() {
     }
 }
 
-// ── Proxy ───────────────────────────────────────────────────────────────────
-// Useful against ISP blocking, e.g. routing through ByeDPI (socks5://127.0.0.1:1080).
 const proxyModeOptions = computed<{ key: ProxyMode; label: string }[]>(() => [
     { key: 'system', label: t('downloads.proxy.modeSystem') },
     { key: 'none', label: t('downloads.proxy.modeNone') },
@@ -272,14 +261,13 @@ onMounted(async () => {
     try {
         await refreshTools();
         await checkUpdates();
-    } catch { /* offline — no update info */ }
+    } catch {}
 });
 </script>
 
 <template>
     <SettingsShell
         title="Внешние источники"
-        description="Дополнение локальной библиотеки данными из открытых сервисов"
     >
         <div class="settingsBlock">
             <SettingToggle
@@ -291,14 +279,9 @@ onMounted(async () => {
                 @toggle="toggle(item.key)"
             />
         </div>
-        <p class="hint">
-            Данные берутся из открытых источников. Повторные открытия не обращаются к сети.
-        </p>
 
-        <!-- Downloader settings only make sense with the Downloads page enabled. -->
         <Transition name="dlZone">
         <div v-if="settings.show_downloads_page && !isAndroid" class="dlZone">
-            <!-- Download folder -->
             <h2 class="sectionTitle">{{ t('downloads.folder.sectionTitle') }}</h2>
             <div class="dlFolder">
                 <div class="dlFolderRow">
@@ -338,7 +321,6 @@ onMounted(async () => {
                 </Transition>
             </div>
 
-            <!-- Components + cookies -->
             <h2 class="sectionTitle">{{ t('downloads.tools.sectionTitle') }}</h2>
             <div v-if="!toolsLoaded" class="unifiedPanel skeletonPanel" aria-hidden="true">
                 <div class="panelSection">
@@ -466,7 +448,6 @@ onMounted(async () => {
                 </div>
             </div>
 
-            <!-- Proxy -->
             <h2 class="sectionTitle">{{ t('downloads.proxy.sectionTitle') }}</h2>
             <div class="dlProxy">
                 <p class="dlProxyDesc">{{ t('downloads.proxy.desc') }}</p>
@@ -531,26 +512,17 @@ onMounted(async () => {
     max-width: 800px;
     width: 100%;
 }
-.hint {
-    margin-top: 6px;
-    max-width: 800px;
-    font-weight: 500;
-    font-size: 13px;
-    line-height: 1.5;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.42);
-}
 
-/* The whole downloads zone appears/disappears with the master toggle above. */
 .dlZone {
     display: flex;
     flex-direction: column;
     width: 100%;
 }
 .dlZone-enter-active {
-    transition: opacity .32s ease, transform .32s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity .32s var(--ease-smooth), transform .32s var(--ease-smooth);
 }
 .dlZone-leave-active {
-    transition: opacity .16s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .dlZone-enter-from {
     opacity: 0;
@@ -560,7 +532,6 @@ onMounted(async () => {
     opacity: 0;
 }
 
-/* Bottom footnote about regional blocking/VPN — quiet, no call to action. */
 .regionNote {
     margin-top: 30px;
     padding-top: 18px;
@@ -573,7 +544,6 @@ onMounted(async () => {
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.38);
 }
 
-/* Warning/error notes shared by folder and proxy blocks; animated in. */
 .dlWarn {
     margin: 10px 0 0;
     font-size: 12.5px;
@@ -582,10 +552,10 @@ onMounted(async () => {
     color: hsla(38, 85%, 72%, 0.95);
 }
 .noteSlide-enter-active {
-    transition: opacity .22s ease, transform .22s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .noteSlide-leave-active {
-    transition: opacity .14s ease;
+    transition: opacity .14s var(--ease-smooth);
 }
 .noteSlide-enter-from {
     opacity: 0;
@@ -595,7 +565,6 @@ onMounted(async () => {
     opacity: 0;
 }
 
-/* Section titles of the downloads zone */
 .sectionTitle {
     margin-top: 40px;
     margin-bottom: 16px;
@@ -606,7 +575,6 @@ onMounted(async () => {
     color: hsla(0, 0%, 100%, 0.92);
 }
 
-/* Download folder */
 .dlFolder {
     max-width: 800px;
     width: 100%;
@@ -619,12 +587,11 @@ onMounted(async () => {
     padding: 12px 16px 12px 12px;
     border-radius: 18px;
     background: hsla(0, 0%, 100%, 0.028);
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .dlFolderRow:hover {
     background: hsla(0, 0%, 100%, 0.04);
 }
-/* Accent-tinted tile; opens the folder in the system explorer. */
 .dlFolderTile {
     flex-shrink: 0;
     display: flex;
@@ -636,7 +603,7 @@ onMounted(async () => {
     cursor: pointer;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 78%, 0.8);
     background: hsla(var(--accent-h), var(--accent-s), 62%, 0.1);
-    transition: background-color .2s ease, color .2s ease, transform .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .dlFolderTile:hover {
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.5), 88%, 1);
@@ -645,6 +612,7 @@ onMounted(async () => {
 }
 .dlFolderTile:active {
     transform: translateY(0) scale(0.96);
+    transition-duration: 80ms;
 }
 .dlFolderInfo {
     flex: 1;
@@ -679,7 +647,6 @@ onMounted(async () => {
     gap: 8px;
 }
 
-/* Proxy for yt-dlp */
 .dlProxy {
     max-width: 800px;
     width: 100%;
@@ -691,8 +658,6 @@ onMounted(async () => {
     line-height: 1.5;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.5);
 }
-/* Mode switcher — dark container with an inset border and a sliding thumb
-   behind the active option (equal-width segments make the slide exact). */
 .proxySeg {
     position: relative;
     display: grid;
@@ -713,7 +678,7 @@ onMounted(async () => {
     border-radius: 13px;
     background-color: hsla(0, 0%, 100%, 0.09);
     transform: translateX(calc(var(--seg-i, 0) * (100% + 2px)));
-    transition: transform .26s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform .26s var(--ease-smooth);
     will-change: transform;
 }
 .proxySegBtn {
@@ -732,7 +697,7 @@ onMounted(async () => {
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
-    transition: color .18s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .proxySegBtn:hover {
     color: hsla(0, 0%, 100%, 0.82);
@@ -740,11 +705,10 @@ onMounted(async () => {
 .proxySegBtn.active {
     color: #ffffff;
 }
-/* Custom URL field appears only in "custom" mode — smooth grid collapse. */
 .proxyCustomWrap {
     display: grid;
     grid-template-rows: 0fr;
-    transition: grid-template-rows .3s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: grid-template-rows .3s var(--ease-smooth);
 }
 .proxyCustomWrap.open {
     grid-template-rows: 1fr;
@@ -754,7 +718,7 @@ onMounted(async () => {
     min-height: 0;
     opacity: 0;
     transform: translateY(-4px);
-    transition: opacity .22s ease, transform .3s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform .3s var(--ease-smooth);
 }
 .proxyCustomWrap.open .proxyCustomInner {
     opacity: 1;
@@ -773,7 +737,7 @@ onMounted(async () => {
     font-family: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 13px;
     outline: none;
-    transition: background-color .18s ease, box-shadow .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
 }
 .proxyInput:focus {
     background: hsla(0, 0%, 100%, 0.07);
@@ -788,7 +752,7 @@ onMounted(async () => {
 }
 .hintFade-enter-active,
 .hintFade-leave-active {
-    transition: opacity .14s ease;
+    transition: opacity .14s var(--ease-smooth);
 }
 .hintFade-enter-from,
 .hintFade-leave-to {
@@ -808,8 +772,6 @@ onMounted(async () => {
     to { transform: rotate(360deg); }
 }
 
-/* Unified panel: components + cookies, one continuous
-   card with thin dividers between sub-sections instead of separate boxes. */
 .unifiedPanel {
     max-width: 800px;
     width: 100%;
@@ -817,15 +779,12 @@ onMounted(async () => {
     background: hsla(0, 0%, 100%, 0.028);
     overflow: hidden;
 }
-/* Something missing / update available — a soft accent top nudges toward
-   action (no large bright surfaces, just a thin gradient at the top). */
 .unifiedPanel.missing,
 .unifiedPanel.update {
     background:
         linear-gradient(180deg, hsla(var(--accent-h), var(--accent-s), 50%, 0.07), hsla(0, 0%, 100%, 0.028) 70px),
         hsla(0, 0%, 100%, 0.028);
 }
-/* Staggered entrance when the panel replaces the skeleton. */
 .unifiedPanel:not(.skeletonPanel) > * {
     animation: panelRise .4s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
@@ -853,7 +812,6 @@ onMounted(async () => {
     background: hsla(0, 0%, 100%, 0.05);
 }
 
-/* Skeleton while tool info loads — mirrors the real panel's layout. */
 .skeletonPanel {
     min-height: 168px;
 }
@@ -925,7 +883,7 @@ onMounted(async () => {
     font-weight: 700;
     color: hsla(0, 0%, 100%, 0.6);
     white-space: nowrap;
-    transition: color .24s ease, background-color .24s ease;
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
 .stateDot {
     flex-shrink: 0;
@@ -933,14 +891,14 @@ onMounted(async () => {
     height: 7px;
     border-radius: 50%;
     background-color: hsla(0, 0%, 100%, 0.3);
-    transition: background-color .24s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .depState.ok { color: hsla(145, 55%, 70%, 0.95); background: hsla(145, 45%, 45%, 0.12); }
 .depState.ok .stateDot { background-color: hsla(145, 60%, 55%, 0.95); }
 .depState.update { color: hsla(38, 90%, 70%, 1); background: hsla(38, 85%, 50%, 0.14); cursor: help; }
 .depState.update .stateDot {
     background-color: hsla(38, 90%, 58%, 0.95);
-    animation: dotPulse 2.2s ease-in-out infinite;
+    animation: dotPulse 2.2s var(--ease-smooth-in-out) infinite;
 }
 .depState.missing { color: hsla(0, 0%, 100%, 0.5); }
 .depState.missing .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
@@ -949,7 +907,6 @@ onMounted(async () => {
     50% { opacity: 0.4; }
 }
 
-/* The three tools as one rail of equal cells with hairline separators. */
 .toolRail {
     display: flex;
     flex-direction: row;
@@ -969,7 +926,6 @@ onMounted(async () => {
 .toolCell + .toolCell {
     border-left: 1px solid hsla(0, 0%, 100%, 0.05);
 }
-/* Ring + core dot: the core pops green when the tool becomes installed. */
 .toolDot {
     flex-shrink: 0;
     display: flex;
@@ -979,29 +935,27 @@ onMounted(async () => {
     height: 14px;
     border-radius: 50%;
     box-shadow: inset 0 0 0 1px hsla(0, 0%, 100%, 0.14);
-    transition: box-shadow .24s ease;
+    transition: box-shadow var(--duration-hover) var(--ease-smooth);
 }
 .toolDotCore {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background-color: hsla(0, 0%, 100%, 0.22);
-    transition: background-color .24s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .toolCell.on .toolDot {
     box-shadow: inset 0 0 0 1px hsla(145, 50%, 55%, 0.4);
 }
 .toolCell.on .toolDotCore {
     background-color: hsla(145, 60%, 55%, 0.95);
-    animation: dotPop .35s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: dotPop .35s var(--ease-smooth);
 }
 @keyframes dotPop {
     0% { transform: scale(0.4); }
     60% { transform: scale(1.35); }
     100% { transform: scale(1); }
 }
-/* Update available for this specific tool overrides the green "on" dot with
-   the same orange used by the overall .depState.update pill. */
 .toolCell.update .toolDot {
     box-shadow: inset 0 0 0 1px hsla(38, 85%, 55%, 0.4);
 }
@@ -1014,7 +968,7 @@ onMounted(async () => {
     font-weight: 600;
     letter-spacing: -0.01em;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: color .24s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
     white-space: nowrap;
 }
 .toolCell.on .toolName { color: hsla(0, 0%, 100%, 0.9); }
@@ -1030,7 +984,6 @@ onMounted(async () => {
 }
 .toolVer.off { color: hsla(0, 0%, 100%, 0.2); }
 
-/* Thin indicator bar during install. */
 .depBar {
     position: relative;
     height: 2px;
@@ -1046,8 +999,8 @@ onMounted(async () => {
     bottom: 0;
     width: 38%;
     border-radius: inherit;
-    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 14%), 100%), 66%, 0.95);
-    animation: depSlide 1.2s ease-in-out infinite;
+    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 14% * var(--accent-k, 1)), 100%), 66%, 0.95);
+    animation: depSlide 1.2s var(--ease-smooth-in-out) infinite;
 }
 @keyframes depSlide {
     0% { transform: translateX(-110%); }
@@ -1062,7 +1015,6 @@ onMounted(async () => {
     margin-top: 16px;
 }
 
-/* Action buttons (shared across the zone) */
 .actBtn {
     cursor: pointer;
     position: relative;
@@ -1070,7 +1022,7 @@ onMounted(async () => {
     border-radius: 999px;
     font-size: 13px;
     font-weight: 700;
-    transition: background-color .2s ease, color .2s ease, opacity .2s ease, transform .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .actBtn:disabled {
     cursor: default;
@@ -1078,6 +1030,7 @@ onMounted(async () => {
 }
 .actBtn:not(:disabled):active {
     transform: scale(0.97);
+    transition-duration: 80ms;
 }
 .actBtn.primary {
     color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
@@ -1103,18 +1056,14 @@ onMounted(async () => {
     color: hsla(2, 72%, 80%, 1);
     background-color: hsla(2, 60%, 50%, 0.16);
 }
-/* Spinner sits ON TOP of the text (absolute); text is just faded via opacity,
-   so button width never changes. Both stay in the DOM and cross-fade via
-   opacity instead of flicking with v-if. */
 .actBtn .btnLabel {
     opacity: 1;
-    transition: opacity .18s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .actBtn.loading .btnLabel {
     opacity: 0;
 }
-/* Centered via negative margins, not translate — the spin animation owns
-   the transform property. */
+/* Centered via negative margins: the spin animation owns transform. */
 .actBtn .btnSpinner {
     position: absolute;
     top: 50%;
@@ -1122,15 +1071,12 @@ onMounted(async () => {
     margin: -6.5px 0 0 -6.5px;
     opacity: 0;
     pointer-events: none;
-    transition: opacity .18s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .actBtn.loading .btnSpinner {
     opacity: 1;
 }
 
-/* "Check updates" button: both labels sit in the same grid cell, so width is
-   fixed to the longest one and doesn't shift when switching to the "Checking…"
-   spinner label (the other label stays in flow, just hidden). */
 .checkBtn .checkLabels {
     display: grid;
     align-items: center;
@@ -1148,9 +1094,6 @@ onMounted(async () => {
 .checkBtn.checking .checkLabel:not(.busy) { visibility: hidden; }
 .checkBtn.checking .checkLabel.busy { visibility: visible; }
 
-/* Cookies/PO-token sections: quieter than the components section (both
-   optional). A sub-title + short description, then one row with the live
-   status on the left and actions on the right. */
 .statusRow {
     display: flex;
     align-items: center;
@@ -1172,7 +1115,7 @@ onMounted(async () => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    transition: color .24s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .rowActions {
     flex-shrink: 0;
@@ -1186,18 +1129,8 @@ onMounted(async () => {
 .panelSection.invalid .stateDot { background-color: hsla(2, 70%, 60%, 0.95); }
 .panelSection.none .stateDot { background-color: hsla(0, 0%, 100%, 0.28); }
 
-/* PO-token section: status line first (it IS the title there), then the
-   description, then right-aligned actions. */
-
-/* "Advanced" collapsible toggle (PO-token, optional) — same weight/color
-   family as .subTitle so it reads as a sub-section header, not a stray link. */
-
-/* Smooth height collapse for the PO-token section (grid-rows trick: content
-   stays mounted, so no re-fetch/re-render on every open). */
-
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .settingsBlock,
-    .hint,
     .sectionTitle,
     .dlFolder,
     .dlProxy,
@@ -1220,7 +1153,6 @@ onMounted(async () => {
     .proxySeg { width: 100%; }
 }
 
-/* Cookies: browser picker + file row (reuses the proxy segmented control). */
 .cookieSeg { margin-top: 12px; }
 .cookieDetail { margin-top: 12px; }
 .browserChips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1232,7 +1164,7 @@ onMounted(async () => {
     font-weight: 700;
     color: hsla(0, 0%, 100%, 0.65);
     background-color: hsla(0, 0%, 100%, 0.06);
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .browserChip:hover { color: #fff; background-color: hsla(0, 0%, 100%, 0.11); }
 .browserChip.active {

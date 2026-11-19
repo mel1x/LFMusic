@@ -55,15 +55,11 @@ const rawArtistName = computed(() => {
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
-// Case-insensitive lookup: backend groups artists by lowercased name, so
-// "Pyrokinesis" and "pyrokinesis" are the same artist.
 const artistPlaylist = computed(() => {
     const lower = rawArtistName.value.toLowerCase()
     return artistPlaylists.value.find(p => p.name.toLowerCase() === lower)
 })
 
-// Canonical artist name (from the playlist) ensures one nickname/avatar
-// regardless of URL casing. Falls back to the raw name before playlists load.
 const artistName = computed(() => artistPlaylist.value?.name ?? rawArtistName.value)
 
 const artistTracks = ref<TrackMetadata[]>([])
@@ -73,8 +69,6 @@ async function loadArtistTracks() {
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
-        // Use live cache objects, or covers loaded into the cached object later
-        // won't show up on these (raw, uncached) track references.
         artistTracks.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     } catch {
         artistTracks.value = []
@@ -90,8 +84,6 @@ const { avatarFor } = useExternalSources()
 const artistCover = computed(() => {
     const custom = getCustomCoverFn('artist', artistName.value)
     if (custom) return custom
-    // External avatar (if enabled) takes priority over the first track's cover
-    // since it represents the artist more accurately.
     const external = avatarFor(artistName.value)
     if (external) return external
     const path = artistPlaylist.value?.first_file_path
@@ -107,8 +99,6 @@ function albumCoverFor(name: string, fallback: string | null): string {
 }
 
 const previewTracks = computed(() => artistTracks.value.slice(0, 6))
-
-// ── Albums of this artist (album playlists whose first track has this artist) ──
 
 interface AlbumEntry {
     id: number
@@ -171,8 +161,6 @@ watch(artistTrackPathsSignature, () => {
     void refreshListenCount()
 }, { immediate: true })
 
-// ── Cover prefetch for visible items ───────────────────────────────────────
-
 function requestCovers() {
     const pending: TrackMetadata[] = []
     const headPath = artistPlaylist.value?.first_file_path
@@ -200,8 +188,6 @@ onMounted(async () => {
 
 watch(() => artistTracks.value.length, () => requestCovers())
 watch(artistName, () => requestCovers())
-
-// ── Albums line scroll ─────────────────────────────────────────────────────
 
 const albumsLineEl = ref<HTMLElement | null>(null)
 const scrollLeft = ref(0)
@@ -261,8 +247,6 @@ onUnmounted(() => {
     albumsRO = null
 })
 
-// ── Play artist ────────────────────────────────────────────────────────────
-
 const isArtistActive = computed(() =>
     activePlaylistSource.value === sourceId.value
 )
@@ -276,8 +260,6 @@ function onPlayArtist() {
     setPlaylistSource(sourceId.value, artistTracks.value)
     playTrack(artistTracks.value[0])
 }
-
-// ── Track interactions (preview list) ──────────────────────────────────────
 
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
@@ -296,8 +278,6 @@ function onCoverClick(track: TrackMetadata) {
     playTrack(track, { manualListStart: true })
 }
 
-// ── Track context menu ────────────────────────────────────────────────────
-
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
 function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
@@ -310,8 +290,6 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     const rect = btn.getBoundingClientRect()
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
-
-// ── Album interactions ────────────────────────────────────────────────────
 
 const { isPinned: isPinnedFn, togglePin } = usePins()
 
@@ -358,8 +336,6 @@ function openAlbumMenuFromCover(e: MouseEvent, album: AlbumEntry) {
     albumMenu.value = { x: e.clientX, y: e.clientY, album, centerX: false }
 }
 
-// ── Navigation ────────────────────────────────────────────────────────────
-
 const pageRootEl = ref<HTMLElement | null>(null)
 const scrollY = ref(0)
 
@@ -382,8 +358,6 @@ function openArtistTracks() {
 function openArtistAlbums() {
     router.push({ path: '/collections/albums', query: { q: artistName.value } })
 }
-
-// ── Artist page context menu (more button) ────────────────────────────────
 
 const artistMenu = ref<{ x: number; y: number } | null>(null)
 const isPinned = computed(() => isPinnedFn('artist', artistName.value))
@@ -587,7 +561,7 @@ function onCoverImgClick() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
@@ -619,7 +593,7 @@ function onCoverImgClick() {
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     width: fit-content;
 }
 .backBtn:hover {
@@ -628,7 +602,7 @@ function onCoverImgClick() {
 }
 .backBtn svg {
     color: hsla(0, 0%, 100%, 0.6);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
     color: hsla(0, 0%, 100%, 1);
@@ -655,7 +629,7 @@ function onCoverImgClick() {
     height: 200px;
     background-color: #202020;
     border-radius: 9999px;
-    transition: width .24s ease, height .24s ease, margin .24s ease, filter .28s ease;
+    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
@@ -684,7 +658,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.4);
     width: fit-content;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -724,7 +698,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.7);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .badge:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
@@ -749,7 +723,7 @@ function onCoverImgClick() {
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     font-size: 12px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.8);
@@ -774,15 +748,13 @@ function onCoverImgClick() {
     background-color: transparent;
     color: hsla(0, 0%, 100%, 0.6);
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .moreBtn:hover,
 .moreBtn.menuOpen {
     background-color: hsla(0, 0%, 100%, 0.08);
     color: hsla(0, 0%, 100%, 1);
 }
-
-/* ── Lines (Tracks / Albums) ───────────────────────────────────────────── */
 
 .pageLine {
     width: 100%;
@@ -808,7 +780,7 @@ function onCoverImgClick() {
     font-weight: 800;
     font-size: 24px;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 1);
@@ -819,7 +791,7 @@ function onCoverImgClick() {
     display: block;
     color: hsla(0, 0%, 100%, 0.4);
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .lineTitle:hover svg {
     margin-left: 12px;
@@ -840,7 +812,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.6);
     opacity: 0;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         border: 2px solid hsla(0, 0%, 100%, 0.4);
@@ -875,8 +847,6 @@ function onCoverImgClick() {
     display: none;
 }
 
-/* ── Track list (preview) ────────────────────────────────────────────── */
-
 .tracksList {
     margin-top: 0;
     display: flex;
@@ -889,8 +859,6 @@ function onCoverImgClick() {
     font-size: 14px;
     font-weight: 500;
 }
-
-/* ── Albums row card styles ──────────────────────────────────────────── */
 
 .playlistItem {
     flex-shrink: 0;
@@ -912,7 +880,7 @@ function onCoverImgClick() {
     height: var(--card-w, 210px);
     border-radius: 18px;
     object-fit: cover;
-    transition: filter .24s ease, transform .24s ease;
+    transition: filter var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
 .playlistItem:hover .cover,
@@ -931,7 +899,7 @@ function onCoverImgClick() {
     backdrop-filter: blur(8px);
     opacity: 0;
     transform: translateY(4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .playlistItem .overlayBtn:hover {

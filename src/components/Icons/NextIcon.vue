@@ -1,5 +1,5 @@
 <template>
-  <svg
+  <svg class="lfi lfi-next"
     width="28px"
     height="28px"
     viewBox="0 0 24 24"

@@ -25,6 +25,7 @@ import defaultTrackCover from '../assets/trackCover.webp';
 import { useI18n } from '../composables/useI18n';
 import { openYearRecap, seasonalRecapYear } from '../composables/useYearRecap';
 import { useSpectrum, SPECTRUM_BARS } from '../composables/useSpectrum';
+import ScannerBg from '../components/ScannerBg.vue';
 
 const router = useRouter();
 const { t } = useI18n();
@@ -46,35 +47,29 @@ const {
     getTrackByPath,
 } = usePlayer();
 
-// Mix settings ("wave" style tuning)
-
 const familiarityOptions: { id: Familiarity; label: string }[] = [
     { id: 'fresh', label: 'Незнакомое' },
     { id: 'balanced', label: 'Сбалансированно' },
     { id: 'favorite', label: 'Любимое' },
 ];
 
-// Mix settings singleton persisted to localStorage: survives navigation and app restart.
 const { selectedMood, familiarity, losslessOnly } = useMixSettings();
 const settingsOpen = ref(false);
 const isBuildingMix = ref(false);
 
 const currentMood = computed(() => moods.find(m => m.id === selectedMood.value) ?? moods[0]);
 
-// Background spectrum while music plays: mirrored, so the bass sits in the middle.
-// Bars are written straight to the DOM every frame, outside Vue.
-const AMBIENT_BARS = SPECTRUM_BARS * 2;
-const ambientBox = ref<HTMLElement | null>(null);
+const scanner = ref<InstanceType<typeof ScannerBg> | null>(null);
 const spectrum = useSpectrum();
 
-function drawAmbient(levels: Float32Array) {
-    const els = ambientBox.value?.children as HTMLCollectionOf<HTMLElement> | undefined;
-    if (!els || els.length !== AMBIENT_BARS) return;
-    for (let i = 0; i < SPECTRUM_BARS; i++) {
-        const t = `scaleY(${Math.max(0.03, levels[i])})`;
-        els[SPECTRUM_BARS - 1 - i].style.transform = t;
-        els[SPECTRUM_BARS + i].style.transform = t;
-    }
+function driveFlow(levels: Float32Array) {
+    let bass = 0;
+    for (let i = 0; i < 5; i++) bass += levels[i];
+    bass /= 5;
+    let all = 0;
+    for (let i = 0; i < SPECTRUM_BARS; i++) all += levels[i];
+    all /= SPECTRUM_BARS;
+    scanner.value?.setEnergy(Math.min(1, bass * 0.7 + all * 0.3));
 }
 
 const isMixActive = computed(() => activePlaylistSource.value === 'mix');
@@ -87,9 +82,6 @@ const mixOptions = computed<RecommendationOptions>(() => ({
     losslessOnly: losslessOnly.value || undefined,
 }));
 
-// Mix playback
-
-/** Mix queue paths: recommendation engine results, or shuffled full catalog as fallback (paths only, resolved lazily via cache). */
 async function buildMixPaths(mood: string): Promise<string[]> {
     let recs: TrackMetadata[] = [];
     try {
@@ -110,13 +102,7 @@ async function warmCovers(paths: string[]) {
     if (tracks.length) loadCoversForTracks(tracks);
 }
 
-/**
- * Start/refresh the wave.
- * By default builds a fully new queue and plays its first track — shuffle and
- * mood changes also change the current track.
- * @param keepCurrent true — current track keeps playing, only the queue tail
- *                    is rebuilt (used for wave composition/lossless changes).
- */
+/** Starts/refreshes the wave; `keepCurrent` keeps the current track and rebuilds only the tail. */
 async function startMix(mood: string, keepCurrent = false) {
     if (!hasLibrary.value || isBuildingMix.value) return;
     isBuildingMix.value = true;
@@ -124,7 +110,6 @@ async function startMix(mood: string, keepCurrent = false) {
         const fresh = await buildMixPaths(mood);
         if (fresh.length === 0) return;
 
-        // Deterministic wave queue (no global shuffle).
         shuffled.value = false;
 
         if (keepCurrent && isMixActive.value && currentTrack.value && currentTrackIndex.value >= 0) {
@@ -134,8 +119,6 @@ async function startMix(mood: string, keepCurrent = false) {
             setMixSourceFromPaths([...keepPaths, ...tail]);
             void warmCovers(tail.slice(0, 24));
         } else {
-            // If recommendations put the currently playing track first again,
-            // move it off position 0 so the current track is guaranteed to change.
             const currentPath = currentTrack.value?.file_path;
             if (currentPath && fresh.length > 1 && fresh[0] === currentPath) {
                 const j = 1 + Math.floor(Math.random() * (fresh.length - 1));
@@ -158,20 +141,18 @@ function onPlayMix() {
     void startMix(selectedMood.value);
 }
 
-/** Shuffle — new recommendation queue and new current track. */
+/** Shuffle - new recommendation queue and new current track. */
 function onShuffleMix() {
     void startMix(selectedMood.value);
 }
 
 function selectMood(id: string) {
     selectedMood.value = id;
-    // Mood change restarts the wave along with the current track.
     if (isMixActive.value) void startMix(id);
 }
 
 function selectFamiliarity(id: Familiarity) {
     familiarity.value = id;
-    // Changing wave composition only affects the tail — current track keeps playing.
     if (isMixActive.value) void startMix(selectedMood.value, true);
 }
 
@@ -182,8 +163,6 @@ function toggleLossless() {
 
 const familiarityLabel = computed(() => familiarityOptions.find(o => o.id === familiarity.value)?.label ?? '');
 
-// Statistics modal
-
 const statsOpen = ref(false);
 const statsLoading = ref(false);
 const taste = ref<TasteProfile | null>(null);
@@ -192,7 +171,6 @@ const topTracks = ref<{ track: TrackMetadata; listens: number }[]>([]);
 
 async function loadTopTracks() {
     const raw = await getMostPlayed(4);
-    // Live cache objects, so lazily loaded covers show up.
     cacheTracks(raw);
     const list = raw.map(tr => getTrackByPath(tr.file_path) ?? tr);
     loadCoversForTracks(list);
@@ -223,29 +201,39 @@ const hasTaste = computed(() => !!taste.value && taste.value.analyzed_tracks > 0
 const hasListens = computed(() => (summary.value?.total_listens ?? 0) > 0);
 const analyzedTracks = computed(() => taste.value?.analyzed_tracks ?? 0);
 
+const STATS_ICONS = {
+    time: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+    listens: '<path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/>',
+    library: '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
+    analyzed: '<path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/>',
+    morning: '<path d="M12 2v8"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m8 6 4-4 4 4"/><path d="M16 18a4 4 0 0 0-8 0"/>',
+    day: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+    evening: '<path d="M12 10V2"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m16 6-4 4-4-4"/><path d="M16 18a4 4 0 0 0-8 0"/>',
+    night: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+} as const;
+
 const statsFacts = computed(() => {
     const s = summary.value;
     const secs = s?.total_listened_secs ?? 0;
     const hours = Math.floor(secs / 3600);
     return [
         hours > 0
-            ? { value: hours.toLocaleString('ru-RU'), unit: t('stats.hoursShort'), label: 'За музыкой' }
-            : { value: String(Math.floor(secs / 60)), unit: t('stats.minutesShort'), label: 'За музыкой' },
-        { value: (s?.total_listens ?? 0).toLocaleString('ru-RU'), unit: '', label: 'Прослушиваний' },
-        { value: (s?.total_tracks ?? 0).toLocaleString('ru-RU'), unit: '', label: t('stats.libraryTracks') },
-        { value: analyzedTracks.value.toLocaleString('ru-RU'), unit: '', label: 'Проанализировано' },
+            ? { value: hours.toLocaleString('ru-RU'), unit: t('stats.hoursShort'), label: 'За музыкой', icon: STATS_ICONS.time }
+            : { value: String(Math.floor(secs / 60)), unit: t('stats.minutesShort'), label: 'За музыкой', icon: STATS_ICONS.time },
+        { value: (s?.total_listens ?? 0).toLocaleString('ru-RU'), unit: '', label: 'Прослушиваний', icon: STATS_ICONS.listens },
+        { value: (s?.total_tracks ?? 0).toLocaleString('ru-RU'), unit: '', label: t('stats.libraryTracks'), icon: STATS_ICONS.library },
+        { value: analyzedTracks.value.toLocaleString('ru-RU'), unit: '', label: 'Проанализировано', icon: STATS_ICONS.analyzed },
     ];
 });
 
-// Listening by time of day: shares for the segmented bar, the peak is highlighted.
 const dayParts = computed(() => {
     const s = summary.value;
     if (!s) return [];
     const parts = [
-        { id: 'morning', label: t('stats.morning'), count: s.morning_listens },
-        { id: 'day', label: t('stats.day'), count: s.day_listens },
-        { id: 'evening', label: t('stats.evening'), count: s.evening_listens },
-        { id: 'night', label: t('stats.night'), count: s.night_listens },
+        { id: 'morning', label: t('stats.morning'), count: s.morning_listens, icon: STATS_ICONS.morning },
+        { id: 'day', label: t('stats.day'), count: s.day_listens, icon: STATS_ICONS.day },
+        { id: 'evening', label: t('stats.evening'), count: s.evening_listens, icon: STATS_ICONS.evening },
+        { id: 'night', label: t('stats.night'), count: s.night_listens, icon: STATS_ICONS.night },
     ];
     const total = parts.reduce((sum, p) => sum + p.count, 0);
     if (total === 0) return [];
@@ -254,6 +242,7 @@ const dayParts = computed(() => {
         ...p,
         share: p.count / total,
         pct: Math.round((p.count / total) * 100),
+        rel: max > 0 ? Math.round((p.count / max) * 100) : 0,
         peak: p.count === max,
     }));
 });
@@ -290,7 +279,6 @@ const character = computed(() => {
     return t('stats.characterSentence', { traits });
 });
 
-// Year recap: only offered as a badge in December/January.
 const seasonYear = seasonalRecapYear();
 
 function onKeydown(e: KeyboardEvent) {
@@ -301,8 +289,7 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
     window.addEventListener('keydown', onKeydown);
-    // The bars are hidden with reduced motion (see CSS): no need to tap the FFT for them.
-    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) spectrum.start(drawAmbient);
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) spectrum.start(driveFlow);
 });
 
 onUnmounted(() => {
@@ -328,11 +315,10 @@ onUnmounted(() => {
             </button>
 
             <template v-if="hasLibrary">
-                <div ref="ambientBox" class="ambientBars" :class="{ on: isPlaying }" aria-hidden="true">
-                    <span v-for="i in AMBIENT_BARS" :key="i" class="ambientBar"></span>
-                </div>
-
                 <div class="stageArea">
+                    <div class="flowBg" aria-hidden="true">
+                        <ScannerBg ref="scanner" />
+                    </div>
                     <div class="mixStage">
                         <div class="mixHeader">
                             <div class="mixType">Персональная волна</div>
@@ -376,7 +362,6 @@ onUnmounted(() => {
                             <button v-if="losslessOnly" class="badge" @click="settingsOpen = true" v-tooltip:bottom="'Настройки микса'">Lossless</button>
                         </div>
 
-                        <!-- Fixed slot, so the stage doesn't jump when the mix starts. -->
                         <div class="mixNowSlot">
                             <Transition name="desc-fade">
                                 <div v-if="isMixActive && currentTrack" class="mixNow">
@@ -483,7 +468,7 @@ onUnmounted(() => {
                             <CloseIcon width="18" height="18" />
                         </button>
 
-                        <div v-if="statsLoading" class="statsLoading">Загрузка музыкального профиля…</div>
+                        <div v-if="statsLoading" class="statsLoading">Загрузка музыкального профиля...</div>
 
                         <template v-else-if="hasTaste || hasListens">
                             <div class="statsHead">
@@ -493,68 +478,59 @@ onUnmounted(() => {
                             </div>
 
                             <div class="statsFacts">
-                                <div v-for="f in statsFacts" :key="f.label" class="statsFact">
+                                <div v-for="f in statsFacts" :key="f.label" class="statsCard statsFact">
+                                    <span class="statsIcon">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="f.icon"></svg>
+                                    </span>
                                     <div class="statsFactValue">{{ f.value }}<span v-if="f.unit" class="statsFactUnit">{{ f.unit }}</span></div>
                                     <div class="statsFactLabel">{{ f.label }}</div>
                                 </div>
                             </div>
 
-                            <div class="statsGrid" :class="{ single: !hasTaste }">
-                                <div v-if="hasTaste" class="statsCol">
-                                    <div class="statsBlock">
-                                        <div class="statsLabel">{{ t('stats.sound') }}</div>
-                                        <div class="metricList">
-                                            <div v-for="m in metrics" :key="m.key" class="metricRow">
-                                                <div class="metricHead">
-                                                    <span class="metricName">{{ m.key }}</span>
-                                                    <span class="metricValue">{{ m.display }}</span>
-                                                </div>
-                                                <div class="metricTrack">
-                                                    <span class="metricFill" :style="{ width: `${Math.max(m.value, 2)}%` }"></span>
-                                                </div>
+                            <div class="statsGrid" :class="{ single: !hasTaste || !dayParts.length }">
+                                <div v-if="hasTaste" class="statsCard">
+                                    <div class="statsLabel">{{ t('stats.sound') }}</div>
+                                    <div class="metricList">
+                                        <div v-for="m in metrics" :key="m.key" class="metricRow">
+                                            <div class="metricHead">
+                                                <span class="metricName">{{ m.key }}</span>
+                                                <span class="metricValue">{{ m.display }}</span>
+                                            </div>
+                                            <div class="metricTrack">
+                                                <span class="metricFill" :style="{ width: `${Math.max(m.value, 2)}%` }"></span>
                                             </div>
                                         </div>
                                     </div>
                                 </div>
 
-                                <div class="statsCol">
-                                    <div v-if="dayParts.length" class="statsBlock">
-                                        <div class="statsLabel">{{ t('stats.dayTime') }}</div>
-                                        <div class="dayBar">
-                                            <span
-                                                v-for="p in dayParts.filter(d => d.count > 0)"
-                                                :key="p.id"
-                                                class="daySeg"
-                                                :class="[p.id, { peak: p.peak }]"
-                                                :style="{ flexGrow: p.share }"
-                                            ></span>
-                                        </div>
-                                        <div class="dayLegend">
-                                            <div v-for="p in dayParts" :key="p.id" class="dayItem" :class="{ peak: p.peak }">
-                                                <span class="dayDot" :class="p.id"></span>
-                                                <span class="dayName">{{ p.label }}</span>
-                                                <span class="dayPct">{{ p.pct }}%</span>
-                                            </div>
+                                <div v-if="dayParts.length" class="statsCard">
+                                    <div class="statsLabel">{{ t('stats.dayTime') }}</div>
+                                    <div class="dayGrid">
+                                        <div v-for="p in dayParts" :key="p.id" class="dayTile" :class="{ peak: p.peak }">
+                                            <svg class="dayIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="p.icon"></svg>
+                                            <div class="dayPct">{{ p.pct }}<span>%</span></div>
+                                            <div class="dayName">{{ p.label }}</div>
+                                            <div class="dayTrack"><span class="dayFill" :style="{ width: `${Math.max(p.rel, 3)}%` }"></span></div>
                                         </div>
                                     </div>
+                                </div>
 
-                                    <div v-if="topTracks.length" class="statsBlock">
-                                        <div class="statsLabel">{{ t('stats.topTracks') }}</div>
-                                        <div class="topList">
-                                            <div v-for="(item, i) in topTracks" :key="item.track.file_path" class="topRow">
-                                                <span class="topRank">{{ i + 1 }}</span>
-                                                <img
-                                                    class="topCover"
-                                                    :src="(getTrackByPath(item.track.file_path) ?? item.track).cover_art || defaultTrackCover"
-                                                    alt=""
-                                                    draggable="false"
-                                                />
-                                                <div class="topText">
-                                                    <div class="topTitle">{{ item.track.title || item.track.file_path.split(/[\\/]/).pop() }}</div>
-                                                    <div class="topArtist">{{ item.track.artist || t('recap.unknownArtist') }}</div>
-                                                </div>
-                                                <span v-if="item.listens > 0" class="topCount">{{ timesCountText(item.listens) }}</span>
+                                <div v-if="topTracks.length" class="statsCard statsWide">
+                                    <div class="statsLabel">{{ t('stats.topTracks') }}</div>
+                                    <div class="topList">
+                                        <div v-for="(item, i) in topTracks" :key="item.track.file_path" class="topRow">
+                                            <span class="topRank">{{ i + 1 }}</span>
+                                            <img
+                                                class="topCover"
+                                                :src="(getTrackByPath(item.track.file_path) ?? item.track).cover_art || defaultTrackCover"
+                                                alt=""
+                                                draggable="false"
+                                            />
+                                            <div class="topText">
+                                                <div class="topTitle">{{ item.track.title || item.track.file_path.split(/[\\/]/).pop() }}</div>
+                                                <div class="topArtist">{{ item.track.artist || t('recap.unknownArtist') }}</div>
                                             </div>
+                                            <span v-if="item.listens > 0" class="topCount">{{ timesCountText(item.listens) }}</span>
                                         </div>
                                     </div>
                                 </div>
@@ -593,39 +569,6 @@ onUnmounted(() => {
     overflow: hidden;
 }
 
-/* Live spectrum behind the page: flat, faint accent bars that appear only while music plays. */
-.ambientBars {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 46%;
-    z-index: 0;
-    display: flex;
-    align-items: flex-end;
-    gap: 6px;
-    padding: 0 28px;
-    box-sizing: border-box;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity .6s ease;
-}
-.ambientBars.on {
-    opacity: 1;
-}
-.ambientBar {
-    flex: 1;
-    height: 100%;
-    border-radius: 8px 8px 0 0;
-    background-color: hsla(var(--accent-h), var(--accent-s), 62%, 0.09);
-    transform: scaleY(0.03);
-    transform-origin: center bottom;
-    will-change: transform;
-}
-@media (prefers-reduced-motion: reduce) {
-    .ambientBars { display: none; }
-}
-
 .stageArea {
     position: relative;
     flex: 1;
@@ -636,10 +579,30 @@ onUnmounted(() => {
     justify-content: center;
 }
 
+.flowBg {
+    position: absolute;
+    inset: 8px 0 12px;
+    border-radius: 20px;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 0;
+    background-color: hsla(0, 0%, 100%, 0.022);
+}
+:global(body:not(.lfmusic-phone) .flowBg) {
+    -webkit-mask:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='84'%3E%3Cpath d='M0 0H11.16A18 18 0 0 1 29.1 19.41A33 33 0 0 0 64.59 54.9A18 18 0 0 1 84 72.84V84H0Z'/%3E%3C/svg%3E") right top / 84px 84px no-repeat,
+        linear-gradient(#000 0 0) left top / calc(100% - 84px) 100% no-repeat,
+        linear-gradient(#000 0 0) left bottom / 100% calc(100% - 84px) no-repeat;
+    mask:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='84'%3E%3Cpath d='M0 0H11.16A18 18 0 0 1 29.1 19.41A33 33 0 0 0 64.59 54.9A18 18 0 0 1 84 72.84V84H0Z'/%3E%3C/svg%3E") right top / 84px 84px no-repeat,
+        linear-gradient(#000 0 0) left top / calc(100% - 84px) 100% no-repeat,
+        linear-gradient(#000 0 0) left bottom / 100% calc(100% - 84px) no-repeat;
+}
+
 .statsBtn {
     position: absolute;
-    top: 20px;
-    right: 28px;
+    top: 34px;
+    right: 30px;
     z-index: 3;
     user-select: none;
     cursor: pointer;
@@ -653,7 +616,7 @@ onUnmounted(() => {
     border-radius: 50%;
     background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.75);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .statsBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.11);
@@ -662,8 +625,8 @@ onUnmounted(() => {
 
 .recapBadge {
     position: absolute;
-    top: 20px;
-    right: 78px;
+    top: 34px;
+    right: 84px;
     z-index: 3;
     user-select: none;
     cursor: pointer;
@@ -678,7 +641,7 @@ onUnmounted(() => {
     font-weight: 700;
     color: #fff;
     background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.92);
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .recapBadge:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 1);
@@ -688,7 +651,7 @@ onUnmounted(() => {
     height: 7px;
     border-radius: 50%;
     background: #fff;
-    animation: recapBadgePulse 2.4s ease-in-out infinite;
+    animation: recapBadgePulse 2.4s var(--ease-smooth-in-out) infinite;
 }
 @keyframes recapBadgePulse {
     0%, 100% { opacity: 1; transform: scale(1); }
@@ -740,7 +703,7 @@ onUnmounted(() => {
     min-height: 23px;
 }
 .desc-fade-enter-active,
-.desc-fade-leave-active { transition: opacity .2s ease, transform .2s ease; }
+.desc-fade-leave-active { transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth); }
 .desc-fade-enter-from { opacity: 0; transform: translateY(4px); }
 .desc-fade-leave-to { opacity: 0; transform: translateY(-4px); }
 
@@ -764,7 +727,7 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.7);
     font-size: 12px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     max-width: 100%;
     white-space: nowrap;
     overflow: hidden;
@@ -792,14 +755,15 @@ onUnmounted(() => {
     justify-content: center;
     gap: 8px;
     min-width: 168px;
-    padding: 14px 26px;
+    height: 48px;
+    padding: 0 26px;
     border: none;
     border-radius: 9999px;
     background-color: hsla(0, 0%, 100%, 1);
     color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
     font-size: 14px;
     font-weight: 700;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .playListBtn:hover:not(:disabled) { background-color: hsla(0, 0%, 100%, 0.84); }
 .playListBtn:disabled {
@@ -823,7 +787,7 @@ onUnmounted(() => {
     background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.78);
     box-sizing: border-box;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .roundBtn:hover:not(:disabled) {
     background-color: hsla(0, 0%, 100%, 0.12);
@@ -835,7 +799,6 @@ onUnmounted(() => {
     color: #fff;
 }
 
-/* Current mix track: one small cover, shown only while the mix is the active source. */
 .mixNowSlot {
     display: flex;
     justify-content: center;
@@ -851,7 +814,6 @@ onUnmounted(() => {
     max-width: 100%;
     padding: 6px 18px 6px 6px;
     border-radius: 999px;
-    /* Opaque (--light-bg lifted a step), so the background spectrum stays behind it. */
     background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 19%);
     box-sizing: border-box;
     text-align: left;
@@ -893,7 +855,6 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.5);
 }
 
-/* Mood tiles: the main way to steer the mix, so they get real size. */
 .moodGrid {
     position: relative;
     z-index: 2;
@@ -902,7 +863,6 @@ onUnmounted(() => {
     grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 10px;
     width: 100%;
-    max-width: 920px;
 }
 .moodTile {
     user-select: none;
@@ -911,16 +871,15 @@ onUnmounted(() => {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 4px;
-    padding: 16px 16px 15px;
+    gap: 3px;
+    padding: 12px 14px 11px;
     border: none;
     border-radius: 20px;
-    /* Opaque like .mixNow: the background spectrum passes behind, not through. */
     background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 18.5%);
     color: hsla(0, 0%, 100%, 0.9);
     font-family: inherit;
     text-align: left;
-    transition: background-color .2s ease, color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .moodTile:hover {
     background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 22%);
@@ -929,13 +888,13 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    margin-bottom: 10px;
+    width: 30px;
+    height: 30px;
+    margin-bottom: 6px;
     border-radius: 50%;
     background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(var(--accent-h), var(--accent-s), 72%, 1);
-    transition: background-color .2s ease, color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .moodTileName {
     max-width: 100%;
@@ -956,7 +915,7 @@ onUnmounted(() => {
     -webkit-box-orient: vertical;
     overflow: hidden;
     min-height: calc(2 * 1.35em);
-    transition: color .2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .moodTile.active {
     background-color: hsl(var(--accent-h), var(--accent-s), 52%);
@@ -1012,7 +971,7 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.85);
     font-size: 13px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .emptyBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.12);
@@ -1066,7 +1025,7 @@ onUnmounted(() => {
     border-radius: 9999px;
     background: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.7);
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .panelClose:hover { background: hsla(0, 0%, 100%, 0.12); color: #fff; }
 .panelBody {
@@ -1114,7 +1073,7 @@ onUnmounted(() => {
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.03);
     text-align: left;
-    transition: background 0.2s ease;
+    transition: background var(--duration-hover) var(--ease-smooth);
 }
 .moodRow:focus,
 .moodRow:active,
@@ -1138,7 +1097,7 @@ onUnmounted(() => {
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.05);
     color: hsla(var(--accent-h), var(--accent-s), 70%, 1);
-    transition: background .2s ease, color .2s ease;
+    transition: background var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
 }
 .moodRow:hover .moodIco {
@@ -1168,7 +1127,7 @@ onUnmounted(() => {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: color 0.2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .moodRow:hover .moodDesc { color: rgba(255, 255, 255, 0.6); }
 .moodRow.active .moodName { color: #fff; }
@@ -1183,7 +1142,7 @@ onUnmounted(() => {
     justify-content: center;
     flex-shrink: 0;
     box-sizing: border-box;
-    transition: border-color 0.2s ease;
+    transition: border-color var(--duration-hover) var(--ease-smooth);
 }
 .moodRow.active .moodRadio {
     border-color: hsla(var(--accent-h), var(--accent-s), 62%, 1);
@@ -1194,7 +1153,7 @@ onUnmounted(() => {
     border-radius: 50%;
     background-color: hsla(var(--accent-h), var(--accent-s), 62%, 1);
     transform: scale(0);
-    transition: transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+    transition: transform var(--duration-hover) cubic-bezier(0.32, 0.72, 0, 1);
 }
 .moodRow.active .moodRadioDot { transform: scale(1); }
 
@@ -1221,7 +1180,7 @@ onUnmounted(() => {
     font-size: 13px;
     font-weight: 600;
     white-space: nowrap;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .segment:hover { color: hsla(0, 0%, 100%, 0.82); }
 .segment.active {
@@ -1242,7 +1201,7 @@ onUnmounted(() => {
     border-radius: 999px;
     background: hsla(0, 0%, 100%, 0.03);
     text-align: left;
-    transition: background .2s ease;
+    transition: background var(--duration-hover) var(--ease-smooth);
 }
 .toggleRow:hover { background: hsla(0, 0%, 100%, 0.06); }
 .toggleText { display: flex; flex-direction: column; gap: 3px; }
@@ -1255,7 +1214,7 @@ onUnmounted(() => {
     height: 24px;
     border-radius: 9999px;
     background: hsla(0, 0%, 100%, 0.14);
-    transition: background .24s ease;
+    transition: background var(--duration-hover) var(--ease-smooth);
 }
 .switch.on { background: hsla(var(--accent-h), var(--accent-s), 55%, 1); }
 .knob {
@@ -1266,14 +1225,16 @@ onUnmounted(() => {
     height: 18px;
     border-radius: 50%;
     background: #fff;
-    transition: transform .24s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: transform .22s var(--icon-ease);
 }
 .switch.on .knob { transform: translateX(18px); }
 
 
 
-.panel-enter-active, .panel-leave-active { transition: opacity .24s ease; }
-.panel-enter-active .settingsPanel, .panel-leave-active .settingsPanel { transition: transform .28s cubic-bezier(0.32, 0.72, 0, 1); }
+.panel-enter-active { transition: opacity .26s var(--ease-smooth); }
+.panel-leave-active { transition: opacity .24s var(--ease-smooth-in-out); }
+.panel-enter-active .settingsPanel { transition: transform .26s var(--ease-smooth); }
+.panel-leave-active .settingsPanel { transition: transform .24s var(--ease-smooth-in-out); }
 .panel-enter-from, .panel-leave-to { opacity: 0; }
 .panel-enter-from .settingsPanel, .panel-leave-to .settingsPanel { transform: translateX(calc(100% + 12px)); }
 
@@ -1285,10 +1246,8 @@ onUnmounted(() => {
     .mixName { font-size: 42px; }
 }
 
-/* Phone breakpoint (canonical for this app; see other views too). */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .pageRoot { padding: 16px 10px; }
-    /* Phones: tiles shrink to icon + name chips that wrap. */
     .moodGrid {
         display: flex;
         flex-wrap: wrap;
@@ -1308,11 +1267,9 @@ onUnmounted(() => {
     .mixNowTitle { max-width: 240px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
     .mixName { font-size: 34px; letter-spacing: -0.8px; }
-    /* Own padding so text doesn't hit the edges even with the page's small padding. */
     .mixDesc { font-size: 14px; max-width: 100%; padding: 0 18px; box-sizing: border-box; }
     .playListBtn { min-width: 150px; min-height: 42px; padding: 13px 22px; font-size: 13px; }
     .roundBtn { width: 46px; height: 46px; }
-    /* Mix settings full-screen, no edge padding. */
     .settingsPanel {
         top: 0;
         right: 0;
@@ -1343,15 +1300,14 @@ onUnmounted(() => {
     padding: 24px;
     box-sizing: border-box;
 }
-/* Flat surface like the other modals; sections are separated by spacing only. */
 .statsModal {
-    --stats-s: max(min(var(--accent-s), 70%), 35%);
+    --stats-s: max(min(var(--accent-s), 70%), calc(35% * var(--accent-k, 1)));
     position: relative;
     width: 760px;
     max-width: 100%;
     max-height: 88vh;
     overflow-y: auto;
-    padding: 28px 30px 26px;
+    padding: 24px 26px;
     border-radius: 28px;
     background-color: var(--light-bg);
     box-shadow: 0 32px 90px hsla(0, 0%, 0%, 0.5);
@@ -1377,7 +1333,7 @@ onUnmounted(() => {
     border-radius: 9999px;
     background: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.7);
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .statsClose:hover {
     background: hsla(0, 0%, 100%, 0.12);
@@ -1393,140 +1349,145 @@ onUnmounted(() => {
 .statsHead {
     display: flex;
     flex-direction: column;
-    padding-right: 44px;
+    gap: 6px;
+    padding-right: 48px;
 }
 .statsKicker {
+    user-select: none;
     font-size: 11px;
     font-weight: 700;
-    letter-spacing: .12em;
+    letter-spacing: 1.2px;
     text-transform: uppercase;
-    color: hsla(var(--accent-h), min(var(--accent-s), 60%), 82%, 0.8);
-    user-select: none;
+    color: hsla(0, 0%, 100%, 0.42);
 }
 .statsTitle {
-    margin-top: 8px;
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 26px;
-    line-height: 1.15;
-    font-weight: 800;
-    letter-spacing: -0.01em;
-    color: hsla(0, 0%, 100%, 0.96);
     user-select: none;
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 30px;
+    font-weight: 800;
+    line-height: 1.1;
+    color: #fff;
 }
 .statsSubtitle {
-    margin-top: 6px;
     font-size: 14px;
-    line-height: 1.5;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.6);
+    line-height: 1.4;
+    color: hsl(var(--accent-h), min(var(--stats-s), 60%), 80%);
 }
 .statsLoading, .statsEmpty {
-    padding-right: 44px;
+    padding: 48px 24px;
+    text-align: center;
     font-size: 14px;
-    line-height: 1.55;
+    font-weight: 500;
+    line-height: 1.5;
     color: hsla(0, 0%, 100%, 0.55);
 }
 
-/* Four numbers in one row. */
+.statsCard {
+    min-width: 0;
+    padding: 16px 18px;
+    border-radius: 22px;
+    background-color: hsla(0, 0%, 100%, 0.035);
+    box-sizing: border-box;
+}
+.statsLabel {
+    user-select: none;
+    margin-bottom: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.42);
+}
+
 .statsFacts {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    column-gap: 24px;
-    margin-top: 24px;
+    gap: 10px;
+    margin-top: 18px;
 }
 .statsFact {
-    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    padding: 12px 14px 13px;
+}
+.statsIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    margin-bottom: 10px;
+    border-radius: 10px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsl(var(--accent-h), min(var(--stats-s), 70%), 80%);
 }
 .statsFactValue {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 26px;
-    line-height: 1.1;
+    font-size: 24px;
     font-weight: 800;
-    letter-spacing: -0.01em;
-    color: hsla(0, 0%, 100%, 0.96);
+    line-height: 1.1;
+    color: #fff;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.statsFact:first-child .statsFactValue {
-    color: hsl(var(--accent-h), var(--stats-s), 80%);
-}
 .statsFactUnit {
-    margin-left: 4px;
-    font-size: 15px;
+    margin-left: 3px;
+    font-size: 14px;
     font-weight: 700;
-    opacity: 0.6;
+    color: hsla(0, 0%, 100%, 0.5);
 }
 .statsFactLabel {
+    margin-top: 4px;
     font-size: 12px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.5);
+    color: hsla(0, 0%, 100%, 0.48);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    user-select: none;
 }
 
 .statsGrid {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    column-gap: 40px;
-    margin-top: 34px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
 }
 .statsGrid.single {
     grid-template-columns: minmax(0, 1fr);
 }
-.statsCol {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-}
-.statsLabel {
-    margin-bottom: 14px;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: .1em;
-    text-transform: uppercase;
-    color: hsla(0, 0%, 100%, 0.42);
-    user-select: none;
-}
-.statsBlock + .statsBlock {
-    margin-top: 24px;
+.statsWide {
+    grid-column: 1 / -1;
 }
 
-/* Sound metrics: same thin accent bars as the time-of-day strip. */
 .metricList {
     display: flex;
     flex-direction: column;
-    gap: 28px;
+    gap: 11px;
 }
 .metricHead {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 8px;
+    gap: 10px;
+    margin-bottom: 6px;
 }
 .metricName {
-    min-width: 0;
     font-size: 13px;
     font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.85);
+    color: hsla(0, 0%, 100%, 0.82);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    user-select: none;
 }
 .metricValue {
     flex-shrink: 0;
     font-size: 12px;
     font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.5);
     font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.5);
 }
 .metricTrack {
     height: 6px;
@@ -1539,105 +1500,105 @@ onUnmounted(() => {
     height: 100%;
     border-radius: 9999px;
     background-color: hsl(var(--accent-h), var(--stats-s), 68%);
-    transform-origin: left center;
-    animation: daySegIn .5s cubic-bezier(.2, .8, .2, 1);
 }
 
-/* Time of day: light-to-dark accent tones, like the sun going down. */
-.dayBar {
-    display: flex;
-    gap: 3px;
-    height: 10px;
-}
-.daySeg {
-    flex-basis: 0;
-    min-width: 6px;
-    border-radius: 3px;
-    transform-origin: left center;
-    animation: daySegIn .5s cubic-bezier(.2, .8, .2, 1);
-}
-.daySeg:first-child { border-radius: 9999px 3px 3px 9999px; }
-.daySeg:last-child { border-radius: 3px 9999px 9999px 3px; }
-@keyframes daySegIn {
-    from { transform: scaleX(0.6); opacity: 0; }
-    to { transform: scaleX(1); opacity: 1; }
-}
-.daySeg.morning, .dayDot.morning { background: hsl(var(--accent-h), var(--stats-s), 84%); }
-.daySeg.day, .dayDot.day { background: hsl(var(--accent-h), var(--stats-s), 68%); }
-.daySeg.evening, .dayDot.evening { background: hsl(var(--accent-h), var(--stats-s), 52%); }
-.daySeg.night, .dayDot.night { background: hsl(var(--accent-h), var(--stats-s), 36%); }
-.dayLegend {
+.dayGrid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
-    margin-top: 14px;
 }
-.dayItem {
-    min-width: 0;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    column-gap: 6px;
-    row-gap: 3px;
-}
-.dayDot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-}
-.dayName {
-    font-size: 12px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.5);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    user-select: none;
-}
-.dayPct {
-    grid-column: 1 / -1;
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 16px;
-    font-weight: 800;
-    color: hsla(0, 0%, 100%, 0.55);
-    font-variant-numeric: tabular-nums;
-}
-.dayItem.peak .dayName { color: hsla(0, 0%, 100%, 0.85); }
-.dayItem.peak .dayPct { color: hsla(0, 0%, 100%, 0.96); }
-
-.topList {
+.dayTile {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-}
-.topRow {
     min-width: 0;
-    display: grid;
-    grid-template-columns: 14px 40px minmax(0, 1fr) auto;
-    align-items: center;
-    column-gap: 12px;
+    padding: 10px 12px 12px;
+    border-radius: 16px;
+    background-color: hsla(0, 0%, 100%, 0.035);
 }
-.topRank {
-    font-size: 12px;
-    font-weight: 700;
-    text-align: center;
-    color: hsla(0, 0%, 100%, 0.35);
-    font-variant-numeric: tabular-nums;
-    user-select: none;
+.dayTile.peak {
+    background-color: hsla(var(--accent-h), var(--stats-s), 60%, 0.12);
 }
-.topRow:first-child .topRank {
+.dayIcon {
+    color: hsla(0, 0%, 100%, 0.45);
+}
+.dayTile.peak .dayIcon {
     color: hsl(var(--accent-h), var(--stats-s), 78%);
 }
+.dayPct {
+    margin-top: 8px;
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 22px;
+    font-weight: 800;
+    line-height: 1;
+    color: hsla(0, 0%, 100%, 0.82);
+    font-variant-numeric: tabular-nums;
+}
+.dayPct span {
+    margin-left: 1px;
+    font-size: 13px;
+    color: hsla(0, 0%, 100%, 0.45);
+}
+.dayTile.peak .dayPct {
+    color: #fff;
+}
+.dayName {
+    margin-top: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.5);
+}
+.dayTrack {
+    margin-top: 8px;
+    height: 6px;
+    border-radius: 9999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    overflow: hidden;
+}
+.dayFill {
+    display: block;
+    height: 100%;
+    border-radius: 9999px;
+    background-color: hsla(0, 0%, 100%, 0.3);
+}
+.dayTile.peak .dayFill {
+    background-color: hsl(var(--accent-h), var(--stats-s), 68%);
+}
+
+.topList {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px 14px;
+}
+.topRow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    padding: 6px;
+    border-radius: 14px;
+}
+.topRank {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.35);
+}
+.topRow:first-child .topRank {
+    color: hsl(var(--accent-h), var(--stats-s), 75%);
+}
 .topCover {
+    flex-shrink: 0;
     width: 40px;
     height: 40px;
-    border-radius: 6px;
+    border-radius: 9px;
     object-fit: cover;
-    display: block;
-    background: hsla(0, 0%, 100%, 0.06);
-    user-select: none;
+    background-color: hsla(0, 0%, 100%, 0.06);
 }
 .topText {
+    flex: 1;
     min-width: 0;
 }
 .topTitle, .topArtist {
@@ -1646,28 +1607,29 @@ onUnmounted(() => {
     text-overflow: ellipsis;
 }
 .topTitle {
-    font-size: 13.5px;
+    font-size: 14px;
     font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.92);
+    color: #fff;
 }
 .topArtist {
     margin-top: 2px;
     font-size: 12px;
-    color: hsla(0, 0%, 100%, 0.5);
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.48);
 }
 .topCount {
+    flex-shrink: 0;
     font-size: 12px;
-    color: hsla(0, 0%, 100%, 0.42);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
-    white-space: nowrap;
+    color: hsla(0, 0%, 100%, 0.45);
 }
 
-.stats-enter-active, .stats-leave-active { transition: opacity .2s ease; }
-.stats-enter-active .statsModal, .stats-leave-active .statsModal { transition: transform .24s cubic-bezier(0.32, 0.72, 0, 1), opacity .24s ease; }
+.stats-enter-active, .stats-leave-active { transition: opacity var(--duration-modal) var(--ease-smooth); }
+.stats-enter-active .statsModal, .stats-leave-active .statsModal { transition: transform var(--duration-modal) var(--ease-smooth), opacity var(--duration-modal) var(--ease-smooth); }
 .stats-enter-from, .stats-leave-to { opacity: 0; }
-.stats-enter-from .statsModal, .stats-leave-to .statsModal { transform: scale(0.96) translateY(6px); opacity: 0; }
+.stats-enter-from .statsModal, .stats-leave-to .statsModal { transform: translateY(8px) scale(.98); opacity: 0; }
 
-/* Phones: stats modal full-screen, no edge padding, one column. */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .statsBackdrop { padding: 0; }
     .statsModal {
@@ -1676,16 +1638,21 @@ onUnmounted(() => {
         height: 100%;
         max-height: none;
         border-radius: 0;
-        padding: calc(var(--safe-top, 0px) + 26px) 20px calc(var(--safe-bottom, 0px) + 28px);
+        padding: calc(var(--safe-top, 0px) + 26px) 16px calc(var(--safe-bottom, 0px) + 28px);
     }
     .statsClose { top: calc(var(--safe-top, 0px) + 18px); }
+    .statsTitle { font-size: 26px; }
     .statsFacts {
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        row-gap: 18px;
     }
     .statsGrid {
         grid-template-columns: minmax(0, 1fr);
-        row-gap: 32px;
+    }
+    .topList {
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .statsCard {
+        padding: 16px;
     }
 }
 </style>

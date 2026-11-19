@@ -25,8 +25,6 @@ function trackTitle(track: TrackMetadata): string {
   return track.title || fileName || 'LFMusic'
 }
 
-// System media controls on desktop Linux via MPRIS (souvlaki backend).
-// No-op elsewhere (Windows uses the taskbar, Android uses useAndroidMediaSession).
 export function useLinuxMediaSession(options: LinuxMediaSessionOptions) {
   if (!isLinuxDesktop()) return
 
@@ -40,7 +38,6 @@ export function useLinuxMediaSession(options: LinuxMediaSessionOptions) {
       title: track ? trackTitle(track) : null,
       artist: track?.artist ? joinArtists(track.artist, settings.value.artist_separators) : null,
       album: track?.album || null,
-      // Backend builds a file:// URL to the cached WebP thumbnail from file_path.
       filePath: track?.file_path || null,
       durationSecs: Math.max(0, options.durationSecs.value || 0),
     }).catch(() => {})
@@ -75,7 +72,6 @@ export function useLinuxMediaSession(options: LinuxMediaSessionOptions) {
     }
   }
 
-  // Metadata: on track, cover, or duration change.
   watch(
     [
       () => options.currentTrack.value?.file_path,
@@ -89,13 +85,11 @@ export function useLinuxMediaSession(options: LinuxMediaSessionOptions) {
     { immediate: true },
   )
 
-  // Play/pause/stop state is sent immediately (with the current position).
   watch(
     () => options.playbackState.value,
     () => sendPlayback(),
   )
 
-  // Position updates throttled to once per 3s; MPRIS clients extrapolate themselves.
   watch(options.positionSecs, () => {
     const now = Date.now()
     if (now - lastPositionSentAt < 3000) return

@@ -12,9 +12,6 @@ const normalizedSourceMap = Object.fromEntries(
     Object.entries(sourceMap).map(([key, value]) => [normalizeSpaces(key), value])
 )
 const enTextCache = new Map<string, string>()
-// Text with no translation (track titles, names: the bulk of the DOM) is remembered
-// too, so the observer doesn't rerun the lookups and patterns on every re-render.
-// Bounded, since such strings are open-ended.
 const enMissCache = new Set<string>()
 const EN_MISS_CACHE_MAX = 20_000
 
@@ -152,8 +149,6 @@ export function translateText(text: string): string {
     return finish(text)
 }
 
-// Singleton: previously every calling component registered its own watch on
-// language, duplicating document.documentElement.lang writes.
 let i18nInstance: ReturnType<typeof createI18n> | null = null
 
 export function useI18n() {

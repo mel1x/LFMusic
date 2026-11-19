@@ -9,10 +9,6 @@ import { peakIndex, recapCovers, type RecapCard } from './recapCards'
 import CountUp from './CountUp.vue'
 import RecapCover from './RecapCover.vue'
 
-// One story card. Visual language follows the rest of the app: a dark surface
-// with a single light of the cover's accent (or the cover itself, blurred),
-// covers as the main material, and quiet type with clear hierarchy.
-
 const props = defineProps<{ card: RecapCard; recap: YearRecap; playingUrl: string | null }>()
 const emit = defineEmits<{ (e: 'sound', url: string | null): void; (e: 'replay'): void }>()
 
@@ -92,7 +88,6 @@ const minutesEquivalent = computed(() => {
   return t('recap.minutes.hours', { hours: count(Math.max(1, Math.round(hours)), 'hours') })
 })
 
-// Whole rows only: 3 per row in the intro wall, 4 in the variety grid.
 const introCovers = computed(() => {
   const covers = recapCovers(r.value, 9)
   return covers.slice(0, covers.length - (covers.length % 3))
@@ -149,7 +144,6 @@ function playRow(url: string | null) {
     </div>
 
     <div class="rcBody">
-      <!-- Not enough history -->
       <template v-if="card.kind === 'empty'">
         <div class="rcCenter">
           <div class="rcKicker s0">{{ t('recap.title', { year: recap.year }) }}</div>
@@ -158,7 +152,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Intro -->
       <template v-else-if="card.kind === 'intro'">
         <div class="rcMain end">
           <div class="rcKicker s0">LFMusic</div>
@@ -168,7 +161,6 @@ function playRow(url: string | null) {
         <div class="rcFoot s3">{{ t('recap.intro.hint') }}</div>
       </template>
 
-      <!-- Minutes -->
       <template v-else-if="card.kind === 'minutes'">
         <div class="rcKicker s0">{{ t('recap.minutes.kicker') }}</div>
         <div class="rcMain">
@@ -182,7 +174,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- First track of the year -->
       <template v-else-if="card.kind === 'first' && card.track">
         <div class="rcKicker s0">{{ t('recap.first.kicker') }}</div>
         <div class="rcMain">
@@ -195,7 +186,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Variety -->
       <template v-else-if="card.kind === 'variety'">
         <div class="rcKicker s0">{{ t('recap.variety.kicker') }}</div>
         <div class="rcMain">
@@ -212,7 +202,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Track of the year -->
       <template v-else-if="card.kind === 'topTrack' && card.track">
         <div class="rcKicker s0">{{ t('recap.topTrack.kicker') }}</div>
         <div class="rcMain">
@@ -226,7 +215,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Top tracks -->
       <template v-else-if="card.kind === 'topTracks' && card.tracks">
         <div class="rcKicker s0">{{ t('recap.topTracks.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.topTracks.title') }}</div>
@@ -255,7 +243,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Artist of the year / discovery -->
       <template v-else-if="(card.kind === 'topArtist' || card.kind === 'discovery') && card.artist">
         <div class="rcKicker s0">{{ t(`recap.${card.kind}.kicker`) }}</div>
         <div class="rcMain center">
@@ -273,7 +260,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Top artists -->
       <template v-else-if="card.kind === 'topArtists' && card.artists">
         <div class="rcKicker s0">{{ t('recap.topArtists.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.topArtists.title') }}</div>
@@ -302,7 +288,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Album of the year -->
       <template v-else-if="card.kind === 'topAlbum' && card.album">
         <div class="rcKicker s0">{{ t('recap.topAlbum.kicker') }}</div>
         <div class="rcMain">
@@ -316,7 +301,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Genres -->
       <template v-else-if="card.kind === 'genres' && card.genres">
         <div class="rcKicker s0">{{ t('recap.genres.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.genres.title') }}</div>
@@ -336,7 +320,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Time of day -->
       <template v-else-if="card.kind === 'moments' && card.moment">
         <div class="rcKicker s0">{{ t('recap.moments.kicker') }}</div>
         <div class="rcMain">
@@ -360,7 +343,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- One track on repeat -->
       <template v-else-if="card.kind === 'obsession' && card.obsession">
         <div class="rcKicker s0">{{ t('recap.obsession.kicker') }}</div>
         <div class="rcMain">
@@ -376,7 +358,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Longest session -->
       <template v-else-if="card.kind === 'marathon' && card.session">
         <div class="rcKicker s0">{{ t('recap.marathon.kicker') }}</div>
         <div class="rcMain">
@@ -392,7 +373,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Months, streak, record day -->
       <template v-else-if="card.kind === 'rhythm'">
         <div class="rcKicker s0">{{ t('recap.rhythm.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.rhythm.title', { month: peakMonth }) }}</div>
@@ -416,7 +396,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Collection growth -->
       <template v-else-if="card.kind === 'collection'">
         <div class="rcKicker s0">{{ t('recap.collection.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.collection.title') }}</div>
@@ -445,7 +424,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Listening habits -->
       <template v-else-if="card.kind === 'habits'">
         <div class="rcKicker s0">{{ t('recap.habits.kicker') }}</div>
         <div class="rcMain">
@@ -460,7 +438,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Character -->
       <template v-else-if="card.kind === 'character' && card.character">
         <div class="rcKicker s0">{{ t('recap.character.kicker') }}</div>
         <div class="rcMain">
@@ -474,7 +451,6 @@ function playRow(url: string | null) {
         </div>
       </template>
 
-      <!-- Summary -->
       <template v-else-if="card.kind === 'outro'">
         <div class="rcKicker s0">{{ t('recap.title', { year: recap.year }) }}</div>
         <div class="rcTitle s1">{{ t('recap.outro.title') }}</div>
@@ -505,7 +481,6 @@ function playRow(url: string | null) {
   --h: var(--rc-h, var(--accent-h, 250));
   --s: var(--rc-s, var(--accent-s, 45%));
   --display: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  /* Tamed accent for small highlights: bars, peaks, eq. */
   --accent-soft: hsl(var(--h), min(var(--s), 70%), 72%);
   position: absolute;
   inset: 0;
@@ -513,11 +488,8 @@ function playRow(url: string | null) {
   color: hsla(0, 0%, 100%, 0.96);
   user-select: none;
   background: hsl(var(--h), min(var(--s), 26%), 8%);
-  /* Type is sized against the card (cqw/cqh), which follows the window size. */
   container-type: size;
 }
-
-/* ── Backgrounds ─────────────────────────────────────────────────────────── */
 
 .rcBg {
   position: absolute;
@@ -557,7 +529,6 @@ function playRow(url: string | null) {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
 
-/* Intro: the year's covers as a quiet wall behind the title. */
 .rcMosaic {
   position: absolute;
   inset: 0 0 auto 0;
@@ -572,11 +543,9 @@ function playRow(url: string | null) {
 .rcMosaicCover {
   aspect-ratio: 1;
   border-radius: 8px;
-  animation: rcFade .8s ease both;
+  animation: rcFade .8s var(--ease-smooth) both;
   animation-delay: calc(var(--i) * 0.05s);
 }
-
-/* ── Layout ──────────────────────────────────────────────────────────────── */
 
 .rcBody {
   position: relative;
@@ -612,9 +581,8 @@ function playRow(url: string | null) {
   gap: 10px;
 }
 
-/* Staggered entrance: s0..s3 appear one after another. */
 .s0, .s1, .s2, .s3 {
-  animation: rcRise .5s cubic-bezier(.2, .8, .2, 1) both;
+  animation: rcRise .5s var(--ease-smooth) both;
 }
 .s1 { animation-delay: .08s; }
 .s2 { animation-delay: .18s; }
@@ -627,8 +595,6 @@ function playRow(url: string | null) {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-
-/* ── Type ────────────────────────────────────────────────────────────────── */
 
 .rcKicker {
   font-size: 11px;
@@ -696,7 +662,6 @@ function playRow(url: string | null) {
   color: hsla(0, 0%, 100%, 0.5);
 }
 
-/* Days with music out of the year. */
 .rcMeter {
   height: 4px;
   margin-bottom: 10px;
@@ -711,10 +676,9 @@ function playRow(url: string | null) {
   border-radius: inherit;
   background: var(--accent-soft);
   transform-origin: left;
-  animation: rcGrow 1s cubic-bezier(.2, .8, .2, 1) .5s both;
+  animation: rcGrow 1s var(--ease-smooth) .5s both;
 }
 
-/* Label / value rows with hairline dividers, like settings rows. */
 .rcRows {
   display: flex;
   flex-direction: column;
@@ -756,8 +720,6 @@ function playRow(url: string | null) {
   color: hsla(0, 0%, 100%, 0.85);
   background: hsla(0, 0%, 100%, 0.08);
 }
-
-/* ── Covers ──────────────────────────────────────────────────────────────── */
 
 .rcHeroCover {
   width: min(100%, 46cqh);
@@ -837,11 +799,9 @@ function playRow(url: string | null) {
 .rcGridCover {
   aspect-ratio: 1;
   border-radius: 6px;
-  animation: rcRise .5s cubic-bezier(.2, .8, .2, 1) both;
+  animation: rcRise .5s var(--ease-smooth) both;
   animation-delay: calc(.25s + var(--i) * .04s);
 }
-
-/* ── Lists ───────────────────────────────────────────────────────────────── */
 
 .rcList {
   flex: 1;
@@ -863,8 +823,8 @@ function playRow(url: string | null) {
   color: inherit;
   background: transparent;
   cursor: pointer;
-  transition: background-color .18s ease;
-  animation: rcRise .45s cubic-bezier(.2, .8, .2, 1) both;
+  transition: background-color var(--duration-hover) var(--ease-smooth);
+  animation: rcRise .45s var(--ease-smooth) both;
   animation-delay: calc(.2s + var(--i) * .05s);
 }
 .rcRow:disabled {
@@ -897,7 +857,7 @@ function playRow(url: string | null) {
   height: 100%;
   border-radius: 1px;
   background: var(--accent-soft);
-  animation: rcEq .9s ease-in-out infinite alternate;
+  animation: rcEq .9s var(--ease-smooth-in-out) infinite alternate;
 }
 .rcEq i:nth-child(2) { animation-delay: -.3s; }
 .rcEq i:nth-child(3) { animation-delay: -.6s; }
@@ -939,15 +899,13 @@ function playRow(url: string | null) {
   color: hsla(0, 0%, 100%, 0.5);
 }
 
-/* ── Genres ──────────────────────────────────────────────────────────────── */
-
 .rcGenres {
   display: flex;
   flex-direction: column;
   gap: 22px;
 }
 .rcGenre {
-  animation: rcRise .5s cubic-bezier(.2, .8, .2, 1) both;
+  animation: rcRise .5s var(--ease-smooth) both;
   animation-delay: calc(.2s + var(--i) * .08s);
 }
 .rcGenreHead {
@@ -984,7 +942,7 @@ function playRow(url: string | null) {
   border-radius: inherit;
   background: var(--accent-soft);
   transform-origin: left;
-  animation: rcGrow .9s cubic-bezier(.2, .8, .2, 1) both;
+  animation: rcGrow .9s var(--ease-smooth) both;
 }
 .rcGenre .rcBar span {
   animation-delay: calc(.35s + var(--i) * .08s);
@@ -993,8 +951,6 @@ function playRow(url: string | null) {
   from { transform: scaleX(0); }
   to { transform: scaleX(1); }
 }
-
-/* ── Charts ──────────────────────────────────────────────────────────────── */
 
 .rcChart.grow {
   flex: 1;
@@ -1019,7 +975,7 @@ function playRow(url: string | null) {
   border-radius: 2px;
   background: hsla(0, 0%, 100%, 0.16);
   transform-origin: bottom;
-  animation: rcGrowUp .6s cubic-bezier(.2, .8, .2, 1) both;
+  animation: rcGrowUp .6s var(--ease-smooth) both;
   animation-delay: calc(.3s + var(--i) * .015s);
 }
 .rcBars.months span {
@@ -1050,8 +1006,6 @@ function playRow(url: string | null) {
   text-align: center;
 }
 
-/* ── Collection ──────────────────────────────────────────────────────────── */
-
 .rcFacts {
   display: flex;
   flex-direction: column;
@@ -1062,7 +1016,7 @@ function playRow(url: string | null) {
   gap: 14px;
   padding: 14px 0;
   border-top: 1px solid hsla(0, 0%, 100%, 0.08);
-  animation: rcRise .5s cubic-bezier(.2, .8, .2, 1) both;
+  animation: rcRise .5s var(--ease-smooth) both;
   animation-delay: calc(.2s + var(--i) * .08s);
 }
 .rcFact:first-child {
@@ -1090,8 +1044,6 @@ function playRow(url: string | null) {
   border-top: 1px solid hsla(0, 0%, 100%, 0.08);
 }
 
-/* ── Summary ─────────────────────────────────────────────────────────────── */
-
 .rcSummaryTop {
   display: flex;
   align-items: center;
@@ -1118,13 +1070,12 @@ function playRow(url: string | null) {
   color: #fff;
   background: hsla(var(--h), var(--s), 58%, 0.28);
   cursor: pointer;
-  transition: background-color .18s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .rcButton:hover {
   background: hsla(var(--h), var(--s), 58%, 0.4);
 }
 
-/* Short cards (small windows, phones in landscape). */
 @media (max-height: 640px) {
   .rcBody { padding: 62px 22px 22px; }
   .rcRow { height: 52px; }

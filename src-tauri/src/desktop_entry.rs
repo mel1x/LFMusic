@@ -1,10 +1,5 @@
-//! Linux: registers the app in the user's desktop (`~/.local/share`) so panels
-//! and taskbars show the LFMusic logo. On Wayland the compositor only knows the
-//! window's app_id (`lfmusic`, the binary name) and the panel resolves the icon
-//! through a matching `.desktop` file; the window icon set by GTK is ignored.
-//! A plain binary (`tauri build --no-bundle`, a copied release) has no such
-//! file, so it would get a generic icon. Packaged installs (.deb/.rpm under
-//! /usr, /opt) ship their own entry and are left alone.
+//! Linux: registers a `.desktop` entry so Wayland panels show the app icon (they ignore the GTK
+//! window icon). Packaged installs are left alone.
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -19,8 +14,6 @@ mod imp {
         ("512x512", include_bytes!("../icons/icon.png")),
     ];
 
-    /// Writes `contents` only if the file is missing or differs, so a regular
-    /// start touches nothing (and doesn't wake panels watching these dirs).
     fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         if fs::read(path).ok().as_deref() == Some(contents) {
             return Ok(());
@@ -32,7 +25,6 @@ mod imp {
     }
 
     fn quote_exec(path: &str) -> String {
-        // Desktop Entry spec: quoted args escape `"`, `` ` ``, `$` and `\`.
         let mut out = String::from("\"");
         for c in path.chars() {
             if matches!(c, '"' | '`' | '$' | '\\') {
@@ -45,7 +37,6 @@ mod imp {
     }
 
     pub fn register(data_dir: PathBuf) {
-        // AppImage runs from a temporary mount; the stable path is $APPIMAGE.
         let exe = match std::env::var_os("APPIMAGE") {
             Some(p) => PathBuf::from(p),
             None => match std::env::current_exe() {

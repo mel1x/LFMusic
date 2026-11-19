@@ -1,7 +1,3 @@
-// Display names for genre tags. Tracks downloaded from streaming sources carry
-// short ids ("rusrap", "local-indie", "phonkgenre"); everything else is shown as
-// written in the tags.
-
 type GenreName = [ru: string, en: string]
 
 const GENRE_NAMES: Record<string, GenreName> = {

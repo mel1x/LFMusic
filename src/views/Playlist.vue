@@ -61,13 +61,10 @@ const playlist = computed<PlaylistInfo | undefined>(() =>
     playlists.value.find(p => p.id === playlistId.value)
 )
 
-// The built-in "Мне нравится" playlist can't be renamed/deleted and uses a
-// fixed accent-tinted cover instead of a track thumbnail.
 const isFavorites = computed(() => playlist.value?.kind === 'Favorites')
 
 const playlistTrackPaths = ref<string[]>([])
-// The page's own copies: a playlist bigger than the shared track cache can't
-// rely on it (misses would refetch and evict each other forever).
+// Own copies: a playlist bigger than the shared cache would refetch and evict forever.
 const ownTracks = shallowRef(new Map<string, TrackMetadata>())
 
 async function reloadPlaylistTracks() {
@@ -81,7 +78,6 @@ async function reloadPlaylistTracks() {
         ownTracks.value = new Map(tracks.map(t => [t.file_path, t]))
         playlistTrackPaths.value = tracks.map(t => t.file_path)
     } catch (e) {
-        // Deleted playlist or a backend error: show it empty instead of an endless loader.
         console.error('Ошибка загрузки треков плейлиста:', e)
         ownTracks.value = new Map()
         playlistTrackPaths.value = []
@@ -92,7 +88,6 @@ const playlistTracks = computed<TrackMetadata[]>(() => {
     const out: TrackMetadata[] = []
     const own = ownTracks.value
     for (const p of playlistTrackPaths.value) {
-        // Live cache object first, so lazily loaded covers show.
         const t = peekTrackByPath(p) ?? own.get(p)
         if (t) out.push(t)
     }
@@ -113,8 +108,6 @@ const playlistCover = computed(() => {
     if (custom) return custom
     return firstCoverTrack.value?.cover_art || defaultPlaylistCover
 })
-
-// ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 import { menuAnchorBelow } from '../utils/menu'
@@ -144,8 +137,6 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-// On the favorites playlist, drop tracks the moment they're unliked (from a row
-// heart or a context menu anywhere), instead of waiting for a reload.
 const baseTracks = computed(() =>
     isFavorites.value ? playlistTracks.value.filter(t => isFavorite(t.file_path)) : playlistTracks.value
 )
@@ -164,14 +155,10 @@ const filteredTracks = computed(() => {
     )
 })
 
-// ── Header height ──
-
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
 let headerResizeObserver: ResizeObserver | null = null
 
-// Gate must stay closed until playlist tracks are loaded, or it opens on an
-// empty list, content flashes, then the loader appears over the cover fetch.
 const dataReady = ref(false)
 
 onMounted(async () => {
@@ -204,8 +191,6 @@ onUnmounted(() => {
 })
 
 watch(playlistId, async () => {
-    // Close the gate while switching playlists, or it'd stay open and flash
-    // the previous playlist's content while the new one's tracks load.
     dataReady.value = false
     await reloadPlaylistTracks()
     dataReady.value = true
@@ -216,8 +201,6 @@ watch(firstCoverTrack, (track) => {
         loadCoversForTracks([track])
     }
 }, { immediate: true })
-
-// ── Virtual scroll ──
 
 const {
     containerEl: trackListEl,
@@ -232,7 +215,6 @@ watch(debouncedSearch, () => resetScroll())
 
 const isScrollingToTop = ref(false)
 
-// Hold back first paint until the first 20 covers have resolved.
 const { ready: coversReady } = useCoverGate(() => filteredTracks.value.slice(0, 20), {
     armed: () => dataReady.value,
 })
@@ -242,8 +224,6 @@ watch(visibleTracks, (tracks) => {
         loadCoversForTracks(tracks)
     }
 }, { immediate: true })
-
-// ── Play button ──
 
 const isPlaylistActive = computed(() =>
     activePlaylistSource.value === sourceId.value
@@ -258,8 +238,6 @@ function onPlayPlaylist() {
         playTrack(filteredTracks.value[0])
     }
 }
-
-// ── Sticky header ──
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -279,8 +257,6 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// ── Track click ──
-
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
         onCoverClick(track)
@@ -298,8 +274,6 @@ function onCoverClick(track: TrackMetadata) {
     playTrack(track, { manualListStart: true })
 }
 
-// ── Context menu ──
-
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
 function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
@@ -316,15 +290,12 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 async function onRemoveFromPlaylist(track: TrackMetadata) {
     const idx = playlistTrackPaths.value.indexOf(track.file_path)
     if (idx !== -1) playlistTrackPaths.value.splice(idx, 1)
-    // Optimistic; put the row back if the backend refused.
     const ok = await removeTrackFromPlaylist(playlistId.value, track.file_path)
     if (!ok && idx !== -1 && !playlistTrackPaths.value.includes(track.file_path)) {
         playlistTrackPaths.value.splice(Math.min(idx, playlistTrackPaths.value.length), 0, track.file_path)
     }
 }
 
-// "Move to top" is always available here; playback order only resyncs if
-// this playlist is the active source.
 const canMoveToTop = computed(() => true)
 
 async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
@@ -334,19 +305,14 @@ async function moveTrackToTopOfPlaylist(track: TrackMetadata) {
     playlistTrackPaths.value.unshift(track.file_path)
     await invoke('playlist_move_track_to_top', { playlistId: playlistId.value, filePath: track.file_path })
     if (isPlaylistActive.value) {
-        // Rebuild the source from the reordered playlist.
         setPlaylistSource(sourceId.value, playlistTracks.value.slice())
     }
     window.dispatchEvent(new CustomEvent('lfmusic:playlist-track-moved-to-top', { detail: { playlistId: playlistId.value } }))
 }
 
-// ── Back ──
-
 function goBack() {
     goBackOrHome(router)
 }
-
-// ── Playlist context menu ──
 
 const playlistMenu = ref<{ x: number; y: number } | null>(null)
 const { isPinned: isPinnedFn, togglePin, updatePinName, unpin } = usePins()
@@ -386,8 +352,6 @@ async function onConfirmDeletePlaylist() {
     router.push('/collections')
     await deletePlaylist(id)
 }
-
-// ── Rename playlist ──
 
 const isEditingName = ref(false)
 const editingName = ref('')
@@ -596,11 +560,11 @@ function onCoverImgClick() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     overflow-y: scroll;
 }
@@ -624,7 +588,7 @@ function onCoverImgClick() {
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
@@ -632,7 +596,7 @@ function onCoverImgClick() {
 }
 .backBtn svg {
     color: hsla(0, 0%, 100%, 0.6);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
     color: hsla(0, 0%, 100%, 1);
@@ -658,7 +622,7 @@ function onCoverImgClick() {
     height: 200px;
     background-color: transparent;
     border-radius: 18px;
-    transition: width .24s ease, height .24s ease, margin .24s ease, filter .28s ease;
+    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
@@ -687,7 +651,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.4);
     width: fit-content;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -722,7 +686,7 @@ function onCoverImgClick() {
     outline: none;
     min-width: 240px;
     max-width: 100%;
-    transition: border-color .24s ease, background-color .24s ease;
+    transition: border-color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
 .pageHat .dataZone .info .listNameInput:focus {
     background-color: hsla(0, 0%, 100%, 0.09);
@@ -740,7 +704,7 @@ function onCoverImgClick() {
     cursor: pointer;
     opacity: 0;
     transform: translateX(-4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .pageHat .dataZone .info .listNameRow:hover .editNameBtn {
     opacity: 1;
@@ -766,7 +730,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.7);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     max-width: 100%;
     white-space: nowrap;
     overflow: hidden;
@@ -795,7 +759,7 @@ function onCoverImgClick() {
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     font-size: 12px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.8);
@@ -820,7 +784,7 @@ function onCoverImgClick() {
     background-color: transparent;
     color: hsla(0, 0%, 100%, 0.6);
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .moreBtn:hover,
 .moreBtn.menuOpen {
@@ -841,7 +805,7 @@ function onCoverImgClick() {
     left: 12px;
     transform: translateY(-50%);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
@@ -864,7 +828,7 @@ function onCoverImgClick() {
     justify-content: center;
     padding: 6px;
     border-radius: 50%;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -914,7 +878,7 @@ function onCoverImgClick() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -929,7 +893,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -955,7 +919,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.7);
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -979,7 +943,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.07);

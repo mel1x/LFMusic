@@ -1,9 +1,4 @@
-// Ported from src/composables/useSearch.ts to keep search behavior identical
-// on the backend. Five ranked tiers: exact substring, fuzzy (Levenshtein),
-// exact with RU/EN layout swap, fuzzy with layout swap, audio format keyword.
-//
-// Operates on the in-memory index (see library.rs), built in the same order
-// as `get_all_tracks`, so per-tier result order matches the old frontend.
+// Port of src/composables/useSearch.ts ranking: keep both in sync.
 
 use crate::util::levenshtein;
 
@@ -56,11 +51,10 @@ impl SearchEntry {
 
 /// Mirrors `fileName.replace(/\.[^/.]+$/, '')`.
 fn strip_ext(file: &str) -> &str {
-    if let Some(idx) = file.rfind('.') {
-        if idx + 1 < file.len() {
+    if let Some(idx) = file.rfind('.')
+        && idx + 1 < file.len() {
             return &file[..idx];
         }
-    }
     file
 }
 
@@ -170,7 +164,6 @@ fn fuzzy_match(target: &str, query_chars: &[char]) -> bool {
     if max_edits == 0 {
         return false;
     }
-    // Fast path: per-word.
     for w in target.split_whitespace() {
         let wchars: Vec<char> = w.chars().collect();
         let wl = wchars.len();
@@ -193,8 +186,7 @@ fn genre_matches(entry: &SearchEntry, filter: Option<&str>) -> bool {
     }
 }
 
-/// Ranked search over the index; results ordered by tier, index order within
-/// each tier. `genre_filter` is an optional exact genre match.
+/// Ranked search over the index; results ordered by tier, index order within each tier.
 pub fn rank<'a>(
     entries: &'a [SearchEntry],
     query: &str,
@@ -294,8 +286,6 @@ mod tests {
 
     #[test]
     fn fuzzy_typo_matches() {
-        // "boheman" is 1 edit off "bohemian"; threshold 0.2 at 7 chars allows 1 edit.
-        // A transposition (2 edits) would NOT match, matching frontend behavior.
         let entries = vec![entry("/m/1.mp3", "Bohemian Rhapsody", "Queen", "A", None)];
         let res = paths(rank(&entries, "boheman", None));
         assert_eq!(res, vec!["/m/1.mp3"]);
@@ -303,7 +293,6 @@ mod tests {
 
     #[test]
     fn layout_switch_match() {
-        // "queen" typed on a Russian layout = "йгуут"; switching back gives "queen".
         let entries = vec![entry("/m/1.mp3", "Song", "Queen", "A", None)];
         let res = paths(rank(&entries, "йгуут", None));
         assert_eq!(res, vec!["/m/1.mp3"]);
@@ -346,7 +335,6 @@ mod tests {
             entry("/m/1.mp3", "B", "X", "Al", None),
             entry("/m/2.mp3", "A", "X", "Al", None),
         ];
-        // Empty query returns index order, not alphabetical.
         assert_eq!(paths(rank(&entries, "", None)), vec!["/m/1.mp3", "/m/2.mp3"]);
         assert_eq!(paths(rank(&entries, "   ", None)), vec!["/m/1.mp3", "/m/2.mp3"]);
     }
@@ -369,14 +357,12 @@ mod tests {
 
     #[test]
     fn fuzzy_requires_minimum_length() {
-        // 3-char query is below FUZZY_MIN_LEN (4): no fuzzy match even for a 1-edit typo.
         let entries = vec![entry("/m/1.mp3", "Cat", "X", "Al", None)];
         assert!(rank(&entries, "Cwt", None).is_empty());
     }
 
     #[test]
     fn fuzzy_rejects_too_many_edits() {
-        // 4 chars, threshold 0.2 -> floor(4*0.2)=0 edits allowed.
         let entries = vec![entry("/m/1.mp3", "Wxyz", "X", "Al", None)];
         assert!(rank(&entries, "Abcd", None).is_empty());
     }
@@ -420,8 +406,6 @@ mod tests {
 
     #[test]
     fn format_query_skips_fuzzy_text_matching() {
-        // is_format_query("flac") disables fuzzy matching, so a title only
-        // fuzzily resembling "flac" must not match via the text tier.
         let entries = vec![
             entry("/m/1.mp3", "Flac", "X", "Al", None),
             entry("/m/2.flac", "Unrelated", "Y", "Bl", None),
@@ -449,7 +433,6 @@ mod tests {
         assert_eq!(strip_ext("track"), "track");
         assert_eq!(strip_ext("track.mp3"), "track");
         assert_eq!(strip_ext("a.b.c.mp3"), "a.b.c");
-        // Trailing dot is not a valid extension separator.
         assert_eq!(strip_ext("track."), "track.");
     }
 

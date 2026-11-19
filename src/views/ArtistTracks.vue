@@ -47,15 +47,11 @@ const rawArtistName = computed(() => {
     try { return decodeURIComponent(raw as string) } catch { return (raw as string) || '' }
 })
 
-// Case-insensitive lookup: backend groups artists by lowercased name, so
-// "Pyrokinesis" and "pyrokinesis" are the same artist.
 const artistPlaylist = computed(() => {
     const lower = rawArtistName.value.toLowerCase()
     return artistPlaylists.value.find(p => p.name.toLowerCase() === lower)
 })
 
-// Canonical artist name (from the playlist) ensures one nickname/avatar
-// regardless of URL casing. Falls back to the raw name before playlists load.
 const artistName = computed(() => artistPlaylist.value?.name ?? rawArtistName.value)
 
 const artistTracks = ref<TrackMetadata[]>([])
@@ -65,9 +61,6 @@ async function loadArtistTracks() {
     try {
         const tracks = await getPlaylistTracks(pl.id)
         cacheTracks(tracks)
-        // Use live cache objects: cacheTracks merges into an existing cached
-        // object, and covers are written there too, so raw (uncached) track
-        // references would never show a cover for already-cached tracks.
         artistTracks.value = tracks.map(t => getTrackByPath(t.file_path) ?? t)
     } catch {
         artistTracks.value = []
@@ -90,8 +83,6 @@ const artistCover = computed(() => {
     const t = getTrackByPath(path)
     return t?.cover_art || defaultTrackCover
 })
-
-// ── Search ──
 
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -134,8 +125,6 @@ const filteredTracks = computed(() => {
     )
 })
 
-// ── Header height ──
-
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
 let headerResizeObserver: ResizeObserver | null = null
@@ -162,8 +151,6 @@ onUnmounted(() => {
     headerResizeObserver?.disconnect()
 })
 
-// ── Virtual scroll ──
-
 const {
     containerEl: trackListEl,
     onScroll,
@@ -184,8 +171,6 @@ watch(visibleTracks, (tracks) => {
     }
 }, { immediate: true })
 
-// ── Play button ──
-
 const isArtistActive = computed(() =>
     activePlaylistSource.value === sourceId.value
 )
@@ -199,8 +184,6 @@ function onPlayArtist() {
         playTrack(filteredTracks.value[0])
     }
 }
-
-// ── Sticky header ──
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -220,8 +203,6 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// ── Track click ──
-
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
         onCoverClick(track)
@@ -239,8 +220,6 @@ function onCoverClick(track: TrackMetadata) {
     playTrack(track, { manualListStart: true })
 }
 
-// ── Context menu ──
-
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
 
 function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
@@ -253,8 +232,6 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
     const rect = btn.getBoundingClientRect()
     trackMenu.value = { x: rect.left - 6, y: rect.top + rect.height / 2, track }
 }
-
-// ── Back ──
 
 function goBack() {
     goBackOrHome(router)
@@ -376,11 +353,11 @@ function onCoverImgClick() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     overflow-y: scroll;
 }
@@ -404,7 +381,7 @@ function onCoverImgClick() {
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
@@ -412,7 +389,7 @@ function onCoverImgClick() {
 }
 .backBtn svg {
     color: hsla(0, 0%, 100%, 0.6);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
     color: hsla(0, 0%, 100%, 1);
@@ -438,7 +415,7 @@ function onCoverImgClick() {
     height: 200px;
     background-color: transparent;
     border-radius: 9999px;
-    transition: width .24s ease, height .24s ease, margin .24s ease, filter .28s ease;
+    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
@@ -467,7 +444,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.4);
     width: fit-content;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -509,7 +486,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.7);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     max-width: 100%;
     white-space: nowrap;
     overflow: hidden;
@@ -538,7 +515,7 @@ function onCoverImgClick() {
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     font-size: 12px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.8);
@@ -568,7 +545,7 @@ function onCoverImgClick() {
     left: 12px;
     transform: translateY(-50%);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
@@ -591,7 +568,7 @@ function onCoverImgClick() {
     justify-content: center;
     padding: 6px;
     border-radius: 50%;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -641,7 +618,7 @@ function onCoverImgClick() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -656,7 +633,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -682,7 +659,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.7);
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);

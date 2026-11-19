@@ -3,7 +3,7 @@ name = "lfmusic"
 version = "1.0.0"
 description = "Desktop Music App for local saved library"
 authors = ["melix"]
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -23,35 +23,40 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rodio = { version = "0.20", features = ["symphonia-all"] }
-symphonia = { version = "0.5", features = ["all"] }
-lofty = "0.22"
-base64 = "0.22"
-rusqlite = { version = "0.31", features = ["bundled"] }
+# Only the output side: decoding is ours (symphonia, see audio_player.rs).
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+symphonia = { version = "0.6", features = ["all"] }
+lofty = "0.25"
+base64 = "0.23"
+rusqlite = { version = "0.41", features = ["bundled"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
-rayon = "1.10"
+rayon = "1.12"
 # Оптимизированный БПФ (SIMD: SSE/AVX/NEON) для реал-тайм визуализатора спектра.
 rustfft = "6"
 # HTTP-клиент для внешних источников метаданных (iTunes/Deezer/MusicBrainz).
 # rustls вместо native-tls — без системного OpenSSL, собирается и на Android.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "blocking", "json", "query"] }
+# TLS for reqwest: ring + bundled Mozilla roots (see util::http_tls), so HTTPS
+# works the same everywhere, Android included, without a platform verifier.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 # Проверка целостности скачанных бинарей (yt-dlp) по SHA256 из релиза.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Десктоп-зависимости (не Android/iOS).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 # Discord Rich Presence — IPC с локальным клиентом Discord.
-discord-rich-presence = "0.2.5"
+discord-rich-presence = "1.1"
 # Распаковка zip-архивов (страница «Скачивание»): ffmpeg на Windows
 # (FFmpeg-Builds) и macOS (evermeet.cx); Deno (JS-движок для yt-dlp) на всех
 # десктоп-платформах распространяется в zip (на Linux ffmpeg идёт в tar.xz,
 # см. tar/lzma-rs ниже, а Deno — в zip, поэтому zip нужен и здесь).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Системное медиа-управление на Linux (MPRIS). use_zbus — чистый Rust,
 # без системной зависимости libdbus.
 [target.'cfg(target_os = "linux")'.dependencies]
-souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+souvlaki = { version = "0.9", default-features = false, features = ["use_zbus"] }
 # Распаковка tar.xz-сборок ffmpeg (FFmpeg-Builds) для страницы «Скачивание».
 # lzma-rs — чистый Rust xz-декодер (без системного liblzma), tar — чтение архива.
 tar = "0.4"
@@ -60,7 +65,9 @@ lzma-rs = "0.3"
 [target.'cfg(windows)'.dependencies]
 # In-app updates from GitHub releases (signed NSIS/MSI installers + latest.json).
 tauri-plugin-updater = "2"
-windows = { version = "0.61", features = [
+# WebView2 memory target while minimized (see window_state.rs); same version as wry uses.
+webview2-com = "0.39"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",

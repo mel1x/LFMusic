@@ -15,9 +15,6 @@ import VolumeZeroIcon from '../Icons/VolumeZeroIcon.vue'
 import PrevIcon from '../Icons/PrevIcon.vue'
 import NextIcon from '../Icons/NextIcon.vue'
 
-// Year recap as a story: full-screen cards with progress segments, tap/swipe/
-// keyboard navigation, hold to pause and a looping fragment of the featured track.
-
 const { t } = useI18n()
 const { playbackState, togglePlayPause } = usePlayer()
 const sound = useRecapSound()
@@ -108,8 +105,6 @@ watch(current, card => {
   sound.preload(cards.value[index.value + 1]?.sound)
 })
 
-// ── Pointer: tap sides to move, hold to pause, swipe on touch ──────────────
-
 const HOLD_MS = 220
 let pressAt = 0
 let pressX = 0
@@ -119,8 +114,6 @@ let holdTimer: ReturnType<typeof setTimeout> | null = null
 function isInteractive(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest('button, a, input, [data-interactive]')
 }
-
-// ── Volume: hover slider, drag, wheel, arrows ──────────────────────────────
 
 const VOLUME_STEP = 0.05
 const volumeRail = ref<HTMLElement | null>(null)
@@ -217,7 +210,6 @@ function onWheel(e: WheelEvent) {
 
 function onKeydown(e: KeyboardEvent) {
   if (!recapOpen.value) return
-  // Arrows on the focused volume slider change the volume, not the card.
   if (e.target instanceof Element && e.target.closest('[role="slider"]') && e.key.startsWith('Arrow')) return
   if (e.key === 'Escape') close()
   else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next()
@@ -395,14 +387,13 @@ onUnmounted(() => {
   overscroll-behavior: contain;
 }
 
-/* One soft light of the current card's accent behind the frame. */
 .recapGlow {
   position: absolute;
   inset: 0;
   pointer-events: none;
   background:
     radial-gradient(42% 60% at 50% 50%, hsla(var(--rc-h), var(--rc-s), 45%, 0.14), transparent 72%);
-  transition: background .8s ease;
+  transition: background .8s var(--ease-smooth);
 }
 
 .recapFrame {
@@ -485,13 +476,12 @@ onUnmounted(() => {
   background: hsla(0, 0%, 0%, 0.25);
   backdrop-filter: blur(8px);
   cursor: pointer;
-  transition: background-color .18s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .recapTool:hover {
   background: hsla(0, 0%, 0%, 0.4);
 }
 
-/* Volume: the icon button grows a slider to its left on hover, focus or drag. */
 .recapVolume {
   pointer-events: auto;
   display: flex;
@@ -500,7 +490,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: hsla(0, 0%, 0%, 0.25);
   backdrop-filter: blur(8px);
-  transition: background-color .18s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .recapVolume:hover,
 .recapVolume:focus-within,
@@ -521,7 +511,7 @@ onUnmounted(() => {
   cursor: pointer;
   outline: none;
   touch-action: none;
-  transition: width .2s ease, padding .2s ease;
+  transition: width var(--duration-hover) var(--ease-smooth), padding var(--duration-hover) var(--ease-smooth);
 }
 .recapVolume:hover .recapVolumeSlider,
 .recapVolume:focus-within .recapVolumeSlider,
@@ -572,7 +562,7 @@ onUnmounted(() => {
   color: hsla(0, 0%, 100%, 0.8);
   background: hsla(0, 0%, 100%, 0.08);
   cursor: pointer;
-  transition: background-color .2s ease, color .2s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .recapClose:hover {
   background: hsla(0, 0%, 100%, 0.16);
@@ -592,7 +582,7 @@ onUnmounted(() => {
   color: #fff;
   background: hsla(0, 0%, 100%, 0.1);
   cursor: pointer;
-  transition: background-color .2s ease, opacity .2s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth), opacity var(--duration-hover) var(--ease-smooth);
 }
 .recapArrow:hover:not(:disabled) {
   background: hsla(0, 0%, 100%, 0.2);
@@ -630,7 +620,7 @@ onUnmounted(() => {
   height: 100%;
   border-radius: 3px;
   background: #fff;
-  animation: recapEq 0.9s ease-in-out infinite alternate;
+  animation: recapEq 0.9s var(--ease-smooth-in-out) infinite alternate;
 }
 .recapEq span:nth-child(2) { animation-delay: -0.3s; }
 .recapEq span:nth-child(3) { animation-delay: -0.6s; }
@@ -639,10 +629,9 @@ onUnmounted(() => {
   to { transform: scaleY(1); }
 }
 
-/* Card transitions: both cards stay absolutely positioned inside the frame. */
 .recapNext-enter-active, .recapNext-leave-active,
 .recapPrev-enter-active, .recapPrev-leave-active {
-  transition: transform .45s cubic-bezier(.2, .8, .2, 1), opacity .35s ease;
+  transition: transform .45s var(--ease-smooth), opacity .35s var(--ease-smooth);
 }
 .recapNext-enter-from { transform: translateX(8%) scale(0.97); opacity: 0; }
 .recapNext-leave-to { transform: translateX(-8%) scale(0.97); opacity: 0; }
@@ -650,10 +639,10 @@ onUnmounted(() => {
 .recapPrev-leave-to { transform: translateX(8%) scale(0.97); opacity: 0; }
 
 .recapFade-enter-active, .recapFade-leave-active {
-  transition: opacity .3s ease;
+  transition: opacity .3s var(--ease-smooth);
 }
 .recapFade-enter-active .recapFrame {
-  transition: transform .45s cubic-bezier(.2, .9, .3, 1.1);
+  transition: transform .45s var(--icon-ease);
 }
 .recapFade-enter-from, .recapFade-leave-to {
   opacity: 0;
@@ -662,7 +651,6 @@ onUnmounted(() => {
   transform: scale(0.92) translateY(20px);
 }
 
-/* Phones: the card is the whole screen. */
 @media (max-width: 600px) {
   .recapRoot { gap: 0; }
   .recapFrame {
@@ -674,7 +662,6 @@ onUnmounted(() => {
   }
   .recapArrow { display: none; }
   .recapClose {
-    /* Same row as the pause/mute tools: segments (12 + 3) + 10px gap. */
     top: calc(var(--safe-top, 0px) + 25px);
     right: 14px;
     z-index: 6;

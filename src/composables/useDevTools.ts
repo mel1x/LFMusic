@@ -1,10 +1,5 @@
 import { setInvokeHook } from '../utils/tauriCore'
 
-// Developer mode capture: hooks app `invoke` calls and collects JS errors.
-// Installed in main.ts before mount so startup calls are recorded too; if the
-// saved settings say dev mode is off, `stopDevCapture` removes every hook.
-// Data lives in plain arrays (no Vue reactivity per call); the panel polls it.
-
 export interface DevCall {
     id: number
     cmd: string

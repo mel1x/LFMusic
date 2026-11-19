@@ -1,10 +1,6 @@
 import { computed, ref } from 'vue'
 import { useSettings } from './useSettings'
 
-// Holiday events: during a holiday window the app gets a themed background
-// pattern (HolidayPattern) and ambient/click effects (HolidayEffects).
-// Dates are local [month, day], inclusive; a window may wrap over the new year.
-
 export type HolidayId =
     | 'new_year'
     | 'valentine'
@@ -24,13 +20,10 @@ export const HOLIDAYS: HolidayDef[] = [
     { id: 'valentine',    from: [2, 13],  to: [2, 15] },
     { id: 'womens_day',   from: [3, 7],   to: [3, 9] },
     { id: 'cosmonautics', from: [4, 11],  to: [4, 13] },
-    // Fete de la Musique / World Music Day.
     { id: 'music_day',    from: [6, 20],  to: [6, 22] },
     { id: 'halloween',    from: [10, 29], to: [11, 1] },
 ]
 
-// Preview any theme without waiting for the date:
-// localStorage.setItem('lfmusic_holiday', 'halloween') + reload ('none' disables).
 const OVERRIDE_KEY = 'lfmusic_holiday'
 
 function readOverride(): HolidayId | 'none' | null {
@@ -76,7 +69,6 @@ export const activeHoliday = computed<HolidayId | null>(() => {
 export function useHoliday() {
     if (!started) {
         started = true
-        // The app can stay open across midnight; also recheck when the window wakes up.
         setInterval(tick, 10 * 60 * 1000)
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) tick()

@@ -1,6 +1,4 @@
-/* Bundled fonts: the app must render the same without internet.
-   Inter 4.1 (rsms/inter), one variable file with wght + opsz axes.
-   Montserrat variable (wght), split by script as on Google Fonts. Licenses: *-LICENSE.txt. */
+/* Bundled fonts: the app must render the same without internet. Licenses: *-LICENSE.txt. */
 
 @font-face {
   font-family: "Inter";

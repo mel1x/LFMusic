@@ -4,10 +4,8 @@ import { translateText, useI18n } from './useI18n'
 const ATTRS = ['placeholder', 'aria-label', 'title'] as const
 type Attr = typeof ATTRS[number]
 
-// What a node held before we translated it, and what we wrote. If the node still
-// shows `written`, nothing re-rendered it and `source` stays the original text;
-// anything else means Vue (or other code) changed it, so the current value is the
-// new source. Only nodes we actually translated are tracked.
+// If the node still shows `written`, `source` is the original text; otherwise the current value is
+// the new source.
 interface Tracked {
     source: string
     written: string
@@ -36,9 +34,7 @@ function translateTextNode(node: Text) {
     if (!source.trim()) return
 
     const next = translateText(source)
-    // Untranslatable text (track titles, names) is neither tracked nor written.
     if (next === source && !tracked) return
-    // closest() is the costly part, so it runs only when there is something to write.
     if (shouldSkip(node)) return
 
     textState.set(node, { source, written: next })
@@ -87,8 +83,7 @@ function walk(root: Node) {
     }
 }
 
-/** Our own writes would come back as mutation records; drop them. Callers only
- *  invoke this right after a synchronous pass, so nothing else is pending. */
+/** Our own writes would come back as mutation records; drop them. */
 function dropOwnRecords() {
     observer?.takeRecords()
 }
@@ -109,8 +104,6 @@ export function refreshDomI18n() {
 
 function flushMutationQueue() {
     mutationScheduled = false
-    // Records delivered after the callback but before this microtask are still
-    // queued in the observer: take them too, then drop what our writes produced.
     const records = observer ? mutationQueue.concat(observer.takeRecords()) : mutationQueue
     mutationQueue = []
     if (records.length === 0) return
@@ -158,9 +151,7 @@ export function startDomI18n() {
 
     observer = new MutationObserver(scheduleMutationFlush)
 
-    // Legacy literals are Russian, so in Russian there is nothing to translate:
-    // the observer only runs in English. The refresh still runs on every switch,
-    // so text translated earlier goes back to its source.
+    // Legacy literals are Russian: the observer only runs in English.
     let previous: string | null = null
     watch(language, (lang) => {
         setObserving(lang === 'en')

@@ -10,10 +10,6 @@ import {
 } from '../composables/useDevTools';
 import CloseIcon from './Icons/CloseIcon.vue';
 
-// Developer panel, shown only when dev mode was on at startup. Capture data is
-// plain arrays filled by useDevTools; while the panel is open it re-reads them
-// on a short timer instead of making every invoke reactive.
-
 interface DevInfo {
     version: string;
     os: string;
@@ -33,7 +29,6 @@ const filter = ref('');
 const info = ref<DevInfo | null>(null);
 const copied = ref(false);
 
-// Bumped by the poll timer; computeds read it to pick up new capture data.
 const tick = ref(0);
 const errorCount = ref(devErrors.length);
 
@@ -82,7 +77,6 @@ watch(open, isOpen => {
     } else {
         if (fpsRaf !== null) cancelAnimationFrame(fpsRaf);
         fpsRaf = null;
-        // Closed: only the error badge needs updates.
         startPolling(2000);
     }
 });
@@ -185,7 +179,6 @@ async function copyLog() {
         copied.value = true;
         setTimeout(() => { copied.value = false; }, 1400);
     } catch {
-        // Clipboard unavailable.
     }
 }
 
@@ -353,7 +346,7 @@ const overviewRows = computed(() => {
     color: hsla(0, 0%, 100%, 0.78);
     box-shadow: 0 10px 28px hsla(0, 0%, 0%, 0.35);
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease, transform .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .devToggle:hover,
 .devToggle.active {
@@ -423,7 +416,7 @@ const overviewRows = computed(() => {
     background: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.7);
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .devClose:hover {
     background: hsla(0, 0%, 100%, 0.12);
@@ -448,7 +441,7 @@ const overviewRows = computed(() => {
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .devTab:hover {
     color: #fff;
@@ -528,7 +521,7 @@ const overviewRows = computed(() => {
     font-weight: 700;
     cursor: pointer;
     user-select: none;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .devBtn:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.28);
@@ -658,7 +651,7 @@ const overviewRows = computed(() => {
 
 .devPanel-enter-active,
 .devPanel-leave-active {
-    transition: opacity .18s ease, transform .18s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     transform-origin: bottom right;
 }
 .devPanel-enter-from,

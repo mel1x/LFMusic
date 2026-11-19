@@ -1,13 +1,8 @@
 import { ref, computed, nextTick } from 'vue'
 
 /**
- * Горизонтальный ряд карточек со стрелочной навигацией (как в обычном поиске).
- * Считает адаптивную ширину карточки под ширину контейнера (`--card-w`),
- * отслеживает позицию прокрутки и отдаёт `canPrev`/`canNext` + перелистывание на
- * «страницу». Сам скроллбар скрыт стилями `.lineList`; листают кнопками в шапке.
- *
- * Использование: навесить `el` через `:ref`, прокинуть `--card-w` и `visibility`
- * из `measured`, вызвать `observe()` после монтирования списка.
+ * Horizontal card row with arrow navigation: adaptive `--card-w`, `canPrev`/`canNext`. Call
+ * `observe()` after the list mounts.
  */
 export function useScrollLine(baseItemWidth = 190, gap = 16) {
   const el = ref<HTMLElement | null>(null)

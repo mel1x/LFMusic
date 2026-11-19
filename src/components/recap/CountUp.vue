@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 
-// Number that counts up from zero once the card appears.
-
 const props = withDefaults(defineProps<{
   value: number
   locale: string

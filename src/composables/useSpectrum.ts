@@ -1,30 +1,23 @@
 import { watch, effectScope } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer } from './usePlayer';
+import { frameLoop } from '../utils/frameLoop';
 
-// Shared FFT spectrum from the Rust backend, SPECTRUM_BARS bars (0..1), for every
-// visualizer at once: one backend tap and one polling loop, enabled while at
-// least one consumer holds it. Data is polled at ~25Hz and smoothed toward the
-// targets at up to ~60fps (fast attack, slow decay so it looks alive instead of
-// jittery). Levels go to listeners as a plain array and consumers write the bar
-// transforms straight to the DOM: no Vue re-render per frame.
 export const SPECTRUM_BARS = 16;
 
 export type SpectrumListener = (levels: Float32Array) => void;
 
-const FETCH_MS = 40;
-// Cap render rate so 120/144Hz screens don't do extra work (and decay speed stays the same).
-const FRAME_MS = 15;
-// Changes smaller than this are invisible; skip notifying listeners.
+const FETCH_MS = 60;
+const FRAME_MS = 33;
+const ATTACK_60 = 0.5;
+const DECAY_60 = 0.16;
 const EPSILON = 0.002;
 
 const levels = new Float32Array(SPECTRUM_BARS);
 const listeners = new Set<SpectrumListener>();
 
-let raf: number | null = null;
 let targets: number[] = new Array(SPECTRUM_BARS).fill(0);
 let lastFetch = 0;
-let lastFrame = 0;
 let fetching = false;
 let playingWatchSet = false;
 
@@ -37,7 +30,6 @@ async function fetchSpectrum() {
             targets = bars;
         }
     } catch {
-        // Backend unavailable (e.g. plain Vite mode) - keep zeros.
     } finally {
         fetching = false;
     }
@@ -47,16 +39,14 @@ function notify() {
     for (const fn of listeners) fn(levels);
 }
 
-function frame(now: number) {
-    raf = null;
-    if (listeners.size === 0) return;
-    const playing = usePlayer().isPlaying.value;
+const loop = frameLoop(frame, FRAME_MS);
 
-    if (now - lastFrame < FRAME_MS) {
-        raf = requestAnimationFrame(frame);
-        return;
-    }
-    lastFrame = now;
+function frame(now: number, dt: number): boolean {
+    if (listeners.size === 0) return false;
+    const playing = usePlayer().isPlaying.value;
+    const steps = Math.min(100, dt || FRAME_MS) / (1000 / 60);
+    const attack = 1 - Math.pow(1 - ATTACK_60, steps);
+    const decay = 1 - Math.pow(1 - DECAY_60, steps);
 
     if (playing && now - lastFetch >= FETCH_MS) {
         lastFetch = now;
@@ -71,8 +61,7 @@ function frame(now: number) {
     for (let i = 0; i < SPECTRUM_BARS; i++) {
         const target = targets[i] ?? 0;
         const c = levels[i];
-        // Attack faster than decay: peaks jump up, don't jitter down.
-        const k = target > c ? 0.5 : 0.16;
+        const k = target > c ? attack : decay;
         let next = c + (target - c) * k;
         if (target === 0 && next < 0.001) next = 0;
         if (Math.abs(next - c) > EPSILON || (next === 0 && c !== 0)) changed = true;
@@ -81,25 +70,18 @@ function frame(now: number) {
     }
     if (changed) notify();
 
-    // Paused and settled: the loop sleeps until playback resumes.
-    if (playing || moving) {
-        raf = requestAnimationFrame(frame);
-    }
+    return playing || moving;
 }
 
 function start() {
-    if (raf == null) {
+    if (!loop.running) {
         lastFetch = 0;
-        lastFrame = 0;
-        raf = requestAnimationFrame(frame);
+        loop.start();
     }
 }
 
 function stop() {
-    if (raf != null) {
-        cancelAnimationFrame(raf);
-        raf = null;
-    }
+    loop.stop();
 }
 
 function subscribe(fn: SpectrumListener) {
@@ -108,8 +90,7 @@ function subscribe(fn: SpectrumListener) {
     if (listeners.size > 1) return;
     if (!playingWatchSet) {
         playingWatchSet = true;
-        // Play/pause restarts the loop; on pause the bars settle smoothly. Detached scope:
-        // the first subscriber is a component, and its unmount must not stop this watcher.
+        // Detached scope: the first subscriber's unmount must not stop this watcher.
         effectScope(true).run(() => {
             watch(usePlayer().isPlaying, () => { if (listeners.size > 0) start(); });
         });
@@ -126,7 +107,7 @@ function unsubscribe(fn: SpectrumListener) {
     void invoke('player_set_spectrum_enabled', { enabled: false }).catch(() => {});
 }
 
-/** Holds the spectrum while `start(listener)` is active; `stop()` releases it. Safe to call repeatedly. */
+/** Holds the spectrum while `start(listener)` is active; `stop()` releases it. */
 export function useSpectrum() {
     let current: SpectrumListener | null = null;
     return {
@@ -140,7 +121,6 @@ export function useSpectrum() {
             const fn = current;
             current = null;
             unsubscribe(fn);
-            // Leave bars at rest.
             fn(new Float32Array(SPECTRUM_BARS));
         },
     };

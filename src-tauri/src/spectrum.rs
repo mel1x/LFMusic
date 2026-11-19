@@ -1,9 +1,5 @@
-//! Real-time spectrum analyzer for playing audio.
-//!
-//! Producer: `AnalyzerSource` in the audio thread (see `audio_player`) mixes
-//! the post-EQ output to mono into a ring buffer. Consumer: the
-//! `audio_get_spectrum` IPC command, polled by the frontend every rAF frame
-//! (30/60 fps), which FFTs the latest window into `bars` log-spaced bands.
+//! Spectrum analyzer: `AnalyzerSource` feeds post-EQ mono samples into a ring buffer;
+//! `player_get_spectrum` FFTs the latest window into log-spaced bars.
 
 use crate::audio_features::hann_window;
 use rustfft::num_complex::Complex32;
@@ -12,8 +8,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// FFT window size (power of two). At 44.1kHz this is ~46ms — enough bass
-/// resolution while staying responsive at 60fps.
+/// FFT window size (power of two).
 const FFT_SIZE: usize = 2048;
 
 /// Visible spectrum range: below 30Hz is inaudible on bars, above 16kHz is cut.
@@ -25,9 +20,7 @@ const DB_FLOOR: f32 = -72.0;
 const DB_CEIL: f32 = -14.0;
 
 pub struct SpectrumAnalyzer {
-    /// Single global flag (not per-visualizer): kept outside the mutex so the
-    /// audio thread can check it with a lock-free relaxed load per sample.
-    /// Multiple visualizer instances share this one flag.
+    /// Global flag outside the mutex: the audio thread checks it per sample without locking.
     enabled: AtomicBool,
     inner: Mutex<Inner>,
 }
@@ -59,13 +52,12 @@ impl SpectrumAnalyzer {
 
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
-        if !enabled {
-            // Clear buffer so re-enabling doesn't flash a stale tail.
-            if let Ok(mut g) = self.inner.lock() {
-                g.active = false;
-                g.filled = 0;
-                g.write = 0;
-            }
+        if !enabled
+            && let Ok(mut g) = self.inner.lock()
+        {
+            g.active = false;
+            g.filled = 0;
+            g.write = 0;
         }
     }
 
@@ -98,8 +90,6 @@ impl SpectrumAnalyzer {
         }
     }
 
-    /// Consumer: compute `bars` normalized (0..1) frequency bands from the
-    /// latest buffer window; zeros when idle or buffer isn't full yet.
     pub fn compute_bars(&self, bars: usize) -> Vec<f32> {
         let bars = bars.clamp(1, 128);
         if !self.is_enabled() {
@@ -114,7 +104,6 @@ impl SpectrumAnalyzer {
             if !g.active || g.filled < FFT_SIZE {
                 return vec![0.0; bars];
             }
-            // Copy the ring in chronological (oldest-to-newest) order.
             let mut buf = vec![0.0f32; FFT_SIZE];
             let start = g.write;
             for (i, slot) in buf.iter_mut().enumerate() {
@@ -123,7 +112,6 @@ impl SpectrumAnalyzer {
             (buf, g.sample_rate)
         };
 
-        // FFT itself runs without holding the lock.
         compute_bars_from_samples(&samples, sample_rate, bars)
     }
 }
@@ -178,20 +166,17 @@ fn compute_bars_from_samples(samples: &[f32], sample_rate: u32, bars: usize) -> 
 
     let mut out = vec![0.0f32; bars];
     for (b, slot) in out.iter_mut().enumerate() {
-        // Log-spaced band boundaries.
         let lo = FREQ_MIN * ratio.powf(b as f32 / bars as f32);
         let hi = FREQ_MIN * ratio.powf((b + 1) as f32 / bars as f32);
         let bin_lo = ((lo / bin_hz).floor() as usize).max(1);
         let bin_hi = ((hi / bin_hz).ceil() as usize).clamp(bin_lo + 1, half);
 
-        // Normalize by window size so scale doesn't depend on FFT_SIZE.
         let sum = buffer[bin_lo..bin_hi].iter().map(|c| c.norm()).sum::<f32>() / n as f32;
         let avg = sum / (bin_hi - bin_lo) as f32;
 
         let db = 20.0 * (avg + 1e-7).log10();
         let norm = ((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR)).clamp(0.0, 1.0);
 
-        // Slight high-frequency boost: without it, high bands look flat/dead.
         let tilt = 1.0 + 0.5 * (b as f32 / bars.max(1) as f32);
         *slot = (norm * tilt).clamp(0.0, 1.0);
     }
@@ -231,7 +216,6 @@ mod tests {
     fn compute_bars_is_zero_before_buffer_fills_even_when_enabled() {
         let analyzer = SpectrumAnalyzer::new();
         analyzer.set_enabled(true);
-        // Fewer samples than FFT_SIZE -> buffer not yet full.
         analyzer.push_mono(&vec![0.5f32; 100], 44_100);
         let bars = analyzer.compute_bars(8);
         assert!(bars.iter().all(|&v| v == 0.0));
@@ -284,7 +268,6 @@ mod tests {
 
     #[test]
     fn compute_bars_from_samples_peaks_near_tone_frequency() {
-        // 1kHz sine: expect energy in the mid band, near-nothing in the lowest.
         let sample_rate = 44_100u32;
         let samples = sine(1000.0, sample_rate, FFT_SIZE);
         let bars = compute_bars_from_samples(&samples, sample_rate, 16);
@@ -296,8 +279,6 @@ mod tests {
             .map(|(i, _)| i)
             .unwrap();
 
-        // Bands are log-spaced from FREQ_MIN(30) to FREQ_MAX(16000); 1kHz
-        // should land mid-scale, not in the lowest (bass) bin.
         assert!(max_idx > 0, "пик не должен быть в самом нижнем (басовом) бине");
     }
 }

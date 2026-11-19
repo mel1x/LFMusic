@@ -1,13 +1,5 @@
-//! Free, no-API-key metadata sources (iTunes, Deezer, MusicBrainz/CAA, Wikipedia)
-//! behind a common [`Provider`] interface. The aggregator queries providers,
-//! scores matches by title/artist similarity, and picks the best result.
-//!
-//! Used for: canonical album track order (+ "phantom" tracks not in the local
-//! library), and artist avatars.
-//!
-//! Images are never sent through IPC as base64: they're downloaded, validated,
-//! and re-encoded to WebP on disk; the frontend gets a `lfmusic-external://...`
-//! URL (see [`protocol_handler`]), same pattern as `lfmusic-cover`.
+//! Free, keyless metadata sources (iTunes, Deezer, MusicBrainz/CAA, Wikipedia) for album order,
+//! covers and artist avatars. Images are cached as WebP and served via `lfmusic-external://`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -50,14 +42,12 @@ pub struct ExternalImage {
     pub matched_name: String,
 }
 
-/// Distinguishes "confirmed not found" (all providers said no) from a
-/// "temporary error" (network/parse/rate-limit) — the latter must not be
-/// cached as a permanent negative result.
+/// Separates "not found" from a temporary error; only the former is cached.
 pub enum FetchOutcome<T> {
     Found(T),
     /// All providers genuinely reported nothing found.
     NotFound,
-    /// At least one provider errored and none found a match — retry later.
+    /// At least one provider errored and none found a match - retry later.
     TemporaryError,
 }
 
@@ -81,8 +71,6 @@ trait Provider: Send + Sync {
         Ok(None)
     }
 
-    /// Cover lookup prefers matching by album (one cover for all its tracks);
-    /// falls back to track title when album is empty.
     fn cover(
         &self,
         _client: &reqwest::blocking::Client,
@@ -98,6 +86,7 @@ fn client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
+            .tls_backend_preconfigured(crate::util::http_tls())
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(6))
@@ -119,14 +108,7 @@ fn host_registry() -> &'static Mutex<HashMap<String, HostState>> {
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// MusicBrainz/CAA require ≤1 req/s. iTunes Search API is hard-limited to
-/// ~20 req/min per IP, so we use 3s between requests — 300ms (≈200/min) used
-/// to hit 429s and empty "error decoding" bodies once a parallel pool kept the
-/// rate maxed out. Deezer's documented limit is 50 req/5s (~10 req/s); 140ms
-/// (~7 req/s) leaves headroom for bursts across the prep pool's several
-/// concurrent workers while still comfortably outrunning the old 220ms gap
-/// (kept as the main prep source, so this is the one that matters most for
-/// first-run batch prep time).
+/// Per-host request gaps: MusicBrainz/CAA <= 1 req/s, iTunes ~20 req/min, Deezer 50 req/5s.
 fn host_min_gap(host: &str) -> Duration {
     match host {
         "musicbrainz.org" | "coverartarchive.org" => Duration::from_millis(1100),
@@ -151,13 +133,8 @@ fn host_of(url: &str) -> String {
         .to_lowercase()
 }
 
-/// Hosts strict enough (MusicBrainz/CAA document ≤1 req/s) that pacing request
-/// *starts* isn't sufficient on its own: `host_throttle` only spaces out when
-/// requests begin, so a response that's still in flight when the next thread's
-/// slot opens leaves two connections to the same host open at once. Under the
-/// prep pool's several concurrent workers that reliably produced connection
-/// resets ("error sending request") from these hosts, so they additionally get
-/// a per-host lock held across the whole request (see [`send_throttled`]).
+/// Strict hosts (MusicBrainz/CAA) also get a per-host lock across the whole request: overlapping
+/// connections got reset.
 fn host_needs_serialized_requests(host: &str) -> bool {
     matches!(host, "musicbrainz.org" | "coverartarchive.org")
 }
@@ -172,8 +149,7 @@ fn host_send_lock(host: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// Waits until the host's next slot is free, then reserves it. The sleep
-/// happens after releasing the mutex, not while holding it.
+/// Waits until the host's next slot is free, then reserves it.
 fn host_throttle(host: &str) {
     let sleep_dur = {
         let reg = host_registry();
@@ -181,11 +157,10 @@ fn host_throttle(host: &str) {
         let st = guard.entry(host.to_string()).or_default();
         let now = Instant::now();
         let mut earliest = st.next_slot.unwrap_or(now);
-        if let Some(b) = st.blocked_until {
-            if b > earliest {
+        if let Some(b) = st.blocked_until
+            && b > earliest {
                 earliest = b;
             }
-        }
         let target = if earliest > now { earliest } else { now };
         st.next_slot = Some(target + host_min_gap(host));
         target.saturating_duration_since(now)
@@ -195,8 +170,6 @@ fn host_throttle(host: &str) {
     }
 }
 
-/// Registers backoff after 429/503 (keeps the max of current/new so we never
-/// shorten an already-scheduled pause).
 fn register_backoff(host: &str, secs: u64) {
     let reg = host_registry();
     let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
@@ -218,16 +191,12 @@ fn retry_after_secs(resp: &reqwest::blocking::Response) -> u64 {
         .clamp(1, 120)
 }
 
-/// Sends a request honoring per-host rate limit + backoff. On 429/503,
-/// registers backoff and returns `Err` (treated as a temporary error upstream,
-/// not cached as "not found").
+/// Sends a request honoring per-host rate limit + backoff.
 fn send_throttled(
     builder: reqwest::blocking::RequestBuilder,
     host: &str,
 ) -> Result<reqwest::blocking::Response, String> {
-    // For strict hosts, hold a per-host lock across the whole request (not just
-    // the pacing wait) so no two requests to that host are ever in flight at
-    // once — see host_needs_serialized_requests. `lock` must outlive `_guard`.
+    // Strict hosts: hold the per-host lock for the whole request; `lock` must outlive `_guard`.
     let lock = host_needs_serialized_requests(host).then(|| host_send_lock(host));
     let _guard = lock.as_ref().map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
 
@@ -242,13 +211,9 @@ fn send_throttled(
     Ok(resp)
 }
 
-/// Backoff for "soft" rate-limiting: iTunes sometimes responds 200 with an
-/// empty body instead of 429 when overloaded.
 const SOFT_RATE_LIMIT_BACKOFF_SECS: u64 = 20;
 
-/// Like [`send_throttled`] but decodes JSON directly. An empty 200 body is
-/// treated as a soft rate-limit (registers backoff, returns `Err`) instead of
-/// surfacing a JSON decode error.
+/// Like [`send_throttled`] but decodes JSON directly.
 fn send_throttled_json<T: serde::de::DeserializeOwned>(
     builder: reqwest::blocking::RequestBuilder,
     host: &str,
@@ -267,8 +232,8 @@ fn get_image(url: &str) -> Result<reqwest::blocking::Response, String> {
     send_throttled(client().get(url), &host)
 }
 
-/// Canonicalizes a string for comparison: lowercase, alphanumeric/spaces only,
-/// collapsed whitespace.
+/// Canonicalizes a string for comparison: lowercase, alphanumeric/spaces only, collapsed
+/// whitespace.
 fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = true;
@@ -287,10 +252,7 @@ fn normalize(s: &str) -> String {
     out
 }
 
-/// Strips noise (feat., remastered, bracketed notes) for more robust matching.
-/// Uses `strip_title_noise` for bracketed noise like `"Song (feat. X)"`; the
-/// extra `replace()` pass below still catches the no-parens legacy form
-/// `"Song Title - Remastered"`, which `strip_title_noise` doesn't touch.
+/// Strips noise (feat., remastered, bracketed notes) for matching.
 fn normalize_title(s: &str) -> String {
     let cleaned: String = strip_title_noise(s)
         .replace("remastered", " ")
@@ -315,27 +277,20 @@ fn similarity(a: &str, b: &str) -> f32 {
     let dist = levenshtein(&ca, &cb);
     let max_len = ca.len().max(cb.len()) as f32;
     let ratio = 1.0 - (dist as f32 / max_len);
-    // Containment bonus for e.g. "Album" vs "Album (Deluxe Edition)".
     let contains_bonus = if na.contains(&nb) || nb.contains(&na) { 0.15 } else { 0.0 };
     (ratio + contains_bonus).clamp(0.0, 1.0)
 }
 
-/// Detects a source's default "no photo" placeholder image; prefer falling
-/// back to the local cover instead of using these.
 fn is_placeholder_image(url: &str) -> bool {
-    // Deezer uses an empty md5 segment in the path when there's no photo, e.g.
-    // https://e-cdns-images.dzcdn.net/images/artist//1000x1000-000000-80-0-0.jpg
     url.contains("/images/artist//")
         || url.contains("/images/cover//")
         || url.contains("/images/user//")
-        // Known Deezer default images (same silhouette/wave under different md5s).
         || url.contains("d41d8cd98f00b204e9800998ecf8427e")
         || url.contains("1fecff61b191427ec4d2760a77527bf5")
         || url.contains("e460b01306de4c8d790508e0d80d1fdf")
 }
 
 /// Below this size (bytes) an image is treated as a source's placeholder.
-/// Deezer's placeholder is ≤33KB at 1000x1000; real photos are 90KB+.
 const MIN_REAL_IMAGE_BYTES: usize = 45_000;
 
 /// Hard cap on downloaded image size (guards against oversized/junk responses).
@@ -353,7 +308,6 @@ fn album_score(query_artist: &str, query_album: &str, album: &ExternalAlbum) -> 
     } else {
         similarity(query_artist, &album.artist)
     };
-    // Title matters more than artist (library artist tags are often formatted differently).
     title_sim * 0.7 + artist_sim * 0.3
 }
 
@@ -526,7 +480,6 @@ impl Provider for ITunes {
         if sim < 0.5 {
             return Ok(None);
         }
-        // iTunes previews are 100x100 but Apple serves full-res via URL substitution.
         let url = art.replace("100x100bb", "1000x1000bb");
         Ok(Some(ExternalImage {
             source: "iTunes".to_string(),
@@ -670,8 +623,6 @@ impl Provider for Deezer {
         .json()
         .map_err(|e| e.to_string())?;
 
-        // Best name match wins; ties go to the earlier result (Deezer ranks by
-        // relevance, so the first same-named artist is usually the intended one).
         let mut best: Option<(f32, String, String)> = None;
         for a in search.data {
             let Some(url) = a.picture_xl.filter(|u| !u.is_empty()).or(a.picture_big) else {
@@ -743,19 +694,17 @@ impl Provider for Deezer {
                     Some((sim, h.title, url))
                 })
                 .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            if let Some((sim, name, url)) = best {
-                if sim >= 0.5 {
+            if let Some((sim, name, url)) = best
+                && sim >= 0.5 {
                     return Ok(Some(ExternalImage {
                         source: "Deezer".to_string(),
                         url,
                         matched_name: name,
                     }));
                 }
-            }
             return Ok(None);
         }
 
-        // No album given: search by track, use its album's cover.
         #[derive(Deserialize)]
         struct TrackSearchResp {
             data: Vec<TrackHit>,
@@ -787,15 +736,14 @@ impl Provider for Deezer {
                 Some((sim, h.title, url))
             })
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some((sim, name, url)) = best {
-            if sim >= 0.5 {
+        if let Some((sim, name, url)) = best
+            && sim >= 0.5 {
                 return Ok(Some(ExternalImage {
                     source: "Deezer".to_string(),
                     url,
                     matched_name: name,
                 }));
             }
-        }
         Ok(None)
     }
 }
@@ -841,7 +789,6 @@ impl Provider for MusicBrainz {
         .json()
         .map_err(|e| e.to_string())?;
 
-        // Prefer best title match, then most tracks (full releases over singles).
         let best = search
             .releases
             .into_iter()
@@ -921,8 +868,6 @@ impl Provider for MusicBrainz {
     }
 }
 
-/// Finds a MusicBrainz release-group (the "album" spanning all editions, one
-/// cover for all reissues) best matching title (and artist, if given).
 fn mb_release_group_id(
     client: &reqwest::blocking::Client,
     artist: &str,
@@ -960,7 +905,6 @@ fn mb_release_group_id(
         .into_iter()
         .filter_map(|g| {
             let sim = similarity(album, &g.title);
-            // If artist is known, reject a same-titled album by someone else.
             let artist_ok = artist.is_empty()
                 || g
                     .artist_credit
@@ -992,7 +936,6 @@ impl Provider for CoverArtArchive {
         album: &str,
         _title: &str,
     ) -> Result<Option<ExternalImage>, String> {
-        // CAA indexes covers by MusicBrainz release-group, so album is required.
         if album.trim().is_empty() {
             return Ok(None);
         }
@@ -1026,18 +969,15 @@ impl Provider for CoverArtArchive {
             client.get(format!("https://coverartarchive.org/release-group/{}", rg_id)),
             "coverartarchive.org",
         )?;
-        // CAA responds 404 when the release-group has no cover art.
         if !resp.status().is_success() {
             return Ok(None);
         }
         let caa: CaaResp = resp.json().map_err(|e| e.to_string())?;
 
-        // Prefer the image marked "front", else the first available.
         let Some(img) = caa.images.iter().find(|i| i.front).or_else(|| caa.images.first())
         else {
             return Ok(None);
         };
-        // Prefer a pre-sized 1200/500 thumbnail over the (potentially huge) original.
         let url = img
             .thumbnails
             .x1200
@@ -1056,19 +996,15 @@ impl Provider for CoverArtArchive {
 
 struct Wikipedia;
 
-/// Whether a Wikidata short description indicates a music artist. Without
-/// this check, search easily returns an unrelated same-named article (city,
-/// film, color).
+/// Whether a Wikidata short description indicates a music artist.
 fn is_music_description(desc: Option<&str>) -> bool {
     let Some(d) = desc else {
         return false;
     };
     let d = d.to_lowercase();
     const KW: &[&str] = &[
-        // en
         "musician", "singer", "rapper", "band", "composer", "songwriter", "vocalist",
         "guitarist", "drummer", " dj", "duo", "group", "producer", "music",
-        // ru
         "певец", "певица", "музыкант", "группа", "рэпер", "композитор", "исполнит",
         "музыкальн", "дуэт", "диджей", "вокалист", "гитарист", "ансамбль", "бэнд",
         "рок-", "поп-", "музыка",
@@ -1076,9 +1012,7 @@ fn is_music_description(desc: Option<&str>) -> bool {
     KW.iter().any(|k| d.contains(k))
 }
 
-/// Looks up an artist article in one Wikipedia language edition and returns
-/// its lead photo. Strict filtering by description + name match: when in
-/// doubt, return `None` rather than risk the wrong picture.
+/// Looks up an artist article in one Wikipedia language edition and returns its lead photo.
 fn wiki_lookup(
     client: &reqwest::blocking::Client,
     lang: &str,
@@ -1128,8 +1062,6 @@ fn wiki_lookup(
         return Ok(None);
     };
 
-    // Candidate needs: photo + music description + name match. Best name
-    // match wins; ties go to higher search rank (lower index).
     let mut candidates: Vec<(f32, i64, String, String)> = Vec::new();
     for p in query.pages.values() {
         let Some(thumb) = &p.thumbnail else {
@@ -1167,8 +1099,6 @@ impl Provider for Wikipedia {
         client: &reqwest::blocking::Client,
         artist: &str,
     ) -> Result<Option<ExternalImage>, String> {
-        // English first (wider coverage, stable descriptions), then Russian
-        // (local artists missing from en).
         for lang in ["en", "ru"] {
             if let Some(img) = wiki_lookup(client, lang, artist)? {
                 return Ok(Some(img));
@@ -1179,28 +1109,18 @@ impl Provider for Wikipedia {
 }
 
 fn album_providers() -> Vec<Box<dyn Provider>> {
-    // Deezer first: much higher rate limit than iTunes and rich data without
-    // a key. A near-exact match (score >= 0.97) short-circuits the rest.
-    // iTunes/MusicBrainz only get the tail of requests, keeping us under
-    // iTunes's strict limit.
     vec![Box::new(Deezer), Box::new(ITunes), Box::new(MusicBrainz)]
 }
 
 fn image_providers() -> Vec<Box<dyn Provider>> {
-    // Deezer primary (rich artist photos, no key); Wikipedia fallback for
-    // artists missing from Deezer.
     vec![Box::new(Deezer), Box::new(Wikipedia)]
 }
 
 fn cover_providers() -> Vec<Box<dyn Provider>> {
-    // Deezer first: most tracks resolve here (short-circuits on first match),
-    // keeping iTunes's strict limit from being hit during bulk prep.
-    // Cover Art Archive is the last resort for niche/regional releases.
     vec![Box::new(Deezer), Box::new(ITunes), Box::new(CoverArtArchive)]
 }
 
 /// Queries sources for a track/album cover, returns first match.
-/// `TemporaryError` if nothing was found but at least one provider errored.
 pub fn fetch_track_cover(artist: &str, album: &str, title: &str) -> FetchOutcome<ExternalImage> {
     let client = client();
     let mut had_error = false;
@@ -1233,7 +1153,6 @@ pub fn fetch_album_tracklist(artist: &str, album: &str) -> FetchOutcome<External
                 if score < 0.5 {
                     continue;
                 }
-                // Reject a same-titled album by a different artist.
                 if !artist.is_empty() && similarity(artist, &candidate.artist) < 0.35 {
                     continue;
                 }
@@ -1258,9 +1177,7 @@ pub fn fetch_album_tracklist(artist: &str, album: &str) -> FetchOutcome<External
     }
 }
 
-/// Queries sources for the best artist avatar. Stops at the first confident
-/// match (>=0.85) to save network calls and avoid a less-accurate fallback
-/// image (e.g. Wikipedia) overriding a good one.
+/// Queries sources for the best artist avatar.
 pub fn fetch_artist_image(artist: &str) -> FetchOutcome<ExternalImage> {
     let client = client();
     let mut best: Option<(f32, ExternalImage)> = None;
@@ -1291,8 +1208,6 @@ pub fn fetch_artist_image(artist: &str) -> FetchOutcome<ExternalImage> {
 }
 
 /// A track candidate found via an external source (for the download page).
-/// Unlike [`ExternalTrack`], carries a remote cover URL (loaded directly by
-/// the webview) and source name — a "phantom" result not in the library.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExternalSearchTrack {
     pub title: String,
@@ -1309,22 +1224,14 @@ pub struct ExternalSearchTrack {
     pub artist_id: Option<u64>,
     #[serde(default)]
     pub album_id: Option<u64>,
-    /// Genre, when the source exposes it directly (iTunes only — Deezer's
-    /// track/album search responses don't include it; for Deezer results the
-    /// download path looks it up separately via `album_id`, see
-    /// [`deezer_album_genre`]).
     #[serde(default)]
     pub genre: Option<String>,
-    /// Set only for the "paste a link" flow (`downloads_resolve_url`) — the
-    /// exact yt-dlp target URL, passed straight through to `downloads_enqueue`
-    /// as `DownloadRequest::direct_url` so the worker downloads it directly
-    /// instead of searching. `None` for Deezer/iTunes search results.
     #[serde(default)]
     pub source_url: Option<String>,
 }
 
-/// Deezer album search result for the download page, identified by Deezer id
-/// (see [`album_detail`]).
+/// Deezer album search result for the download page, identified by Deezer id (see
+/// [`album_detail`]).
 #[derive(Debug, Clone, Serialize)]
 pub struct ExternalSearchAlbum {
     pub id: u64,
@@ -1365,18 +1272,12 @@ pub struct ExternalArtistDetail {
     pub top_tracks: Vec<ExternalSearchTrack>,
 }
 
-/// Identity key for a download candidate: normalized artist+title+album.
-/// Includes album so same-titled tracks from different albums stay distinct;
-/// empty album falls back to artist+title only. Keep in sync with `trackKey`
-/// in `useDownloads.ts`.
+/// Identity key: normalized artist+title+album. Keep in sync with `trackKey` in useDownloads.ts.
 pub fn track_identity_key(artist: &str, title: &str, album: Option<&str>) -> String {
     normalize(&format!("{} {} {}", artist, title, album.unwrap_or("")))
 }
 
-/// Bracketed tokens treated as noise (credits/labels), not a distinct version.
-/// A bracket group containing one of these is dropped so "Song (prod. by X)"
-/// matches "Song". Version markers (remix/live/acoustic/...) are NOT listed
-/// and are preserved.
+/// Bracket tokens treated as noise; version markers (remix/live/...) are not listed and stay.
 const TITLE_NOISE_TOKENS: &[&str] = &[
     "feat", "ft", "featuring", "prod", "produced", "official", "lyric", "lyrics",
     "visualizer", "remaster", "remastered", "explicit", "mv",
@@ -1388,9 +1289,7 @@ fn group_is_noise(buf: &str) -> bool {
         .any(|w| TITLE_NOISE_TOKENS.contains(&w))
 }
 
-/// Strips bracketed credits (`(prod. by ...)`/`(feat. ...)`/`(Official Video)`)
-/// and trailing `feat.`/`prod.` for title matching. Version markers in
-/// brackets (remix/live/...) are preserved.
+/// Strips bracketed credits (`(prod.
 fn strip_title_noise(s: &str) -> String {
     let lower = s.to_lowercase();
     let mut out = String::with_capacity(lower.len());
@@ -1421,7 +1320,6 @@ fn strip_title_noise(s: &str) -> String {
             }
         }
     }
-    // Unclosed bracket: keep the remainder if it's not noise.
     if !buf.is_empty() && !group_is_noise(&buf) {
         out.push_str(&buf);
     }
@@ -1441,18 +1339,13 @@ pub fn title_match_key(title: &str) -> String {
     normalize(&strip_title_noise(title))
 }
 
-/// Normalized album key for album-aware library matching. Both sides of a
-/// comparison (local tag and external source album) must go through this or
-/// the keys won't line up.
+/// Normalized album key; both sides of a comparison must go through it.
 pub fn album_match_key(album: &str) -> String {
     normalize(album)
 }
 
-/// Builds the separator list once (user separators + built-in feat/ft/and...),
-/// sorted longest-first so a short prefix like " feat " doesn't fragment
-/// " featuring " before it matches. Hoisted out of the hot path: rebuilding
-/// this per-track on a tens-of-thousands library caused UI freezes during
-/// index rebuilds. See [`split_artists_for_match_prepared`].
+/// Separators sorted longest-first (" feat " must not split " featuring "); built once, outside the
+/// hot path.
 pub fn prepare_artist_separators(separators: &[String]) -> Vec<String> {
     let mut seps: Vec<String> = separators.iter().map(|x| x.to_lowercase()).collect();
     for extra in [
@@ -1466,13 +1359,7 @@ pub fn prepare_artist_separators(separators: &[String]) -> Vec<String> {
     seps
 }
 
-/// Splits an artist string into normalized names for fuzzy matching, using an
-/// already-[`prepare_artist_separators`]-prepared separator list (no
-/// per-call allocation/sort). Unlike [`crate::library::split_artists`], splits
-/// more aggressively (also on feat/ft/x/vs/"и" etc.) so multi-artist tracks
-/// can match on any one artist.
 pub fn split_artists_for_match_prepared(artist: &str, prepared_seps: &[String]) -> Vec<String> {
-    // Pad with spaces so separators like " feat " match at boundaries.
     let mut s = format!(" {} ", artist.to_lowercase());
     for sep in prepared_seps {
         s = s.replace(sep.as_str(), "\u{1}");
@@ -1489,18 +1376,13 @@ pub fn split_artists_for_match_prepared(artist: &str, prepared_seps: &[String]) 
 }
 
 /// Builds a Deezer advanced query with field operators `artist:"..." track:"..."`.
-/// Exact field matching rescues niche tracks with generic titles (e.g. "Intro")
-/// that get buried by same-named hits in free-text `q=` search. Quotes in
-/// values would break the syntax, so they're replaced with a space.
 fn deezer_advanced_query(artist: &str, title: &str) -> String {
     let a = artist.replace('"', " ");
     let t = title.replace('"', " ");
     format!("artist:\"{}\" track:\"{}\"", a.trim(), t.trim())
 }
 
-/// Returns filtered tracks plus the raw (pre-filter) Deezer result count —
-/// pagination must use the raw count, since filtering out entries (e.g. no
-/// artist) would prematurely zero `has_more` and skew `next_index`.
+/// Pagination uses the raw Deezer count: filtering would zero `has_more` too early.
 fn deezer_search_tracks(
     client: &reqwest::blocking::Client,
     query: &str,
@@ -1585,8 +1467,6 @@ fn deezer_search_tracks(
     Ok((tracks, raw_count))
 }
 
-/// Picks the best available image URL (xl -> big -> medium), skipping empty
-/// and placeholder Deezer defaults.
 fn pick_image(candidates: &[Option<String>]) -> Option<String> {
     candidates
         .iter()
@@ -1787,10 +1667,6 @@ pub fn album_detail(id: u64) -> Result<Option<ExternalAlbumDetail>, String> {
     }))
 }
 
-/// Looks up a track's genre via its Deezer album id — the track search
-/// endpoint doesn't include genre, only `/album/{id}` does. Best-effort:
-/// `None` on any network/parse error or when the album has no genre set
-/// (Deezer uses id 0 / an empty list for "All"/unclassified).
 pub fn deezer_album_genre(album_id: u64) -> Option<String> {
     #[derive(Deserialize)]
     struct AlbumResp {
@@ -1901,20 +1777,13 @@ pub fn artist_detail(id: u64) -> Result<Option<ExternalArtistDetail>, String> {
     }))
 }
 
-/// Artist ids whose `/artist/{id}/top` came back empty. Deezer geo-restricts
-/// that endpoint in some regions (it answers `{"data":[],"total":0}` for every
-/// artist), so those artists page through name search instead — remembered
-/// to skip the dead request on every subsequent page.
+/// Artists whose `/top` came back empty (Deezer geo-restriction) page through name search instead.
 fn top_unavailable() -> &'static Mutex<std::collections::HashSet<u64>> {
     static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// One page of an artist's tracks, most popular first. Uses Deezer's
-/// `/artist/{id}/top`; when that's empty, falls back to free-text search by
-/// the artist's name filtered to tracks whose main artist is `id`.
-/// `name` is fetched from `/artist/{id}` when not supplied. `albums`/`artists`
-/// of the returned page are always empty.
+/// One page of an artist's tracks, most popular first.
 pub fn artist_tracks(
     id: u64,
     name: Option<&str>,
@@ -2012,7 +1881,6 @@ pub fn artist_tracks(
         }
     }
 
-    // Name-search fallback.
     let name = match name.map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => n.to_string(),
         None => {
@@ -2031,9 +1899,7 @@ pub fn artist_tracks(
         }
     };
 
-    // Search hits by other artists are filtered out, so a single page may
-    // yield only a handful — keep pulling pages (bounded) until there's enough
-    // to fill the screen, otherwise infinite scroll never gets a scroll event.
+    // A short first page may not overflow the view: keep pulling pages until it can scroll.
     const MAX_REQUESTS: u32 = 4;
     let batch = limit.max(50);
     let mut tracks: Vec<ExternalSearchTrack> = Vec::new();
@@ -2101,11 +1967,9 @@ fn itunes_search_tracks(
             if artist.is_empty() {
                 return None;
             }
-            // 100x100 -> 600x600 preview via URL substitution (as in cover lookup).
             let cover_url = h
                 .artwork_url100
                 .map(|u| u.replace("100x100bb", "600x600bb"));
-            // "Music" is iTunes's generic fallback bucket, not a real genre.
             let genre = h
                 .primary_genre_name
                 .filter(|g| !g.is_empty() && g != "Music");
@@ -2117,7 +1981,6 @@ fn itunes_search_tracks(
                 cover_url,
                 source: "iTunes".to_string(),
                 in_library: false,
-                // iTunes doesn't expose an id, so artist/album aren't clickable.
                 artist_id: None,
                 album_id: None,
                 genre,
@@ -2127,8 +1990,7 @@ fn itunes_search_tracks(
         .collect())
 }
 
-/// Pagination cursor is based ONLY on Deezer results; mixed-in iTunes tracks
-/// don't affect it, or the frontend would misread the offset and skip results.
+/// The pagination cursor counts only Deezer results.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExternalSearchPage {
     pub tracks: Vec<ExternalSearchTrack>,
@@ -2141,10 +2003,7 @@ pub struct ExternalSearchPage {
     pub has_more: bool,
 }
 
-/// Deezer is the primary paginated source. iTunes is mixed in only on the
-/// first page and only when Deezer's page was short (`< limit`) — avoids an
-/// extra network call for popular queries. Deezer order is preserved; iTunes
-/// tracks are appended with dedup by `track_identity_key`.
+/// Deezer is the primary paginated source.
 pub fn search_tracks(
     query: &str,
     artist: Option<&str>,
@@ -2175,19 +2034,13 @@ pub fn search_tracks(
     let next_index = index + deezer_raw;
     let has_more = deezer_raw >= limit;
 
-    // Exact field search (first page only, when artist+title are known, e.g.
-    // clicking a "phantom" in an album view). Free-text `q=` ranks by
-    // popularity, so a niche generically-titled track ("Intro") gets buried;
-    // field-exact hits are put at the front instead.
-    if index == 0 {
-        if let (Some(a), Some(t)) = (artist, title) {
+    if index == 0
+        && let (Some(a), Some(t)) = (artist, title) {
             let (a, t) = (a.trim(), t.trim());
             if !a.is_empty() && !t.is_empty() {
                 let adv = deezer_advanced_query(a, t);
                 match deezer_search_tracks(client, &adv, 0, limit) {
                     Ok((exact, _)) if !exact.is_empty() => {
-                        // Album-aware dedup: same-titled tracks from different
-                        // albums both stay; only the same release collapses.
                         let mut seen: std::collections::HashSet<String> = exact
                             .iter()
                             .map(|t| track_identity_key(&t.artist, &t.title, t.album.as_deref()))
@@ -2204,7 +2057,6 @@ pub fn search_tracks(
                 }
             }
         }
-    }
 
     if index == 0 && deezer_raw < limit {
         match itunes_search_tracks(client, q, limit) {
@@ -2259,14 +2111,11 @@ pub struct AlbumLayoutEntry {
     pub file_path: Option<String>,
 }
 
-/// Maps external tracks onto local (file_path, title) pairs, returning the
-/// canonical-order layout. Local tracks that don't fit the canon are omitted
-/// here; the frontend appends them at the end itself.
+/// Maps external tracks onto local (file_path, title) pairs, returning the canonical-order layout.
 pub fn build_layout(
     tracks: &[ExternalTrack],
     local: &[(String, String)],
 ) -> Vec<AlbumLayoutEntry> {
-    // Normalized title -> local paths (may have duplicates).
     let mut by_title: HashMap<String, Vec<String>> = HashMap::new();
     for (path, title) in local {
         by_title
@@ -2306,14 +2155,10 @@ fn scheme_origin() -> String {
     }
 }
 
-/// `version` is for cache-busting: a `refresh` changes the fetch time, so the
-/// URL changes and the webview reloads the image.
 fn external_protocol_url(kind: &str, hex: &str, version: u64) -> String {
     format!("{}/{}/{}?v={}", scheme_origin(), kind, hex, version)
 }
 
-/// On-disk cache of downloaded images (artist avatars or track/album covers):
-/// a dir of WebP files plus a JSON manifest with the fetch result per key.
 struct ImageCache {
     /// URL path segment of the `lfmusic-external://` protocol.
     kind: &'static str,
@@ -2327,9 +2172,7 @@ struct ImageCache {
     /// Placeholder-size threshold, see [`download_validate_encode`].
     min_real_bytes: Option<usize>,
     label: &'static str,
-    /// Serializes read-modify-write of the manifest across parallel prep threads,
-    /// so concurrent "load -> insert -> save" cycles don't clobber each other.
-    /// Network downloads happen outside this lock - only the disk merge is serialized.
+    /// Serializes manifest read-modify-write across prep threads; downloads stay outside the lock.
     lock: Mutex<()>,
 }
 
@@ -2371,7 +2214,6 @@ fn build_external_response<R: Runtime>(
     app: &AppHandle<R>,
     uri: &tauri::http::Uri,
 ) -> Response<Vec<u8>> {
-    // Path shape: /<kind>/<hex>, kind = artist|cover.
     let mut segs = uri.path().trim_matches('/').splitn(2, '/');
     let kind = segs.next().unwrap_or("");
     let hex = segs.next().unwrap_or("");
@@ -2386,7 +2228,6 @@ fn build_external_response<R: Runtime>(
         "cover" => &TRACK_COVERS,
         _ => return not_found(),
     };
-    // Read-only path: no create_dir_all per request (a missing dir is just a 404).
     let path = app_data_dir.join(cache.name).join(cache.file_name_for_hex(hex));
     match fs::read(&path) {
         Ok(bytes) => Response::builder()
@@ -2400,8 +2241,6 @@ fn build_external_response<R: Runtime>(
     }
 }
 
-/// File read happens on a small shared pool so the webview isn't blocked and a
-/// grid of avatars doesn't spawn a thread per image.
 pub fn protocol_handler<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
@@ -2422,9 +2261,8 @@ enum ImageDownload {
     Error(String),
 }
 
-/// Downloads, validates (status/content-type/size/decode), and re-encodes to
-/// WebP capped at `max_dim`. `min_real_bytes` is the placeholder-size
-/// threshold for avatars; `None` for covers since small legitimate art exists.
+/// Downloads, validates (status/content-type/size/decode), and re-encodes to WebP capped at
+/// `max_dim`.
 fn download_validate_encode(
     url: &str,
     target: &Path,
@@ -2443,11 +2281,9 @@ fn download_validate_encode(
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-    {
-        if !ct.trim().to_ascii_lowercase().starts_with("image/") {
+        && !ct.trim().to_ascii_lowercase().starts_with("image/") {
             return ImageDownload::Error(format!("не изображение: {}", ct));
         }
-    }
     let bytes = match resp.bytes() {
         Ok(b) => b,
         Err(e) => return ImageDownload::Error(e.to_string()),
@@ -2455,11 +2291,10 @@ fn download_validate_encode(
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return ImageDownload::Error(format!("слишком большой файл: {} Б", bytes.len()));
     }
-    if let Some(min) = min_real_bytes {
-        if bytes.len() < min {
+    if let Some(min) = min_real_bytes
+        && bytes.len() < min {
             return ImageDownload::Placeholder;
         }
-    }
     let img = match image::load_from_memory(&bytes) {
         Ok(i) => i,
         Err(_) => return ImageDownload::Error("не удалось декодировать изображение".into()),
@@ -2475,7 +2310,6 @@ fn download_validate_encode(
     {
         return ImageDownload::Error("не удалось закодировать WebP".into());
     }
-    // Atomic write (temp + rename) so the protocol handler never reads a partial file.
     let Some(dir) = target.parent() else {
         return ImageDownload::Error("нет родительской директории".into());
     };
@@ -2494,7 +2328,7 @@ fn download_validate_encode(
 struct ArtistImageRecord {
     file: Option<String>,
     source: Option<String>,
-    /// "ok" | "none" — negative cache to avoid hitting the network repeatedly.
+    /// "ok" | "none" - negative cache to avoid hitting the network repeatedly.
     status: String,
     fetched_secs: u64,
 }
@@ -2587,26 +2421,22 @@ impl ImageCache {
         }
 
         self.ensure_version(app_data_dir);
-        if !refresh {
-            if let Some(rec) = self.load_manifest(app_data_dir).get(&key) {
+        if !refresh
+            && let Some(rec) = self.load_manifest(app_data_dir).get(&key) {
                 if rec.status == "ok" {
-                    if let Some(file) = &rec.file {
-                        if self.dir(app_data_dir).join(file).exists() {
+                    if let Some(file) = &rec.file
+                        && self.dir(app_data_dir).join(file).exists() {
                             return ArtistImageResult {
                                 status: "ok".into(),
                                 source: rec.source.clone(),
                                 url: Some(self.url(&key, rec.fetched_secs)),
                             };
                         }
-                    }
                 } else if rec.status == "none" {
                     return none_result();
                 }
             }
-        }
 
-        // Network fetch stays outside the manifest lock so parallel prep threads
-        // can download concurrently.
         let now = unix_secs();
         let filename = self.file_name(&key);
         let target = self.dir(app_data_dir).join(&filename);
@@ -2756,10 +2586,7 @@ pub fn artist_settled_keys(app_data_dir: &Path) -> HashSet<String> {
     ARTIST_IMAGES.settled_keys(app_data_dir)
 }
 
-/// Bulk-marks cover keys whose tracks all have a local cover, without network
-/// calls. "local" is not a settled status: the batch pass skips such a key only
-/// while its tracks are still all covered, so a coverless track added to the
-/// album later still gets an external cover.
+/// Marks cover keys whose tracks all have a local cover (not a settled status).
 pub fn mark_track_covers_local(app_data_dir: &Path, keys: &[String]) {
     if keys.is_empty() {
         return;
@@ -2811,9 +2638,6 @@ mod tests {
         assert_eq!(normalize_title("Title feat Someone"), normalize("Title"));
     }
 
-    /// Regression: `normalize_title` used to look for `" feat."` without
-    /// handling the opening paren, so bracketed tags like "(feat. Artist X)"
-    /// weren't stripped and matching local tracks showed as phantoms.
     #[test]
     fn normalize_title_strips_parenthesized_feat_and_bracketed_remaster_marker() {
         assert_eq!(
@@ -2836,8 +2660,6 @@ mod tests {
     #[test]
     fn similarity_gives_containment_bonus_for_deluxe_edition_style_suffix() {
         let with_bonus = similarity("Album", "Album (Deluxe Edition)");
-        // Without contains_bonus this would be ~0.25; the +0.15 bonus pushes
-        // it to ~0.40 — higher, but still far from "similar".
         assert!(with_bonus > 0.35, "ожидали эффект contains_bonus, similarity={with_bonus}");
         assert!(with_bonus < 0.5, "similarity={with_bonus}");
     }
@@ -2900,7 +2722,6 @@ mod tests {
             tracks: vec![],
         };
         let score = album_score("", "Best Of", &album);
-        // title_sim ~= 1.0 (exact match), artist_sim fixed at 0.7.
         assert!((score - (1.0 * 0.7 + 0.7 * 0.3)).abs() < 0.05);
     }
 
@@ -2935,7 +2756,6 @@ mod tests {
 
     #[test]
     fn title_match_key_keeps_version_markers_in_parentheses() {
-        // remix/live/acoustic are distinct versions, not noise, and must be kept.
         let key = title_match_key("Song Name (Live)");
         assert_ne!(key, normalize("Song Name"));
         assert_eq!(key, normalize("Song Name (Live)"));
@@ -3000,8 +2820,6 @@ mod tests {
 
     #[test]
     fn prepare_artist_separators_sorts_longest_first_to_avoid_prefix_collisions() {
-        // " feat " is a prefix of " featuring "; applying it first would
-        // fragment " featuring " before the longer separator gets a chance.
         let prepared = prepare_artist_separators(&[]);
         let feat_idx = prepared.iter().position(|s| s == " feat ").unwrap();
         let featuring_idx = prepared.iter().position(|s| s == " featuring ").unwrap();
@@ -3047,7 +2865,6 @@ mod tests {
 
     #[test]
     fn album_cache_key_distinguishes_album_and_artist_order() {
-        // Different (album, artist) pairs must not collapse when words shift across fields.
         let a = album_cache_key("X Y", "Z");
         let b = album_cache_key("X", "Y Z");
         assert_ne!(a, b);
@@ -3062,8 +2879,6 @@ mod tests {
 
     #[test]
     fn artist_image_url_and_cover_image_url_differ_for_same_key() {
-        // Same logical key must not yield the same URL for an artist avatar vs.
-        // an album cover, or the protocol handler would serve the wrong image.
         let artist_url = ARTIST_IMAGES.url("queen", 1);
         let cover_url = TRACK_COVERS.url("queen", 1);
         assert_ne!(artist_url, cover_url);

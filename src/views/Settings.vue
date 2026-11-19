@@ -36,9 +36,6 @@ const allCategories = [
     },
 ] as const;
 
-// External sources (album order/covers/avatars from open services, plus the
-// yt-dlp download tooling bundled into that settings page) are a desktop-only
-// feature — not offered on Android or in the phone layout.
 const categories = computed(() => isAndroidRuntime() || isPhoneViewport() ? allCategories.filter(c => c.id !== 'external') : allCategories);
 
 const pageRootEl = ref<HTMLElement | null>(null);
@@ -101,11 +98,11 @@ function scrollToTop() {
     min-height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .pageTitle {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -136,7 +133,7 @@ function scrollToTop() {
     padding: 12px 20px 12px 24px;
     border-radius: 999px;
     cursor: pointer;
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .categoryRow:hover {
     background-color: hsla(0, 0%, 100%, 0.035);
@@ -154,7 +151,7 @@ function scrollToTop() {
     font-weight: 700;
     font-size: 20px;
     color: #ffffff;
-    transition: color .2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .rowDesc {
     user-select: none;
@@ -166,13 +163,12 @@ function scrollToTop() {
 .rowChevron {
     flex-shrink: 0;
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 80%, 0.4);
-    transition: color .2s ease, transform .2s ease;
+    transition: color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .categoryRow:hover .rowChevron {
     color: hsla(0, 0%, 100%, 0.85);
     transform: translateX(4px);
 }
-/* Same row as the categories, set apart by spacing. */
 .donateRow {
     margin-top: 24px;
     max-width: 760px;

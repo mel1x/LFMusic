@@ -50,7 +50,6 @@ async function load(id: number) {
     const mySeq = ++seq
     tracks.value = []
     hasMore.value = false
-    // A page request of the previous artist may still be in flight; it won't reset this.
     loadingMore.value = false
     failed.value = false
     nextIndex = 0
@@ -90,8 +89,7 @@ async function loadMore() {
     }
 }
 
-// A short first page may not overflow the view — then no scroll event ever
-// fires, so keep loading until the list is scrollable or exhausted.
+// A short first page may not overflow: keep loading until the list scrolls or ends.
 async function fillViewport() {
     const el = pageEl.value
     if (!el || !hasMore.value) return
@@ -168,7 +166,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
     overflow-y: scroll;
@@ -194,14 +192,14 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-weight: 500;
     cursor: pointer;
     user-select: none;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     width: fit-content;
 }
 .backBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
     color: hsla(0, 0%, 100%, 1);
 }
-.backBtn svg { color: hsla(0, 0%, 100%, 0.6); transition: .24s ease; }
+.backBtn svg { color: hsla(0, 0%, 100%, 0.6); transition: var(--duration-hover) var(--ease-smooth); }
 .backBtn:hover svg { color: hsla(0, 0%, 100%, 1); }
 
 .pageHead {

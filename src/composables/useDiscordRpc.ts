@@ -42,11 +42,9 @@ function presenceTitle(track: TrackMetadata): string {
   return track.title || fileName || 'LFMusic'
 }
 
-// Session cache of resolved covers: file_path -> https URL (null = not found).
 const coverUrlCache = new Map<string, string | null>()
 
-// Rich Presence only accepts https image URLs, but library covers are local
-// files, so look up cover art via the iTunes Search API (no key, CORS-enabled).
+// Rich Presence needs https images: covers are looked up via the iTunes Search API.
 async function findCoverUrl(track: TrackMetadata): Promise<string | null> {
   const cached = coverUrlCache.get(track.file_path)
   if (cached !== undefined) return cached
@@ -68,14 +66,10 @@ async function findCoverUrl(track: TrackMetadata): Promise<string | null> {
     coverUrlCache.set(track.file_path, url)
     return url
   } catch {
-    // Network unavailable: don't cache, retry next time.
     return null
   }
 }
 
-// Discord Rich Presence: publishes the current track to the Discord profile.
-// Discord animates the progress bar itself from timestamps, so we only send
-// updates on track/source change, pause, and seeks. No-op on Android.
 export function useDiscordRpc(options: DiscordRpcOptions) {
   if (isAndroidRuntime()) return
 
@@ -113,7 +107,6 @@ export function useDiscordRpc(options: DiscordRpcOptions) {
     }
 
     const coverUrl = await findCoverUrl(track)
-    // State may have changed while awaiting the cover lookup; this update is stale.
     if (seq !== sendSeq) return
 
     const playing = options.playbackState.value === 'Playing'
@@ -152,7 +145,6 @@ export function useDiscordRpc(options: DiscordRpcOptions) {
     { immediate: true },
   )
 
-  // Seek: position diverged from the extrapolation of the last sent update.
   watch(options.positionSecs, (pos) => {
     if (options.playbackState.value !== 'Playing') return
     if (!settings.value.discord_rpc_enabled || !options.currentTrack.value) return

@@ -1,4 +1,6 @@
 import { ref, shallowRef, reactive, computed, watch, effectScope } from "vue";
+import { playbackSpeed } from "./useSoundFx";
+import { frameLoop } from "../utils/frameLoop";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -37,8 +39,7 @@ export interface TrackMetadata {
   is_lossless: boolean;
   file_path: string;
   cover_art: string | null;
-  /** Frontend-only: cover was set from an external source (not embedded/override).
-   *  Lets us revert it when external covers are disabled without touching local covers. */
+  /** Frontend-only: cover was set from an external source (not embedded/override). */
   cover_external?: boolean;
   accent_color: string | null;
   bpm: number | null;
@@ -58,6 +59,8 @@ export interface PlayerStatus {
 }
 
 export interface PlayTrackOptions {
+  /** Load the track paused at 0:00 (sleep timer "after this track"). */
+  startPaused?: boolean;
   skipAttempt?: boolean;
   orderIndex?: number;
   finishPrevious?: boolean;
@@ -165,16 +168,12 @@ function roundedSeconds(seconds: number): number {
   return Math.round(Math.max(0, seconds) * 1000) / 1000;
 }
 
-// Singleton state (shared between all consumers)
-
 const currentTrack = ref<TrackMetadata | null>(null);
 const playbackState = ref<"Stopped" | "Playing" | "Paused">("Stopped");
 const volume = ref(0.5);
 const positionSecs = ref(0);
 const isLoading = ref(false);
 const errorMessage = ref("");
-// Lightweight ordered list of catalog paths (DB order) instead of a full reactive
-// array of objects — avoids holding 10k heavy reactive objects just for queue/count.
 const catalogPaths = shallowRef<string[]>([]);
 const isSeeking = ref(false);
 const seekValue = ref(0);
@@ -182,87 +181,73 @@ let statusInterval: ReturnType<typeof setInterval> | null = null;
 let stopStatusWatcher: (() => void) | null = null;
 let stopTrackEndedListener: UnlistenFn | null = null;
 let isHandlingTrackEnd = false;
-// The backend also pushes a `track_ended` event near-instantly on natural EOF (see
-// spawn_track_end_watcher in lib.rs), so this poll is no longer the primary path for
-// that — just position/volume drift correction (rAF handles visual smoothness) plus
-// a safety net if an event is ever missed. Widened from 500ms now that it's not
-// gating how quickly the next track starts.
+// The backend pushes `track_ended`; this poll only corrects drift and is a fallback.
 const STATUS_POLL_MS = 1000;
 
-let lastFrameTime = performance.now();
-let animationFrameId: number | null = null;
+/** Asked on every natural end of a track: true loads the next one paused (sleep timer). */
+let trackEndPauseHook: (() => boolean) | null = null;
+export function setTrackEndPauseHook(hook: (() => boolean) | null) {
+  trackEndPauseHook = hook;
+}
 
-function updateSmoothProgress() {
-  if (playbackState.value !== "Playing") {
-    animationFrameId = null;
-    return;
-  }
+let lastFrameTime = performance.now();
+
+/** Position ticks about once per pixel of a ~1000px bar (5-30 per second) instead of every vsync. */
+function progressTickMs() {
+  const duration = currentTrack.value?.duration_secs ?? 0;
+  if (duration <= 0) return 150;
+  return Math.min(150, Math.max(33, duration / Math.max(0.25, playbackSpeed.value)));
+}
+
+const smoothProgress = frameLoop(() => {
+  if (playbackState.value !== "Playing") return false;
+  // Own clock, not the loop's dt: seeks and status polls reset it.
   const now = performance.now();
   const delta = (now - lastFrameTime) / 1000;
   lastFrameTime = now;
 
-  if (!isSeeking.value) {
-    if (delta > 0 && delta < 1) {
-      const duration = currentTrack.value?.duration_secs ?? 0;
-      if (duration > 0) {
-        positionSecs.value = Math.min(duration, positionSecs.value + delta);
-      } else {
-        positionSecs.value += delta;
-      }
+  if (!isSeeking.value && delta > 0 && delta < 1) {
+    const duration = currentTrack.value?.duration_secs ?? 0;
+    const step = delta * playbackSpeed.value;
+    if (duration > 0) {
+      positionSecs.value = Math.min(duration, positionSecs.value + step);
+    } else {
+      positionSecs.value += step;
     }
   }
-  animationFrameId = requestAnimationFrame(updateSmoothProgress);
-}
+}, progressTickMs);
 
 function startSmoothProgress() {
-  if (animationFrameId === null) {
+  if (!smoothProgress.running) {
     lastFrameTime = performance.now();
-    animationFrameId = requestAnimationFrame(updateSmoothProgress);
+    smoothProgress.start();
   }
 }
 
 function stopSmoothProgress() {
-  if (animationFrameId !== null) {
-    cancelAnimationFrame(animationFrameId);
-    animationFrameId = null;
-  }
+  smoothProgress.stop();
 }
 
-// Shuffle / Repeat
 const shuffled = ref(false);
 const repeatMode = ref<"queue" | "track">("queue");
-// Flat playback queue (file_path list). In shuffle mode the tail is topped up with
-// freshly generated reshuffle passes so at least QUEUE_LOOKAHEAD tracks are always
-// visible ahead. Stores paths only — objects resolve through the cache.
 const playbackOrder = shallowRef<string[]>([]);
-// Explicit pointer to the current track's position in playbackOrder: needed because
-// in shuffle mode the same track can appear in multiple passes, so findIndex won't work.
+// Explicit index: in shuffle the same track can sit in several passes, so findIndex will not work.
 const currentOrderIndex = ref<number>(-1);
 
 const showSettings = ref(false);
 
-// Playback source: 'catalog' | 'playlist:ID' | null
 const activePlaylistSource = ref<string | null>(null);
-// Track objects for the current non-catalog source (playlist/album/artist/mix).
-// Bounded in size so full objects are fine; unused for catalog (paths only).
 const sourceTrackList = ref<TrackMetadata[]>([]);
-// Ordered paths of the active source (queue driver for ANY source): catalog ->
-// filtered/full paths, otherwise -> paths from sourceTrackList.
 const sourcePaths = shallowRef<string[]>([]);
 
-// Reactive LRU cache of track metadata (materialized on demand).
-// A reactive Map: adding an entry retriggers computeds that resolved a path via
-// getTrackByPath and got undefined (Vue 3 tracks key-level access, including misses).
-// Holds metadata plus lazily loaded covers; LRU eviction bounds memory (mainly base64 covers).
+// Reactive Map: adding an entry retriggers computeds that missed it. LRU eviction bounds memory
+// (mostly covers).
 const trackCache = reactive(new Map<string, TrackMetadata>());
 const TRACK_CACHE_LIMIT = 3000;
-// Non-reactive last-access tick, for LRU without extra reactivity triggers.
 const cacheAccessTick = new Map<string, number>();
 let cacheTick = 0;
 
 const inFlightTrackFetches = new Set<string>();
-// Set (not array) so scheduleTrackFetch's membership check is O(1) — it runs on
-// every cache miss, e.g. once per row while scrolling an unmaterialized catalog window.
 let pendingFetchPaths = new Set<string>();
 let fetchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -285,7 +270,6 @@ function maybeEvictCache() {
   const pinned = pinnedCachePaths();
   const candidates = [...trackCache.keys()].filter(p => !pinned.has(p));
   candidates.sort((a, b) => (cacheAccessTick.get(a) ?? 0) - (cacheAccessTick.get(b) ?? 0));
-  // Evict down to ~90% of the limit in one batch to avoid evicting too often.
   const target = Math.floor(TRACK_CACHE_LIMIT * 0.9);
   let toRemove = trackCache.size - target;
   for (const path of candidates) {
@@ -344,9 +328,10 @@ function getTrackByPath(filePath: string): TrackMetadata | undefined {
   return undefined;
 }
 
-/** Cache read without the background fetch on a miss. For lists that hold their
- *  own track objects: fetching on every miss would make a list larger than the
- *  cache evict and refetch its own entries in an endless loop. */
+/**
+ * Cache read without a fetch on miss: lists holding their own objects would otherwise evict and
+ * refetch forever.
+ */
 function peekTrackByPath(filePath: string): TrackMetadata | undefined {
   const hit = trackCache.get(filePath);
   if (hit) cacheAccessTick.set(filePath, ++cacheTick);
@@ -360,7 +345,7 @@ async function fetchTracksByPaths(paths: string[]): Promise<TrackMetadata[]> {
     try {
       const tracks = await invoke<TrackMetadata[]>("library_get_tracks_by_paths", { paths: missing });
       cacheTracks(tracks);
-    } catch { /* ignore */ }
+    } catch {}
   }
   return paths.map(p => trackCache.get(p)).filter((t): t is TrackMetadata => !!t);
 }
@@ -369,10 +354,7 @@ let initialized = false;
 let statsSession: PlaybackStatsSession | null = null;
 let collectionStatsSession: CollectionStatsSession | null = null;
 
-// usePlayer() is called from ~20 components. All refs are module singletons, but
-// computed/functions used to be recreated per call (a separate Map copy per component).
-// A single instance is created in its own effectScope so it isn't destroyed when the
-// first calling component unmounts.
+// One instance in its own effectScope, so it survives the first caller's unmount.
 let playerInstance: ReturnType<typeof createPlayer> | null = null;
 
 export function usePlayer() {
@@ -392,8 +374,6 @@ function createPlayer() {
   } = useFolders();
 
   const { loadPlaylists, getPlaylistTracks, playlists: allPlaylists } = usePlaylists();
-
-  // Shuffle/Repeat helpers
 
   /** Paths of the active playback source (queue driver). */
   function getActiveSourcePaths(): string[] {
@@ -526,9 +506,6 @@ function createPlayer() {
     });
   }
 
-  /** `final` (closing, reloading) writes everything and hands the still playing session
-   *  to the history log. Periodic saves skip the write until a minute has piled up,
-   *  so frequent state saves don't each hit the disk. */
   async function flushCurrentStatisticsProgress(final = true) {
     const session = statsSession;
     if (!session) return;
@@ -597,7 +574,6 @@ function createPlayer() {
 
   function syncCollectionStatsSource(sourceId: string | null, paths: string[]) {
     const ref = collectionRefFromSource(sourceId);
-    // Bail before deduping: for catalog sources `paths` can be the whole library.
     if (!ref) {
       collectionStatsSession = null;
       return;
@@ -635,8 +611,6 @@ function createPlayer() {
     session.completedPaths.clear();
   }
 
-  /** Tracks after the current one that must always be pre-available in playbackOrder
-   *  (queue shows 1 current + 7 upcoming = 8). */
   const QUEUE_LOOKAHEAD = 7;
 
   function upcomingCount(): number {
@@ -655,10 +629,10 @@ function createPlayer() {
     return arr;
   }
 
-  /** Tops up the playbackOrder tail with fresh random permutations of the source so
-   *  at least QUEUE_LOOKAHEAD tracks follow the current one. Each pass is regenerated,
-   *  so order never repeats; the first track of a new pass is never the same as the
-   *  last track of the previous one (when source has >1 track). */
+  /**
+   * Tops up the shuffle tail with fresh permutations so QUEUE_LOOKAHEAD tracks follow the current
+   * one.
+   */
   function ensureLookahead() {
     if (!shuffled.value) return;
     const source = getActiveSourcePaths();
@@ -728,7 +702,6 @@ function createPlayer() {
   function setPlaylistSource(sourceId: string, tracks: TrackMetadata[]) {
     activePlaylistSource.value = sourceId;
     setSourceTracks(tracks);
-    // The "mix" queue only exists on the frontend, so persist it for restore after restart.
     if (sourceId === "mix") {
       saveMixQueuePaths(tracks.map(t => t.file_path));
     }
@@ -745,8 +718,6 @@ function createPlayer() {
     scheduleSaveState();
   }
 
-  /** Sets the mix queue from paths without materializing every object up front
-   *  (they resolve lazily through the cache). */
   function setMixSourceFromPaths(paths: string[]) {
     activePlaylistSource.value = "mix";
     sourceTrackList.value = [];
@@ -836,7 +807,7 @@ function createPlayer() {
 
   const hasNext = computed(() => {
     if (playbackOrder.value.length === 0) return false;
-    if (shuffled.value) return true; // can always generate another pass
+    if (shuffled.value) return true;
     return currentOrderIndex.value >= 0 && currentOrderIndex.value < playbackOrder.value.length - 1;
   });
   const hasPrev = computed(() => currentOrderIndex.value > 0);
@@ -875,7 +846,6 @@ function createPlayer() {
       await initFolders();
       await invoke("library_cleanup");
       catalogPaths.value = await invoke<string[]>("library_get_catalog_paths", {});
-      // Default playback source is the whole catalog.
       if (isCatalogActiveSource()) sourcePaths.value = catalogPaths.value;
       shuffled.value = false;
       syncPlaybackOrder();
@@ -896,8 +866,6 @@ function createPlayer() {
       syncPlaybackOrder();
       await loadPlaylists();
 
-      // Catalog is every track in the library, so a missing path means the
-      // track was removed from the library.
       if (prevTrack && !paths.includes(prevTrack.file_path)) {
         await invoke("player_stop");
         playbackState.value = "Stopped";
@@ -909,16 +877,11 @@ function createPlayer() {
     }
   }
 
-  /** One-time background rescan of active folders on startup: picks up files
-   *  added/removed outside the app; new tracks land at the front of the catalog
-   *  via backend sort_order. Silent (no progress modal/isScanning flag); refreshes
-   *  the catalog through refreshLibrary() when done. */
   async function rescanOnStartup() {
     try {
       await invoke("library_rescan");
       await refreshLibrary();
     } catch {
-      // Startup must not fail because of a background rescan.
     }
   }
 
@@ -970,10 +933,12 @@ function createPlayer() {
       if (options.finishPrevious !== false) {
         await finishCurrentStatsSession();
       }
-      const useCrossfade = settings.value.crossfade_between_tracks && playbackState.value === "Playing";
-      const metadata = useCrossfade
-        ? await invoke<TrackMetadata>("player_play_crossfade", { filePath, crossfadeSecs: 0.25 })
-        : await invoke<TrackMetadata>("player_play", { filePath });
+      const useCrossfade = !options.startPaused && settings.value.crossfade_between_tracks && playbackState.value === "Playing";
+      const metadata = options.startPaused
+        ? await invoke<TrackMetadata>("player_play_paused", { filePath, positionSecs: 0 })
+        : useCrossfade
+          ? await invoke<TrackMetadata>("player_play_crossfade", { filePath, crossfadeSecs: 0.25 })
+          : await invoke<TrackMetadata>("player_play", { filePath });
 
       if (!metadata.cover_art) {
         const cached = getTrackByPath(filePath);
@@ -999,18 +964,15 @@ function createPlayer() {
       } else {
         currentOrderIndex.value = locateInOrder(metadata.file_path);
       }
-      // Keep the shuffle tail filled so the UI can always show 8 tracks.
       if (shuffled.value) ensureLookahead();
-      playbackState.value = "Playing";
+      const startState = options.startPaused ? "Paused" : "Playing";
+      playbackState.value = startState;
       positionSecs.value = 0;
-      beginStatsSession(metadata, 0, "Playing");
+      beginStatsSession(metadata, 0, startState);
       recordTrackStartStatistics(metadata.file_path, options);
       showSettings.value = false;
       scheduleSaveState();
     } catch (e: any) {
-      // Drop the unavailable track from the queue and try the next one. In shuffle
-      // the same path can sit in several passes (history too), so take the slot we
-      // were asked to play, else the nearest one ahead of the current position.
       const order = playbackOrder.value;
       const failedIdx = options.orderIndex !== undefined && order[options.orderIndex] === filePath
         ? options.orderIndex
@@ -1033,8 +995,7 @@ function createPlayer() {
     }
   }
 
-  /** A file that exists but can't be opened stops the previous track in the backend
-   *  (a missing file doesn't: it fails before playback is touched), so mirror its state. */
+  /** A file that exists but cannot be opened stops the previous track in the backend: mirror that. */
   async function syncAfterFailedPlay() {
     try {
       const status = await invoke<PlayerStatus>("player_get_status");
@@ -1045,7 +1006,6 @@ function createPlayer() {
         positionSecs.value = 0;
       }
     } catch {
-      // ignore: the next status poll corrects it
     }
   }
 
@@ -1080,9 +1040,9 @@ function createPlayer() {
     }
   }
 
-  async function playNext(auto = false) {
+  async function playNext(auto = false, startPaused = false) {
     if (auto && repeatMode.value === "track" && currentTrack.value) {
-      await playTrack(currentTrack.value, { orderIndex: currentOrderIndex.value, finishPrevious: false });
+      await playTrack(currentTrack.value, { orderIndex: currentOrderIndex.value, finishPrevious: false, startPaused });
       return;
     }
     if (!auto) {
@@ -1093,21 +1053,17 @@ function createPlayer() {
     const idx = currentOrderIndex.value;
     if (idx >= 0 && idx < playbackOrder.value.length - 1) {
       const nextIdx = idx + 1;
-      await playTrack(playbackOrder.value[nextIdx], { orderIndex: nextIdx, finishPrevious: false });
+      await playTrack(playbackOrder.value[nextIdx], { orderIndex: nextIdx, finishPrevious: false, startPaused });
       if (shuffled.value) {
         ensureLookahead();
         trimHistory();
       }
     } else {
-      // Unshuffled: loop back to the start. Shuffled shouldn't reach here since
-      // ensureLookahead guarantees a tail, but handle it just in case.
       await playTrack(playbackOrder.value[0], { orderIndex: 0, finishPrevious: false });
       if (shuffled.value) ensureLookahead();
     }
   }
 
-  /** `skipRestart`: always go to the previous track (mini player swipe) instead of
-   *  rewinding the current one after 3 seconds. */
   async function playPrev(opts?: { skipRestart?: boolean }) {
     if (playbackOrder.value.length === 0) return;
     if (!opts?.skipRestart && positionSecs.value > 3) {
@@ -1196,8 +1152,6 @@ function createPlayer() {
         lastFrameTime = performance.now();
       }
       updateStatsProgress(status.position_secs, status.state);
-      // Position is otherwise saved only on events; keep it fresh in case the
-      // app is killed (Android background, OS shutdown, crash).
       if (status.state === "Playing" && performance.now() - lastPeriodicSaveMs >= PERIODIC_SAVE_MS) {
         lastPeriodicSaveMs = performance.now();
         void saveState(false);
@@ -1224,20 +1178,17 @@ function createPlayer() {
         }
       }
     } catch {
-      // ignore polling errors
     }
   }
 
-  /** Shared by the `track_ended` event and the status-poll fallback: advances the
-   *  queue once per natural end-of-track. `finishedPath` guards against a stale
-   *  signal racing a manual track change that already moved playback elsewhere. */
+  /** Advances the queue once per natural end; `finishedPath` guards against a stale signal. */
   async function handleTrackNaturallyEnded(finishedPath: string) {
     if (isHandlingTrackEnd || isLoading.value) return;
     if (!currentTrack.value || currentTrack.value.file_path !== finishedPath) return;
     isHandlingTrackEnd = true;
     try {
       await finishCurrentStatsSession({ fullListen: true });
-      await playNext(true);
+      await playNext(true, trackEndPauseHook?.() ?? false);
     } finally {
       isHandlingTrackEnd = false;
     }
@@ -1256,8 +1207,6 @@ function createPlayer() {
     }
   }
 
-  // Debounced state save: under event spam (rapid track switching, volume dragging,
-  // page navigation) only the last call actually persists, not every intermediate one.
   let saveStateTimer: ReturnType<typeof setTimeout> | null = null;
   function scheduleSaveState() {
     if (saveStateTimer) clearTimeout(saveStateTimer);
@@ -1269,7 +1218,6 @@ function createPlayer() {
 
   /** `final`: the app is closing or reloading, so pending statistics are written now. */
   async function saveState(final = true) {
-    // An immediate save supersedes any pending debounced one.
     if (saveStateTimer) {
       clearTimeout(saveStateTimer);
       saveStateTimer = null;
@@ -1321,7 +1269,6 @@ function createPlayer() {
       repeatMode.value = (saved.repeat_mode === "track" ? "track" : "queue");
       activePlaylistSource.value = saved.active_playlist_source ?? null;
 
-      // Restore the playback source through the backend (without a full trackList).
       const src = activePlaylistSource.value;
       const fallbackToCatalog = () => {
         activePlaylistSource.value = null;
@@ -1355,13 +1302,11 @@ function createPlayer() {
         if (tracks.length) setSourceTracks(tracks);
         else fallbackToCatalog();
       } else if (src === "mix") {
-        // The computed mix queue is stored on the frontend (localStorage).
         const mixPaths = loadMixQueuePaths();
         const tracks = mixPaths.length ? await fetchTracksByPaths(mixPaths) : [];
         if (tracks.length) setSourceTracks(tracks);
         else fallbackToCatalog();
       } else {
-        // Catalog / search / no source: play the full catalog.
         sourceTrackList.value = [];
         sourcePaths.value = catalogPaths.value;
       }
@@ -1397,8 +1342,6 @@ function createPlayer() {
       }
       currentTrack.value = metadata;
       cacheTrack(metadata);
-      // In shuffle mode playbackOrder may already exist but currentOrderIndex is -1:
-      // put current first and top up the tail so the queue is valid.
       if (shuffled.value) {
         const inSource = getActiveSourcePaths().includes(metadata.file_path);
         if (inSource) {
@@ -1416,7 +1359,6 @@ function createPlayer() {
       beginStatsSession(metadata, pos, "Paused");
     } catch (e) {
       console.error("Ошибка восстановления трека, сбрасываем сохранённое состояние:", e);
-      // Reset the broken state so the next startup is clean.
       try {
         await invoke("save_player_state", {
           playerState: {
@@ -1448,19 +1390,13 @@ function createPlayer() {
       startSmoothProgress();
     }
 
-    // Silent one-time rescan of active folders (fire-and-forget, doesn't delay UI readiness).
     void rescanOnStartup();
 
-    // Pushed by spawn_track_end_watcher (lib.rs) near-instantly on natural EOF —
-    // primary path for advancing the queue; the status poll above is the fallback.
     stopTrackEndedListener = await listen<string>("track_ended", (event) => {
       void handleTrackNaturallyEnded(event.payload);
     });
 
-    // Listening history is written in batches; the OS may kill a backgrounded
-    // app (Android) before the next batch is due. The full state save also
-    // writes the listened time and position (an unfinished session only
-    // replaces the open one in the backend, so repeats don't duplicate it).
+    // Android may kill a backgrounded app before the next history batch: save now.
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
         void saveState()
@@ -1469,8 +1405,7 @@ function createPlayer() {
       }
     });
 
-    // Any close path (title bar button, Alt+F4, taskbar) saves first. Bounded,
-    // so a backend busy with a long scan can't keep the window from closing.
+    // Bounded, so a backend busy with a scan cannot block closing.
     if (!isAndroidRuntime()) {
       try {
         await getCurrentWindow().onCloseRequested(async () => {
@@ -1484,11 +1419,15 @@ function createPlayer() {
       }
     }
 
-    // Persist the current page on navigation (debounced). Set up after restoreState
-    // so its own router.replace doesn't trigger a save.
+    // Set up after restoreState, so its own router.replace does not save.
     watch(() => router.currentRoute.value.path, () => {
       scheduleSaveState();
     });
+
+    // Looping "now playing" indicators stop with playback (see styles/ui.css).
+    watch(playbackState, (state) => {
+      document.documentElement.classList.toggle("lf-playing", state === "Playing");
+    }, { immediate: true });
 
     stopStatusWatcher = watch(playbackState, (state: string) => {
       if (state === 'Playing') {
@@ -1517,13 +1456,11 @@ function createPlayer() {
     initialized = false;
   }
 
-  // Start init immediately on first import
   init();
 
   const catalogCount = computed(() => catalogPaths.value.length);
 
   return {
-    // Player state
     currentTrack,
     playbackState,
     volume,
@@ -1541,7 +1478,6 @@ function createPlayer() {
     activePlaylistSource,
     sourceTrackList,
 
-    // Library / settings state
     showSettings,
     folders,
     isScanning,
@@ -1549,7 +1485,6 @@ function createPlayer() {
     scanProgress,
     folderAddError,
 
-    // Computed
     trackTitle,
     trackArtist,
     trackAlbum,
@@ -1568,7 +1503,6 @@ function createPlayer() {
     currentCoverArt,
     currentAccentColor,
 
-    // Utilities
     formatTime,
     getTrackDisplayName,
     getTrackByPath,
@@ -1577,7 +1511,6 @@ function createPlayer() {
     fetchTracksByPaths,
     folderDisplayName,
 
-    // Actions
     loadLibrary,
     refreshLibrary,
     addFolder,

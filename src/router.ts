@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory, type Router } from 'vue-router'
-import { isAndroidRuntime } from './composables/usePlatform'
+import { isAndroidRuntime, isPhoneViewport } from './composables/usePlatform'
 import Main from './views/Main.vue'
 import Catalog from './views/Catalog.vue'
 import Search from './views/Search.vue'
@@ -28,12 +28,18 @@ const routes = [
   { path: '/album/:name', component: Album, props: true },
   { path: '/artist/:name', component: Artist, props: true },
   { path: '/artist/:name/tracks', component: ArtistTracks, props: true },
-  { path: '/settings', component: () => import('./views/Settings.vue') },
-  { path: '/settings/appearance', component: () => import('./views/settings/Appearance.vue') },
-  { path: '/settings/playback', component: () => import('./views/settings/Playback.vue') },
-  { path: '/settings/library', component: () => import('./views/settings/Library.vue') },
-  { path: '/settings/general', component: () => import('./views/settings/General.vue') },
-  { path: '/settings/external', component: () => import('./views/settings/ExternalSources.vue') },
+  {
+    path: '/settings',
+    component: () => import('./views/SettingsLayout.vue'),
+    children: [
+      { path: '', component: () => import('./views/Settings.vue') },
+      { path: 'appearance', component: () => import('./views/settings/Appearance.vue') },
+      { path: 'playback', component: () => import('./views/settings/Playback.vue') },
+      { path: 'library', component: () => import('./views/settings/Library.vue') },
+      { path: 'general', component: () => import('./views/settings/General.vue') },
+      { path: 'external', component: () => import('./views/settings/ExternalSources.vue') },
+    ],
+  },
 ]
 
 const router = createRouter({
@@ -41,15 +47,12 @@ const router = createRouter({
   routes,
 })
 
-// External sources settings are a desktop-only feature (no tab to reach them
-// from on Android) — redirect away from any direct/deep link too.
 router.beforeEach((to) => {
   if (to.path === '/settings/external' && isAndroidRuntime()) return '/settings'
+  if (to.path === '/settings' && !isPhoneViewport()) return '/settings/appearance'
 })
 
-// window.history.state.back is null when there's no previous entry in this
-// session (e.g. right after launch, or a deep link) — router.back() would
-// silently no-op then, so fall back to the recommendations page instead.
+// No previous entry in this session (launch, deep link): router.back() would do nothing.
 export function goBackOrHome(instance: Router = router) {
   if (window.history.state?.back) {
     instance.back()

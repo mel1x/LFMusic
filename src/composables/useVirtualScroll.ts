@@ -39,8 +39,6 @@ export function useVirtualScroll<T>(
         scrollTop.value = (e.target as HTMLElement).scrollTop
     }
 
-    // Returns the previous object while start/end are unchanged, so scroll events
-    // within the same row don't re-slice the list and re-render every visible row.
     const range = computed<{ start: number; end: number }>((prev) => {
         const total = items.value.length
         let start = 0

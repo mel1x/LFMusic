@@ -1,6 +1,3 @@
-//! After yt-dlp: make sure the file is playable (convert with ffmpeg when it
-//! isn't), then write tags, cover art and lyrics.
-
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -35,7 +32,6 @@ fn detect(path: &Path) -> Option<FileType> {
 fn playable_ext(path: &Path) -> Option<&'static str> {
     match detect(path)? {
         FileType::Mp4 => {
-            // Only audio-only MP4 (m4a); a muxed video file would also land here.
             let ext = path.extension()?.to_str()?.to_ascii_lowercase();
             (ext == "m4a").then_some("m4a")
         }
@@ -45,13 +41,10 @@ fn playable_ext(path: &Path) -> Option<&'static str> {
         FileType::Wav => Some("wav"),
         FileType::Aac => Some("aac"),
         FileType::Aiff => Some("aiff"),
-        // Opus (symphonia has no decoder), WebM/Matroska and anything else.
         _ => None,
     }
 }
 
-/// Ensures the downloaded file is something the player can decode, converting
-/// to m4a (AAC) with ffmpeg if needed. Returns the final path and extension.
 pub fn ensure_playable(
     file: &Path,
     tools: &Resolved,
@@ -67,9 +60,8 @@ pub fn ensure_playable(
         ));
     };
     let out = file.with_file_name("converted.m4a");
-    // A muxed MP4 almost always carries AAC, which can be stream-copied.
-    // Anything else (WebM/Opus) must be transcoded — copying Opus into an
-    // .m4a would produce a file that still can't be decoded.
+    // Muxed MP4 usually carries AAC (stream-copied); WebM/Opus must be transcoded, Opus in .m4a
+    // still cannot be decoded.
     const COPY: &[&str] = &["-c:a", "copy"];
     const AAC: &[&str] = &["-c:a", "aac", "-b:a", "256k"];
     let attempts: &[&[&str]] = if detect(file) == Some(FileType::Mp4) { &[COPY, AAC] } else { &[AAC] };
@@ -95,16 +87,15 @@ pub fn ensure_playable(
     Err(JobError::new(ErrorKind::Format, "ffmpeg не смог конвертировать аудио"))
 }
 
-// ── Network helpers ─────────────────────────────────────────────────────────
-
 fn http() -> &'static reqwest::blocking::Client {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
+            .tls_backend_preconfigured(crate::util::http_tls())
             .user_agent("LFMusic (+https://github.com/mel1x/LFMusic)")
             .timeout(Duration::from_secs(15))
             .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+            .expect("Не удалось создать HTTP-клиент")
     })
 }
 
@@ -135,11 +126,9 @@ fn resolve_cover(info: &TagInfo) -> Option<Vec<u8>> {
     }
     if let crate::external::FetchOutcome::Found(img) =
         crate::external::fetch_track_cover(info.artist, info.album.unwrap_or(""), info.title)
-    {
-        if let Some(bytes) = fetch_image(&img.url) {
+        && let Some(bytes) = fetch_image(&img.url) {
             return Some(bytes);
         }
-    }
     info.thumbnail_url
         .and_then(fetch_image)
         .and_then(|b| square_jpeg(&b))
@@ -157,8 +146,6 @@ fn image_mime(bytes: &[u8]) -> lofty::picture::MimeType {
         _ => MimeType::Jpeg,
     }
 }
-
-// ── Lyrics (LRCLIB, keyless) ────────────────────────────────────────────────
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,11 +211,7 @@ fn fetch_lyrics(artist: &str, title: &str, album: Option<&str>, duration: Option
     plain_only
 }
 
-// ── Tagging ─────────────────────────────────────────────────────────────────
-
-/// Writes title/artist/album/genre/cover/lyrics. Best-effort: a file that
-/// can't be tagged is still a valid download. Returns lyrics for the `.lrc`
-/// sidecar, which is written once the file has its final name.
+/// Writes title/artist/album/genre/cover/lyrics.
 pub fn write_tags(path: &Path, info: &TagInfo) -> Option<Lyrics> {
     use lofty::config::WriteOptions;
     use lofty::picture::{Picture, PictureType};
@@ -241,7 +224,6 @@ pub fn write_tags(path: &Path, info: &TagInfo) -> Option<Lyrics> {
         .map(|t| t.properties().duration().as_secs())
         .filter(|s| *s > 0);
 
-    // Independent hosts — fetch concurrently.
     let (lyrics, cover, genre) = std::thread::scope(|s| {
         let lyrics = s.spawn(|| fetch_lyrics(info.artist, info.title, info.album, duration));
         let cover = s.spawn(|| resolve_cover(info));
@@ -278,7 +260,7 @@ pub fn write_tags(path: &Path, info: &TagInfo) -> Option<Lyrics> {
     if let Some(bytes) = cover {
         tag.remove_picture_type(PictureType::CoverFront);
         let mime = image_mime(&bytes);
-        tag.push_picture(Picture::new_unchecked(PictureType::CoverFront, Some(mime), None, bytes));
+        tag.push_picture(Picture::unchecked(bytes).pic_type(PictureType::CoverFront).mime_type(mime).build());
     }
     if let Some(text) = lyrics.as_ref().and_then(|l| l.plain.as_deref().or(l.synced.as_deref())) {
         tag.insert_text(ItemKey::Lyrics, text.to_string());

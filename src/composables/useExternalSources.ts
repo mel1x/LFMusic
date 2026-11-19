@@ -4,8 +4,6 @@ import { useSettings } from "./useSettings";
 import { isAndroidRuntime } from "./usePlatform";
 import type { TrackMetadata } from "./usePlayer";
 
-// Types mirror the serde structs in src-tauri/src/external.rs
-
 export interface AlbumLayoutEntry {
   position: number;
   disc: number;
@@ -34,13 +32,8 @@ interface CachedArtistImage {
   url: string;
 }
 
-// Singleton state
-
-// Artist avatars: normalized key -> data URL (or null = "none").
 const avatars = reactive<Record<string, string | null>>({});
 
-// Album layouts: album name -> layout, cached for the session to avoid
-// re-hitting IPC on every re-render.
 const albumLayouts = reactive<Record<string, AlbumLayout>>({});
 const inFlightAlbums = new Set<string>();
 
@@ -48,15 +41,12 @@ let cachedAvatarsLoaded = false;
 const cachedAvatarsReady = ref(false);
 
 /**
- * External request scheduler prioritized by recency: the most recently
- * requested key runs first, and re-requesting bumps priority. This makes
- * loading follow the current screen instead of the start of the list.
- * The queue is capped — oldest (off-screen) requests get dropped and
- * re-requested if they scroll back into view.
+ * Recency-prioritized request queue: the current screen loads first; capped, old requests are
+ * dropped.
  */
 function createScheduler(concurrency: number, maxPending: number) {
   let active = 0;
-  const order: string[] = []; // pending keys, end of array = highest priority
+  const order: string[] = [];
   const tasks = new Map<string, () => Promise<void>>();
   const running = new Set<string>();
 
@@ -78,7 +68,6 @@ function createScheduler(concurrency: number, maxPending: number) {
   function schedule(key: string, run: () => Promise<void>): void {
     if (running.has(key)) return;
     if (tasks.has(key)) {
-      // Already queued — bump priority (current screen first).
       const i = order.indexOf(key);
       if (i !== -1) order.splice(i, 1);
       order.push(key);
@@ -96,19 +85,12 @@ function createScheduler(concurrency: number, maxPending: number) {
   return { schedule };
 }
 
-// External APIs are rate-limited, and a list can request dozens of images at once.
 const avatarScheduler = createScheduler(4, 60);
 const coverScheduler = createScheduler(4, 80);
 
-// Covers for tracks without embedded art: cache key (artist+album) -> data URL
-// (or null = "not found"). Tracks from the same album share one cover.
 const trackCovers = reactive<Record<string, string | null>>({});
 const coverWaiters = new Map<string, Set<TrackMetadata>>();
 
-// Live track objects that got an external cover applied (file_path -> track).
-// Needed to roll back when the setting is disabled and restore when re-enabled.
-// The data URLs themselves stay in trackCovers (and the backend's permanent
-// cache), so re-enabling doesn't hit the network again.
 const externallyCovered = new Map<string, TrackMetadata>();
 
 /** Apply an external cover to a track and remember it for rollback/restore. */
@@ -118,15 +100,12 @@ function applyExternalCover(track: TrackMetadata, url: string): void {
   externallyCovered.set(track.file_path, track);
 }
 
-// Roll back/restore external covers when the setting is toggled. The watch
-// runs in a detached scope that lives for the app's lifetime (singleton composable).
 effectScope(true).run(() => {
   const { settings } = useSettings();
   watch(
     () => settings.value.external_track_covers,
     (enabled) => {
       if (enabled) {
-        // Restore from the session cache (no network hit).
         for (const track of externallyCovered.values()) {
           if (track.cover_art) continue;
           const key = coverCacheKey(track.artist || "", track.album || "", track.title || "");
@@ -134,8 +113,6 @@ effectScope(true).run(() => {
           if (url) applyExternalCover(track, url);
         }
       } else {
-        // Hide external covers -> local placeholder shows. Keep the cache and
-        // cover_external flag so we can restore on re-enable.
         for (const track of externallyCovered.values()) {
           if (track.cover_external) track.cover_art = null;
         }
@@ -152,7 +129,7 @@ export function clearExternalCoverFlag(track: TrackMetadata): void {
   }
 }
 
-/** Cover cache key — must match `cover_cache_key` in external.rs. */
+/** Cover cache key - must match `cover_cache_key` in external.rs. */
 function coverCacheKey(artist: string, album: string, title: string): string {
   const alb = album.trim();
   return alb
@@ -160,16 +137,11 @@ function coverCacheKey(artist: string, album: string, title: string): string {
     : normalizeKey(`${artist} ${title} t`);
 }
 
-/**
- * Artist name normalization — must match `normalize` in
- * src-tauri/src/external.rs: lowercase, letters/digits only, everything
- * else collapses to a single space, trimmed.
- */
+/** Must match `normalize` in src-tauri/src/external.rs. */
 function normalizeKey(s: string): string {
   let out = "";
   let prevSpace = true;
-  // Per-character lowercase (whole-string toLowerCase is context-sensitive:
-  // Greek final sigma) and Rust's alphanumeric set (Alphabetic + Numeric).
+  // Per-char lowercase and Rust's alphanumeric set, like external::normalize.
   for (const orig of s) {
     for (const ch of orig.toLowerCase()) {
       if (/[\p{Alphabetic}\p{N}]/u.test(ch)) {
@@ -191,7 +163,6 @@ export function useExternalSources() {
   async function loadCachedAvatars(): Promise<void> {
     if (cachedAvatarsLoaded) return;
     cachedAvatarsLoaded = true;
-    // External sources are a desktop-only feature — no fetching on Android.
     if (isAndroidRuntime()) {
       cachedAvatarsReady.value = true;
       return;
@@ -208,20 +179,14 @@ export function useExternalSources() {
     }
   }
 
-  /**
-   * Artist avatar from external sources (or null). Reactive: returns what's
-   * already known while loading, then updates when ready. Network request
-   * only fires if the setting is enabled.
-   */
+  /** Artist avatar from external sources (or null). */
   function avatarFor(artistName: string): string | null {
     if (!artistName) return null;
     if (isAndroidRuntime()) return null;
-    // The setting hides external avatars even if already cached.
     if (!settings.value.external_artist_avatars) return null;
     const key = normalizeKey(artistName);
     if (key in avatars) return avatars[key];
 
-    // Request (or bump priority if already queued) — current screen first.
     avatarScheduler.schedule(key, () =>
       invoke<ArtistImageResult>("external_artist_image", { artistName, refresh: false })
         .then((res) => {
@@ -252,15 +217,11 @@ export function useExternalSources() {
     }
   }
 
-  /**
-   * Album layout (canonical order + phantom tracks). Cached in session memory.
-   * Only requested if the setting is enabled.
-   */
+  /** Album layout (canonical order + phantom tracks). */
   async function getAlbumLayout(albumName: string, refresh = false): Promise<AlbumLayout | null> {
     if (!albumName) return null;
     if (isAndroidRuntime()) return null;
     if (!refresh && albumName in albumLayouts) return albumLayouts[albumName];
-    // Layout is needed if external order OR supplement-missing is enabled.
     if (!settings.value.external_album_order && !settings.value.external_supplement_missing && !refresh) return null;
     if (inFlightAlbums.has(albumName) && !refresh) return albumLayouts[albumName] ?? null;
 
@@ -277,11 +238,6 @@ export function useExternalSources() {
     }
   }
 
-  /**
-   * For a track without an embedded cover, lazily fetches an album cover from
-   * external sources and reactively sets it on `track.cover_art`. Only
-   * requests if the setting is enabled. Safe to call repeatedly.
-   */
   function fetchTrackCover(track: TrackMetadata): void {
     if (isAndroidRuntime()) return;
     if (!settings.value.external_track_covers) return;
@@ -298,7 +254,6 @@ export function useExternalSources() {
       return;
     }
 
-    // Register the track as waiting for this cover (multiple tracks per album).
     let waiters = coverWaiters.get(key);
     if (!waiters) {
       waiters = new Set();
@@ -306,7 +261,6 @@ export function useExternalSources() {
     }
     waiters.add(track);
 
-    // Request (or bump priority) — current screen first.
     coverScheduler.schedule(key, () =>
       invoke<ArtistImageResult>("external_track_cover", { artist, album, title, refresh: false })
         .then((res) => {

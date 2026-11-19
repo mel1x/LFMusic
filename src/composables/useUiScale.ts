@@ -1,10 +1,6 @@
 import { onMounted, onUnmounted } from "vue";
 import { isPhoneViewport, updateRuntimeClasses } from "./usePlatform";
 
-// Scales the UI to window size (base 1460x860) via body { zoom }; call once at the app root.
-// Full-viewport fixed overlays use the same scale as the body so their compensated
-// dimensions stay in sync throughout maximize/fullscreen resize sequences.
-
 const BASE_W = 1460;
 const BASE_H = 860;
 const MIN_SCALE = 0.78;

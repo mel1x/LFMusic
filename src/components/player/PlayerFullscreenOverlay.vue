@@ -92,9 +92,6 @@ const {
 
 const { lines: lyricLines, synced: lyricsSynced, hasLyrics, activeIndex: lyricIndex } = useLyrics();
 
-// Synced lyrics: the sung line stays in the middle of the panel. The line
-// column slides with a CSS transform transition (written straight to the DOM);
-// the wheel shifts it by hand for a few seconds, then it snaps back.
 const lyricsEl = ref<HTMLElement | null>(null);
 const lyricsTrackEl = ref<HTMLElement | null>(null);
 const LYRICS_MANUAL_MS = 3000;
@@ -135,7 +132,6 @@ function shiftLyrics(delta: number, transition: string) {
     const base = lyricsBaseOffset();
     if (!box || !track || base === null) return;
     const half = box.clientHeight / 2;
-    // Keep some text on screen: the column may move until its edge reaches the middle.
     const y = Math.min(half, Math.max(half - track.offsetHeight, base + lyricsManualShift + delta));
     lyricsManualShift = y - base;
     setLyricsOffset(y, transition);
@@ -190,7 +186,6 @@ function onQfToggleFav(track: TrackMetadata) {
     void toggleFavorite(track.file_path);
 }
 
-// Close overlay on page navigation.
 const route = useRoute();
 watch(() => route.fullPath, () => {
     if (showOverlay.value) closeFullscreen();
@@ -204,16 +199,12 @@ const fsProgressPercent = computed(() => {
     if (!durationSecs.value) return 0;
     return (progressSliderValue.value / durationSecs.value) * 100;
 });
-// Getters for v-live-*: position changes every frame, and re-rendering this whole
-// template (queue list included) per frame is expensive.
+// Getters for v-live-*: re-rendering this template per frame is expensive.
 const liveSliderValue = () => progressSliderValue.value;
 const liveFillPercent = () => fsProgressPercent.value;
 
 const minimizeWindow = () => win.minimize();
-// Backend handles this: if in OS fullscreen (F11), click exits it and maximizes;
-// otherwise it's a normal maximize toggle.
 const maximizeWindow = () => invoke('toggle_window_maximize');
-// State is saved by the close-requested handler in usePlayer (any close path).
 const closeWindow = () => win.close();
 
 const qfTrackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null);
@@ -681,7 +672,7 @@ function openQfCoverMenu(e: MouseEvent) {
     filter: blur(80px) brightness(0.3) saturate(1.4);
     transform: scale(1.1);
     opacity: 0;
-    transition: opacity 0.6s ease;
+    transition: opacity 0.6s var(--ease-smooth);
     will-change: opacity;
 }
 .fs-bg-img.active {
@@ -711,7 +702,7 @@ function openQfCoverMenu(e: MouseEvent) {
     color: hsla(0, 0%, 100%, 0.7);
     border-radius: 50%;
     cursor: pointer;
-    transition: background .24s, color .24s;
+    transition: background var(--duration-hover), color var(--duration-hover);
 }
 .fs-close-btn:hover {
     background: hsla(0, 0%, 100%, 0.15);
@@ -731,7 +722,7 @@ function openQfCoverMenu(e: MouseEvent) {
     justify-content: center;
     color: #fff;
     background-color: transparent;
-    transition: background-color 0.14s ease-in-out;
+    transition: background-color 0.14s var(--ease-smooth-in-out);
 }
 .fs-win-btn:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
@@ -747,7 +738,7 @@ function openQfCoverMenu(e: MouseEvent) {
     object-fit: cover;
     user-select: none;
     opacity: 0;
-    transition: opacity 0.5s ease;
+    transition: opacity 0.5s var(--ease-smooth);
     will-change: opacity;
 }
 .fs-cover.active {
@@ -774,7 +765,7 @@ function openQfCoverMenu(e: MouseEvent) {
     text-overflow: ellipsis;
     letter-spacing: -0.01em;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 1);
@@ -791,7 +782,7 @@ function openQfCoverMenu(e: MouseEvent) {
     overflow: hidden;
     text-overflow: ellipsis;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.7);
@@ -809,7 +800,7 @@ function openQfCoverMenu(e: MouseEvent) {
     overflow: hidden;
     text-overflow: ellipsis;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.5);
@@ -855,7 +846,7 @@ function openQfCoverMenu(e: MouseEvent) {
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
     margin-top: 1px;
     opacity: 0;
-    transition: opacity 0.25s ease;
+    transition: opacity 0.25s var(--ease-smooth);
 }
 .fs-progress:hover .fs-progress-slider::-webkit-slider-thumb,
 .fs-progress-slider:active::-webkit-slider-thumb {
@@ -874,14 +865,14 @@ function openQfCoverMenu(e: MouseEvent) {
     background-color: hsla(0, 0%, 100%, 0.12);
     z-index: 1;
     overflow: hidden;
-    transition: background-color 0.25s ease;
+    transition: background-color 0.25s var(--ease-smooth);
 }
 .fs-progress-fill {
     height: 100%;
     width: 0%;
     border-radius: 2px;
     background-color: hsla(0, 0%, 100%, 0.7);
-    transition: background-color 0.25s ease;
+    transition: background-color 0.25s var(--ease-smooth);
 }
 .fs-progress:hover .fs-progress-track,
 .fs-progress-bar-wrapper:hover .fs-progress-track {
@@ -930,7 +921,7 @@ function openQfCoverMenu(e: MouseEvent) {
     min-width: 0;
     position: relative;
     z-index: 2;
-    transition: transform .48s cubic-bezier(0.22, 0.61, 0.36, 1);
+    transition: transform .48s var(--ease-smooth);
 }
 .mode-player .qf-left {
     transform: translateX(calc((720px + 48px) / 2));
@@ -949,14 +940,14 @@ function openQfCoverMenu(e: MouseEvent) {
     overflow: hidden;
     box-shadow: 0 28px 90px rgba(0, 0, 0, 0.55);
     flex-shrink: 0;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .qf-cover-dim {
     position: absolute;
     inset: 0;
     background: hsla(0, 0%, 0%, 0.45);
     opacity: 0;
-    transition: opacity .48s ease;
+    transition: opacity .48s var(--ease-smooth);
     pointer-events: none;
     z-index: 2;
     border-radius: 20px;
@@ -970,7 +961,7 @@ function openQfCoverMenu(e: MouseEvent) {
     inset: 0;
     z-index: 3;
     opacity: 0;
-    transition: opacity .48s ease;
+    transition: opacity .48s var(--ease-smooth);
     pointer-events: none;
 }
 .qf-cover-container:hover .qf-player-controls,
@@ -989,7 +980,7 @@ function openQfCoverMenu(e: MouseEvent) {
     background: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 0.9);
     color: #fff;
     cursor: pointer;
-    transition: background .24s, color .24s, transform .24s;
+    transition: background var(--duration-hover), color var(--duration-hover), transform var(--duration-hover);
 }
 .qf-corner-btn:hover {
     background: hsla(var(--accent-h), min(var(--accent-s), 70%), calc(var(--accent-l) * 1.15), 1);
@@ -1038,9 +1029,9 @@ function openQfCoverMenu(e: MouseEvent) {
     opacity: 0;
     overflow: hidden;
     pointer-events: none;
-    transition: max-width .32s cubic-bezier(0.22, 0.61, 0.36, 1),
-                padding .32s cubic-bezier(0.22, 0.61, 0.36, 1),
-                opacity .24s ease;
+    transition: max-width .32s var(--ease-smooth),
+                padding .32s var(--ease-smooth),
+                opacity var(--duration-hover) var(--ease-smooth);
 }
 .qf-corner-br:hover .qf-volume-slider-popup {
     max-width: 220px;
@@ -1100,7 +1091,7 @@ function openQfCoverMenu(e: MouseEvent) {
     background: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 0.9);
     color: hsla(0, 0%, 100%, 0.85);
     cursor: pointer;
-    transition: color .24s, background .24s, transform .24s;
+    transition: color var(--duration-hover), background var(--duration-hover), transform var(--duration-hover);
 }
 .qf-side-btn:hover {
     color: #fff;
@@ -1142,7 +1133,7 @@ function openQfCoverMenu(e: MouseEvent) {
     background: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 0.9);
     color: #fff;
     cursor: pointer;
-    transition: color .24s, background .24s, transform .24s;
+    transition: color var(--duration-hover), background var(--duration-hover), transform var(--duration-hover);
 }
 .qf-center-btn:hover {
     background: hsla(var(--accent-h), min(var(--accent-s), 70%), calc(var(--accent-l) * 1.15), 1);
@@ -1162,7 +1153,7 @@ function openQfCoverMenu(e: MouseEvent) {
     background: #fff;
     color: hsla(var(--accent-h), min(var(--accent-s), 60%), var(--accent-l), 1);
     cursor: pointer;
-    transition: transform .24s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .qf-center-play:hover {
     transform: scale(1.06);
@@ -1173,7 +1164,7 @@ function openQfCoverMenu(e: MouseEvent) {
 }
 .qf-progress-hover .fs-times {
     opacity: 0.45;
-    transition: opacity .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .qf-progress-hover:hover .fs-times,
 .qf-progress-hover .fs-progress-slider:hover + .fs-times,
@@ -1187,8 +1178,8 @@ function openQfCoverMenu(e: MouseEvent) {
     width: 720px;
     max-width: 720px;
     z-index: 1;
-    transition: transform .48s cubic-bezier(0.22, 0.61, 0.36, 1),
-                opacity .18s ease;
+    transition: transform .48s var(--ease-smooth),
+                opacity var(--duration-hover) var(--ease-smooth);
 }
 .mode-player .qf-right-wrap {
     transform: translateX(calc(-100% - 48px));
@@ -1212,7 +1203,7 @@ function openQfCoverMenu(e: MouseEvent) {
     padding-left: 4px;
     user-select: none;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.95);
@@ -1238,7 +1229,7 @@ function openQfCoverMenu(e: MouseEvent) {
     padding: 6px 16px 6px 6px;
     border-radius: 9px;
     cursor: pointer;
-    transition: .31s ease-in-out;
+    transition: .31s var(--ease-smooth-in-out);
     user-select: none;
     overflow: hidden;
     background-color: hsla(0, 0%, 100%, 0);
@@ -1257,7 +1248,7 @@ function openQfCoverMenu(e: MouseEvent) {
     border-radius: 50%;
     background: hsla(0, 0%, 100%, 0.08);
     transform: scale(0);
-    animation: qf-ripple-expand 0.5s ease-out forwards;
+    animation: qf-ripple-expand 0.5s var(--ease-smooth) forwards;
     pointer-events: none;
 }
 @keyframes qf-ripple-expand {
@@ -1269,7 +1260,6 @@ function openQfCoverMenu(e: MouseEvent) {
 .qf-hover-icon {
     position: absolute;
     top: 50%;
-    /* cover center: padding-left 6px + 44/2 = 28px */
     left: 28px;
     transform: translate(-50%, -50%);
     display: flex;
@@ -1281,7 +1271,7 @@ function openQfCoverMenu(e: MouseEvent) {
     border-radius: 9999px;
     color: #242424;
     background-color: hsla(0, 0%, 100%, 1.0);
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     z-index: 3;
 }
 .qf-queue-item:hover .qf-hover-icon,
@@ -1293,7 +1283,7 @@ function openQfCoverMenu(e: MouseEvent) {
     height: 44px;
     background-color: #202020;
     border-radius: 6px;
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
 }
@@ -1334,7 +1324,7 @@ function openQfCoverMenu(e: MouseEvent) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .qf-queue-item:hover .qf-queue-artist {
     color: hsla(0, 0%, 100%, 0.6);
@@ -1345,7 +1335,7 @@ function openQfCoverMenu(e: MouseEvent) {
     font-weight: 500;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
     opacity: 1;
 }
@@ -1366,7 +1356,7 @@ function openQfCoverMenu(e: MouseEvent) {
     border: none;
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.35);
-    transition: color .24s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
     z-index: 3;
 }
 .qf-queue-fav:hover {
@@ -1386,7 +1376,7 @@ function openQfCoverMenu(e: MouseEvent) {
     transform: translateY(-50%);
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     opacity: 0;
 }
 .qf-hover-options:hover {
@@ -1403,7 +1393,6 @@ function openQfCoverMenu(e: MouseEvent) {
     padding: 24px 12px;
     text-align: center;
 }
-/* Short lyrics sit centered like the queue; long ones shrink the list, which scrolls. */
 .qf-lyrics {
     overflow: hidden;
 }
@@ -1429,7 +1418,6 @@ function openQfCoverMenu(e: MouseEvent) {
 .qf-lyric-line.gap {
     height: 24px;
 }
-/* Synced: the whole panel height, lines fade out towards the edges. */
 .qf-lyrics.synced {
     justify-content: stretch;
 }
@@ -1446,7 +1434,7 @@ function openQfCoverMenu(e: MouseEvent) {
     position: relative;
     padding: 0 4px;
     will-change: transform;
-    transition: transform .65s cubic-bezier(0.22, 0.61, 0.36, 1);
+    transition: transform .65s var(--ease-smooth);
 }
 .synced .qf-lyric-line {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -1460,7 +1448,7 @@ function openQfCoverMenu(e: MouseEvent) {
     user-select: none;
     transform: scale(0.94);
     transform-origin: left center;
-    transition: color .5s ease, transform .65s cubic-bezier(0.22, 0.61, 0.36, 1);
+    transition: color .5s var(--ease-smooth), transform .65s var(--ease-smooth);
 }
 .synced .qf-lyric-line.past {
     color: hsla(0, 0%, 100%, 0.36);
@@ -1572,7 +1560,7 @@ function openQfCoverMenu(e: MouseEvent) {
         justify-content: center !important;
         cursor: pointer !important;
         border: none !important;
-        transition: background-color 0.2s !important;
+        transition: background-color var(--duration-hover) !important;
     }
 
     .qf-mobile-more-btn:active {
@@ -1619,7 +1607,7 @@ function openQfCoverMenu(e: MouseEvent) {
         justify-content: center !important;
         cursor: pointer !important;
         border: none !important;
-        transition: background-color 0.2s !important;
+        transition: background-color var(--duration-hover) !important;
     }
 
     .qf-mobile-playback-btn:active {
@@ -1643,7 +1631,7 @@ function openQfCoverMenu(e: MouseEvent) {
         cursor: pointer !important;
         border: none !important;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
-        transition: background-color 0.2s, transform 0.1s !important;
+        transition: background-color var(--duration-hover), transform 0.1s !important;
     }
 
     .qf-mobile-playback-play:active {
@@ -1667,7 +1655,7 @@ function openQfCoverMenu(e: MouseEvent) {
         justify-content: center !important;
         cursor: pointer !important;
         border: none !important;
-        transition: color 0.2s !important;
+        transition: color var(--duration-hover) !important;
     }
 
     .qf-mobile-side-btn.active {
@@ -1699,7 +1687,7 @@ function openQfCoverMenu(e: MouseEvent) {
         justify-content: center !important;
         gap: 8px !important;
         cursor: pointer !important;
-        transition: background-color 0.2s !important;
+        transition: background-color var(--duration-hover) !important;
         margin-top: 6px !important;
     }
 
@@ -1928,10 +1916,10 @@ function openQfCoverMenu(e: MouseEvent) {
 }
 
 .fs-enter-active {
-    transition: opacity .35s ease, transform .35s ease;
+    transition: opacity .35s var(--ease-smooth), transform .35s var(--ease-smooth);
 }
 .fs-leave-active {
-    transition: opacity .25s ease, transform .25s ease;
+    transition: opacity .25s var(--ease-smooth), transform .25s var(--ease-smooth);
 }
 .fs-enter-from {
     opacity: 0;

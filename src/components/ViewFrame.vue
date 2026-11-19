@@ -202,7 +202,7 @@ main::-webkit-scrollbar {
   border-radius: 999px;
   opacity: 0;
   pointer-events: all;
-  transition: opacity 0.25s ease, background 0.15s ease;
+  transition: opacity 0.25s var(--ease-smooth), background var(--duration-hover) var(--ease-smooth);
 }
 
 .scrollThumb:hover {

@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import trackCover from '../../assets/trackCover.webp';
 import { toast } from 'vue-sonner';
 
 import MoreIcon from '../Icons/MoreIcon.vue';
 import TrackContextMenu from '../TrackContextMenu.vue';
+import SoundMenu from './SoundMenu.vue';
 import TrackArtists from '../TrackArtists.vue';
 import ShuffleIcon from '../Icons/ShuffleIcon.vue';
 import PrevIcon from '../Icons/PrevIcon.vue';
@@ -25,6 +26,57 @@ import { usePlayerUi } from '../../composables/usePlayerUi';
 import { useLyrics } from '../../composables/useLyrics';
 import { accentPreview, hexToHSL } from '../../composables/useAccentTheme';
 import { vLiveWidth, vLiveValue } from '../../directives/live';
+import { currentUiScale } from '../../composables/useUiScale';
+import { useSoundFx } from '../../composables/useSoundFx';
+import { useSleepTimer } from '../../composables/useSleepTimer';
+import { useEqualizer } from '../../composables/useEqualizer';
+
+const soundMenuAnchor = ref<DOMRect | null>(null);
+const { fx: soundFx, load: loadSoundFx } = useSoundFx();
+const { mode: sleepMode } = useSleepTimer();
+const { eqEnabled: soundEqEnabled, load: loadSoundEq } = useEqualizer();
+void loadSoundFx();
+void loadSoundEq();
+/** Any sound effect, speed change or sleep timer is on: the button lights up. */
+const soundActive = computed(() => {
+    const f = soundFx.value;
+    return soundEqEnabled.value || f.space.enabled || f.crusher.enabled || f.vinyl.enabled
+        || f.speed !== 1 || sleepMode.value !== 'off';
+});
+function toggleSoundMenu(e: MouseEvent) {
+    soundMenuAnchor.value = soundMenuAnchor.value
+        ? null
+        : (e.currentTarget as HTMLElement).getBoundingClientRect();
+}
+
+const codecTipOpen = ref(false);
+const codecTipStyle = ref<Record<string, string>>({});
+let codecTipTimer: number | null = null;
+
+function onCodecEnter(e: MouseEvent) {
+    const el = e.currentTarget as HTMLElement;
+    if (codecTipTimer !== null) window.clearTimeout(codecTipTimer);
+    codecTipTimer = window.setTimeout(() => {
+        codecTipTimer = null;
+        const r = el.getBoundingClientRect();
+        const scale = currentUiScale();
+        codecTipStyle.value = {
+            left: `${(r.left + r.width / 2) / scale}px`,
+            top: `${(r.top - 16) / scale}px`,
+        };
+        codecTipOpen.value = true;
+    }, 450);
+}
+
+function onCodecLeave() {
+    if (codecTipTimer !== null) {
+        window.clearTimeout(codecTipTimer);
+        codecTipTimer = null;
+    }
+    codecTipOpen.value = false;
+}
+
+onUnmounted(onCodecLeave);
 
 const {
     currentTrack,
@@ -68,16 +120,13 @@ const {
     onVolumeScroll,
 } = usePlayerUi();
 
-// Vertical volume slider drawn with plain elements: a native range input with
-// writing-mode renders differently in WebView2 and WebKitGTK (Linux), so the
-// popup is the same everywhere. Geometry matches .volumeSlider / .volumeThumb.
+// Plain-element volume slider: a vertical range input renders differently in WebView2 and
+// WebKitGTK.
 const VOLUME_SLIDER_H = 140;
 const VOLUME_THUMB = 11;
 const volumeDragging = ref(false);
 
 function setVolumeFromPointer(e: PointerEvent) {
-    // rect is in zoomed (UI scale) pixels, like clientY. The thumb center
-    // travels between the track ends, half a thumb in from the edges.
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const inset = (rect.height * VOLUME_THUMB) / VOLUME_SLIDER_H / 2;
     const ratio = (rect.bottom - inset - e.clientY) / (rect.height - inset * 2);
@@ -118,7 +167,7 @@ const progressFillPercent = computed(() => {
     if (!durationSecs.value) return 0;
     return (progressSliderValue.value / durationSecs.value) * 100;
 });
-// Getters for v-live-*: position changes every frame, the template must not read it.
+// Getters for v-live-*: the template must not read the per-frame position.
 const liveSliderValue = () => progressSliderValue.value;
 const liveFillPercent = () => progressFillPercent.value;
 
@@ -144,18 +193,14 @@ function onPlayerRipple(e: MouseEvent) {
     ripple.addEventListener('animationend', () => ripple.remove());
 }
 
-// Mobile mini player: neighbours of the current track peek from the sides and a
-// horizontal swipe switches to them (the queue wraps like the prev/next buttons).
 const wrapperEl = ref<HTMLElement | null>(null);
-// Offset goes straight to a CSS variable: a reactive value would re-render the
-// whole player on every pointermove.
+// Offset goes to a CSS variable: a reactive value would re-render the player on every pointermove.
 let swipeX = 0;
 function setSwipeX(x: number) {
     swipeX = x;
     wrapperEl.value?.style.setProperty('--swipe-x', `${x}px`);
 }
 const swipeAnimating = ref(false);
-// Side gap between the bar and a peeking card; the bar inset is 28px (see mobile CSS).
 const PEEK_GAP = 6;
 const BAR_INSET = 28;
 
@@ -218,7 +263,6 @@ async function onSwipeUp(e: PointerEvent) {
     swipeStart = null;
     if (!swipeDragging) return;
     swipeDragging = false;
-    // The click that follows a drag must not open the fullscreen player or hit a button.
     suppressClickUntil = performance.now() + 400;
 
     const width = wrapperEl.value?.clientWidth ?? 0;
@@ -233,12 +277,10 @@ async function onSwipeUp(e: PointerEvent) {
         return;
     }
     setSwipeX(-dir * (width - BAR_INSET * 2 + PEEK_GAP));
-    // Start the theme change together with the slide, not after playback starts.
     accentPreview.value = target.accent_color ?? '#1a1a1a';
     await wait(220);
     const action = (dir > 0 ? playNext() : playPrev({ skipRestart: true }))
         .finally(() => { accentPreview.value = null; });
-    // Hold the slid position until the new track is in, then jump back without animation.
     await Promise.race([action, wait(800)]);
     swipeAnimating.value = false;
     setSwipeX(0);
@@ -413,13 +455,33 @@ function onMoveToTop(track: TrackMetadata) {
                 >
                     <LyricsIcon />
                 </button>
-                <div v-if="currentTrack" class="queueList" @click.stop="openQueueFullscreen"><ListIcon /></div>
-                <div class="codecInfo" v-if="currentTrack && codecDisplay">
+                <div v-if="currentTrack" class="queueList lfi-host" @click.stop="openQueueFullscreen"><ListIcon /></div>
+                <button
+                    class="soundBtn"
+                    :class="{ active: soundActive, open: !!soundMenuAnchor }"
+                    aria-label="Звук"
+                    @mousedown.stop
+                    @click.stop="toggleSoundMenu"
+                >
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
+                        <path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
+                        <path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
+                    </svg>
+                </button>
+                <div
+                    class="codecInfo"
+                    v-if="currentTrack && codecDisplay"
+                    @mouseenter="onCodecEnter"
+                    @mouseleave="onCodecLeave"
+                >
                     {{ codecDisplay }}
-                    <div class="codecTooltip">
-                        <span class="codecTooltip-title">Качество трека</span>
-                        <span class="codecTooltip-details">{{ codecDetails }}</span>
-                    </div>
+                    <Teleport to="body">
+                        <div class="codecTooltip" :class="{ visible: codecTipOpen }" :style="codecTipStyle">
+                            <span class="codecTooltip-title">Качество трека</span>
+                            <span class="codecTooltip-details">{{ codecDetails }}</span>
+                        </div>
+                    </Teleport>
                 </div>
                 <div
                     class="volumeControl"
@@ -455,6 +517,7 @@ function onMoveToTop(track: TrackMetadata) {
             </div>
         </div>
     </div>
+    <SoundMenu v-if="soundMenuAnchor" :anchor="soundMenuAnchor" @close="soundMenuAnchor = null" />
     <TrackContextMenu
         v-if="playerTrackMenu && currentTrack"
         :x="playerTrackMenu.x"
@@ -503,7 +566,7 @@ function onMoveToTop(track: TrackMetadata) {
     border-radius: 50%;
     background: #fff;
     opacity: 0;
-    transition: opacity 0.3s ease;
+    transition: opacity 0.3s var(--ease-smooth);
 }
 .progress-slider:hover::-webkit-slider-thumb {
     opacity: 1;
@@ -517,14 +580,14 @@ function onMoveToTop(track: TrackMetadata) {
     height: 104px;
     border-radius: 14px;
     background-color: hsla(var(--player-accent-h), min(var(--player-accent-s), 60%), var(--player-accent-l), 1);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .progress-bar-bg {
     height: 4px;
     width: 100%;
     background-color: hsla(0, 0%, 100%, 0.12);
     opacity: 0;
-    transition: opacity 0.3s ease;
+    transition: opacity 0.3s var(--ease-smooth);
 }
 .progress-bar-fill {
     position: absolute;
@@ -534,7 +597,7 @@ function onMoveToTop(track: TrackMetadata) {
     width: 0px;
     background-color: hsla(0, 0%, 100%, 0.65);
     opacity: 0;
-    transition: opacity 0.3s ease;
+    transition: opacity 0.3s var(--ease-smooth);
 }
 .progress-bg {
     position: absolute;
@@ -581,7 +644,7 @@ function onMoveToTop(track: TrackMetadata) {
     height: 64px;
     border-radius: 8px;
     overflow: hidden;
-    transition: .24s;
+    transition: var(--duration-hover);
     flex-shrink: 0;
 }
 .fullscreenBtn {
@@ -598,7 +661,7 @@ function onMoveToTop(track: TrackMetadata) {
     background: hsla(var(--player-accent-h), var(--player-accent-s), 20%, 1);
     border-radius: 50%;
     cursor: pointer;
-    transition: background-color .24s, opacity .3s ease-in-out;
+    transition: background-color var(--duration-hover), opacity .3s var(--ease-smooth-in-out);
     z-index: 4;
     opacity: 0;
 
@@ -611,7 +674,7 @@ function onMoveToTop(track: TrackMetadata) {
     width: 64px;
     height: 64px;
     border-radius: 8px;
-    transition: .24s;
+    transition: var(--duration-hover);
     object-fit: cover;
 }
 .coverWrapper:hover .trackCover {
@@ -658,7 +721,7 @@ function onMoveToTop(track: TrackMetadata) {
     width: 20px;
     height: 20px;
     background: transparent;
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -675,7 +738,7 @@ function onMoveToTop(track: TrackMetadata) {
     font-size: 15px;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.5);
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -694,7 +757,7 @@ function onMoveToTop(track: TrackMetadata) {
     color: hsla(0, 0%, 100%, 0.5);
     cursor: pointer;
     margin-right: 8px;
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -712,7 +775,7 @@ function onMoveToTop(track: TrackMetadata) {
     padding: 8px;
     background-color: transparent;
     color: hsla(0, 0%, 100%, 0.5);
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -733,7 +796,7 @@ function onMoveToTop(track: TrackMetadata) {
     height: 40px;
     border-radius: 50%;
     background-color: #ffffff;
-    transition: transform .24s ease-in-out;
+    transition: transform .2s var(--icon-ease);
     transform-origin: center;
     color: hsla(var(--player-accent-h), min(var(--player-accent-s), 60%), var(--player-accent-l), 1);
     transform: translateZ(0);
@@ -745,6 +808,7 @@ function onMoveToTop(track: TrackMetadata) {
 }
 .playBtn:active:not(:disabled) {
     transform: scale(1.0) translateZ(0);
+    transition: transform 80ms var(--ease-smooth);
 }
 .playBtn:disabled {
     opacity: 0.25;
@@ -755,7 +819,7 @@ function onMoveToTop(track: TrackMetadata) {
     padding: 8px;
     background-color: transparent;
     color: hsla(0, 0%, 100%, 0.5);
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -771,7 +835,7 @@ function onMoveToTop(track: TrackMetadata) {
     color: hsla(0, 0%, 100%, 0.5);
     cursor: pointer;
     margin-left: 8px;
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -804,7 +868,7 @@ function onMoveToTop(track: TrackMetadata) {
     background: transparent;
     color: hsla(0, 0%, 100%, 0.5);
     cursor: pointer;
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover:not(:disabled) {
         color: hsla(0, 0%, 100%, 0.8);
@@ -814,13 +878,35 @@ function onMoveToTop(track: TrackMetadata) {
     opacity: 0.25;
     cursor: default;
 }
+.soundBtn {
+    display: flex;
+    margin: -1px -8px 0;
+    padding: 8px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: hsla(0, 0%, 100%, 0.5);
+    cursor: pointer;
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
+
+    &:hover,
+    &.open {
+        color: hsla(0, 0%, 100%, 0.8);
+    }
+    &.open {
+        background-color: hsla(0, 0%, 100%, 0.08);
+    }
+    &.active {
+        color: hsl(var(--player-accent-h), max(var(--player-accent-s), 55%), 75%);
+    }
+}
 .queueList {
     margin-top: -1px;
     cursor: pointer;
     padding: 8px;
     background: transparent;
     color: hsla(0, 0%, 100%, 0.5);
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -832,16 +918,11 @@ function onMoveToTop(track: TrackMetadata) {
     font-size: 15px;
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.5);
-    transition: .24s;
+    transition: var(--duration-hover);
     position: relative;
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
-    }
-
-    &:hover .codecTooltip {
-        visibility: visible;
-        opacity: 1;
     }
 }
 .codecTooltip {
@@ -853,18 +934,20 @@ function onMoveToTop(track: TrackMetadata) {
     flex-direction: column;
     align-items: center;
     gap: 2px;
-    position: absolute;
-    bottom: calc(100% + 16px);
-    left: 50%;
-    transform: translateX(-50%);
+    position: fixed;
+    transform: translate(-50%, -100%);
     background-color: hsla(var(--player-accent-h), var(--player-accent-s), var(--player-accent-l), 0.15);
     border-radius: 16px;
     padding: 8px 12px;
     white-space: nowrap;
-    z-index: 100;
+    z-index: 1000010;
     backdrop-filter: blur(17px);
     box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
-    transition: opacity 0.2s ease, visibility 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), visibility var(--duration-hover) var(--ease-smooth);
+}
+.codecTooltip.visible {
+    visibility: visible;
+    opacity: 1;
 }
 .codecTooltip-title {
     width: 100%;
@@ -887,7 +970,7 @@ function onMoveToTop(track: TrackMetadata) {
     padding: 8px;
     background: transparent;
     color: hsla(0, 0%, 100%, 0.5);
-    transition: .24s;
+    transition: var(--duration-hover);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -928,11 +1011,8 @@ function onMoveToTop(track: TrackMetadata) {
     box-shadow: 0 0px 16px rgba(0, 0, 0, 0.05);
 
     z-index: 11;
-    transition: opacity 0.2s ease, visibility 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), visibility var(--duration-hover) var(--ease-smooth);
 }
-/* Invisible ~24px zone around the popup keeps it open while the mouse is in it
-   (bridges to the volume icon below, buffers the sides/top). Popup is a
-   descendant of .volumeControl, so hovering this zone keeps :hover active. */
 .volumeSliderPopup::after {
     content: '';
     position: absolute;
@@ -944,13 +1024,8 @@ function onMoveToTop(track: TrackMetadata) {
     opacity: 1;
     pointer-events: auto;
 }
-/* 24px wide drag hit area; the thumb center reaches exactly the track ends,
-   so the track is shorter by one thumb (11px) and the fill boundary lines up
-   with the thumb center. Fill and thumb are driven by --vol (0..1, set on the
-   popup). */
 .volumeSlider {
     position: relative;
-    /* above the popup's ::after hover zone, which would swallow the pointer */
     z-index: 1;
     width: 24px;
     height: 140px;
@@ -985,8 +1060,6 @@ function onMoveToTop(track: TrackMetadata) {
     background: #fff;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
 }
-/* The popup rises above the player into the page; lift the whole player
-   over page layers (e.g. the mood grid on Main, z-index 2) while it's open. */
 :global(.player:has(.volumeControl:hover)),
 :global(.player:has(.volumeControl.dragging)) {
     z-index: 60;
@@ -999,7 +1072,7 @@ function onMoveToTop(track: TrackMetadata) {
     transition: none;
 }
 .playerControls.seeking .progress-bar-fill {
-    transition: opacity 0.3s ease;
+    transition: opacity 0.3s var(--ease-smooth);
 }
 .playerControls.seeking .progress-bg {
     transition: none;
@@ -1009,7 +1082,7 @@ function onMoveToTop(track: TrackMetadata) {
     border-radius: 50%;
     background: hsla(0, 0%, 100%, 0.15);
     transform: scale(0);
-    animation: ripple-expand 0.6s ease-out forwards;
+    animation: ripple-expand 0.6s var(--ease-smooth) forwards;
     pointer-events: none;
     z-index: 4;
 }
@@ -1025,7 +1098,6 @@ function onMoveToTop(track: TrackMetadata) {
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
-    /* The bar is inset 28px so the neighbour cards peek 22px from the sides (6px gap). */
     .playerControlsWrapper {
         width: 100%;
         height: var(--mobile-player-height);
@@ -1044,7 +1116,7 @@ function onMoveToTop(track: TrackMetadata) {
     .swipeAnimating .playerControls,
     .swipeAnimating .botPart,
     .swipeAnimating .peekCard {
-        transition: transform .22s ease;
+        transition: transform var(--duration-hover) var(--ease-smooth);
     }
 
     .peekCard {
@@ -1143,7 +1215,6 @@ function onMoveToTop(track: TrackMetadata) {
         gap: 8px;
     }
 
-    /* 52px in the 68px bar (84 - 2 * 8) gives 8px top and bottom; 37 - 28 on the left looks equal next to the rounder bar corner. */
     .coverWrapper,
     .trackCover {
         width: 52px;
@@ -1227,6 +1298,7 @@ function onMoveToTop(track: TrackMetadata) {
 
     .codecInfo,
     .lyricsBtn,
+    .soundBtn,
     .volumeControl {
         display: none;
     }

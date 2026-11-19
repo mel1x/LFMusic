@@ -10,10 +10,6 @@ import {
   type YearRecap,
 } from '../../composables/useYearRecap'
 
-// Turns a YearRecap into the ordered list of story cards. A card only makes it
-// into the list when its numbers are worth showing, so a light year gets a
-// shorter story instead of cards full of zeros.
-
 /** plain: dark surface with one accent light; cover: the featured cover, blurred, behind it. */
 export type CardTone = 'plain' | 'cover'
 
@@ -61,7 +57,10 @@ export interface RecapCard {
   character?: RecapCharacter
 }
 
-/** Cover accent, tamed like the app's dynamic accent: grey covers give none, loud ones are toned down. */
+/**
+ * Cover accent, tamed like the app's dynamic accent: grey covers give none, loud ones are toned
+ * down.
+ */
 function accentOf(track: RecapTrack | null | undefined): CardAccent | null {
   const hex = track?.accent_color
   if (!hex || !/^#[0-9a-f]{6}$/i.test(hex)) return null
@@ -149,7 +148,6 @@ export function buildRecapCards(recap: YearRecap): RecapCard[] {
   const top = recap.top_tracks
   const pick = (i: number) => top.length > 0 ? top[i % top.length] : undefined
   const sound = (track: RecapTrack | null | undefined) => track?.snippet_url ?? pick(0)?.snippet_url ?? null
-  // Cards without a featured cover share the year's color: the first top track with an accent.
   const yearAccent = top.map(accentOf).find(a => a !== null) ?? null
   const accent = (track?: RecapTrack | null) => accentOf(track) ?? yearAccent
 

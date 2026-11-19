@@ -1,8 +1,5 @@
-//! In-app updates from GitHub releases.
-//! Windows: tauri-plugin-updater with signed NSIS/MSI installers (see `tauri.windows.conf.json`).
-//! Android: the same `latest.json` carries an `android` entry with the APK url; the APK is
-//! downloaded to the cache dir and handed to the system installer by the JS bridge
-//! (`LFMusicAndroid.installApk`). Other platforms report `supported: false`.
+//! In-app updates from GitHub releases: Windows via tauri-plugin-updater, Android via the `android`
+//! entry in latest.json.
 
 use serde::Serialize;
 use tauri::AppHandle;
@@ -29,8 +26,8 @@ mod imp {
     #[derive(Default)]
     pub struct PendingUpdate(Mutex<Option<Update>>);
 
-    /// NSIS installs put `uninstall.exe` next to the app; MSI builds are patched
-    /// with their bundle type. Anything else is a copied (portable) exe.
+    /// NSIS installs put `uninstall.exe` next to the app; MSI builds are patched with their bundle
+    /// type.
     fn is_portable() -> bool {
         let nsis_installed = std::env::current_exe()
             .ok()
@@ -56,8 +53,7 @@ mod imp {
         })
     }
 
-    /// Downloads and runs the installer (passive mode). The installer closes the
-    /// app itself; the restart is a fallback.
+    /// Downloads and runs the installer (passive mode).
     pub async fn install(app: AppHandle) -> Result<Option<String>, String> {
         let update = app
             .state::<PendingUpdate>()
@@ -111,9 +107,16 @@ mod imp {
             .collect()
     }
 
+    fn client() -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .tls_backend_preconfigured(crate::util::http_tls())
+            .build()
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn check(app: AppHandle) -> Result<UpdateCheck, String> {
         let current = app.package_info().version.to_string();
-        let latest: serde_json::Value = reqwest::Client::new()
+        let latest: serde_json::Value = client()?
             .get(LATEST_URL)
             .send()
             .await
@@ -142,8 +145,6 @@ mod imp {
         })
     }
 
-    /// Downloads the APK into the cache dir (shared through the FileProvider
-    /// `cache-path`) and returns its path for the JS bridge to install.
     pub async fn install(app: AppHandle) -> Result<Option<String>, String> {
         let url = app
             .state::<PendingUpdate>()
@@ -161,7 +162,7 @@ mod imp {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join("lfmusic-update.apk");
 
-        let mut response = reqwest::Client::new()
+        let mut response = client()?
             .get(&url)
             .send()
             .await
@@ -214,7 +215,6 @@ pub async fn update_check(app: AppHandle) -> Result<UpdateCheck, String> {
 }
 
 /// Windows: installs and restarts (returns only on error).
-/// Android: returns the downloaded APK path for `LFMusicAndroid.installApk`.
 #[tauri::command]
 pub async fn update_install(app: AppHandle) -> Result<Option<String>, String> {
     #[cfg(any(windows, target_os = "android"))]

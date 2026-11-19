@@ -4,34 +4,26 @@ import type { TrackMetadata } from "./usePlayer";
 import { useExternalSources, clearExternalCoverFlag } from "./useExternalSources";
 
 const MAX_CONCURRENT_COVERS = 3;
-// Cap on the waiting pool: current screen always wins priority; oldest
-// off-screen requests get dropped and re-requested if scrolled back to.
 const MAX_PENDING_COVERS = 150;
-// Track metadata cache miss: not materialized yet, retry shortly after.
 const COVER_MISS_RETRIES = 6;
 const COVER_MISS_RETRY_MS = 150;
 
 /** Resolves a live track object by path (usually `getTrackByPath` from usePlayer). */
 type TrackResolver = (filePath: string) => TrackMetadata | undefined;
 
-// Priority queue by recency: the most recently requested path loads first;
-// re-requesting bumps priority, so loading follows the current screen
-// instead of strictly draining from the start of the list.
-const order: string[] = []; // pending paths, end of array = highest priority
+const order: string[] = [];
 const items = new Map<string, TrackResolver>();
 const running = new Set<string>();
 const missRetries = new Map<string, number>();
 let active = 0;
 
-// Paths whose cover is already resolved (loaded or confirmed absent).
-// Reactive — screens gate first paint until the first N resolve.
 const resolvedCovers = reactive(new Set<string>());
 
 function markCoverResolved(filePath: string) {
     resolvedCovers.add(filePath);
 }
 
-/** True once a track's cover is known — either loaded, or confirmed absent. */
+/** True once a track's cover is known - either loaded, or confirmed absent. */
 export function isCoverResolved(track: Pick<TrackMetadata, "file_path" | "cover_art">): boolean {
     return !!track.cover_art || resolvedCovers.has(track.file_path);
 }
@@ -55,8 +47,6 @@ function pump(): void {
         }
 
         if (!track) {
-            // Metadata hasn't landed in the cache yet (track materializes via
-            // background loading) — retry shortly, bounded by retry count.
             const tries = missRetries.get(filePath) ?? 0;
             if (tries < COVER_MISS_RETRIES) {
                 missRetries.set(filePath, tries + 1);
@@ -68,7 +58,6 @@ function pump(): void {
             continue;
         }
 
-        // Track exists, no cover yet — read the embedded one.
         missRetries.delete(filePath);
         running.add(filePath);
         active++;
@@ -76,15 +65,13 @@ function pump(): void {
             .then(art => {
                 const cached = resolve(filePath);
                 if (art) {
-                    // Write into the live object from the same screen's cache (reactive).
-                    // This is a local (embedded/override) cover — clear the external
-                    // flag so disabling external covers won't revert it.
+                    // Local cover: clear the external flag so disabling external covers will not
+                    // revert it.
                     if (cached) {
                         cached.cover_art = art;
                         clearExternalCoverFlag(cached);
                     }
                 } else if (cached) {
-                    // No embedded cover — try an external source (if enabled).
                     useExternalSources().fetchTrackCover(cached);
                 }
             })
@@ -102,8 +89,6 @@ function pump(): void {
 function schedule(filePath: string, resolve: TrackResolver): void {
     if (running.has(filePath)) return;
     if (items.has(filePath)) {
-        // Already queued — bump priority (current screen first) and refresh
-        // the resolver to the current screen.
         const i = order.indexOf(filePath);
         if (i !== -1) order.splice(i, 1);
         order.push(filePath);
@@ -120,8 +105,6 @@ function schedule(filePath: string, resolve: TrackResolver): void {
 }
 
 export function useCoverLoader(options: CoverLoaderOptions) {
-    // Captures this call's resolver locally — no shared mutable module state
-    // that a subsequent screen could overwrite.
     const resolve = options.getTrackByPath;
 
     function setupPreloadWatch(
@@ -136,7 +119,6 @@ export function useCoverLoader(options: CoverLoaderOptions) {
                 const visible = visibleTracks.value.map(t => t.file_path);
                 const visibleSet = new Set(visible);
                 const preloadOnly = tracks.map(t => t.file_path).filter(p => !visibleSet.has(p));
-                // Preload is lower priority; visible window is higher (scheduled last).
                 for (const filePath of preloadOnly) {
                     const t = resolve(filePath);
                     if (!t || !t.cover_art) schedule(filePath, resolve);

@@ -2,12 +2,8 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import CloseIcon from './Icons/CloseIcon.vue';
 
-// Global fullscreen cover overlay, opened via the `lfmusic:show-fullscreen-cover`
-// window event (dispatched from cover cards/viewers).
 interface FullscreenCoverDetail {
     src: string;
-    // Set when the source is the grayscale catalog placeholder, so the
-    // fullscreen view keeps its accent-color tint instead of showing it raw.
     tinted?: boolean;
 }
 
@@ -30,7 +26,6 @@ function handleFullscreenCoverEvent(e: Event) {
     }
 }
 
-// Escape closes (previously handled centrally in App.vue).
 function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && fullscreenCoverSrc.value) {
         e.preventDefault();
@@ -132,7 +127,7 @@ onUnmounted(() => {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: background-color .24s ease, color .24s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     z-index: 100000;
 }
 .fullscreenCoverCloseBtn:hover {
@@ -145,11 +140,11 @@ onUnmounted(() => {
 
 .fullscreen-cover-fade-enter-active,
 .fullscreen-cover-fade-leave-active {
-    transition: opacity 0.28s ease;
+    transition: opacity 0.28s var(--ease-smooth);
 }
 .fullscreen-cover-fade-enter-active .fullscreenCoverImage,
 .fullscreen-cover-fade-leave-active .fullscreenCoverImage {
-    transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: transform 0.28s var(--icon-ease);
 }
 .fullscreen-cover-fade-enter-from {
     opacity: 0;

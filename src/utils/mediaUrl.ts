@@ -1,10 +1,8 @@
 import { ref, watchEffect, type Ref } from 'vue';
 import { isLinuxDesktop } from '../composables/usePlatform';
 
-// WebKitGTK's media player only loads http(s)/file/blob URLs: bundled videos
-// served over tauri:// fail right away with FormatError ("protocol not
-// allowed"). There we fetch the file once and hand <video> a blob: URL instead.
-// The dev server (http://localhost) works as is.
+// WebKitGTK plays only http(s)/file/blob URLs, not tauri://: there the file is fetched once and
+// passed as a blob URL.
 const needsBlob =
     typeof location !== 'undefined' && isLinuxDesktop() && !/^https?:$/.test(location.protocol);
 
@@ -25,8 +23,6 @@ function toBlobUrl(url: string): Promise<string | undefined> {
     return pending;
 }
 
-// URL the current platform's <video> can actually play. On Linux it stays
-// undefined until the blob is ready, so render the <source> with v-if.
 export function usePlayableUrl(source: () => string | undefined): Ref<string | undefined> {
     const playable = ref<string | undefined>(needsBlob ? undefined : source());
     watchEffect(() => {

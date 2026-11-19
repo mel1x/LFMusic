@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 
 import SearchIcon from '../components/Icons/SearchIcon.vue'
 import DownloadIcon from '../components/Icons/DownloadIcon.vue'
-import AlbumIcon from '../components/Icons/AlbumIcon.vue'
 import CloseIcon from '../components/Icons/CloseIcon.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import CoverImage from '../components/CoverImage.vue'
@@ -51,14 +50,10 @@ const {
     trackKey,
 } = useDownloads()
 
-// ── Search input ────────────────────────────────────────────────────────────
-
 const searchInput = ref<HTMLInputElement | null>(null)
 useTypeToSearch(searchInput)
 const rawSearch = ref('')
 const query = ref('')
-// Exact artist/title when arriving from an album's missing track: Deezer
-// field search finds generic titles ("Intro") that free text buries.
 const exactMatch = ref<{ artist: string; title: string } | null>(null)
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -89,7 +84,6 @@ function onKeydown(e: KeyboardEvent) {
 
 const hasQuery = computed(() => query.value.length > 0)
 
-// A URL in the box downloads exactly that page (any yt-dlp-supported site).
 function isUrl(s: string): boolean {
     if (!/^https?:\/\/\S+$/i.test(s)) return false
     try { return !!new URL(s).hostname } catch { return false }
@@ -97,17 +91,15 @@ function isUrl(s: string): boolean {
 const linkMode = computed(() => isUrl(query.value))
 const typingLink = computed(() => isUrl(rawSearch.value.trim()))
 
-// ── Recent searches ─────────────────────────────────────────────────────────
-
 const RECENT_KEY = 'lfmusic_past_downloads'
 const recent = ref<string[]>([])
 function loadRecent() {
     try { recent.value = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]') } catch { recent.value = [] }
 }
 function saveRecent() {
-    try { localStorage.setItem(RECENT_KEY, JSON.stringify(recent.value)) } catch { /* storage unavailable */ }
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify(recent.value)) } catch {}
 }
-/** Called whenever a result is actually used — only useful queries are kept. */
+/** Called whenever a result is actually used - only useful queries are kept. */
 function remember() {
     const q = rawSearch.value.trim()
     if (!q || isUrl(q)) return
@@ -128,8 +120,6 @@ function useRecent(q: string) {
     query.value = q
     searchInput.value?.focus()
 }
-
-// ── Catalog search ──────────────────────────────────────────────────────────
 
 type Tab = 'all' | 'tracks' | 'albums' | 'artists'
 const tab = ref<Tab>('all')
@@ -165,7 +155,6 @@ async function runSearch(q: string) {
     albums.value = []
     artists.value = []
     hasMore.value = false
-    // A page of the previous query may still be in flight; it won't reset this.
     loadingMore.value = false
     searchError.value = false
     nextIndex = 0
@@ -176,7 +165,6 @@ async function runSearch(q: string) {
     try {
         let page = await search(q, 0, PAGE, exactMatch.value ?? undefined)
         let used = q
-        // Typed in the wrong keyboard layout? Retry with the swapped string.
         if (isEmptyPage(page)) {
             const swapped = switchLayout(q)
             if (swapped && swapped !== q) {
@@ -217,16 +205,12 @@ async function loadMore() {
 }
 
 const pageEl = ref<HTMLElement | null>(null)
-// The search dock gets its own background only once it sticks, so it doesn't
-// cut a band through the page's accent glow while at the top.
 const stuck = ref(false)
 function onScroll(e: Event) {
     const el = e.target as HTMLElement
     stuck.value = el.scrollTop > 64
     if (tab.value === 'tracks' && el.scrollHeight - el.scrollTop - el.clientHeight < 400) void loadMore()
 }
-
-// ── Links ───────────────────────────────────────────────────────────────────
 
 const link = ref<LinkResult | null>(null)
 const linkResolving = ref(false)
@@ -266,8 +250,6 @@ watch(query, (q) => {
         void runSearch(q)
     }
 })
-
-// ── "All" tab composition ───────────────────────────────────────────────────
 
 type Best =
     | { kind: 'artist'; artist: ExternalSearchArtist }
@@ -318,13 +300,9 @@ async function downloadBest() {
     await enqueue(tr).catch(e => console.error(e))
 }
 
-// ── Redownload confirm ──────────────────────────────────────────────────────
-
 const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm(remember)
 
 useKeepDownloadedInLibrary(() => [tracks.value, link.value?.tracks ?? []])
-
-// ── Idle page: recent downloads ─────────────────────────────────────────────
 
 const recentDownloads = computed<ExternalSearchTrack[]>(() =>
     queue.value
@@ -347,8 +325,6 @@ const recentDownloads = computed<ExternalSearchTrack[]>(() =>
         })),
 )
 
-// ── Tools setup ─────────────────────────────────────────────────────────────
-
 const setupNeeded = computed(() => toolsLoaded.value && !tools.value.info.unsupported && (ytdlpMissing.value || denoMissing.value))
 const installing = computed(() => tools.value.busy)
 const installConfirm = ref(false)
@@ -370,15 +346,12 @@ async function runInstall() {
         installError.value = String(e)
     }
 }
-// Auto-update covers this when enabled; otherwise offer it here.
 const showUpdate = computed(() =>
     !setupNeeded.value && !dlSettings.value.auto_update && tools.value.info.ytdlp.managed && tools.value.info.ytdlp.update_available,
 )
 async function runUpdate() {
     try { await installTools(['ytdlp']) } catch (e) { installError.value = String(e) }
 }
-
-// ── Lifecycle ───────────────────────────────────────────────────────────────
 
 onMounted(async () => {
     loadRecent()
@@ -391,7 +364,7 @@ onMounted(async () => {
         if (a && ti) exactMatch.value = { artist: a, title: ti }
         query.value = q.trim()
     }
-    try { await refreshTools() } catch { /* stays optimistic */ }
+    try { await refreshTools() } catch {}
     if (!locked.value) {
         await nextTick()
         searchInput.value?.focus()
@@ -407,10 +380,8 @@ onUnmounted(() => {
 
 <template>
     <div class="dlPage" ref="pageEl" @scroll="onScroll">
-        <!-- ── Hero: title + search ─────────────────────────────────────── -->
         <header class="hero">
             <h1 class="heroTitle">{{ t('downloads.title') }}</h1>
-            <p class="heroSub">{{ t('downloads.subtitle') }}</p>
         </header>
 
         <div class="searchDock" :class="{ stuck }">
@@ -456,7 +427,6 @@ onUnmounted(() => {
             </nav>
         </div>
 
-        <!-- ── First-run setup ──────────────────────────────────────────── -->
         <section v-if="setupNeeded" class="setupCard">
             <div class="setupIcon"><DownloadIcon width="26" height="26" /></div>
             <div class="setupBody">
@@ -495,7 +465,6 @@ onUnmounted(() => {
             </button>
         </section>
 
-        <!-- ── Idle ─────────────────────────────────────────────────────── -->
         <template v-if="!hasQuery">
             <section v-if="recent.length && !locked" class="block">
                 <div class="blockHead">
@@ -517,27 +486,8 @@ onUnmounted(() => {
                     <DownloadTrackRow v-for="tr in recentDownloads" :key="trackKey(tr.artist, tr.title, tr.album)" :track="tr" @redownload="confirmTrack = $event" />
                 </div>
             </section>
-
-            <section class="tips">
-                <div class="tip">
-                    <span class="tipIcon"><SearchIcon width="18" height="18" /></span>
-                    <strong>{{ t('downloads.tips.searchTitle') }}</strong>
-                    <span>{{ t('downloads.tips.searchText') }}</span>
-                </div>
-                <div class="tip">
-                    <span class="tipIcon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
-                    <strong>{{ t('downloads.tips.linkTitle') }}</strong>
-                    <span>{{ t('downloads.tips.linkText') }}</span>
-                </div>
-                <div class="tip">
-                    <span class="tipIcon"><AlbumIcon width="18" height="18" /></span>
-                    <strong>{{ t('downloads.tips.albumTitle') }}</strong>
-                    <span>{{ t('downloads.tips.albumText') }}</span>
-                </div>
-            </section>
         </template>
 
-        <!-- ── Link ─────────────────────────────────────────────────────── -->
         <template v-else-if="linkMode">
             <div v-if="linkResolving" class="stateBox">
                 <span class="bigSpinner"></span>
@@ -564,7 +514,6 @@ onUnmounted(() => {
             </section>
         </template>
 
-        <!-- ── Catalog results ──────────────────────────────────────────── -->
         <template v-else>
             <div v-if="searching && !anyResults" class="skeleton">
                 <div class="skelHero"><span class="skelCover"></span><span class="skelLines"><i></i><i></i><i></i></span></div>
@@ -582,7 +531,6 @@ onUnmounted(() => {
                 <span class="stateDesc">{{ t('downloads.emptyNothingDesc') }}</span>
             </div>
 
-            <!-- All -->
             <template v-else-if="tab === 'all'">
                 <div class="topGrid">
                     <section v-if="best" class="bestWrap">
@@ -656,7 +604,6 @@ onUnmounted(() => {
                 </section>
             </template>
 
-            <!-- Tracks -->
             <section v-else-if="tab === 'tracks'" class="block">
                 <div class="trackList">
                     <DownloadTrackRow v-for="tr in tracks" :key="trackKey(tr.artist, tr.title, tr.album)" :track="tr" @download="remember" @redownload="confirmTrack = $event" />
@@ -664,14 +611,12 @@ onUnmounted(() => {
                 <div v-if="loadingMore" class="loadMore"><span class="btnSpinner light"></span></div>
             </section>
 
-            <!-- Albums -->
             <section v-else-if="tab === 'albums'" class="block">
                 <div class="cardGrid">
                     <DownloadAlbumCard v-for="al in albums" :key="al.id" :album="al" @open="remember" @download="remember" />
                 </div>
             </section>
 
-            <!-- Artists -->
             <section v-else class="block">
                 <div class="cardGrid artists">
                     <div v-for="a in artists" :key="a.id" class="artistCard" @click="openArtist(a)">
@@ -714,7 +659,7 @@ onUnmounted(() => {
     display: flex;
     flex-direction: column;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 }
@@ -722,7 +667,6 @@ onUnmounted(() => {
 .dlPage::-webkit-scrollbar-track { background: transparent; }
 .dlPage::-webkit-scrollbar-thumb { background: hsla(0, 0%, 100%, 0.12); border-radius: 3px; }
 
-/* ── Hero ─────────────────────────────────────────────────────────── */
 .hero {
     padding: 20px 0 4px;
     display: flex;
@@ -738,14 +682,6 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.95);
     user-select: none;
 }
-.heroSub {
-    max-width: 640px;
-    font-size: 13.5px;
-    font-weight: 500;
-    line-height: 1.45;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.4), 85%, 0.5);
-    user-select: none;
-}
 .searchDock {
     position: sticky;
     top: 0;
@@ -755,7 +691,7 @@ onUnmounted(() => {
     display: flex;
     flex-direction: column;
     gap: 14px;
-    transition: background-color .2s ease, box-shadow .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
 }
 .searchDock.stuck {
     background-color: var(--light-bg);
@@ -768,7 +704,7 @@ onUnmounted(() => {
     height: 46px;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.04);
-    transition: background-color .24s ease, box-shadow .24s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
 }
 .searchBox.link {
     box-shadow: inset 0 0 0 1.5px hsla(145, 50%, 60%, 0.45);
@@ -784,7 +720,7 @@ onUnmounted(() => {
     flex-shrink: 0;
     cursor: text;
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: color .24s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .searchBox:hover .searchLead { color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8); }
 .searchBox.link .searchLead { color: hsla(145, 55%, 68%, 0.95); }
@@ -832,7 +768,7 @@ onUnmounted(() => {
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.3);
     background: transparent;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .searchClear:hover { color: hsla(0, 0%, 100%, 0.6); }
 
@@ -849,7 +785,7 @@ onUnmounted(() => {
     font-weight: 700;
     color: hsla(0, 0%, 100%, 0.7);
     background-color: hsla(0, 0%, 100%, 0.06);
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
 .tab:hover:not(:disabled) { background-color: hsla(0, 0%, 100%, 0.11); color: #fff; }
@@ -865,7 +801,6 @@ onUnmounted(() => {
     opacity: 0.55;
 }
 
-/* ── Setup / update ───────────────────────────────────────────────── */
 .setupCard {
     margin-top: 10px;
     display: flex;
@@ -907,7 +842,7 @@ onUnmounted(() => {
 .chipDot { width: 7px; height: 7px; border-radius: 50%; background: hsla(0, 0%, 100%, 0.25); }
 .setupChip.on { color: hsla(145, 50%, 75%, 0.95); }
 .setupChip.on .chipDot { background: hsla(145, 60%, 55%, 1); }
-.setupChip.busy .chipDot { background: hsla(var(--accent-h), var(--accent-s), 70%, 1); animation: pulse 1s ease-in-out infinite; }
+.setupChip.busy .chipDot { background: hsla(var(--accent-h), var(--accent-s), 70%, 1); animation: pulse 1s var(--ease-smooth-in-out) infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 .setupProgress { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; max-width: 520px; }
 .setupBar { position: relative; height: 5px; border-radius: 3px; overflow: hidden; background: hsla(0, 0%, 100%, 0.1); }
@@ -915,10 +850,10 @@ onUnmounted(() => {
     position: absolute;
     inset: 0 auto 0 0;
     border-radius: 3px;
-    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 20%), 100%), 72%, 1);
-    transition: width .25s ease;
+    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 20% * var(--accent-k, 1)), 100%), 72%, 1);
+    transition: width .25s var(--ease-smooth);
 }
-.setupBarFill.indeterminate { width: 30%; animation: slide 1.2s ease-in-out infinite; }
+.setupBarFill.indeterminate { width: 30%; animation: slide 1.2s var(--ease-smooth-in-out) infinite; }
 @keyframes slide { 0% { left: -30%; } 100% { left: 100%; } }
 .setupProgressText { font-size: 12px; font-weight: 600; color: hsla(0, 0%, 100%, 0.55); font-variant-numeric: tabular-nums; }
 .setupError { font-size: 12.5px; font-weight: 600; color: hsla(2, 80%, 74%, 0.95); }
@@ -949,7 +884,7 @@ onUnmounted(() => {
     font-weight: 800;
     color: hsla(var(--accent-h), var(--accent-s), 16%, 1);
     background: hsla(0, 0%, 100%, 0.95);
-    transition: transform .2s ease, background-color .2s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
 .primaryBtn:hover:not(:disabled) { background: #fff; transform: translateY(-1px); }
 .primaryBtn:disabled { cursor: default; opacity: 0.6; }
@@ -967,7 +902,7 @@ onUnmounted(() => {
     font-weight: 800;
     color: hsla(0, 0%, 100%, 0.9);
     background: hsla(0, 0%, 100%, 0.1);
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .ghostBtn:hover:not(:disabled) { background: hsla(0, 0%, 100%, 0.16); }
 .btnSpinner {
@@ -981,7 +916,6 @@ onUnmounted(() => {
 .btnSpinner.light { border-color: hsla(0, 0%, 100%, 0.15); border-top-color: hsla(0, 0%, 100%, 0.85); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Blocks ───────────────────────────────────────────────────────── */
 .block { margin-top: 26px; display: flex; flex-direction: column; gap: 12px; }
 .blockHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
 .blockTitle {
@@ -998,7 +932,7 @@ onUnmounted(() => {
     font-size: 12.5px;
     font-weight: 700;
     color: hsla(0, 0%, 100%, 0.5);
-    transition: color .18s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
 .textBtn:hover { color: #fff; }
 .trackList { display: flex; flex-direction: column; gap: 3px; margin: 0 -8px; }
@@ -1011,7 +945,6 @@ onUnmounted(() => {
 }
 .linkHead { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 
-/* Recent searches */
 .recentChips { display: flex; flex-wrap: wrap; gap: 8px; }
 .recentChip {
     display: inline-flex;
@@ -1026,7 +959,7 @@ onUnmounted(() => {
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.75);
     background-color: hsla(0, 0%, 100%, 0.06);
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
 .recentChip:hover { background-color: hsla(0, 0%, 100%, 0.11); color: #fff; }
@@ -1043,44 +976,11 @@ onUnmounted(() => {
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.3);
     background: transparent;
-    transition: .18s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .recentChip:hover .recentRemove { color: hsla(0, 0%, 100%, 0.6); }
 .recentRemove:hover { color: #fff; background: hsla(0, 0%, 100%, 0.12); }
 
-/* Tips */
-.tips {
-    margin-top: 30px;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 14px;
-}
-.tip {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 18px;
-    border-radius: 18px;
-    background: hsla(0, 0%, 100%, 0.04);
-    font-size: 12.5px;
-    line-height: 1.45;
-    color: hsla(0, 0%, 100%, 0.45);
-    user-select: none;
-}
-.tip strong { font-size: 14px; font-weight: 700; color: hsla(0, 0%, 100%, 0.88); }
-.tipIcon {
-    width: 36px;
-    height: 36px;
-    margin-bottom: 6px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: hsla(var(--accent-h), var(--accent-s), 85%, 0.95);
-    background: hsla(var(--accent-h), var(--accent-s), 55%, 0.16);
-}
-
-/* ── Top result + top tracks ──────────────────────────────────────── */
 .topGrid {
     margin-top: 18px;
     display: grid;
@@ -1102,7 +1002,7 @@ onUnmounted(() => {
     background:
         radial-gradient(120% 100% at 0% 0%, hsla(var(--accent-h), var(--accent-s), 55%, 0.2), transparent 65%),
         hsla(0, 0%, 100%, 0.045);
-    transition: background-color .2s ease, transform .25s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: background-color var(--duration-hover) var(--ease-smooth), transform .25s var(--ease-smooth);
 }
 .bestCard:hover { background-color: hsla(0, 0%, 100%, 0.075); transform: translateY(-2px); }
 .bestArt {
@@ -1162,14 +1062,13 @@ onUnmounted(() => {
     box-shadow: 0 10px 26px hsla(0, 0%, 0%, 0.35);
     opacity: 0;
     transform: translateY(8px);
-    transition: opacity .22s ease, transform .25s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform .25s var(--ease-smooth);
 }
 .bestCard:hover .bestGo,
 .bestGo.done,
 .bestGo.busy { opacity: 1; transform: translateY(0); }
 .bestGo.done { color: hsla(145, 55%, 30%, 1); }
 
-/* ── Artists ──────────────────────────────────────────────────────── */
 .artistRow {
     display: grid;
     grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -1185,7 +1084,7 @@ onUnmounted(() => {
     cursor: pointer;
     min-width: 0;
     user-select: none;
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .artistCard:hover { background-color: hsla(0, 0%, 100%, 0.045); }
 .artistAvatar {
@@ -1197,7 +1096,7 @@ onUnmounted(() => {
     overflow: hidden;
     background-color: #202020;
     box-shadow: 0 10px 26px hsla(0, 0%, 0%, 0.3);
-    transition: transform .25s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform .25s var(--ease-smooth);
 }
 .artistCard:hover .artistAvatar { transform: scale(1.03); }
 .artistName {
@@ -1211,7 +1110,6 @@ onUnmounted(() => {
 }
 .artistSub { font-size: 12px; font-weight: 500; color: hsla(0, 0%, 100%, 0.4); }
 
-/* ── Albums ───────────────────────────────────────────────────────── */
 .albumLine {
     display: flex;
     gap: 18px;
@@ -1234,7 +1132,7 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.7);
     background: hsla(0, 0%, 100%, 0.06);
     opacity: 0;
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .lineBlock:hover .lineControls button { opacity: 1; }
 .lineControls button:hover:not(:disabled) { background: hsla(0, 0%, 100%, 0.12); color: #fff; }
@@ -1247,7 +1145,6 @@ onUnmounted(() => {
 }
 .cardGrid.artists { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 
-/* ── States ───────────────────────────────────────────────────────── */
 .stateBox {
     flex: 1;
     min-height: 260px;
@@ -1284,7 +1181,6 @@ onUnmounted(() => {
 }
 .loadMore { display: flex; justify-content: center; padding: 18px 0 4px; }
 
-/* Skeleton while the first page loads */
 .skeleton { margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }
 .skelHero { display: flex; gap: 18px; align-items: center; padding: 18px; border-radius: 22px; background: hsla(0, 0%, 100%, 0.035); margin-bottom: 10px; }
 .skelCover { width: 96px; height: 96px; border-radius: 14px; }
@@ -1297,21 +1193,19 @@ onUnmounted(() => {
 .skelCover, .skelThumb, .skelLines i {
     background: linear-gradient(90deg, hsla(0, 0%, 100%, 0.05) 0%, hsla(0, 0%, 100%, 0.1) 50%, hsla(0, 0%, 100%, 0.05) 100%);
     background-size: 200% 100%;
-    animation: shimmer 1.3s ease-in-out infinite;
+    animation: shimmer 1.3s var(--ease-smooth-in-out) infinite;
 }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 
-.fade-enter-active, .fade-leave-active { transition: opacity .18s ease; }
+.fade-enter-active, .fade-leave-active { transition: opacity var(--duration-hover) var(--ease-smooth); }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
-/* ── Narrow windows / phone ───────────────────────────────────────── */
 @media (max-width: 1100px) {
     .artistRow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .artistRow .artistCard:nth-child(n + 5) { display: none; }
 }
 @media (max-width: 900px) {
     .topGrid { grid-template-columns: minmax(0, 1fr); }
-    .tips { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
     .dlPage { padding: 0 16px 80px; }
@@ -1319,7 +1213,6 @@ onUnmounted(() => {
     .searchDock { margin: 0 -16px; padding: 12px 16px; }
     .searchBox { height: 48px; border-radius: 14px; }
     .heroTitle { font-size: 30px; }
-    .heroSub { display: none; }
     .setupCard { flex-direction: column; align-items: flex-start; }
     .artistRow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .artistRow .artistCard:nth-child(n + 4) { display: none; }

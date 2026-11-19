@@ -1,10 +1,4 @@
-//! File-based storage for per-track override cover images.
-//!
-//! Previously cover bytes lived in SQLite (`track_overrides.cover_data`, base64),
-//! forcing every track-list query to pull megabytes into memory just to hash a
-//! signature. Now bytes live at `<app_data_dir>/track_covers/<sig>` and only the
-//! short signature (`cover_sig`) stays in the DB — heavy data is read lazily
-//! only when actually needed (thumbnail generation, accent color).
+//! Override cover files at `<app_data_dir>/track_covers/<sig>`; the DB stores only the signature.
 
 use std::fs;
 use std::path::{Path, PathBuf};

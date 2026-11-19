@@ -114,9 +114,6 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-// Any meaningful action on results (play, open, expand a section) means the
-// query was useful, so we save it to past searches. Typing/picking a past
-// search itself doesn't count.
 function rememberCurrentSearch() {
     const trimmed = rawSearch.value.trim()
     if (trimmed) addPastSearch(trimmed)
@@ -285,7 +282,6 @@ async function onPlayAlbum(e: MouseEvent, a: AlbumResult) {
     await playSource(`album:${a.name}`, a.id, { searchStart: true }, rememberCurrentSearch)
 }
 
-// Track search runs on the backend (same ranking logic, ported to Rust).
 const trackResults = ref<TrackMetadata[]>([])
 let trackSearchReqId = 0
 watch(query, async (q) => {
@@ -295,7 +291,6 @@ watch(query, async (q) => {
         const res = await invoke<TrackMetadata[]>('library_search', { query: q })
         if (reqId === trackSearchReqId) {
             cacheTracks(res)
-            // Live cache objects: the cover loader writes covers into those, not into `res`.
             trackResults.value = res.map(tr => getTrackByPath(tr.file_path) ?? tr)
         }
     } catch {
@@ -305,10 +300,7 @@ watch(query, async (q) => {
 
 const tracksExpanded = ref(false)
 
-// Expanded list ("More") can hold thousands of rows, so we render a visible
-// window via useVirtualScroll (like Catalog). Scroller is the whole page
-// (pageRootEl); section offset is its offsetTop within the page. Fixed row
-// height of 58px must stay in sync with scrollTop.
+// The 58px row height must match the CSS.
 const tracksListEl = ref<HTMLElement | null>(null)
 const tracksOffset = ref(0)
 
@@ -320,7 +312,6 @@ const {
     paddingBottom: vsPaddingBottom,
 } = useVirtualScroll(trackResults, { itemHeight: 58, buffer: 6, scrollOffset: tracksOffset })
 
-// Collapsed: first 8 items; expanded: virtualized window.
 const renderedTracks = computed(() =>
     tracksExpanded.value ? vsVisibleTracks.value : trackResults.value.slice(0, 8),
 )
@@ -397,8 +388,6 @@ watch([albumResults, artistResults], () => {
     if (pending.length) loadCoversForTracks(pending)
 })
 
-// Hold back results until the first 30 artist avatars and 15 track covers
-// have resolved, so they don't flash empty squares on appearance.
 const { ready: coversReady } = useCoverGate(() => {
     const out: TrackMetadata[] = []
     for (const a of artistResults.value.slice(0, 30)) {
@@ -465,9 +454,6 @@ watch([albumResults, playlistResults], async () => {
     playlistsLine.observe()
 })
 
-// The results (and their horizontal line lists) mount only once the gate
-// transition finishes entering — re-measure then so scroll state/visibility
-// is correct. Fires harmlessly for the spinner/empty states too (no lists).
 function onGateAfterEnter() {
     albumsLine.observe()
     playlistsLine.observe()
@@ -479,8 +465,6 @@ onUnmounted(() => {
     window.removeEventListener('resize', recomputeTracksOffset)
 })
 
-// Empty query: show the user's most played artists and recently played tracks
-// instead of a blank page. Cached between visits (see useSearchBrowse).
 const { topArtistStats, recentTracks, loaded: browseLoaded, refresh: refreshBrowse } = useSearchBrowse()
 
 onMounted(() => { void refreshBrowse() })
@@ -501,7 +485,6 @@ const topArtists = computed(() => {
     })
 })
 
-// Artist avatars fall back to the first track's cover: make sure those are loaded.
 watch(topArtists, async (list) => {
     const paths = list.map(a => a.firstPath).filter((p): p is string => !!p && !getTrackByPath(p)?.cover_art)
     if (paths.length === 0) return
@@ -635,7 +618,6 @@ function scrollToTop() {
         <div v-else-if="!hasQuery && browseLoaded" class="emptyState" key="gate-no-query">
             <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
             <div class="emptyText">Введите запрос</div>
-            <div class="emptyDesc">Введите текст для поиска треков, альбомов, исполнителей и плейлистов в вашей библиотеке.</div>
         </div>
 
         <div v-else-if="noResults" class="emptyState" key="gate-no-results">
@@ -644,7 +626,6 @@ function scrollToTop() {
             <div class="emptyDesc">Попробуйте изменить запрос или добавить папки с треками в настройках.</div>
         </div>
 
-        <!-- First visit, browse data still loading: nothing instead of a flashing empty state. -->
         <div v-else-if="!hasQuery" key="gate-wait"></div>
 
         <LoadingSpinner v-else-if="!coversReady" key="gate-spinner" />
@@ -814,7 +795,7 @@ function scrollToTop() {
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
     overflow-y: auto;
@@ -826,7 +807,6 @@ function scrollToTop() {
     border-radius: 3px;
 }
 
-/* Sticky header */
 .stickyHeaderAnchor {
     position: sticky;
     top: -20px;
@@ -850,7 +830,7 @@ function scrollToTop() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -865,13 +845,12 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .toTopBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.12);
 }
 
-/* Search input */
 .searchZone {
     position: relative;
     width: 100%;
@@ -885,7 +864,7 @@ function scrollToTop() {
     left: 14px;
     transform: translateY(-50%);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .searchZone:hover .searchIcon {
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
@@ -904,7 +883,7 @@ function scrollToTop() {
     justify-content: center;
     padding: 6px;
     border-radius: 50%;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .searchClear:hover {
     color: hsla(0, 0%, 100%, 0.6);
@@ -925,7 +904,6 @@ function scrollToTop() {
     font-weight: 600;
 }
 
-/* Past search queries */
 .pastSearchesBar {
     display: flex;
     flex-direction: row;
@@ -952,7 +930,7 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 0.6);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
     max-width: 200px;
     overflow: hidden;
@@ -963,7 +941,6 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 0.8);
 }
 
-/* Section */
 .pageLine {
     width: 100%;
     display: flex;
@@ -1007,7 +984,7 @@ function scrollToTop() {
     background-color: var(--light-bg);
     color: hsla(0, 0%, 100%, 0.6);
     opacity: 0;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .lineControls button:hover {
     border: 2px solid hsla(0, 0%, 100%, 0.4);
@@ -1024,7 +1001,6 @@ function scrollToTop() {
     opacity: 0.65;
 }
 
-/* Empty query: most played artists, one row of round avatars (extra rows are clipped). */
 .browse {
     display: flex;
     flex-direction: column;
@@ -1049,7 +1025,7 @@ function scrollToTop() {
     cursor: pointer;
     user-select: none;
     text-align: center;
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .topArtistCard:hover {
     background-color: hsla(0, 0%, 100%, 0.05);
@@ -1082,7 +1058,6 @@ function scrollToTop() {
     text-overflow: ellipsis;
 }
 
-/* Artists row (badges) */
 .artistsBlockWrap {
     position: relative;
 }
@@ -1092,10 +1067,9 @@ function scrollToTop() {
     flex-wrap: wrap;
     gap: 8px;
     overflow: hidden;
-    transition: max-height .28s ease;
+    transition: max-height .28s var(--ease-smooth);
 }
 .artistsList.collapsed {
-    /* max-height set inline */
 }
 .artistBadge {
     display: flex;
@@ -1113,7 +1087,7 @@ function scrollToTop() {
     cursor: pointer;
     user-select: none;
     max-width: 100%;
-    transition: background-color .2s ease, color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .artistBadge:hover {
     background-color: hsla(0, 0%, 100%, 0.09);
@@ -1173,7 +1147,7 @@ function scrollToTop() {
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.01em;
-    transition: background-color .2s ease, color .2s ease, transform .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .moreArtistsBtn:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.18);
@@ -1196,7 +1170,7 @@ function scrollToTop() {
     font-size: 11px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
-    transition: background-color .2s ease, color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .moreArtistsBtn:hover .moreArtistsCount {
     background-color: hsla(0, 0%, 100%, 0.18);
@@ -1205,7 +1179,7 @@ function scrollToTop() {
 .moreArtistsBtn .chev {
     margin-right: 6px;
     color: hsla(0, 0%, 100%, 0.55);
-    transition: transform .24s ease, color .2s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .moreArtistsBtn:hover .chev {
     color: #fff;
@@ -1214,7 +1188,6 @@ function scrollToTop() {
     transform: rotate(180deg);
 }
 
-/* Horizontal lines (albums / playlists) */
 .lineList {
     position: relative;
     display: flex;
@@ -1250,7 +1223,7 @@ function scrollToTop() {
     height: var(--card-w, 200px);
     border-radius: 18px;
     object-fit: cover;
-    transition: filter .24s ease, transform .24s ease;
+    transition: filter var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
 .playlistItem:hover .cover {
@@ -1268,7 +1241,7 @@ function scrollToTop() {
     backdrop-filter: blur(8px);
     opacity: 0;
     transform: translateY(4px);
-    transition: opacity .24s ease, transform .24s ease, background-color .24s ease, color .24s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .playlistItem:hover .overlayBtn {
@@ -1282,7 +1255,6 @@ function scrollToTop() {
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     background-color: hsla(0, 0%, 100%, 0.95);
 }
-/* Albums: main button sits bottom-right instead of bottom-left. */
 .albumItem .playBtn {
     left: auto;
     right: 12px;
@@ -1322,7 +1294,6 @@ function scrollToTop() {
     text-overflow: ellipsis;
 }
 
-/* Tracks list (mirrors Catalog) */
 .tracksList {
     display: flex;
     flex-direction: column;
@@ -1338,14 +1309,13 @@ function scrollToTop() {
     color: hsla(0, 0%, 100%, 0.8);
     font-size: 12px;
     font-weight: 600;
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .moreTracksBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.12);
     color: hsla(0, 0%, 100%, 1);
 }
 
-/* Empty state */
 .emptyState {
     flex: 1;
     display: flex;
@@ -1366,7 +1336,7 @@ function scrollToTop() {
     font-size: 13px;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.7);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 }
 .emptyText:hover {
     color: hsla(0, 0%, 100%, 0.8);
@@ -1433,7 +1403,6 @@ function scrollToTop() {
         margin-bottom: 20px !important;
     }
 
-    /* Top artists: a swipeable row of smaller avatars instead of a clipped grid. */
     .topArtistGrid {
         display: flex;
         gap: 4px;
@@ -1472,10 +1441,6 @@ function scrollToTop() {
         display: none !important;
     }
 
-    /* TrackRow is a child component now (its own scope id) — :deep() reaches
-       past its root into the internals these phone overrides need to touch.
-       Only Search.vue's rows get these tweaks; Album/Artist/Playlist/ArtistTracks
-       don't opt in, so this stays here rather than moving into TrackRow.vue. */
     :deep(.trackElem) {
         height: 54px !important;
         min-height: 54px !important;

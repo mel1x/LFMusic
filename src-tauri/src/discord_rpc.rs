@@ -1,8 +1,4 @@
-//! Discord Rich Presence (desktop): shows cover, track title, source, and a
-//! listening progress bar (Discord animates it itself from timestamps).
-//!
-//! Frontend sends state (see useDiscordRpc.ts); backend just maintains the
-//! IPC connection to the local Discord client. No-op on mobile (see stubs below).
+//! Discord Rich Presence (desktop): keeps the IPC connection; the frontend sends the state.
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PresencePayload {
@@ -48,15 +44,13 @@ mod imp {
         if state.client.is_some() {
             return true;
         }
-        if let Some(at) = state.last_failed_attempt {
-            if at.elapsed() < RECONNECT_INTERVAL {
+        if let Some(at) = state.last_failed_attempt
+            && at.elapsed() < RECONNECT_INTERVAL {
                 return false;
             }
-        }
 
-        let connected = DiscordIpcClient::new(DISCORD_APP_ID)
-            .ok()
-            .and_then(|mut client| client.connect().ok().map(|_| client));
+        let mut client = DiscordIpcClient::new(DISCORD_APP_ID);
+        let connected = client.connect().ok().map(|_| client);
         match connected {
             Some(client) => {
                 state.client = Some(client);
@@ -64,7 +58,6 @@ mod imp {
                 true
             }
             None => {
-                // Discord not running or bad ID — retry no sooner than RECONNECT_INTERVAL.
                 state.last_failed_attempt = Some(Instant::now());
                 false
             }
@@ -104,8 +97,6 @@ mod imp {
             .state(&state_line)
             .assets(assets);
 
-        // Discord animates the progress bar itself from start/end timestamps,
-        // no need to push updates every second.
         if payload.playing {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -121,7 +112,6 @@ mod imp {
 
         let client = state.client.as_mut().expect("client после ensure_connected");
         if client.set_activity(activity).is_err() {
-            // Connection dropped (Discord closed) — reset and retry later.
             let _ = client.close();
             state.client = None;
             state.last_failed_attempt = Some(Instant::now());
@@ -171,8 +161,7 @@ mod imp {
 
         #[test]
         fn clamp_line_counts_unicode_chars_not_bytes() {
-            // Cyrillic is multi-byte; limit must count chars, not bytes, or
-            // truncation could split a UTF-8 sequence and panic on indexing.
+            // Count chars, not bytes: slicing multi-byte text by bytes can panic.
             let long = "я".repeat(200);
             let clamped = clamp_line(&long);
             assert_eq!(clamped.chars().count(), 128);
@@ -184,7 +173,6 @@ mod imp {
 mod imp {
     use super::PresencePayload;
 
-    // true = "delivered" so the frontend doesn't schedule pointless retries.
     pub fn update_presence(_payload: PresencePayload) -> bool {
         true
     }

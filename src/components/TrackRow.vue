@@ -10,10 +10,6 @@ import MoreIcon from './Icons/MoreIcon.vue'
 import HeartIcon from './Icons/HeartIcon.vue'
 import defaultTrackCover from '../assets/trackCover.webp'
 
-// Shared catalog-style track row, used by Album/Artist/ArtistTracks/Playlist/Search.
-// Purely presentational + event-forwarding: play/pause dispatch, ripple, phone-tap
-// routing and menu positioning all stay in the parent (each screen's queue/source
-// semantics differ), so this component only renders and re-emits raw DOM events.
 const props = withDefaults(
     defineProps<{
         track: TrackMetadata
@@ -103,7 +99,7 @@ function displayName(track: TrackMetadata): string {
     padding: 8px 16px 8px 8px;
     border-radius: 9px;
     background-color: hsla(0, 0%, 100%, 0);
-    transition: .31s ease-in-out;
+    transition: .31s var(--ease-smooth-in-out);
     height: 58px;
     box-sizing: border-box;
     overflow: hidden;
@@ -117,7 +113,7 @@ function displayName(track: TrackMetadata): string {
     border-radius: 50%;
     background: hsla(0, 0%, 100%, 0.08);
     transform: scale(0);
-    animation: ripple-expand 0.5s ease-out forwards;
+    animation: ripple-expand 0.5s var(--ease-smooth) forwards;
     pointer-events: none;
 }
 @keyframes ripple-expand {
@@ -131,7 +127,7 @@ function displayName(track: TrackMetadata): string {
     height: 42px;
     background-color: #202020;
     border-radius: 5px;
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
 }
@@ -159,7 +155,7 @@ function displayName(track: TrackMetadata): string {
     border-radius: 9999px;
     color: #242424;
     background-color: hsla(0, 0%, 100%, 1.0);
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     z-index: 3;
 }
 .trackElem:hover .hoverIcon,
@@ -174,7 +170,7 @@ function displayName(track: TrackMetadata): string {
     transform: translateY(-50%);
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
 
     opacity: 0;
 
@@ -197,7 +193,7 @@ function displayName(track: TrackMetadata): string {
     border: none;
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.35);
-    transition: color .24s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
     z-index: 3;
 }
 .trackFavBtn:hover {
@@ -239,7 +235,7 @@ function displayName(track: TrackMetadata): string {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -252,7 +248,7 @@ function displayName(track: TrackMetadata): string {
     font-weight: 500;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
 
     opacity: 1;
@@ -269,7 +265,7 @@ function displayName(track: TrackMetadata): string {
     background: #fff;
     border-radius: 50%;
     transform-origin: center;
-    animation: pulse 0.8s infinite ease;
+    animation: pulse 0.8s infinite var(--ease-smooth-in-out);
     z-index: 2;
 }
 

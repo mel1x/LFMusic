@@ -1,6 +1,3 @@
-//! Shared helpers for small JSON files in the app data dir (settings, pins,
-//! player state, cover manifests).
-
 use serde::{de::DeserializeOwned, Serialize};
 use std::fs;
 use std::path::Path;
@@ -13,8 +10,7 @@ pub fn load_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
         .unwrap_or_default()
 }
 
-/// Pretty-prints `value` into `path` atomically (temp -> rename), so a crash
-/// or a concurrent reader never sees a partial file.
+/// Atomic write (temp -> rename): readers never see a partial file.
 pub fn save_pretty<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), String> {
     let content = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     write_atomic(path, content.as_bytes())

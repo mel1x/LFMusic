@@ -52,8 +52,6 @@ function onToggleFav(track: TrackMetadata) {
     void toggleFavorite(track.file_path);
 }
 
-// Genre filter
-
 const selectedGenre = ref<string | null>(null)
 
 const genreBarEl = ref<HTMLElement | null>(null)
@@ -129,8 +127,6 @@ function clearSearch() {
     searchInput.value?.focus()
 }
 
-// Filtered paths (genre + search) come from the backend; virtual scroll iterates
-// paths, metadata for the visible window is materialized on demand via cache.
 const filteredPaths = ref<string[]>([])
 let filterReqId = 0
 async function refreshFilteredPaths() {
@@ -145,10 +141,7 @@ async function refreshFilteredPaths() {
     }
 }
 watch([debouncedSearch, selectedGenre], refreshFilteredPaths)
-// Refresh when the catalog composition changes (folders added/removed).
 watch(catalogCount, () => { void loadGenres(); void refreshFilteredPaths() })
-
-// Header height (for virtual scroll offset)
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
@@ -169,7 +162,6 @@ onMounted(() => {
     }
     updateGenreScrollState()
 
-    // Restore selected genre from the active playback source
     const source = activePlaylistSource.value
     if (source && source.startsWith('catalog:genre:')) {
         selectedGenre.value = source.slice('catalog:genre:'.length)
@@ -182,8 +174,6 @@ onUnmounted(() => {
     headerResizeObserver?.disconnect()
 })
 
-// Virtual scroll
-
 const {
     containerEl: trackListEl,
     onScroll,
@@ -193,8 +183,6 @@ const {
     resetScroll,
 } = useVirtualScroll(filteredPaths, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
 
-// Placeholder for a not-yet-loaded path — keeps 1 row per path so the virtual
-// list height doesn't shift during fast scrolling; replaced once cached.
 function stubTrack(path: string): TrackMetadata {
     return {
         file_path: path, title: null, artist: null, album: null, genre: null,
@@ -217,7 +205,6 @@ watch(visiblePaths, (paths) => {
     if (paths.length) void fetchTracksByPaths(paths)
 }, { immediate: true })
 
-// Hold back first paint until the first 20 covers have resolved.
 const gateTracks = computed<TrackMetadata[]>(() =>
     filteredPaths.value.slice(0, 20).map(p => getTrackByPath(p)).filter((t): t is TrackMetadata => !!t)
 )
@@ -226,7 +213,6 @@ watch(() => filteredPaths.value.slice(0, 20), (paths) => {
 }, { immediate: true })
 const { ready: coversReady } = useCoverGate(() => gateTracks.value)
 
-// Load covers for visible tracks (skip during scroll-to-top)
 const isScrollingToTop = ref(false)
 
 watch(visibleTracks, (tracks) => {
@@ -234,8 +220,6 @@ watch(visibleTracks, (tracks) => {
         loadCoversForTracks(tracks)
     }
 }, { immediate: true })
-
-// Catalog play button
 
 const isCatalogActive = computed(() => {
     const src = activePlaylistSource.value
@@ -253,8 +237,6 @@ function onPlayCatalog() {
         }
     }
 }
-
-// Sticky header
 
 const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 300)
@@ -274,8 +256,6 @@ function scrollToTop() {
     trackListEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-// Track click
-
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
         onCoverClick(track)
@@ -283,8 +263,6 @@ function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     }
     createRipple(e)
 }
-
-// Context menus
 
 const catalogMenu = ref<{ x: number; y: number } | null>(null)
 const trackMenu = ref<{ x: number; y: number; track: TrackMetadata } | null>(null)
@@ -311,7 +289,6 @@ function openTrackMenu(e: MouseEvent, track: TrackMetadata) {
 
 async function moveTrackToTop(track: TrackMetadata) {
     await moveCatalogTrackToTop(track.file_path)
-    // Refresh page order (sort_order changed on the backend).
     await refreshFilteredPaths()
 }
 
@@ -528,11 +505,11 @@ function onCoverImgClick() {
     height: 100%;
     background-color: var(--light-bg);
 
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), 42%, 70%, 0.08) 0px, hsla(var(--accent-h), 42%, 80%, 0.04) 95px, hsla(var(--accent-h), 42%, 70%, 0) 375px);
+    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
     background-repeat: no-repeat;
     background-attachment: local;
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     
     overflow-y: scroll;
 }
@@ -563,7 +540,7 @@ function onCoverImgClick() {
     height: 200px;
     background-color: transparent;
     border-radius: 18px;
-    transition: width .24s ease, height .24s ease, margin .24s ease, filter .28s ease;
+    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
     object-fit: cover;
@@ -587,7 +564,7 @@ function onCoverImgClick() {
     background-color: hsla(var(--accent-h), min(var(--accent-s), 45%), 50%, 1);
     mix-blend-mode: color;
     pointer-events: none;
-    transition: background-color .28s ease, inset .24s ease;
+    transition: background-color .28s var(--ease-smooth), inset var(--duration-hover) var(--ease-smooth);
 }
 .pageHat .coverWrap.tinted:hover::after {
     inset: -2px;
@@ -611,7 +588,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.4);
     width: fit-content;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -641,7 +618,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.7);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     max-width: 100%;
     white-space: nowrap;
     overflow: hidden;
@@ -670,7 +647,7 @@ function onCoverImgClick() {
     color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
     font-size: 12px;
     font-weight: 600;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.8);
@@ -689,7 +666,7 @@ function onCoverImgClick() {
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.07);
     color: hsla(0, 0%, 100%, 1);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -708,7 +685,7 @@ function onCoverImgClick() {
     left: 12px;
     transform: translateY(-50%);
     color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
@@ -731,7 +708,7 @@ function onCoverImgClick() {
     justify-content: center;
     padding: 6px;
     border-radius: 50%;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -773,7 +750,7 @@ function onCoverImgClick() {
     justify-content: center;
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.7);
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 1);
@@ -784,7 +761,7 @@ function onCoverImgClick() {
     background-color: hsla(var(--accent-h), var(--accent-s), 17%, 1);
     border-radius: 9999px;
     padding: 8px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(var(--accent-h), var(--accent-s), 21%, 1);
@@ -795,7 +772,7 @@ function onCoverImgClick() {
     background-color: hsla(var(--accent-h), var(--accent-s), 17%, 1);
     border-radius: 9999px;
     padding: 8px 7px 8px 9px;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(var(--accent-h), var(--accent-s), 21%, 1);
@@ -829,7 +806,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 0.6);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
 
     &:hover {
@@ -855,7 +832,7 @@ function onCoverImgClick() {
     align-items: center;
     justify-content: center;
     color: hsla(0, 0%, 0%, 0.5);
-    transition: .2s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 0%, 0.85);
@@ -877,7 +854,7 @@ function onCoverImgClick() {
     padding: 8px 16px 8px 8px;
     border-radius: 9px;
     background-color: hsla(0, 0%, 100%, 0);
-    transition: .31s ease-in-out;
+    transition: .31s var(--ease-smooth-in-out);
     height: 58px;
     box-sizing: border-box;
     overflow: hidden;
@@ -891,7 +868,7 @@ function onCoverImgClick() {
     border-radius: 50%;
     background: hsla(0, 0%, 100%, 0.08);
     transform: scale(0);
-    animation: ripple-expand 0.5s ease-out forwards;
+    animation: ripple-expand 0.5s var(--ease-smooth) forwards;
     pointer-events: none;
 }
 @keyframes ripple-expand {
@@ -905,7 +882,7 @@ function onCoverImgClick() {
     height: 42px;
     background-color: #202020;
     border-radius: 5px;
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
 }
@@ -933,7 +910,7 @@ function onCoverImgClick() {
     border-radius: 9999px;
     color: #242424;
     background-color: hsla(0, 0%, 100%, 1.0);
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
     z-index: 3;
 }
 .trackElem:hover .hoverIcon,
@@ -948,7 +925,7 @@ function onCoverImgClick() {
     transform: translateY(-50%);
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: .31s ease;
+    transition: .31s var(--ease-smooth);
 
     opacity: 0;
 
@@ -971,7 +948,7 @@ function onCoverImgClick() {
     border: none;
     cursor: pointer;
     color: hsla(0, 0%, 100%, 0.35);
-    transition: color .24s ease;
+    transition: color var(--duration-hover) var(--ease-smooth);
     z-index: 3;
 }
 .trackFavBtn:hover {
@@ -1013,7 +990,7 @@ function onCoverImgClick() {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.6);
@@ -1026,7 +1003,7 @@ function onCoverImgClick() {
     font-weight: 500;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.45);
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
 
     opacity: 1;
@@ -1043,7 +1020,7 @@ function onCoverImgClick() {
     background: #fff;
     border-radius: 50%;
     transform-origin: center;
-    animation: pulse 0.8s infinite ease;
+    animation: pulse 0.8s infinite var(--ease-smooth-in-out);
     z-index: 2;
 }
 
@@ -1080,7 +1057,7 @@ function onCoverImgClick() {
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .sticky-header-enter-from,
 .sticky-header-leave-to {
@@ -1095,7 +1072,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 14px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.12);
@@ -1121,7 +1098,7 @@ function onCoverImgClick() {
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.7);
 
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         color: hsla(0, 0%, 100%, 0.8);
@@ -1145,7 +1122,7 @@ function onCoverImgClick() {
     color: hsla(0, 0%, 100%, 1);
     font-size: 12px;
     font-weight: 500;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
 
     &:hover {
         background-color: hsla(0, 0%, 100%, 0.07);
@@ -1153,8 +1130,7 @@ function onCoverImgClick() {
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
-    /* Tint through filters only: the mix-blend-mode overlay breaks on the large masked layer
-       in WebView (only the top part gets colored). */
+    /* Tint through filters only: mix-blend-mode breaks on the large masked layer in WebView. */
     body.lfmusic-phone .catalogPage .pageHat .coverWrap.tinted .cover {
         filter: grayscale(1) sepia(1) hue-rotate(calc((var(--accent-h) - 45) * 1deg)) saturate(2.8) brightness(0.74);
     }

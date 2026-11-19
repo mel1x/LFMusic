@@ -10,9 +10,6 @@ import { useDownloads, type ExternalSearchAlbum } from '../composables/useDownlo
 import { useI18n } from '../composables/useI18n'
 import { tracksCountText } from '../utils/format'
 
-// Catalog album card: the cover opens the album page, the floating button
-// queues every track not already in the library. Width comes from the parent
-// (grid cell, or `--card-w` in a horizontal row).
 const props = defineProps<{ album: ExternalSearchAlbum }>()
 const emit = defineEmits<{ (e: 'open'): void; (e: 'download'): void }>()
 
@@ -86,7 +83,7 @@ async function downloadAlbum() {
     cursor: pointer;
     user-select: none;
     box-sizing: content-box;
-    transition: background-color .22s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .albumCard:hover { background-color: hsla(0, 0%, 100%, 0.04); }
 .coverWrap {
@@ -105,7 +102,7 @@ async function downloadAlbum() {
     inset: 0;
     background: linear-gradient(to top, hsla(0, 0%, 0%, 0.45), transparent 45%);
     opacity: 0;
-    transition: opacity .22s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .albumCard:hover .coverShade { opacity: 1; }
 .fab {
@@ -124,7 +121,7 @@ async function downloadAlbum() {
     box-shadow: 0 6px 18px hsla(0, 0%, 0%, 0.35);
     opacity: 0;
     transform: translateY(8px) scale(0.92);
-    transition: opacity .2s ease, transform .22s cubic-bezier(0.22, 1, 0.36, 1), background-color .2s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
 .albumCard:hover .fab,
 .fab.busy,

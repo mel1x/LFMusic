@@ -21,14 +21,10 @@ interface OriginalTrack {
 
 const titleInput = ref('')
 const artistInput = ref('')
-// Local cover preview: current cover's data URL, the newly picked file's src,
-// or null if the cover was reset.
 const coverPreview = ref<string | null>(null)
 const coverSourcePath = ref<string | null>(null)
 const coverReset = ref(false)
 
-// Track's original tag values (no overrides applied); used by the "Reset"
-// button and to detect whether the current cover is user-set.
 const original = ref<OriginalTrack | null>(null)
 const loadingOriginal = ref(false)
 
@@ -37,7 +33,6 @@ const errorText = ref('')
 const modalCardEl = ref<HTMLElement | null>(null)
 const { onBackdropMousedown, onSheetDragStart } = useSheetModal(modalCardEl, closeTrackEdit)
 
-// Title/Artist fields are textareas that grow up to 2 lines instead of scrolling horizontally.
 const MAX_FIELD_LINES = 2
 function autoGrowField(el: HTMLTextAreaElement) {
     el.style.height = 'auto'
@@ -53,8 +48,6 @@ const vAutogrow = {
     mounted(el: HTMLTextAreaElement) { autoGrowField(el) },
     updated(el: HTMLTextAreaElement) { autoGrowField(el) },
 }
-// Fields are single-line by intent: Enter doesn't insert a line break (Ctrl/Cmd+Enter
-// still bubbles to the document handler and saves).
 function onFieldEnter(e: KeyboardEvent) {
     if (e.ctrlKey || e.metaKey) return
     e.preventDefault()
@@ -77,15 +70,12 @@ const hasChanges = computed(() => {
     )
 })
 
-// Cover preview matches the file tag's original, so the reset button is hidden.
-// Compared as data URLs (either the same base64 string, or both empty).
 const previewIsOriginal = computed(() => {
     if (coverSourcePath.value) return false
     if (!original.value) return false
     return (coverPreview.value || null) === (original.value.coverArt || null)
 })
 
-// Whether any field has an override to reset.
 const canResetAll = computed(() => {
     if (!original.value || !currentTrack.value) return false
     const origTitle = (original.value.title || '').trim()
@@ -108,7 +98,6 @@ watch(isOpen, async (open) => {
         coverReset.value = false
         errorText.value = ''
         original.value = null
-        // Needed both for the "Reset" button and to decide whether to show the cover reset icon.
         await loadOriginal()
     }
 })
@@ -133,8 +122,6 @@ function resetAllToOriginal() {
     if (!original.value) return
     titleInput.value = original.value.title || ''
     artistInput.value = original.value.artist || ''
-    // "Reset" only updates the form, it doesn't save. Mark coverReset so a
-    // subsequent Save also reverts the cover, if it has an override.
     coverSourcePath.value = null
     coverReset.value = original.value.hasOverrideCover
     coverPreview.value = original.value.coverArt || null
@@ -168,7 +155,6 @@ async function resetCover() {
     if (!currentTrack.value) return
     coverSourcePath.value = null
     coverReset.value = true
-    // Show the original cover from file tags; only falls back to "no cover" if absent.
     try {
         const original = await invoke<string | null>('get_original_cover_art', {
             filePath: currentTrack.value.file_path,
@@ -198,16 +184,13 @@ async function onSave() {
         }
         const updated = await invoke<TrackMetadata>('track_set_override', args)
 
-        // Update the cache entry so the UI reacts immediately. `updated` is the
-        // authoritative snapshot; use Object.assign (not cacheTrack's merge logic)
-        // so a cover reset to null is actually applied in place.
+        // Object.assign, not cacheTrack's merge, so a cover reset to null is applied.
         const cached = getTrackByPath(filePath)
         if (cached) Object.assign(cached, updated)
         else cacheTracks([updated])
         if (playerCurrentTrack.value?.file_path === filePath) {
             playerCurrentTrack.value = { ...playerCurrentTrack.value, ...updated }
         }
-        // Full reload so artist playlists pick up the renamed artist, etc.
         await refreshLibrary()
         closeTrackEdit()
     } catch (e: any) {
@@ -334,7 +317,7 @@ onUnmounted(() => {
                             :disabled="!hasChanges || saving"
                             @click="onSave"
                         >
-                            {{ saving ? 'Сохранение…' : 'Сохранить' }}
+                            {{ saving ? 'Сохранение...' : 'Сохранить' }}
                         </button>
                     </div>
                 </div>
@@ -404,7 +387,7 @@ onUnmounted(() => {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .closeBtn:hover {
@@ -508,7 +491,7 @@ onUnmounted(() => {
     justify-content: center;
     gap: 8px;
     opacity: 0;
-    transition: opacity .22s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
     background-color: hsla(0, 0%, 0%, 0.35);
     border-radius: 16px;
 }
@@ -523,7 +506,7 @@ onUnmounted(() => {
     background-color: hsla(0, 0%, 0%, 0.55);
     backdrop-filter: blur(8px);
     border: none;
-    transition: background-color .2s ease, transform .15s ease, color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .coverActionBtn:hover {
     background-color: hsla(0, 0%, 0%, 0.78);
@@ -543,7 +526,7 @@ onUnmounted(() => {
     color: hsla(0, 0%, 100%, 0.85);
     font-size: 12px;
     font-weight: 600;
-    transition: background-color .2s ease, color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .coverPickBtn:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.18);
@@ -585,12 +568,11 @@ onUnmounted(() => {
     font-weight: 500;
     line-height: 1.35;
     border: 1px solid hsla(0, 0%, 100%, 0.04);
-    /* Textarea that grows to 2 lines: no manual resize, wraps words, animates height. */
     resize: none;
     overflow-y: hidden;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    transition: background-color .18s ease, border-color .18s ease, height .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), border-color var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth);
 }
 .fieldInput::placeholder {
     color: hsla(0, 0%, 100%, 0.3);
@@ -649,7 +631,7 @@ onUnmounted(() => {
     font-weight: 700;
     letter-spacing: 0.4px;
     text-transform: uppercase;
-    transition: .22s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     user-select: none;
     border: none;
 }
@@ -676,16 +658,16 @@ onUnmounted(() => {
 }
 
 .modal-enter-active, .modal-leave-active {
-    transition: opacity .22s ease;
+    transition: opacity var(--duration-modal) var(--ease-smooth);
 }
 .modal-enter-active .modalCard, .modal-leave-active .modalCard {
-    transition: transform .26s cubic-bezier(0.22, 1.2, 0.36, 1), opacity .22s ease;
+    transition: transform var(--duration-modal) var(--ease-smooth), opacity var(--duration-modal) var(--ease-smooth);
 }
 .modal-enter-from, .modal-leave-to {
     opacity: 0;
 }
 .modal-enter-from .modalCard, .modal-leave-to .modalCard {
-    transform: scale(0.94) translateY(8px);
+    transform: translateY(8px) scale(.98);
     opacity: 0;
 }
 
@@ -711,7 +693,7 @@ onUnmounted(() => {
         overflow-y: auto !important;
         overscroll-behavior: contain;
         touch-action: pan-y;
-        transition: transform .2s ease;
+        transition: transform var(--duration-hover) var(--ease-smooth);
         will-change: transform;
     }
 
@@ -783,15 +765,19 @@ onUnmounted(() => {
         display: none;
     }
 
-    .modal-enter-active .modalCard,
+    .modal-enter-active .modalCard {
+        transition: transform var(--duration-modal) var(--ease-smooth);
+    }
+
+    .modal-leave-active,
     .modal-leave-active .modalCard {
-        transition: transform .2s ease, opacity .2s ease;
+        transition: transform .5s var(--ease-sheet), opacity .5s var(--ease-sheet);
     }
 
     .modal-enter-from .modalCard,
     .modal-leave-to .modalCard {
-        transform: translateY(20px);
-        opacity: 0;
+        transform: translateY(100%);
+        opacity: 1;
     }
 
     :global(body.lfmusic-phone) .modalBackdrop {

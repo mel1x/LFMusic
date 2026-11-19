@@ -58,9 +58,8 @@ const splashWebm = usePlayableUrl(() => splashVideoWebm);
 const splashMp4 = usePlayableUrl(() => splashVideoMp4);
 const splashFading = ref(false);
 
-// The overlay is opaque and sits above everything, so it must never depend on
-// `ended` alone: if WebView2 fails to load, start or finish the video, the app
-// would stay a black window forever. The fallback timer covers that.
+// Never depend on `ended` alone: if WebView2 fails to play the video the window stays black. The
+// fallback timer covers that.
 let splashTimer: ReturnType<typeof setTimeout> | null = null;
 
 function armSplashTimer(ms: number) {
@@ -78,7 +77,6 @@ function onSplashEnded() {
   }, 600);
 }
 
-// Once the video actually plays, wait for its remaining length plus a margin.
 function onSplashPlaying(e: Event) {
   const video = e.target as HTMLVideoElement;
   const left = Number.isFinite(video.duration) ? video.duration - video.currentTime : 3;
@@ -87,29 +85,20 @@ function onSplashPlaying(e: Event) {
 
 if (showSplash.value) armSplashTimer(4000);
 
-// Escape for the "tracks ready" modal and cover overlay is handled inside
-// TracksReadyModal / FullscreenCover themselves.
 async function handleReloadKey(e: KeyboardEvent) {
-  // Suppress Windows' Alt menu-mode (incl. Alt+Shift layout switch): otherwise
-  // the window enters menu mode and the next keystroke is eaten as a menu
-  // mnemonic (system beep, first letter lost). Safe since there's no window
-  // menu (decorations: false); system Alt+F4/Alt+Tab are handled by the OS
-  // regardless.
+  // Suppress Windows' Alt menu mode: otherwise the next keystroke is eaten as a mnemonic (beep,
+  // lost letter).
   if (e.key === 'Alt') {
     e.preventDefault();
     return;
   }
 
-  // F11 toggles fullscreen (browser-like). Rust side un-maximizes on enter
-  // (else Windows breaks the maximized->fullscreen transition) and restores
-  // maximized on exit.
   if (e.key === 'F11') {
     e.preventDefault();
     if (isAndroidRuntime()) return;
     try {
       await invoke('toggle_window_fullscreen');
     } catch {
-      // No-op on platforms without fullscreen support.
     }
     return;
   }
@@ -121,7 +110,6 @@ async function handleReloadKey(e: KeyboardEvent) {
   }
 }
 
-// Blocks the browser's default context menu (has "Reload").
 function handleContextMenu(e: MouseEvent) {
   e.preventDefault();
 }
@@ -187,7 +175,7 @@ watchEffect(() => {
   align-items: center;
   justify-content: center;
   opacity: 1;
-  transition: opacity 0.6s ease;
+  transition: opacity 0.6s var(--ease-smooth);
 }
 .splash-overlay.splash-fading {
   opacity: 0;
@@ -212,11 +200,7 @@ watchEffect(() => {
   font-weight: 500;
   cursor: default;
   user-select: none;
-  /* Don't set transform/transition here: vue-sonner controls them on
-     [data-sonner-toast] itself (transform: var(--y) for slide/stack, transition
-     with height for the entry animation). Overriding them here (same
-     specificity, but this rule comes later) would break the toast's height
-     and entry animation. */
+  /* No transform/transition here: vue-sonner drives them on [data-sonner-toast]. */
 }
 .toast [data-close-button] {
   order: 99;
@@ -234,7 +218,7 @@ watchEffect(() => {
   border: none;
   outline: none;
   padding: 0;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
   flex-shrink: 0;
 }
 .toast [data-close-button]:hover {
@@ -270,13 +254,8 @@ svg {
   display: block;
 }
 html {
-  /* Backgrounds reuse the accent's saturation (capped) so --accent-color /
-     --dark-bg / --light-bg all stack visually as the same hue family. */
   --dark-bg: hsl(var(--accent-h), min(var(--accent-s), 50%), 8%);
   --light-bg: hsla(var(--accent-h), min(var(--accent-s), 45%), 15%, 1);
-  /* Separate "fast" accent for the player bar: same values, but animated on
-     its own (shorter) timing in useAccentTheme so the player leads the color
-     change. Falls back to the shared accent before the first animation frame. */
   --player-accent-h: var(--accent-h);
   --player-accent-s: var(--accent-s);
   --player-accent-l: var(--accent-l);
@@ -294,9 +273,18 @@ html {
   --mobile-player-height: 84px;
   --mobile-nav-height: calc(68px + var(--safe-bottom));
 
+  --ease-smooth: cubic-bezier(.22, 1, .36, 1);
+  --ease-smooth-in-out: cubic-bezier(.65, 0, .35, 1);
+  --icon-ease: cubic-bezier(.34, 1.56, .64, 1);
+  --ease-sheet: cubic-bezier(.32, .72, 0, 1);
+  --duration-hover: .2s;
+  --duration-page: .32s;
+  --duration-modal: .26s;
+  --duration-theme: .3s;
+
   background: var(--dark-bg) !important;
   overflow: hidden;
-  transition: .24s ease;
+  transition: var(--duration-hover) var(--ease-smooth);
 }
 @supports (padding-top: max(0px, 1px)) {
   html {
@@ -313,11 +301,9 @@ html::selection {
 body {
   background: var(--dark-bg) !important;
   overflow: hidden;
-  transition: .24s ease;
+  transition: var(--duration-hover) var(--ease-smooth);
 }
 #app {
-  /* Own stacking context so the holiday pattern (z-index: -1) sits above the
-     body background but under every app surface. */
   isolation: isolate;
   display: flex;
   flex-direction: column;
@@ -554,8 +540,6 @@ body {
     min-height: 42px !important;
   }
 
-  /* Pages without a cover header (.mobilePage on .pageRoot): room for the fixed
-     MobileScrollHeader bar on top, catalog side gutters, big title under the bar. */
   body.lfmusic-phone .pageRoot.mobilePage {
     height: 100%;
     padding: 56px 14px 28px !important;
@@ -586,15 +570,12 @@ body {
     min-width: 0 !important;
   }
 
-  /* Full-bleed cover header (catalog style) for pages with .mobileHeroPage on .pageRoot. */
   body.lfmusic-phone .mobileHeroPage {
     padding: 0 14px !important;
     overflow-y: auto !important;
     overflow-x: hidden !important;
   }
 
-  /* The cover fades out at its bottom edge into this tint, and the tint fades
-     into the page background further down (scrolls with the content). */
   body.lfmusic-phone .mobileHeroPage {
     --hero-cover-height: clamp(290px, 86vw, 390px);
     background-image: linear-gradient(
@@ -841,8 +822,6 @@ body {
     opacity: 1 !important;
   }
 
-  /* Cards on phones: only a small play button stays on the cover; pin and the menu
-     move to a long press (the cover's contextmenu handler opens the same menu). */
   body.lfmusic-phone .playlistItem .pinBtn,
   body.lfmusic-phone .playlistItem .moreBtn,
   body.lfmusic-phone .playlistItem .cardMore,
@@ -881,7 +860,6 @@ body {
     border-radius: 14px !important;
   }
 
-  /* No hover dimming on touch: it sticks after a tap. */
   body.lfmusic-phone .playlistItem .cover,
   body.lfmusic-phone .artistItem .artistCover {
     filter: none !important;
@@ -901,7 +879,6 @@ body {
     font-size: 13px !important;
   }
 
-  /* Section rows (Collections, Artist page, Search): compact heading, no subtitle. */
   body.lfmusic-phone .mobilePage .pageLine,
   body.lfmusic-phone .mobileHeroPage .pageLine {
     margin-bottom: 26px !important;
@@ -977,7 +954,6 @@ body {
     opacity: 0.82 !important;
   }
 
-  /* Playing dot (16px) centered on the row cover: padding + cover / 2 - 8. */
   body.lfmusic-phone .trackElem .playingAnim {
     left: 27px !important;
     top: 50% !important;

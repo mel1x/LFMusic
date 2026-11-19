@@ -1,15 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::PathBuf;
-use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::formats::SeekMode;
+
+use crate::audio_player::OpenedAudio;
 
 const TARGET_SAMPLE_RATE: u32 = 8_000;
 const ANALYSIS_WINDOW_SECS: f64 = 8.0;
@@ -116,49 +110,13 @@ fn collect_analysis_samples(
     file_path: &str,
     duration_secs: Option<f64>,
 ) -> Result<(Vec<f32>, u32), String> {
-    let file =
-        File::open(file_path).map_err(|e| format!("Не удалось открыть файл для анализа: {}", e))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = PathBuf::from(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-    {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| format!("Не удалось определить формат для анализа: {}", e))?;
-    let mut format_reader = probed.format;
-
-    let track = format_reader
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| "Не найден аудио-трек для анализа".to_string())?;
-
-    let track_id = track.id;
-    let source_sample_rate = track.codec_params.sample_rate.unwrap_or(44_100).max(1);
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("Не удалось создать декодер анализа: {}", e))?;
+    let mut audio = OpenedAudio::open(file_path)
+        .map_err(|e| format!("Не удалось открыть файл для анализа: {}", e))?;
+    let source_sample_rate = audio.sample_rate;
 
     let start_secs = choose_window_start(duration_secs);
     if start_secs > 0.0 {
-        let _ = format_reader.seek(
-            SeekMode::Coarse,
-            SeekTo::Time {
-                time: Time::from(start_secs),
-                track_id: Some(track_id),
-            },
-        );
-        decoder.reset();
+        let _ = audio.seek(start_secs, SeekMode::Coarse);
     }
 
     let stride = (source_sample_rate as f32 / TARGET_SAMPLE_RATE as f32)
@@ -168,28 +126,18 @@ fn collect_analysis_samples(
     let max_samples = (effective_sample_rate as f64 * ANALYSIS_WINDOW_SECS) as usize;
     let mut samples = Vec::with_capacity(max_samples.min(400_000));
     let mut decimation_pos = 0usize;
+    let channels = audio.channels as usize;
+    let mut packet_samples = Vec::new();
 
-    while samples.len() < max_samples {
-        let packet = match format_reader.next_packet() {
-            Ok(packet) => packet,
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        match decoder.decode(&packet) {
-            Ok(decoded) => push_downsampled_mono(
-                &decoded,
-                &mut samples,
-                stride,
-                &mut decimation_pos,
-                max_samples,
-            ),
-            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(_) => break,
-        }
+    while samples.len() < max_samples && audio.decode_next(&mut packet_samples) {
+        push_downsampled_mono(
+            &packet_samples,
+            channels,
+            &mut samples,
+            stride,
+            &mut decimation_pos,
+            max_samples,
+        );
     }
 
     if samples.len() < FFT_SIZE {
@@ -204,37 +152,29 @@ fn choose_window_start(duration_secs: Option<f64>) -> f64 {
     0.0
 }
 
+/// Mixes interleaved `frames` down to mono and keeps every `stride`-th frame.
 fn push_downsampled_mono(
-    buf: &AudioBufferRef,
+    frames: &[f32],
+    channels: usize,
     samples: &mut Vec<f32>,
     stride: usize,
     decimation_pos: &mut usize,
     max_samples: usize,
 ) {
-    macro_rules! extract {
-        ($b:expr, $conv:expr) => {{
-            let b = $b;
-            let channels = b.spec().channels.count().max(1);
-            for frame in 0..b.frames() {
-                if *decimation_pos == 0 && samples.len() < max_samples {
-                    let mut sum = 0.0_f32;
-                    for ch in 0..channels {
-                        sum += $conv(b.chan(ch)[frame]);
-                    }
-                    samples.push((sum / channels as f32).clamp(-1.0, 1.0));
-                }
-                *decimation_pos += 1;
-                if *decimation_pos >= stride {
-                    *decimation_pos = 0;
-                }
-                if samples.len() >= max_samples {
-                    break;
-                }
-            }
-        }};
+    let channels = channels.max(1);
+    for frame in frames.chunks_exact(channels) {
+        if *decimation_pos == 0 && samples.len() < max_samples {
+            let sum: f32 = frame.iter().sum();
+            samples.push((sum / channels as f32).clamp(-1.0, 1.0));
+        }
+        *decimation_pos += 1;
+        if *decimation_pos >= stride {
+            *decimation_pos = 0;
+        }
+        if samples.len() >= max_samples {
+            break;
+        }
     }
-
-    crate::audio_player::dispatch_f32!(buf, extract)
 }
 
 fn global_rms(samples: &[f32]) -> f32 {
@@ -427,7 +367,6 @@ pub(crate) fn fft_radix2(buffer: &mut [Complex]) {
         return;
     }
 
-    // Bit-reversal permutation (in-place).
     let mut j = 0usize;
     for i in 1..n {
         let mut bit = n >> 1;
@@ -441,8 +380,6 @@ pub(crate) fn fft_radix2(buffer: &mut [Complex]) {
         }
     }
 
-    // Butterfly stage using cached twiddles: for stage length `len`, the
-    // factor exp(-2pi*i*k/len) = table[k*(n/len)].
     TWIDDLES.with(|cache| {
         let mut cache = cache.borrow_mut();
         let table = cache.entry(n).or_insert_with(|| build_twiddles(n));
@@ -665,7 +602,6 @@ mod tests {
         assert!(fa.len() >= 16);
     }
 
-    // File analysis budget stays small for scanning (checked at compile time).
     const _: () = {
         assert!(ANALYSIS_WINDOW_SECS >= 8.0);
         assert!(ANALYSIS_WINDOW_SECS <= 12.0);
@@ -698,7 +634,6 @@ mod tests {
     fn silence_yields_minimum_loudness_and_zero_energy() {
         let samples = vec![0.0f32; FFT_SIZE * 4];
         let features = analyze_samples_for_tests(&samples, 11_025);
-        // global_rms(0) -> log10(1e-7) clamped to range minimum -90.0.
         assert_eq!(features.loudness, Some(-90.0));
         assert_eq!(features.energy, Some(0.0));
         assert_eq!(features.key, None, "у тишины не должно быть определяемой тональности");
@@ -734,7 +669,6 @@ mod tests {
         let with_bpm = estimate_danceability(Some(120.0), 0.5, 0.5);
         let without_bpm = estimate_danceability(None, 0.5, 0.5);
         assert!(without_bpm < with_bpm);
-        // Without bpm, tempo_fit contributes nothing: 0.5*0.68 + 0.5*0.10.
         assert!((without_bpm - (0.5 * 0.68 + 0.5 * 0.10)).abs() < 1e-6);
     }
 
@@ -758,8 +692,6 @@ mod tests {
 
     #[test]
     fn fft_radix2_matches_naive_dft_for_random_signal() {
-        // Cross-check against a naive DFT: catches permutation/butterfly bugs
-        // that the sine-wave tests above could miss (right magnitude, wrong phase/bin).
         let n = 64usize;
         let mut input: Vec<Complex> = (0..n)
             .map(|i| Complex::new(((i * 37 % 13) as f32) - 6.0, ((i * 19 % 11) as f32) - 5.0))

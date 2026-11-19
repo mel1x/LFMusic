@@ -1,6 +1,5 @@
-// Vite aliases `@tauri-apps/api/core` to this file (see vite.config.ts) so dev
-// mode can record backend calls: Tauri defines `__TAURI_INTERNALS__.invoke` as
-// read-only, so it can't be wrapped at runtime. Everything else is re-exported as is.
+// Vite aliases @tauri-apps/api/core here (vite.config.ts): __TAURI_INTERNALS__.invoke is
+// read-only, so dev mode wraps it here.
 import { invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from '../../node_modules/@tauri-apps/api/core.js'
 
 export * from '../../node_modules/@tauri-apps/api/core.js'

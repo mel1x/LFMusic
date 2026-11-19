@@ -16,11 +16,12 @@ function detectInitialLanguage(): Language {
 }
 
 export const settingItems = [
-    { key: 'crossfade_on_seek',        label: 'Плавная перемотка трека',                    default: true,  description: 'При включении звучание трека будет плавно переходить при перемотке',                          warning: '' },
-    { key: 'crossfade_between_tracks', label: 'Плавный переход между треками',              default: true,  description: 'При включении звучание треков будет плавно переходить при переключении',                       warning: '' },
-    { key: 'show_player_extra_block',  label: 'Отображение дополнительного блока у плеера', default: false, description: 'Переключает отображение дополнительного блока слева от плеера',                                warning: 'Увеличивает потребление CPU примерно в x1.5-x4 раза' },
-    { key: 'show_github_badge',        label: 'Бейдж github в шапке',                       default: true,  description: 'Переключает отображение кнопки github в шапке приложения',                                     warning: '' },
-    { key: 'discord_rpc_enabled',      label: 'Отображение в статусе discord',              default: true,  description: 'При включении в вашем discord профиле будет отображаться информация о прослушивании',          warning: '' },
+    { key: 'crossfade_on_seek',        label: 'Плавная перемотка трека',                    default: true,  description: '',                          warning: '' },
+    { key: 'crossfade_between_tracks', label: 'Плавный переход между треками',              default: true,  description: '',                       warning: '' },
+    { key: 'show_player_extra_block',  label: 'Отображение дополнительного блока у плеера', default: false, description: '',                                warning: 'Увеличивает потребление CPU примерно в x1.5-x4 раза' },
+    { key: 'show_donate_badge',        label: 'Бейдж доната в шапке',                       default: true,  description: '',                                                                                          warning: '' },
+    { key: 'show_github_badge',        label: 'Бейдж github в шапке',                       default: true,  description: '',                                     warning: '' },
+    { key: 'discord_rpc_enabled',      label: 'Отображение в статусе discord',              default: true,  description: '',          warning: '' },
     { key: 'dynamic_accent_color',     label: 'Динамическая цветовая тема',                 default: true,  description: 'Цвета интерфейса автоматически будут подстраиваться под обложку текущего трека',               warning: '' },
     { key: 'external_album_order',     label: 'Получать порядок треков в альбоме',          default: false, description: 'Расставляет треки локальных альбомов в правильном порядке из внешних источников',               warning: 'Требует подключения к интернету' },
     { key: 'external_supplement_missing', label: 'Дополнять плейлисты недостающими треками', default: false, description: 'Показывает в альбомах отсутствующие в библиотеке треки полупрозрачными (не воспроизводятся и не идут в очередь)', warning: 'Требует подключения к интернету' },
@@ -28,7 +29,7 @@ export const settingItems = [
     { key: 'external_artist_avatars',  label: 'Получать аватарки исполнителей',             default: false, description: 'Подставляет аватарки исполнителей из внешних открытых источников',                              warning: 'Требует подключения к интернету' },
     { key: 'holiday_events',           label: 'Праздничное оформление',                     default: true,  description: 'В праздники добавляет тематический фон, плашку в шапке и снег на Новый год',               warning: '' },
     { key: 'show_downloads_page',      label: 'Страница «Скачивание» в меню',               default: false,  description: 'Показывать раздел «Скачивание» в боковом меню (только на ПК)',                                  warning: '' },
-    { key: 'auto_update_check',        label: 'Проверять обновления при запуске',           default: true,  description: 'При запуске проверяет новую версию на GitHub и предлагает обновиться',            warning: '' },
+    { key: 'auto_update_check',        label: 'Проверять обновления при запуске',           default: true,  description: '',            warning: '' },
     { key: 'dev_mode',                label: 'Режим разработчика',                         default: false, description: 'Добавляет справа снизу кнопку панели разработчика: вызовы бэкенда, ошибки, метрики',           warning: 'Применяется после перезапуска приложения' },
 ] as const
 
@@ -57,7 +58,6 @@ const settings = ref<AppSettings>({ ...defaults, artist_separators: [...ARTIST_S
 
 let initialized = false
 
-// Dev mode as read at startup: toggling it applies only after a restart.
 const devModeActive = ref(false)
 
 type RawSettings = Record<string, boolean | string | string[]>

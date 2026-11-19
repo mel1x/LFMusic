@@ -47,7 +47,6 @@ async function toggle(key: SettingKey) {
     await save();
 }
 
-// Dev mode is read once at startup, so offer a restart while it differs.
 const devRestartPending = computed(() => settings.value.dev_mode !== devModeActive.value);
 
 async function restartApp() {
@@ -103,7 +102,7 @@ watch(() => settings.value.language, () => {
 </script>
 
 <template>
-    <SettingsShell title="Общее" description="Язык интерфейса и интеграции с другими приложениями">
+    <SettingsShell title="Общее">
         <div class="settingsBlock">
             <div v-for="item in generalItems" :key="item.key" class="toggleRow" :class="{ phoneHiddenRow: item.key === 'discord_rpc_enabled' }">
                 <SettingToggle
@@ -136,7 +135,6 @@ watch(() => settings.value.language, () => {
             <div class="settingElem languageSetting">
                 <span class="languageText">
                     <span>{{ t('settings.language') }}</span>
-                    <small>{{ t('settings.languageDescription') }}</small>
                 </span>
                 <div class="languageDropdown" ref="languageDropdownRoot">
                     <button
@@ -210,7 +208,7 @@ watch(() => settings.value.language, () => {
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .restartBtn:disabled {
     opacity: 0.5;
@@ -254,7 +252,7 @@ watch(() => settings.value.language, () => {
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
-    transition: background-color .2s ease, box-shadow .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), box-shadow var(--duration-hover) var(--ease-smooth);
 }
 .languageTrigger:hover,
 .languageTrigger.open {
@@ -280,7 +278,7 @@ watch(() => settings.value.language, () => {
 .languageChevron {
     flex-shrink: 0;
     color: hsla(0, 0%, 100%, 0.48);
-    transition: transform .18s ease;
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .languageTrigger.open .languageChevron {
     transform: rotate(180deg);
@@ -312,7 +310,7 @@ watch(() => settings.value.language, () => {
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .languageOption:hover,
 .languageOption.active {
@@ -321,7 +319,7 @@ watch(() => settings.value.language, () => {
 }
 .languageMenu-enter-active,
 .languageMenu-leave-active {
-    transition: opacity .16s ease, transform .16s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
     transform-origin: top right;
 }
 .languageMenu-enter-from,

@@ -1,10 +1,5 @@
-//! Picks which search hit actually is the requested catalog track.
-//!
-//! A blind "first search result" grabs live versions, covers, sped-up edits and
-//! hour-long loops surprisingly often. Every candidate is scored instead on
-//! title coverage, artist presence, duration closeness (the catalog knows the
-//! exact length) and unwanted-version keywords; anything scoring below
-//! [`MIN_ACCEPTABLE_SCORE`] is rejected rather than downloaded.
+//! Picks the search hit that really is the requested track, scored by title, artist, duration and
+//! version keywords.
 
 /// One search hit, normalized across sources.
 #[derive(Debug, Clone)]
@@ -24,12 +19,8 @@ pub struct Target<'a> {
     pub duration_secs: Option<u32>,
 }
 
-/// A correct upload typically scores 70–90; a different version of the song
-/// (remix, live, sped up…) lands below this even with a matching duration.
 pub const MIN_ACCEPTABLE_SCORE: i32 = 40;
 
-/// Version markers that mean "not the studio recording" — penalized unless
-/// the requested title itself contains them (asking for a remix is fine).
 const UNWANTED: &[&str] = &[
     "live", "cover", "karaoke", "instrumental", "remix", "sped up", "speed up", "slowed",
     "reverb", "nightcore", "8d", "1 hour", "10 hours", "loop", "reaction", "tutorial",
@@ -59,8 +50,7 @@ fn padded(s: &str) -> String {
     format!(" {} ", words(s).join(" "))
 }
 
-/// The requested title without "(feat. …)" / "[…]" decorations, which uploads
-/// often spell differently or drop.
+/// The requested title without "(feat.
 fn core_title(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut depth = 0i32;
@@ -83,7 +73,7 @@ fn core_title(title: &str) -> String {
     }
 }
 
-/// First credited artist ("A, B & C feat. D" → "A").
+/// First credited artist ("A, B & C feat. D" -> "A").
 fn primary_artist(artist: &str) -> String {
     let lower = artist.to_lowercase();
     let cut = [",", " & ", " feat", " ft.", " x ", ";", " и "]
@@ -102,7 +92,6 @@ pub fn score(target: &Target, c: &Candidate) -> i32 {
     let haystack = format!("{}{}", cand_title, uploader);
     let mut s = 0i32;
 
-    // Title coverage: share of requested title words present in the hit.
     let title_words = words(&core_title(target.title));
     if !title_words.is_empty() {
         let hit = title_words
@@ -116,7 +105,6 @@ pub fn score(target: &Target, c: &Candidate) -> i32 {
         }
     }
 
-    // Artist anywhere in title or channel name.
     let artist_words = words(&primary_artist(target.artist));
     if !artist_words.is_empty() {
         let artist_phrase = format!(" {} ", artist_words.join(" "));
@@ -125,13 +113,11 @@ pub fn score(target: &Target, c: &Candidate) -> i32 {
         } else {
             s -= 10;
         }
-        // "Artist - Topic" channels are YouTube Music's auto-generated official audio.
         if uploader.contains(&artist_phrase) && uploader.contains(" topic ") {
             s += 15;
         }
     }
 
-    // Duration: the strongest signal when the catalog knows the length.
     if let (Some(want), Some(got)) = (target.duration_secs, c.duration_secs) {
         let diff = (want as f64 - got).abs();
         s += match diff {
@@ -144,7 +130,6 @@ pub fn score(target: &Target, c: &Candidate) -> i32 {
         };
     }
 
-    // Different version of the song (unless that's what was asked for).
     let wanted_title = padded(target.title);
     let mut penalty = 0;
     for marker in UNWANTED {
@@ -169,7 +154,6 @@ pub fn rank<'a>(target: &Target, candidates: &'a [Candidate]) -> Vec<&'a Candida
         .map(|(i, c)| (score(target, c), i, c))
         .filter(|(s, _, _)| *s >= MIN_ACCEPTABLE_SCORE)
         .collect();
-    // Ties keep the source's own relevance order.
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, _, c)| c).collect()
 }

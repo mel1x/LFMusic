@@ -1,4 +1,6 @@
 import "./assets/fonts/fonts.css";
+import "./styles/icons.css";
+import "./styles/ui.css";
 import { createApp } from "vue";
 import App from "./App.vue";
 import router from "./router";
@@ -6,7 +8,6 @@ import { vTruncate } from "./directives/truncateTooltip";
 import { vTooltip } from "./directives/tooltip";
 import { installDevCapture } from "./composables/useDevTools";
 
-// Records startup invokes; removed again once settings load if dev mode is off.
 try {
     installDevCapture();
 } catch (e) {

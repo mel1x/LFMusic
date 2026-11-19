@@ -1,11 +1,6 @@
 import { ref, computed, effectScope } from "vue";
 import { isAndroidRuntime } from "./usePlatform";
 
-// Android shell: runtime permission status (media/notifications) and safe-area
-// insets (exposed as CSS vars). Listens to the window.LFMusicAndroid bridge and
-// focus/visibility events. Singleton shared by App (init) and
-// AndroidPermissionWarning (reads state).
-
 interface AndroidPermissionStatus {
     mediaGranted: boolean;
     notificationsGranted: boolean;
@@ -92,7 +87,6 @@ function createAndroidShell() {
         try {
             applyAndroidInsets(JSON.parse(raw) as AndroidSafeInsets);
         } catch {
-            // Best-effort: CSS env() and fallback values stay in place.
         }
     }
 
@@ -129,14 +123,12 @@ function createAndroidShell() {
         scheduleAndroidInsetsRefresh();
     }
 
-    // Listeners live for the app's whole lifetime (root never unmounts).
     window.addEventListener("focus", onWindowFocus);
     window.addEventListener("lfmusic:android-permissions", onAndroidPermissionsEvent as EventListener);
     window.addEventListener("lfmusic:android-insets", onAndroidInsetsEvent as EventListener);
     window.visualViewport?.addEventListener("resize", scheduleAndroidInsetsRefresh);
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    // Initial read (bridge may already be available).
     refreshAndroidPermissions();
     scheduleAndroidInsetsRefresh();
 

@@ -4,9 +4,6 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { useI18n } from '../composables/useI18n';
 import CloseIcon from './Icons/CloseIcon.vue';
 
-// "Support the author": DonationAlerts (QR + link) and crypto wallets to copy,
-// same methods as in mixlauncher. Flat surface like the statistics modal.
-
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 
@@ -14,7 +11,6 @@ const { t } = useI18n();
 
 const LINK_URL = 'https://dalink.to/mel1xy';
 
-// DonationAlerts QR modules, one row per number, bit N = column N.
 const QR_ROWS = [
     0x1fd2bd08f807f, 0x105fd5bfcf641, 0x1758b389c715d, 0x174b0c6a5d95d,
     0x17428eff8915d, 0x1047c0476a541, 0x1fd555555557f, 0x00067d45dcb00,
@@ -32,7 +28,6 @@ const QR_ROWS = [
 ];
 const QR_N = QR_ROWS.length;
 
-// Horizontal runs of dark modules as one path (values exceed 32 bits, so no bitwise ops).
 const qrPath = QR_ROWS.map((bits, row) => {
     let d = '';
     let col = 0;
@@ -124,7 +119,6 @@ onBeforeUnmount(() => {
                     </button>
 
                     <div class="donateHead">
-                        <div class="donateKicker">LFMusic</div>
                         <div class="donateTitle">{{ t('donate.title') }}</div>
                         <div class="donateSubtitle">{{ t('donate.desc') }}</div>
                     </div>
@@ -231,7 +225,6 @@ onBeforeUnmount(() => {
     padding: 24px;
     box-sizing: border-box;
 }
-/* Flat surface like the statistics modal; sections are separated by spacing only. */
 .donateModal {
     position: relative;
     width: 680px;
@@ -260,7 +253,7 @@ onBeforeUnmount(() => {
     border-radius: 9999px;
     background: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 0.7);
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .donateClose:hover {
     background: hsla(0, 0%, 100%, 0.12);
@@ -272,15 +265,7 @@ onBeforeUnmount(() => {
     flex-direction: column;
     padding-right: 44px;
 }
-.donateKicker {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: .12em;
-    text-transform: uppercase;
-    color: hsla(var(--accent-h), min(var(--accent-s), 60%), 82%, 0.8);
-}
 .donateTitle {
-    margin-top: 8px;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 26px;
     line-height: 1.15;
@@ -351,7 +336,7 @@ onBeforeUnmount(() => {
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .linkBtn:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.28);
@@ -372,7 +357,7 @@ onBeforeUnmount(() => {
     column-gap: 12px;
     padding: 6px 8px;
     border-radius: 12px;
-    transition: background-color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .coinRow.single {
     cursor: pointer;
@@ -417,7 +402,7 @@ onBeforeUnmount(() => {
     font-variant-numeric: tabular-nums;
 }
 .coinSub.done {
-    color: hsl(var(--accent-h), max(min(var(--accent-s), 70%), 35%), 78%);
+    color: hsl(var(--accent-h), max(min(var(--accent-s), 70%), calc(35% * var(--accent-k, 1))), 78%);
 }
 
 .copyBtn {
@@ -428,14 +413,14 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: center;
     color: hsla(0, 0%, 100%, 0.42);
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .coinRow.single:hover .copyBtn {
     color: hsla(0, 0%, 100%, 0.85);
 }
 .copyBtn.done,
 .coinRow.single:hover .copyBtn.done {
-    color: hsl(var(--accent-h), max(min(var(--accent-s), 70%), 35%), 78%);
+    color: hsl(var(--accent-h), max(min(var(--accent-s), 70%), calc(35% * var(--accent-k, 1))), 78%);
 }
 
 .netList {
@@ -453,7 +438,7 @@ onBeforeUnmount(() => {
     letter-spacing: .02em;
     font-variant-numeric: tabular-nums;
     cursor: pointer;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .netBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.12);
@@ -464,12 +449,11 @@ onBeforeUnmount(() => {
     color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 85%, 1);
 }
 
-.donate-enter-active, .donate-leave-active { transition: opacity .2s ease; }
-.donate-enter-active .donateModal, .donate-leave-active .donateModal { transition: transform .24s cubic-bezier(0.32, 0.72, 0, 1), opacity .24s ease; }
+.donate-enter-active, .donate-leave-active { transition: opacity var(--duration-modal) var(--ease-smooth); }
+.donate-enter-active .donateModal, .donate-leave-active .donateModal { transition: transform var(--duration-modal) var(--ease-smooth), opacity var(--duration-modal) var(--ease-smooth); }
 .donate-enter-from, .donate-leave-to { opacity: 0; }
-.donate-enter-from .donateModal, .donate-leave-to .donateModal { transform: scale(0.96) translateY(6px); opacity: 0; }
+.donate-enter-from .donateModal, .donate-leave-to .donateModal { transform: translateY(8px) scale(.98); opacity: 0; }
 
-/* Phones: full-screen like the statistics modal, one column. */
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .donateBackdrop { padding: 0; }
     .donateModal {

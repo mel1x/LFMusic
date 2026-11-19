@@ -35,6 +35,6 @@ import favoritesCover from '../assets/favorites.webp'
     background-color: hsla(var(--accent-h), min(var(--accent-s), 45%), 50%, 1);
     mix-blend-mode: color;
     pointer-events: none;
-    transition: background-color .28s ease;
+    transition: background-color .28s var(--ease-smooth);
 }
 </style>

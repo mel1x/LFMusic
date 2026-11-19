@@ -79,7 +79,7 @@ function onTogglePin() {
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: 0.24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     user-select: none;
     white-space: nowrap;
     text-align: left;
@@ -89,7 +89,7 @@ function onTogglePin() {
     color: hsla(0, 0%, 100%, 1);
 }
 .ctx-item svg {
-    transition: 0.24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     flex-shrink: 0;
     color: hsla(0, 0%, 100%, 0.5);
 }

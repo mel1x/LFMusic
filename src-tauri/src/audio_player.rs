@@ -1,11 +1,20 @@
 use base64::Engine;
 
 use crate::enhance::{EnhanceSettings, EnhanceShared, EnhanceSource, EnhanceStatus};
+use crate::fx::{FxSettings, FxShared, FxSource, SpeedSource};
 use crate::spectrum::SpectrumAnalyzer;
 use lofty::picture::PictureType;
 use lofty::prelude::*;
 use lofty::probe::Probe;
-use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{ChannelCount, MixerDeviceSink, Player, SampleRate, Source};
+
+/// rodio wants non-zero channel counts and sample rates; our sources keep plain ints.
+pub(crate) fn nz_channels(c: u16) -> ChannelCount {
+    ChannelCount::new(c).unwrap_or(ChannelCount::MIN)
+}
+pub(crate) fn nz_rate(r: u32) -> SampleRate {
+    SampleRate::new(r).unwrap_or(SampleRate::MIN)
+}
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::collections::HashMap;
@@ -14,12 +23,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
-use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{CodecType, DecoderOptions};
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::codecs::audio::well_known::{
+    CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_PCM_F32LE, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE,
+    CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32LE,
+};
+use symphonia::core::codecs::audio::{
+    AudioCodecId, AudioCodecParameters, AudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
+};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use symphonia::core::packet::Packet;
+use symphonia::core::units::Time;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackMetadata {
@@ -46,10 +62,7 @@ pub struct TrackMetadata {
     pub spectral_centroid: Option<f32>,
     pub key: Option<String>,
     pub audio_fingerprint: Option<String>,
-    /// Whether the file has any embedded cover picture (not the picture itself) —
-    /// cached in `tracks.has_cover` so cover-presence checks (`get_cover_art`,
-    /// external-prep) don't need to re-open/re-parse tags each time. Internal
-    /// only, never sent to the frontend.
+    /// Embedded cover present; cached in `tracks.has_cover`. Internal only.
     #[serde(skip)]
     pub has_cover: bool,
 }
@@ -103,7 +116,6 @@ pub(crate) struct BiquadCoeffs {
 impl BiquadCoeffs {
     pub(crate) fn peaking_eq(sample_rate: f32, center_freq: f32, gain_db: f32, q: f32) -> Self {
         if gain_db.abs() < 0.01 {
-            // Passthrough
             return Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
         }
 
@@ -130,11 +142,8 @@ pub(crate) struct BiquadState {
     y1: f32, y2: f32,
 }
 
-/// Soft limiter: passthrough below T=0.97, tanh saturation above it toward CEILING.
-/// KNEE is deliberately decoupled from (CEILING - T): dividing `over` by that gap
-/// directly used to saturate tanh to exactly 1.0 already at x≈1.2, making the
-/// limiter effectively hard-clip for most of the loud range. CEILING < 1.0 so a
-/// sample never hits exactly ±1.0 (guards against overflow if ever converted to int).
+/// Soft limiter: passthrough below 0.97, tanh toward CEILING above. CEILING < 1.0, so a sample
+/// never hits +-1.0.
 #[inline(always)]
 pub(crate) fn soft_clip(x: f32) -> f32 {
     const T: f32 = 0.97;
@@ -185,8 +194,8 @@ struct EqSource<S: Source<Item = f32>> {
 
 impl<S: Source<Item = f32>> EqSource<S> {
     fn new(source: S, eq_settings: Arc<RwLock<EqSettings>>) -> Self {
-        let channels = source.channels();
-        let sample_rate = source.sample_rate();
+        let channels = source.channels().get();
+        let sample_rate = source.sample_rate().get();
         let num_bands = EQ_BANDS.len();
 
         let settings = eq_settings.read().unwrap();
@@ -253,7 +262,6 @@ impl<S: Source<Item = f32>> Iterator for EqSource<S> {
             self.current_channel = 0;
         }
 
-        // Check settings every ~1024 samples
         self.samples_since_check += 1;
         if self.samples_since_check >= 1024 {
             self.samples_since_check = 0;
@@ -274,19 +282,22 @@ impl<S: Source<Item = f32>> Iterator for EqSource<S> {
 }
 
 impl<S: Source<Item = f32>> Source for EqSource<S> {
-    fn current_frame_len(&self) -> Option<usize> { self.source.current_frame_len() }
-    fn channels(&self) -> u16 { self.channels }
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn current_span_len(&self) -> Option<usize> { self.source.current_span_len() }
+    fn channels(&self) -> ChannelCount { nz_channels(self.channels) }
+    fn sample_rate(&self) -> SampleRate { nz_rate(self.sample_rate) }
     fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
 }
 
-/// User EQ followed by auto enhancement.
+/// Speed, user EQ, creative effects (crusher / vinyl / space), then auto enhancement.
 fn effects<S: Source<Item = f32>>(
     source: S,
     eq_settings: &Arc<RwLock<EqSettings>>,
     enhance: &Arc<EnhanceShared>,
-) -> EnhanceSource<EqSource<S>> {
-    EnhanceSource::new(EqSource::new(source, eq_settings.clone()), enhance.clone())
+    fx: &Arc<FxShared>,
+) -> EnhanceSource<FxSource<EqSource<SpeedSource<S>>>> {
+    let sped = SpeedSource::new(source, fx.clone());
+    let eq = EqSource::new(sped, eq_settings.clone());
+    EnhanceSource::new(FxSource::new(eq, fx.clone()), enhance.clone())
 }
 
 type Resp = mpsc::SyncSender<Result<(), String>>;
@@ -299,7 +310,11 @@ enum AudioCmd {
         resp: Resp,
     },
     Pause,
-    Resume,
+    Resume {
+        file_path: Option<String>,
+        position_secs: f64,
+        volume: f32,
+    },
     Stop,
     SetVolume(f32),
     Seek {
@@ -327,10 +342,107 @@ enum AudioCmd {
     },
 }
 
+/// Opens `file_path` and returns symphonia's reader for its container.
+pub(crate) fn probe_reader(file_path: &str) -> Result<Box<dyn FormatReader>, String> {
+    let file = File::open(file_path).map_err(|e| format!("Не удалось открыть файл: {}", e))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    symphonia::default::get_probe()
+        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .map_err(|e| format!("Не удалось определить формат: {}", e))
+}
+
+/// Audio tracks of a container, in file order (video, subtitle and unknown tracks skipped).
+fn audio_tracks(reader: &dyn FormatReader) -> Vec<(u32, AudioCodecParameters, Option<u64>)> {
+    reader
+        .tracks()
+        .iter()
+        .filter_map(|t| {
+            let params = t.codec_params.as_ref()?.audio()?;
+            (params.codec != CODEC_ID_NULL_AUDIO).then(|| (t.id, params.clone(), t.num_frames))
+        })
+        .collect()
+}
+
+/// A file opened for decoding: its reader, the chosen audio track and a decoder for it.
+pub(crate) struct OpenedAudio {
+    pub reader: Box<dyn FormatReader>,
+    pub decoder: Box<dyn AudioDecoder>,
+    pub track_id: u32,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Playable frames of the track, when the container states it.
+    pub num_frames: Option<u64>,
+}
+
+impl OpenedAudio {
+    pub(crate) fn open(file_path: &str) -> Result<Self, String> {
+        let reader = probe_reader(file_path)?;
+        let mut last_err = "Не найден аудио трек".to_string();
+        for (track_id, params, num_frames) in audio_tracks(&*reader) {
+            match symphonia::default::get_codecs()
+                .make_audio_decoder(&params, &AudioDecoderOptions::default())
+            {
+                Ok(decoder) => {
+                    return Ok(Self {
+                        reader,
+                        decoder,
+                        track_id,
+                        sample_rate: params.sample_rate.unwrap_or(44_100).max(1),
+                        channels: params.channels.as_ref().map(|c| c.count() as u16).unwrap_or(2).max(1),
+                        num_frames,
+                    });
+                }
+                Err(e) => last_err = format!("Не удалось создать декодер: {}", e),
+            }
+        }
+        Err(last_err)
+    }
+
+    /// Seeks the track to `secs` and resets the decoder.
+    pub(crate) fn seek(&mut self, secs: f64, mode: SeekMode) -> Result<(), String> {
+        let time = Time::try_from_secs_f64(secs.max(0.0)).unwrap_or(Time::ZERO);
+        self.reader
+            .seek(mode, SeekTo::Time { time, track_id: Some(self.track_id) })
+            .map_err(|e| format!("Ошибка seek: {}", e))?;
+        self.decoder.reset();
+        Ok(())
+    }
+
+    /// Next packet of the chosen track; `None` at the end of the stream or on a read error.
+    pub(crate) fn next_packet(&mut self) -> Option<Packet> {
+        loop {
+            match self.reader.next_packet() {
+                Ok(Some(packet)) if packet.track_id == self.track_id => return Some(packet),
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+
+    /// Decodes the next packet into `out` as interleaved f32 (replacing its content).
+    pub(crate) fn decode_next(&mut self, out: &mut Vec<f32>) -> bool {
+        while let Some(packet) = self.next_packet() {
+            match self.decoder.decode(&packet) {
+                Ok(decoded) => {
+                    decoded.copy_to_vec_interleaved(out);
+                    if !out.is_empty() {
+                        return true;
+                    }
+                }
+                Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+}
+
 struct SymphoniaSource {
-    decoder: Box<dyn symphonia::core::codecs::Decoder>,
-    format_reader: Box<dyn symphonia::core::formats::FormatReader>,
-    track_id: u32,
+    audio: OpenedAudio,
     sample_rate: u32,
     channels: u16,
     current_samples: Vec<f32>,
@@ -339,56 +451,11 @@ struct SymphoniaSource {
 
 impl SymphoniaSource {
     fn new(file_path: &str) -> Result<Self, String> {
-        let file = File::open(file_path)
-            .map_err(|e| format!("Не удалось открыть файл: {}", e))?;
-
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-        let mut hint = Hint::new();
-        if let Some(ext) = PathBuf::from(file_path).extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
-
-        let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-            .map_err(|e| format!("Не удалось определить формат: {}", e))?;
-
-        let format_reader = probed.format;
-
-        let candidates: Vec<(u32, symphonia::core::codecs::CodecParameters)> = format_reader
-            .tracks()
-            .iter()
-            .filter(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-            .map(|t| (t.id, t.codec_params.clone()))
-            .collect();
-
-        // A container can hold more than one non-null stream — e.g. some tools embed
-        // cover art in OGG/Opus as a legacy MJPEG "video" stream (OGM-style) instead of
-        // METADATA_BLOCK_PICTURE. CodecParameters doesn't distinguish audio/video, and
-        // that stream can be listed first with no matching symphonia decoder, which used
-        // to break playback of the whole file. Try each non-null track in turn and use
-        // the first one that actually builds a decoder.
-        let mut last_err = "Не найден аудио трек".to_string();
-        let mut resolved = None;
-        for (id, params) in candidates {
-            match symphonia::default::get_codecs().make(&params, &DecoderOptions::default()) {
-                Ok(decoder) => {
-                    resolved = Some((id, params, decoder));
-                    break;
-                }
-                Err(e) => last_err = format!("Не удалось создать декодер: {}", e),
-            }
-        }
-        let (track_id, codec_params, decoder) = resolved.ok_or(last_err)?;
-        let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-        let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
-
+        let audio = OpenedAudio::open(file_path)?;
         Ok(Self {
-            decoder,
-            format_reader,
-            track_id,
-            sample_rate,
-            channels,
+            sample_rate: audio.sample_rate,
+            channels: audio.channels,
+            audio,
             current_samples: Vec::new(),
             current_pos: 0,
         })
@@ -396,51 +463,15 @@ impl SymphoniaSource {
 
     fn new_with_seek(file_path: &str, seek_secs: f64) -> Result<Self, String> {
         let mut source = Self::new(file_path)?;
-
         if seek_secs > 0.0 {
-            use symphonia::core::formats::{SeekMode, SeekTo};
-            use symphonia::core::units::Time;
-
-            source
-                .format_reader
-                .seek(
-                    SeekMode::Accurate,
-                    SeekTo::Time {
-                        time: Time::from(seek_secs),
-                        track_id: Some(source.track_id),
-                    },
-                )
-                .map_err(|e| format!("Ошибка seek: {}", e))?;
-
-            source.decoder.reset();
-            source.current_samples.clear();
-            source.current_pos = 0;
+            source.audio.seek(seek_secs, SeekMode::Accurate)?;
         }
-
         Ok(source)
     }
 
     fn decode_next_packet(&mut self) -> bool {
-        loop {
-            match self.format_reader.next_packet() {
-                Ok(packet) => {
-                    if packet.track_id() != self.track_id {
-                        continue;
-                    }
-                    match self.decoder.decode(&packet) {
-                        Ok(decoded) => {
-                            self.current_samples.clear();
-                            self.current_pos = 0;
-                            extract_samples_into(&decoded, &mut self.current_samples);
-                            return true;
-                        }
-                        Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-                        Err(_) => return false,
-                    }
-                }
-                Err(_) => return false,
-            }
-        }
+        self.current_pos = 0;
+        self.audio.decode_next(&mut self.current_samples)
     }
 }
 
@@ -463,33 +494,24 @@ impl Iterator for SymphoniaSource {
 }
 
 impl Source for SymphoniaSource {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         let remaining = self.current_samples.len() - self.current_pos;
         if remaining > 0 { Some(remaining) } else { None }
     }
-    fn channels(&self) -> u16 { self.channels }
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn channels(&self) -> ChannelCount { nz_channels(self.channels) }
+    fn sample_rate(&self) -> SampleRate { nz_rate(self.sample_rate) }
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
-/// Ring-buffer depth in decoded packet-blocks (FLAC ~4096 frames, MP3 ~1152, Opus ~960
-/// per block). 64 blocks give ~1-3s of read-ahead to absorb slow disk I/O (USB/network
-/// drives) while staying under ~2MB.
+/// Ring-buffer depth in decoded packet-blocks (FLAC ~4096 frames, MP3 ~1152, Opus ~960 per block).
 const DECODE_QUEUE_BLOCKS: usize = 64;
 
-/// Pipelined source: packet decoding runs on a background `audio-decode` thread that
-/// fills a bounded SPSC queue; `next()` only pulls ready blocks, so slow disk reads or
-/// decoding high-bitrate FLAC/WAV no longer cause audio glitches.
-///
-/// Lifetime = one playback span. On track change/seek/stop, rodio drops the source,
-/// closing `rx`; the background thread's blocking `send()` then errors out and the
-/// thread exits on its own — no separate stop flag or `join` needed.
+/// Pipelined source: decoding runs on an `audio-decode` thread into a bounded queue. Dropping the
+/// source closes `rx`, so the thread exits on its own.
 struct BufferedSymphoniaSource {
     sample_rate: u32,
     channels: u16,
     rx: mpsc::Receiver<Vec<f32>>,
-    /// Spent blocks go back to the decode thread for reuse, so the real-time output
-    /// callback never frees memory and the decoder doesn't allocate per packet.
     recycle: mpsc::SyncSender<Vec<f32>>,
     current: Vec<f32>,
     pos: usize,
@@ -497,15 +519,10 @@ struct BufferedSymphoniaSource {
 
 impl BufferedSymphoniaSource {
     fn new_with_seek(file_path: &str, seek_secs: f64) -> Result<Self, String> {
-        // Open/decode synchronously so sample rate and channel count are known
-        // immediately (rodio needs them before the thread starts), and open/seek
-        // errors still surface to the caller directly.
         let mut inner = SymphoniaSource::new_with_seek(file_path, seek_secs)?;
         let sample_rate = inner.sample_rate;
         let channels = inner.channels;
 
-        // Bounded queue = backpressure: decoder blocks on `send()` when full,
-        // consumer blocks on `recv()` when empty.
         let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(DECODE_QUEUE_BLOCKS);
         let (recycle, recycled) = mpsc::sync_channel::<Vec<f32>>(DECODE_QUEUE_BLOCKS);
 
@@ -513,24 +530,20 @@ impl BufferedSymphoniaSource {
             .name("audio-decode".into())
             .spawn(move || {
                 loop {
-                    // Decode into a spent block when one is back (keeps its capacity).
                     if let Ok(buf) = recycled.try_recv() {
                         inner.current_samples = buf;
                     }
                     if !inner.decode_next_packet() {
                         break;
                     }
-                    // Take without copying; the consumer sends the buffer back once played.
                     let block = std::mem::take(&mut inner.current_samples);
                     if block.is_empty() {
                         continue;
                     }
                     if tx.send(block).is_err() {
-                        return; // consumer gone (track change/seek/stop)
+                        return;
                     }
                 }
-                // EOF/fatal decode error: dropping `tx` here lets the consumer see
-                // `Err` from `recv()` once it drains the rest of the queue.
             })
             .map_err(|e| format!("Не удалось запустить поток декодирования: {}", e))?;
 
@@ -550,13 +563,10 @@ impl Iterator for BufferedSymphoniaSource {
 
     fn next(&mut self) -> Option<f32> {
         if self.pos >= self.current.len() {
-            // Blocks only happen under starvation; normally the buffer stays non-empty.
             match self.rx.recv() {
                 Ok(block) => {
                     let spent = std::mem::replace(&mut self.current, block);
                     if spent.capacity() > 0 {
-                        // Non-blocking; if the decoder is gone or the queue is full, the
-                        // buffer is simply dropped.
                         let _ = self.recycle.try_send(spent);
                     }
                     self.pos = 0;
@@ -571,12 +581,12 @@ impl Iterator for BufferedSymphoniaSource {
 }
 
 impl Source for BufferedSymphoniaSource {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         let remaining = self.current.len() - self.pos;
         if remaining > 0 { Some(remaining) } else { None }
     }
-    fn channels(&self) -> u16 { self.channels }
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn channels(&self) -> ChannelCount { nz_channels(self.channels) }
+    fn sample_rate(&self) -> SampleRate { nz_rate(self.sample_rate) }
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
@@ -588,8 +598,8 @@ struct FadeOut<S: Source<Item = f32>> {
 
 impl<S: Source<Item = f32>> FadeOut<S> {
     fn new(source: S, duration: Duration) -> Self {
-        let total_samples = (source.sample_rate() as f64 * duration.as_secs_f64()) as usize
-            * source.channels() as usize;
+        let total_samples = (source.sample_rate().get() as f64 * duration.as_secs_f64()) as usize
+            * source.channels().get() as usize;
         Self { source, total_samples, elapsed: 0 }
     }
 }
@@ -608,16 +618,13 @@ impl<S: Source<Item = f32>> Iterator for FadeOut<S> {
 }
 
 impl<S: Source<Item = f32>> Source for FadeOut<S> {
-    fn current_frame_len(&self) -> Option<usize> { self.source.current_frame_len() }
-    fn channels(&self) -> u16 { self.source.channels() }
-    fn sample_rate(&self) -> u32 { self.source.sample_rate() }
+    fn current_span_len(&self) -> Option<usize> { self.source.current_span_len() }
+    fn channels(&self) -> ChannelCount { self.source.channels() }
+    fn sample_rate(&self) -> SampleRate { self.source.sample_rate() }
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
-/// Shared between the audio thread and `AudioPlayer`: an atomic flag for cheap
-/// lock-free reads (`get_status` polling) plus a condvar so the track-end watcher
-/// thread can block instead of spin-polling, waking almost immediately when a
-/// track's samples are exhausted (`set_finished`) rather than up to 500ms late.
+/// Atomic "sink empty" flag for lock-free status reads, plus a condvar for the track-end watcher.
 pub struct SinkEndSignal {
     empty: AtomicBool,
     lock: Mutex<()>,
@@ -637,8 +644,7 @@ impl SinkEndSignal {
         self.empty.store(false, Ordering::Relaxed);
     }
 
-    /// Marks the sink empty and wakes anyone blocked in `wait`. Called both on
-    /// natural EOF (from the audio thread) and on an explicit `Stop`.
+    /// Marks the sink empty and wakes anyone blocked in `wait`.
     fn set_finished(&self) {
         self.empty.store(true, Ordering::Relaxed);
         let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -650,23 +656,18 @@ impl SinkEndSignal {
         self.empty.load(Ordering::Relaxed)
     }
 
-    /// Blocks until `set_finished` notifies or `timeout` elapses (safety net against
-    /// a wakeup lost to the classic check/wait race — worst case, same latency as
-    /// the old fixed-interval poll).
+    /// Blocks until `set_finished` or `timeout` (safety net against a lost wakeup).
     pub fn wait(&self, timeout: Duration) {
         let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let _ = self.cvar.wait_timeout(guard, timeout);
     }
 }
 
-/// Transparent tap: passes samples through unchanged while mixing frames to mono and
-/// feeding blocks to the shared `SpectrumAnalyzer` for FFT visualization. Placed above
-/// EQ (and fade-in) so the spectrum reflects what's actually audible.
+/// Transparent tap feeding mono blocks to the spectrum analyzer; placed above EQ so the spectrum
+/// shows what is audible.
 struct AnalyzerSource<S: Source<Item = f32>> {
     source: S,
     analyzer: Arc<SpectrumAnalyzer>,
-    /// Set on EOF; mirrored in `AudioPlayer::sink_empty` so the main thread can poll
-    /// via a plain atomic load, and so the track-end watcher thread wakes promptly.
     finished: Arc<SinkEndSignal>,
     channels: u16,
     sample_rate: u32,
@@ -676,13 +677,11 @@ struct AnalyzerSource<S: Source<Item = f32>> {
 }
 
 impl<S: Source<Item = f32>> AnalyzerSource<S> {
-    /// Mono samples per analyzer push — batches the mutex lock (~once per 256 frames)
-    /// while staying smooth at 60fps.
     const BLOCK: usize = 256;
 
     fn new(source: S, analyzer: Arc<SpectrumAnalyzer>, finished: Arc<SinkEndSignal>) -> Self {
-        let channels = source.channels().max(1);
-        let sample_rate = source.sample_rate();
+        let channels = source.channels().get();
+        let sample_rate = source.sample_rate().get();
         Self {
             source,
             analyzer,
@@ -703,7 +702,6 @@ impl<S: Source<Item = f32>> Iterator for AnalyzerSource<S> {
         let sample = match self.source.next() {
             Some(s) => s,
             None => {
-                // Reset to `false` when a new sink is created in the audio thread.
                 self.finished.set_finished();
                 return None;
             }
@@ -731,9 +729,9 @@ impl<S: Source<Item = f32>> Iterator for AnalyzerSource<S> {
 }
 
 impl<S: Source<Item = f32>> Source for AnalyzerSource<S> {
-    fn current_frame_len(&self) -> Option<usize> { self.source.current_frame_len() }
-    fn channels(&self) -> u16 { self.channels }
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn current_span_len(&self) -> Option<usize> { self.source.current_span_len() }
+    fn channels(&self) -> ChannelCount { nz_channels(self.channels) }
+    fn sample_rate(&self) -> SampleRate { nz_rate(self.sample_rate) }
     fn total_duration(&self) -> Option<Duration> { self.source.total_duration() }
 }
 
@@ -753,9 +751,6 @@ fn cover_art_from_tag(tag: &lofty::tag::Tag) -> Option<String> {
     Some(format!("data:{};base64,{}", mime, b64))
 }
 
-/// Builds a saturation-weighted hue histogram: the winning hue is the one with the
-/// largest "visible" color mass (area x saturation), not just the most vivid pixel.
-/// Yellow/acid tones are excluded or muted since they make poor UI accent colors.
 pub fn extract_accent_color(image_data: &[u8]) -> Option<String> {
     let img = image::load_from_memory(image_data).ok()?;
     let thumb = img.thumbnail(96, 96);
@@ -805,11 +800,9 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
     for px in rgb.pixels() {
         let (h, s, l) = rgb_to_hsl(px[0], px[1], px[2]);
         light_sum += l;
-        // Near-gray and extreme dark/light pixels carry no meaningful hue
         if s < 0.12 || !(0.06..=0.94).contains(&l) {
             continue;
         }
-        // Visible color mass: more saturated + closer to mid-lightness = more noticeable
         let w = s * (1.0 - (2.0 * l - 1.0).abs()).sqrt();
         let bin = &mut bins[((h / HUE_BIN_WIDTH) as usize).min(HUE_BINS - 1)];
         let rad = h.to_radians();
@@ -821,8 +814,6 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         chroma_weight += w;
     }
 
-    // Near-monochrome cover: fall back to neutral gray so stray color noise
-    // doesn't tint the whole UI.
     if chroma_weight < total_px * 0.015 {
         let l = (light_sum / total_px).clamp(0.30, 0.46);
         let (r, g, b) = hsl_to_rgb(0.0, 0.0, l);
@@ -852,7 +843,6 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         return None;
     }
 
-    // Only keep hues with >= 6% of the color mass: a tiny vivid spot shouldn't win.
     let mut pool: Vec<usize> = (0..HUE_BINS)
         .filter(|&i| windows[i].weight >= chroma_weight * 0.06)
         .collect();
@@ -860,8 +850,6 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         pool = (0..HUE_BINS).filter(|&i| windows[i].weight > 0.0).collect();
     }
 
-    // Drop yellow if a non-yellow alternative exists; if the whole cover is yellow,
-    // keep it — normalize_accent_hsl() will shift the hue out of the zone later.
     let non_yellow: Vec<usize> = pool
         .iter()
         .copied()
@@ -871,8 +859,6 @@ fn extract_via_hue_histogram(thumb: &image::DynamicImage) -> Option<String> {
         pool = non_yellow;
     }
 
-    // Dominance is weighted first, color quality second: a rare vivid hue
-    // shouldn't outrank the cover's main tone.
     let score = |w: &HueWindow| -> f64 {
         let pop = w.weight / max_weight;
         let sat_fit = (w.sat / 0.55).min(1.0);
@@ -942,24 +928,21 @@ fn hsl_to_rgb(hue: f64, sat: f64, lightness: f64) -> (u8, u8, u8) {
     )
 }
 
-/// Piecewise-linear saturation ceiling by hue: "toxic" zones (lime, neon green,
-/// fuchsia) get clamped harder than calm blues.
 fn saturation_ceiling(hue: f64) -> f64 {
-    // Control points every 30°, starting at red (0°/360°).
     const POINTS: [f64; 13] = [
-        0.60, // 0    red
-        0.58, // 30   orange
-        0.45, // 60   yellow (rarely hit after the hue shift)
-        0.42, // 90   lime/olive
-        0.45, // 120  green
-        0.48, // 150  emerald
-        0.52, // 180  cyan
-        0.58, // 210  azure
-        0.62, // 240  blue
-        0.60, // 270  violet
-        0.52, // 300  magenta
-        0.56, // 330  pink
-        0.60, // 360 = 0
+        0.60,
+        0.58,
+        0.45,
+        0.42,
+        0.45,
+        0.48,
+        0.52,
+        0.58,
+        0.62,
+        0.60,
+        0.52,
+        0.56,
+        0.60,
     ];
     let h = hue.rem_euclid(360.0);
     let seg = ((h / 30.0) as usize).min(11);
@@ -967,26 +950,18 @@ fn saturation_ceiling(hue: f64) -> f64 {
     POINTS[seg] + (POINTS[seg + 1] - POINTS[seg]) * t
 }
 
-/// Fits a color to the UI background: excludes yellow, clamps lightness to a narrow
-/// range, and caps saturation by hue "toxicity" while keeping the cover's character.
 fn normalize_accent_hsl(hue: f64, sat: f64, light: f64) -> (u8, u8, u8) {
     let mut hue = hue.rem_euclid(360.0);
     let mut sat = sat.clamp(0.0, 1.0);
 
-    // No yellow as a UI color: shift the warm half toward amber, the cool
-    // (lime) half toward muted olive.
     if (YELLOW_FROM..62.0).contains(&hue) {
         hue = 36.0 + (hue - YELLOW_FROM) * (6.0 / (62.0 - YELLOW_FROM));
     } else if (62.0..YELLOW_TO).contains(&hue) {
         hue = 88.0 + (hue - 62.0) * (7.0 / (YELLOW_TO - 62.0));
     }
 
-    // Narrow lightness range so the accent and derived backgrounds
-    // (--dark-bg/--light-bg) look equally dense across any cover.
     let light = light.clamp(0.32, 0.48);
 
-    // Soft-compress saturation toward the hue ceiling: removes acidity while
-    // still distinguishing muted vs. vivid covers.
     let ceiling = saturation_ceiling(hue);
     let knee = ceiling * 0.8;
     if sat > knee {
@@ -998,8 +973,6 @@ fn normalize_accent_hsl(hue: f64, sat: f64, light: f64) -> (u8, u8, u8) {
 }
 
 /// Whether a cover is embedded + its accent color (computed once, cached in the DB).
-/// The full base64 cover is no longer produced here — display uses a WebP thumbnail
-/// served via the `lfmusic-cover` protocol (see `thumbnails`).
 fn cover_meta_from_tag(tag: &lofty::tag::Tag) -> (bool, Option<String>) {
     let picture = tag
         .pictures()
@@ -1015,66 +988,9 @@ fn cover_meta_from_tag(tag: &lofty::tag::Tag) -> (bool, Option<String>) {
     (true, accent)
 }
 
-/// Runs `$m!(buffer, conv)` for whichever sample format `$buf` holds, where `conv`
-/// maps one sample to f32 in [-1, 1]. Covers every symphonia format: a missing arm
-/// used to decode e.g. 24-bit WAV/AIFF or 64-bit float WAV as silence.
-macro_rules! dispatch_f32 {
-    ($buf:expr, $m:ident) => {{
-        use symphonia::core::audio::AudioBufferRef as B;
-        use symphonia::core::sample::{i24, u24};
-        match $buf {
-            B::F32(b) => $m!(b, |s: f32| s),
-            B::F64(b) => $m!(b, |s: f64| s as f32),
-            B::S32(b) => $m!(b, |s: i32| s as f32 / i32::MAX as f32),
-            B::S24(b) => $m!(b, |s: i24| s.inner() as f32 / 8_388_607.0),
-            B::S16(b) => $m!(b, |s: i16| s as f32 / i16::MAX as f32),
-            B::S8(b) => $m!(b, |s: i8| s as f32 / i8::MAX as f32),
-            B::U32(b) => $m!(b, |s: u32| ((s as f64 - 2_147_483_648.0) / 2_147_483_648.0) as f32),
-            B::U24(b) => $m!(b, |s: u24| (s.inner() as f32 - 8_388_608.0) / 8_388_608.0),
-            B::U16(b) => $m!(b, |s: u16| (s as f32 - 32_768.0) / 32_768.0),
-            B::U8(b) => $m!(b, |s: u8| (s as f32 - 128.0) / 128.0),
-        }
-    }};
-}
-pub(crate) use dispatch_f32;
-
-/// Appends `buf` to `samples` as interleaved f32.
-fn extract_samples_into(buf: &AudioBufferRef, samples: &mut Vec<f32>) {
-    macro_rules! extract {
-        ($b:expr, $conv:expr) => {{
-            let b = $b;
-            let frames = b.frames();
-            let channels = b.spec().channels.count();
-            samples.reserve(frames * channels);
-            // Mono/stereo fast paths: slices hoisted out of the loop, no per-sample
-            // plane lookup or bounds check.
-            match channels {
-                1 => samples.extend(b.chan(0)[..frames].iter().map(|&s| $conv(s))),
-                2 => {
-                    let (l, r) = (&b.chan(0)[..frames], &b.chan(1)[..frames]);
-                    for (&a, &c) in l.iter().zip(r) {
-                        samples.push($conv(a));
-                        samples.push($conv(c));
-                    }
-                }
-                _ => {
-                    for frame in 0..frames {
-                        for ch in 0..channels {
-                            samples.push($conv(b.chan(ch)[frame]));
-                        }
-                    }
-                }
-            }
-        }};
-    }
-    dispatch_f32!(buf, extract)
-}
-
-/// Caches probe_actual_codec by (path, mtime). M4A/MP4 is the only format needing a
-/// second file open to disambiguate the codec (AAC vs ALAC); play() re-probes the
-/// same file often, so this avoids re-parsing the container each time.
-fn probe_cache() -> &'static Mutex<HashMap<(String, u64), CodecType>> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, u64), CodecType>>> = OnceLock::new();
+/// Caches probe_actual_codec by (path, mtime): only M4A/MP4 needs a second open (AAC vs ALAC).
+fn probe_cache() -> &'static Mutex<HashMap<(String, u64), AudioCodecId>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, u64), AudioCodecId>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1090,32 +1006,17 @@ fn file_mtime_secs(path: &std::path::Path) -> u64 {
 }
 
 /// Only needed for M4A/MP4 containers
-fn probe_actual_codec(file_path: &str, extension: &str) -> Option<CodecType> {
+fn probe_actual_codec(file_path: &str) -> Option<AudioCodecId> {
     let mtime = file_mtime_secs(std::path::Path::new(file_path));
     let key = (file_path.to_string(), mtime);
 
-    if let Ok(cache) = probe_cache().lock() {
-        if let Some(&codec) = cache.get(&key) {
+    if let Ok(cache) = probe_cache().lock()
+        && let Some(&codec) = cache.get(&key) {
             return Some(codec);
         }
-    }
 
-    let file = File::open(file_path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension(extension);
-
-    let codec = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-        .ok()
-        .and_then(|probed| {
-            probed
-                .format
-                .tracks()
-                .iter()
-                .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-                .map(|t| t.codec_params.codec)
-        })?;
+    let reader = probe_reader(file_path).ok()?;
+    let codec = audio_tracks(&*reader).first().map(|(_, params, _)| params.codec)?;
 
     if let Ok(mut cache) = probe_cache().lock() {
         cache.insert(key, codec);
@@ -1123,16 +1024,16 @@ fn probe_actual_codec(file_path: &str, extension: &str) -> Option<CodecType> {
     Some(codec)
 }
 
-fn is_lossless_codec(codec: CodecType) -> bool {
+fn is_lossless_codec(codec: AudioCodecId) -> bool {
     matches!(
         codec,
-        symphonia::core::codecs::CODEC_TYPE_FLAC
-            | symphonia::core::codecs::CODEC_TYPE_ALAC
-            | symphonia::core::codecs::CODEC_TYPE_PCM_S16LE
-            | symphonia::core::codecs::CODEC_TYPE_PCM_S16BE
-            | symphonia::core::codecs::CODEC_TYPE_PCM_S24LE
-            | symphonia::core::codecs::CODEC_TYPE_PCM_S32LE
-            | symphonia::core::codecs::CODEC_TYPE_PCM_F32LE
+        CODEC_ID_FLAC
+            | CODEC_ID_ALAC
+            | CODEC_ID_PCM_S16LE
+            | CODEC_ID_PCM_S16BE
+            | CODEC_ID_PCM_S24LE
+            | CODEC_ID_PCM_S32LE
+            | CODEC_ID_PCM_F32LE
     )
 }
 
@@ -1153,12 +1054,11 @@ fn format_name_from_ext(ext: &str) -> String {
     .to_string()
 }
 
-/// Play/seek commands stop the old sink before opening the new source. When the
-/// open fails, nothing is playing any more: drop the sinks and mark the end signal,
-/// otherwise the stopped source never reports EOF and the player stays "Playing".
+/// A failed open leaves nothing playing: drop the sinks and mark the end signal, or the player
+/// stays "Playing".
 fn stop_after_failed_open(
-    sink: &mut Option<Sink>,
-    fadeout_sink: &mut Option<Sink>,
+    sink: &mut Option<Player>,
+    fadeout_sink: &mut Option<Player>,
     spectrum: &SpectrumAnalyzer,
     sink_empty: &SinkEndSignal,
 ) {
@@ -1168,34 +1068,87 @@ fn stop_after_failed_open(
     sink_empty.set_finished();
 }
 
-/// Main loop of the dedicated audio thread; owns OutputStream (and the Windows COM
-/// context), OutputStreamHandle, and the current Sink.
+/// An open stream keeps the device rendering silence: paused or stopped this long, the device is
+/// closed. Play/resume reopens it.
+const IDLE_RELEASE: Duration = Duration::from_secs(30);
+
+fn open_output(enhance: &EnhanceShared) -> Result<MixerDeviceSink, String> {
+    let mut stream = rodio::DeviceSinkBuilder::open_default_sink()
+        .map_err(|e| format!("Не удалось инициализировать аудио выход: {}", e))?;
+    stream.log_on_drop(false);
+    let (device_name, profile) = crate::enhance::detect_output_device();
+    enhance.set_detected(device_name, profile);
+    Ok(stream)
+}
+
+/// The open output stream, opening the default device first when it was released.
+fn ensure_output<'a>(
+    stream: &'a mut Option<MixerDeviceSink>,
+    enhance: &EnhanceShared,
+) -> Result<&'a MixerDeviceSink, String> {
+    if stream.is_none() {
+        *stream = Some(open_output(enhance)?);
+    }
+    stream.as_ref().ok_or_else(|| "Аудио выход недоступен".to_string())
+}
+
 fn audio_thread_loop(
     rx: mpsc::Receiver<AudioCmd>,
-    _stream: OutputStream, // must stay alive for the thread's lifetime
-    stream_handle: OutputStreamHandle,
     eq_settings: Arc<RwLock<EqSettings>>,
     enhance: Arc<EnhanceShared>,
+    fx: Arc<FxShared>,
     spectrum: Arc<SpectrumAnalyzer>,
     sink_empty: Arc<SinkEndSignal>,
 ) {
-    let mut sink: Option<Sink> = None;
-    // A new crossfade immediately stops the previous fade-out sink, capping
-    // concurrent fade streams at one.
-    let mut fadeout_sink: Option<Sink> = None;
+    let mut stream: Option<MixerDeviceSink> = None;
+    let mut sink: Option<Player> = None;
+    let mut fadeout_sink: Option<Player> = None;
+    let mut idle_since: Option<Instant> = None;
 
-    while let Ok(cmd) = rx.recv() {
+    loop {
+        let idle = stream.is_some()
+            && sink.as_ref().is_none_or(|s| s.is_paused() || sink_empty.is_finished());
+        if !idle {
+            idle_since = None;
+        } else if idle_since.is_none() {
+            idle_since = Some(Instant::now());
+        }
+
+        let cmd = if stream.is_none() {
+            match rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => break,
+            }
+        } else {
+            let timeout = idle_since.map_or(IDLE_RELEASE, |t| IDLE_RELEASE.saturating_sub(t.elapsed()));
+            match rx.recv_timeout(timeout) {
+                Ok(cmd) => cmd,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if idle_since.is_some_and(|t| t.elapsed() >= IDLE_RELEASE) {
+                        // The paused sink goes too: Resume reopens the file at the position.
+                        if let Some(s) = fadeout_sink.take() { s.stop(); }
+                        if let Some(s) = sink.take() { s.stop(); }
+                        spectrum.set_active(false);
+                        stream = None;
+                        idle_since = None;
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+
         match cmd {
             AudioCmd::PlayFrom { file_path, seek_secs, volume, resp } => {
                 if let Some(ref s) = sink { s.stop(); }
                 let result = (|| -> Result<(), String> {
-                    let new_sink = Sink::try_new(&stream_handle)
-                        .map_err(|e| format!("Не удалось создать sink: {}", e))?;
+                    let output = ensure_output(&mut stream, &enhance)?;
+                    let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        effects(source, &eq_settings, &enhance),
+                        effects(source, &eq_settings, &enhance, &fx),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1209,14 +1162,31 @@ fn audio_thread_loop(
             }
 
             AudioCmd::Pause => {
-                if let Some(ref s) = sink {
-                    if !s.is_paused() { s.pause(); }
-                }
+                if let Some(ref s) = sink
+                    && !s.is_paused() { s.pause(); }
             }
 
-            AudioCmd::Resume => {
+            AudioCmd::Resume { file_path, position_secs, volume } => {
                 if let Some(ref s) = sink {
                     if s.is_paused() { s.play(); }
+                } else if let Some(file_path) = file_path {
+                    let result = (|| -> Result<(), String> {
+                        let output = ensure_output(&mut stream, &enhance)?;
+                        let new_sink = Player::connect_new(output.mixer());
+                        new_sink.set_volume(volume);
+                        let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                        sink_empty.set_playing();
+                        new_sink.append(AnalyzerSource::new(
+                            effects(source, &eq_settings, &enhance, &fx),
+                            spectrum.clone(),
+                            sink_empty.clone(),
+                        ));
+                        sink = Some(new_sink);
+                        Ok(())
+                    })();
+                    if result.is_err() {
+                        stop_after_failed_open(&mut sink, &mut fadeout_sink, &spectrum, &sink_empty);
+                    }
                 }
             }
 
@@ -1235,13 +1205,13 @@ fn audio_thread_loop(
             AudioCmd::Seek { file_path, position_secs, volume, was_paused, resp } => {
                 if let Some(ref s) = sink { s.stop(); }
                 let result = (|| -> Result<(), String> {
-                    let new_sink = Sink::try_new(&stream_handle)
-                        .map_err(|e| format!("Не удалось создать sink: {}", e))?;
+                    let output = ensure_output(&mut stream, &enhance)?;
+                    let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        effects(source, &eq_settings, &enhance),
+                        effects(source, &eq_settings, &enhance, &fx),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1264,26 +1234,24 @@ fn audio_thread_loop(
 
                     if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
 
-                    let fade_sink = Sink::try_new(&stream_handle)
-                        .map_err(|e| format!("Ошибка fade-out sink: {}", e))?;
+                    let output = ensure_output(&mut stream, &enhance)?;
+                    let fade_sink = Player::connect_new(output.mixer());
                     fade_sink.set_volume(volume);
                     let fade_source = BufferedSymphoniaSource::new_with_seek(&file_path, current_pos)?;
                     fade_sink.append(FadeOut::new(
-                        effects(fade_source, &eq_settings, &enhance),
+                        effects(fade_source, &eq_settings, &enhance, &fx),
                         dur,
                     ));
 
                     if let Some(ref old) = sink { old.stop(); }
-                    // rodio keeps playing this sink in the background
                     fadeout_sink = Some(fade_sink);
 
-                    let new_sink = Sink::try_new(&stream_handle)
-                        .map_err(|e| format!("Ошибка нового sink: {}", e))?;
+                    let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        effects(source, &eq_settings, &enhance).fade_in(dur),
+                        effects(source, &eq_settings, &enhance, &fx).fade_in(dur),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1305,16 +1273,15 @@ fn audio_thread_loop(
 
                     if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
 
-                    // fade-in on the new track carries the transition
                     if let Some(old_sink) = sink.take() { old_sink.stop(); }
 
-                    let new_sink = Sink::try_new(&stream_handle)
-                        .map_err(|e| format!("Ошибка нового sink: {}", e))?;
+                    let output = ensure_output(&mut stream, &enhance)?;
+                    let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
-                        effects(source, &eq_settings, &enhance).fade_in(dur),
+                        effects(source, &eq_settings, &enhance, &fx).fade_in(dur),
                         spectrum.clone(),
                         sink_empty.clone(),
                     ));
@@ -1330,9 +1297,8 @@ fn audio_thread_loop(
     }
 }
 
-/// `OutputStream` (cpal, COM on Windows) lives on a dedicated `audio-output` thread.
-/// All Sink operations proxy through an `mpsc` channel, avoiding the need for
-/// `unsafe impl Send/Sync`.
+/// The output stream (cpal, COM on Windows) lives on the `audio-output` thread; sink operations go
+/// through a channel.
 pub struct AudioPlayer {
     cmd_tx: mpsc::Sender<AudioCmd>,
     current_track: Option<TrackMetadata>,
@@ -1342,10 +1308,9 @@ pub struct AudioPlayer {
     accumulated_position: f64,
     eq_settings: Arc<RwLock<EqSettings>>,
     enhance: Arc<EnhanceShared>,
+    fx: Arc<FxShared>,
     spectrum: Arc<SpectrumAnalyzer>,
-    /// Whether the current sink is empty (track finished/stopped). Updated
-    /// asynchronously by the audio thread so the main thread can poll status
-    /// without a blocking channel round-trip; also wakes the track-end watcher.
+    /// Whether the current sink is empty (track finished/stopped).
     sink_empty: Arc<SinkEndSignal>,
 }
 
@@ -1358,37 +1323,27 @@ impl AudioPlayer {
         let eq_for_thread = eq_settings.clone();
         let enhance = Arc::new(EnhanceShared::new());
         let enhance_for_thread = enhance.clone();
+        let fx = Arc::new(FxShared::new());
+        let fx_for_thread = fx.clone();
         let spectrum = Arc::new(SpectrumAnalyzer::new());
         let spectrum_for_thread = spectrum.clone();
-        // true = nothing playing; set false when a track starts.
         let sink_empty = Arc::new(SinkEndSignal::new(true));
         let sink_empty_for_thread = sink_empty.clone();
 
         std::thread::Builder::new()
             .name("audio-output".into())
             .spawn(move || {
-                match OutputStream::try_default() {
-                    Ok((stream, handle)) => {
-                        let (device_name, profile) = crate::enhance::detect_output_device();
-                        enhance_for_thread.set_detected(device_name, profile);
-                        let _ = init_tx.send(Ok(()));
-                        audio_thread_loop(
-                            cmd_rx,
-                            stream,
-                            handle,
-                            eq_for_thread,
-                            enhance_for_thread,
-                            spectrum_for_thread,
-                            sink_empty_for_thread,
-                        );
-                    }
-                    Err(e) => {
-                        let _ = init_tx.send(Err(format!(
-                            "Не удалось инициализировать аудио выход: {}",
-                            e
-                        )));
-                    }
-                }
+                let (device_name, profile) = crate::enhance::detect_output_device();
+                enhance_for_thread.set_detected(device_name, profile);
+                let _ = init_tx.send(Ok(()));
+                audio_thread_loop(
+                    cmd_rx,
+                    eq_for_thread,
+                    enhance_for_thread,
+                    fx_for_thread,
+                    spectrum_for_thread,
+                    sink_empty_for_thread,
+                );
             })
             .map_err(|e| format!("Не удалось запустить аудио поток: {}", e))?;
 
@@ -1405,6 +1360,7 @@ impl AudioPlayer {
             accumulated_position: 0.0,
             eq_settings,
             enhance,
+            fx,
             spectrum,
             sink_empty,
         })
@@ -1427,8 +1383,6 @@ impl AudioPlayer {
             .map_err(|_| "Аудио поток недоступен".to_string())?
     }
 
-    /// Like `send`, for play/seek commands: on failure the audio thread has already
-    /// stopped output (see `stop_after_failed_open`), so the state follows it.
     fn send_play(&mut self, make: impl FnOnce(Resp) -> AudioCmd) -> Result<(), String> {
         let result = self.send(make);
         if result.is_err() {
@@ -1446,26 +1400,17 @@ impl AudioPlayer {
         self.sink_empty.is_finished()
     }
 
-    /// Arc handle for the track-end watcher thread (spawned once in `run()`), so it
-    /// can block on the condvar without needing to lock `AudioPlayer` itself.
     pub fn sink_end_signal(&self) -> Arc<SinkEndSignal> {
         self.sink_empty.clone()
     }
 
-    /// Opens a file for tag/property reading, detecting type by content.
-    ///
-    /// Uses `guess_file_type` (magic bytes) instead of extension-based
-    /// `Probe::open(...).read()`: yt-dlp remuxes Opus into a `.ogg`-named container,
-    /// so extension-based probing expects Vorbis, fails to find its signature, and
-    /// errors with `FileDecoding(Vorbis: "File missing magic signature")` — losing
-    /// tags/cover for those tracks. Content-based detection fixes this while still
-    /// working normally when the extension matches (used as a fallback).
+    /// Detects the file type by content: yt-dlp writes Opus into `.ogg` files, which
+    /// extension-based probing reads as Vorbis and fails.
     pub(crate) fn read_tagged_file(path: &std::path::Path) -> Option<lofty::file::TaggedFile> {
         Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()
     }
 
-    /// Full-size cover as a data URL. Only used for the "reset cover" preview in the
-    /// edit modal (needs the tag original, bypassing any user override).
+    /// Full-size cover as a data URL.
     pub fn extract_cover_art(file_path: &str) -> Option<String> {
         let tagged_file = Self::read_tagged_file(&PathBuf::from(file_path))?;
         let tag = tagged_file
@@ -1474,7 +1419,7 @@ impl AudioPlayer {
         cover_art_from_tag(tag)
     }
 
-    /// Cheap check — doesn't extract picture bytes.
+    /// Cheap check - doesn't extract picture bytes.
     pub fn has_embedded_cover(file_path: &str) -> bool {
         let Some(tagged_file) = Self::read_tagged_file(&PathBuf::from(file_path)) else {
             return false;
@@ -1499,14 +1444,12 @@ impl AudioPlayer {
         Some(picture.data().to_vec())
     }
 
-    /// No cover/accent color — used for library scanning.
+    /// No cover/accent color - used for library scanning.
     pub fn get_metadata_light(file_path: &str) -> Result<TrackMetadata, String> {
         Self::get_metadata_inner(file_path, false)
     }
 
-    /// For unambiguous formats (FLAC, MP3, WAV, OGG, ...) opens the file once via lofty.
-    /// Symphonia probing only kicks in for M4A/MP4, where the codec is ambiguous
-    /// (AAC vs ALAC).
+    /// Symphonia probing only for M4A/MP4, where the codec is ambiguous (AAC vs ALAC).
     pub fn get_metadata(file_path: &str) -> Result<TrackMetadata, String> {
         Self::get_metadata_inner(file_path, true)
     }
@@ -1526,7 +1469,7 @@ impl AudioPlayer {
         let needs_probe = matches!(extension.as_str(), "m4a" | "mp4");
 
         let (is_lossless, format) = if needs_probe {
-            let lossless = probe_actual_codec(file_path, &extension)
+            let lossless = probe_actual_codec(file_path)
                 .map(is_lossless_codec)
                 .unwrap_or(false);
             let fmt = if lossless {
@@ -1573,9 +1516,6 @@ impl AudioPlayer {
                     artist = tag.artist().map(|s| s.to_string());
                     album = tag.album().map(|s| s.to_string());
                     genre = tag.genre().map(|s| s.to_string());
-                    // Presence check is a free byproduct of the tag already being
-                    // parsed (no picture bytes touched) — computed even in "light"
-                    // (with_cover=false) scan mode so it can be cached in the DB.
                     has_cover = !tag.pictures().is_empty();
                     if with_cover {
                         let (_, accent) = cover_meta_from_tag(tag);
@@ -1634,12 +1574,11 @@ impl AudioPlayer {
     }
 
     /// Like [`Self::play`], with `metadata` already read via [`Self::get_metadata`].
-    /// Lets callers do the tag/cover parsing before taking the player lock.
     pub fn play_preloaded(&mut self, file_path: &str, metadata: TrackMetadata) -> Result<TrackMetadata, String> {
         self.play_from(file_path, 0.0, metadata)
     }
 
-    /// Loads, seeks, and immediately pauses — used to restore a saved session.
+    /// Loads, seeks, and immediately pauses - used to restore a saved session.
     pub fn play_paused_preloaded(
         &mut self,
         file_path: &str,
@@ -1704,7 +1643,7 @@ impl AudioPlayer {
         if self.state == PlaybackState::Playing {
             self.fire(AudioCmd::Pause);
             if let Some(started) = self.playback_started_at.take() {
-                self.accumulated_position += started.elapsed().as_secs_f64();
+                self.accumulated_position += self.track_secs_since(started);
             }
             self.state = PlaybackState::Paused;
         }
@@ -1712,7 +1651,11 @@ impl AudioPlayer {
 
     pub fn resume(&mut self) {
         if self.state == PlaybackState::Paused {
-            self.fire(AudioCmd::Resume);
+            self.fire(AudioCmd::Resume {
+                file_path: self.current_file_path(),
+                position_secs: self.get_position(),
+                volume: self.volume,
+            });
             self.playback_started_at = Some(Instant::now());
             self.state = PlaybackState::Playing;
         }
@@ -1796,29 +1739,23 @@ impl AudioPlayer {
     pub fn get_position(&self) -> f64 {
         let elapsed = match self.playback_started_at {
             Some(started) if self.state == PlaybackState::Playing => {
-                started.elapsed().as_secs_f64()
+                self.track_secs_since(started)
             }
             _ => 0.0,
         };
         let pos = self.accumulated_position + elapsed;
-        if let Some(ref track) = self.current_track {
-            if let Some(duration) = track.duration_secs {
+        if let Some(ref track) = self.current_track
+            && let Some(duration) = track.duration_secs {
                 return pos.min(duration);
             }
-        }
         pos
     }
 
-    /// Used e.g. to stop playback before deleting a downloaded file if it's the one
-    /// currently playing — the decoder holds a file handle otherwise blocking deletion.
     pub fn current_file_path(&self) -> Option<String> {
         self.current_track.as_ref().map(|t| t.file_path.clone())
     }
 
-    /// Detects a naturally-finished sink (EOF, not a user-initiated stop) and
-    /// transitions state accordingly. Returns the path that just finished, once,
-    /// so callers (status polling, the track-end watcher thread) don't double-fire —
-    /// after the transition `current_track` is `None`, so a repeat call is a no-op.
+    /// Detects a naturally finished sink and returns its path once (repeat calls are no-ops).
     pub fn poll_finished(&mut self) -> Option<String> {
         if self.state == PlaybackState::Playing && self.is_sink_empty() {
             let path = self.current_file_path();
@@ -1879,6 +1816,24 @@ impl AudioPlayer {
     pub fn enhance_status(&self) -> EnhanceStatus {
         self.enhance.status()
     }
+
+    /// Track time that passed since `started`: wall time scaled by playback speed.
+    fn track_secs_since(&self, started: Instant) -> f64 {
+        started.elapsed().as_secs_f64() * self.fx.speed() as f64
+    }
+
+    pub fn fx_settings(&self) -> FxSettings {
+        self.fx.settings()
+    }
+
+    pub fn set_fx_settings(&mut self, settings: FxSettings) {
+        if self.state == PlaybackState::Playing
+            && let Some(started) = self.playback_started_at {
+                self.accumulated_position += self.track_secs_since(started);
+                self.playback_started_at = Some(Instant::now());
+            }
+        self.fx.apply(settings);
+    }
 }
 
 #[cfg(test)]
@@ -1903,7 +1858,6 @@ mod accent_color_tests {
 
     #[test]
     fn dominant_muted_color_beats_small_vivid_spot() {
-        // 90% muted blue background + a thin neon-red stripe: blue should win.
         let blue = hsl_to_rgb(220.0, 0.35, 0.40);
         let red = hsl_to_rgb(0.0, 1.0, 0.50);
         let img = img_from_fn(|x, _| if x < 86 { blue } else { red });
@@ -1913,7 +1867,6 @@ mod accent_color_tests {
 
     #[test]
     fn yellow_skipped_when_alternative_exists() {
-        // Yellow covers more area, but a noticeable blue alternative should win.
         let yellow = hsl_to_rgb(55.0, 0.80, 0.50);
         let blue = hsl_to_rgb(230.0, 0.60, 0.45);
         let img = img_from_fn(|x, _| if x < 58 { yellow } else { blue });
@@ -1923,7 +1876,6 @@ mod accent_color_tests {
 
     #[test]
     fn fully_yellow_cover_shifts_out_of_yellow_zone() {
-        // All-yellow cover: hue shifts to amber, accent must not stay yellow.
         let yellow = hsl_to_rgb(55.0, 0.90, 0.50);
         let img = img_from_fn(|_, _| yellow);
         let (h, _, _) = accent_hsl(&img);
@@ -1935,7 +1887,6 @@ mod accent_color_tests {
 
     #[test]
     fn neon_green_is_tamed() {
-        // Hue is preserved, but saturation gets clamped by the zone ceiling.
         let neon = hsl_to_rgb(120.0, 1.0, 0.50);
         let img = img_from_fn(|_, _| neon);
         let (h, s, l) = accent_hsl(&img);
@@ -1953,7 +1904,6 @@ mod accent_color_tests {
 
     #[test]
     fn saturation_ceiling_is_continuous() {
-        // No jumps at control-point boundaries.
         for i in 0..=12 {
             let h = i as f64 * 30.0;
             let before = saturation_ceiling(h - 0.01);
@@ -2003,8 +1953,6 @@ mod eq_math_tests {
         }
     }
 
-    /// Steady-state RMS response of the biquad filter to a sine at `freq`,
-    /// measured after a warmup period to let the transient settle.
     fn steady_state_rms(coeffs: &BiquadCoeffs, freq: f32, sample_rate: f32, cycles: usize) -> f32 {
         let mut state = BiquadState::default();
         let samples_per_cycle = (sample_rate / freq).round() as usize;
@@ -2034,7 +1982,6 @@ mod eq_math_tests {
         let flat_rms = steady_state_rms(&flat, freq, sample_rate, 40);
         let boosted_rms = steady_state_rms(&boosted, freq, sample_rate, 40);
 
-        // +6dB ~ x1.995 amplitude at the resonant frequency.
         let ratio = boosted_rms / flat_rms;
         assert!(
             (1.7..2.3).contains(&ratio),
@@ -2057,7 +2004,6 @@ mod eq_math_tests {
 
     #[test]
     fn peaking_eq_barely_affects_far_off_center_frequency() {
-        // A boosted 60Hz band shouldn't noticeably affect 12kHz.
         let sample_rate = 44_100.0;
         let coeffs = BiquadCoeffs::peaking_eq(sample_rate, 60.0, 12.0, 1.4);
         let flat = BiquadCoeffs::peaking_eq(sample_rate, 60.0, 0.0, 1.4);
@@ -2081,8 +2027,6 @@ mod eq_math_tests {
 
     #[test]
     fn soft_clip_never_reaches_unity() {
-        // CEILING < 1.0 keeps output strictly inside (-1.0, 1.0) even when tanh
-        // saturates to 1.0 in f32 — this is the overflow guard for int conversion.
         for x in [0.98f32, 1.0, 2.0, 10.0, 1000.0] {
             let y = soft_clip(x);
             assert!(y < 1.0, "soft_clip({x}) = {y} должен быть строго меньше 1.0");
@@ -2099,10 +2043,6 @@ mod eq_math_tests {
         assert!(y > 0.97 && y < 1.0, "y={y}");
     }
 
-    /// Regression test: `over = (a - T) / (1.0 - T)` used to divide by a narrow gap
-    /// (0.03), saturating tanh to exactly 1.0 in f32 already at x≈1.2 — the limiter
-    /// was effectively hard-clipping most of the loud range. KNEE is now decoupled
-    /// from the ceiling gap, so moderate overdrive stays well below the ceiling.
     #[test]
     fn soft_clip_is_gradual_over_wide_overdrive_range() {
         let moderate_overdrive = soft_clip(1.2);
@@ -2141,12 +2081,12 @@ mod eq_math_tests {
 
     #[test]
     fn is_lossless_codec_classifies_known_codecs() {
-        use symphonia::core::codecs::*;
-        assert!(is_lossless_codec(CODEC_TYPE_FLAC));
-        assert!(is_lossless_codec(CODEC_TYPE_ALAC));
-        assert!(is_lossless_codec(CODEC_TYPE_PCM_S16LE));
-        assert!(!is_lossless_codec(CODEC_TYPE_MP3));
-        assert!(!is_lossless_codec(CODEC_TYPE_AAC));
+        use symphonia::core::codecs::audio::well_known::*;
+        assert!(is_lossless_codec(CODEC_ID_FLAC));
+        assert!(is_lossless_codec(CODEC_ID_ALAC));
+        assert!(is_lossless_codec(CODEC_ID_PCM_S16LE));
+        assert!(!is_lossless_codec(CODEC_ID_MP3));
+        assert!(!is_lossless_codec(CODEC_ID_AAC));
     }
 
     #[test]
@@ -2180,8 +2120,6 @@ mod metadata_tests {
         std::env::temp_dir().join(format!("lfmusic_audio_player_{unique}_{name}"))
     }
 
-    /// Minimal valid 16-bit PCM WAV (no tags) — enough for lofty/symphonia to read
-    /// format/properties without external audio fixtures.
     fn write_test_wav(path: &std::path::Path, sample_rate: u32, channels: u16, num_frames: u32) {
         let bits_per_sample: u16 = 16;
         let block_align: u16 = channels * (bits_per_sample / 8);
@@ -2259,7 +2197,7 @@ mod metadata_tests {
     #[test]
     fn get_metadata_light_reads_wav_properties_without_real_audio_fixture() {
         let path = temp_path("clip.wav");
-        write_test_wav(&path, 8_000, 1, 8_000 * 2); // 2s mono @ 8kHz
+        write_test_wav(&path, 8_000, 1, 8_000 * 2);
 
         let m = AudioPlayer::get_metadata_light(path.to_str().unwrap()).expect("metadata read");
         assert_eq!(m.format, "WAV");
@@ -2276,7 +2214,7 @@ mod metadata_tests {
     #[test]
     fn get_metadata_for_untagged_wav_has_no_cover_or_accent() {
         let path = temp_path("untagged.wav");
-        write_test_wav(&path, 44_100, 2, 44_100); // 1s stereo
+        write_test_wav(&path, 44_100, 2, 44_100);
 
         let m = AudioPlayer::get_metadata(path.to_str().unwrap()).expect("metadata read");
         assert_eq!(m.channels, Some(2));
@@ -2294,9 +2232,8 @@ mod metadata_tests {
 mod player_instance_tests {
     use super::*;
 
-    // These tests spin up a real `AudioPlayer` (real audio device) but must never call
-    // play()/play_paused()/play_crossfade() on an existing file — that would actually
-    // play audio out loud during `cargo test`. Only pre-playback state/control is tested.
+    // Real AudioPlayer: never play() an existing file here, it would play out loud during `cargo
+    // test`.
 
     #[test]
     fn new_player_starts_stopped_with_full_volume() {

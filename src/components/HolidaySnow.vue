@@ -3,9 +3,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { currentUiScale } from '../composables/useUiScale';
 import { isPhoneViewport } from '../composables/usePlatform';
 import { PATHS } from '../utils/holidayArt';
-
-// New Year snow over the whole window (click-through): soft dots with a few
-// rotating snowflakes. One canvas, one rAF loop; paused while the window is hidden.
+import { frameLoop } from '../utils/frameLoop';
 
 interface Flake {
   x: number;
@@ -38,12 +36,9 @@ let flakePath: Path2D | null = null;
 let w = 0;
 let h = 0;
 let pxRatio = 1;
-let raf: number | null = null;
-let last = 0;
 let time = 0;
 let resizeObserver: ResizeObserver | null = null;
 
-// Anywhere on the first fill, otherwise just above the window.
 function spawn(initial: boolean): Flake {
   const glyph = Math.random() < 0.14;
   const size = glyph ? rand(8, 13) : rand(2, 5.5);
@@ -71,7 +66,6 @@ function resize() {
   pxRatio = Math.min(2.5, (window.devicePixelRatio || 1) * currentUiScale());
   canvas.width = Math.round(w * pxRatio);
   canvas.height = Math.round(h * pxRatio);
-  // Keep the scene spread over the new size instead of refilling it.
   if (prevW > 0 && prevH > 0) {
     for (const f of flakes) {
       f.x *= w / prevW;
@@ -83,11 +77,8 @@ function resize() {
   while (flakes.length < target) flakes.push(spawn(true));
 }
 
-function frame(now: number) {
-  raf = requestAnimationFrame(frame);
-  if (last && now - last < FRAME_MS) return;
-  const dt = last ? Math.min((now - last) / 1000, 0.05) : 0;
-  last = now;
+const loop = frameLoop((_now, dtMs) => {
+  const dt = Math.min(dtMs / 1000, 0.05);
   time += dt;
   const c = ctx;
   if (!c) return;
@@ -121,17 +112,14 @@ function frame(now: number) {
       c.fill();
     }
   }
-}
+}, FRAME_MS);
 
 function start() {
-  if (raf !== null) return;
-  last = 0;
-  raf = requestAnimationFrame(frame);
+  loop.start();
 }
 
 function stop() {
-  if (raf !== null) cancelAnimationFrame(raf);
-  raf = null;
+  loop.stop();
 }
 
 function onVisibility() {
@@ -165,7 +153,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* Above the fullscreen player (99999), below modals and menus (1000000+). */
 .holidaySnow {
   position: fixed;
   top: 0;

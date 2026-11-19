@@ -3,15 +3,13 @@ export function isAndroidRuntime(): boolean {
     return /android/i.test(navigator.userAgent)
 }
 
-// Non-Chromium WebKit (WebKitGTK on desktop Linux, WKWebView on macOS): vertical
-// range inputs (writing-mode) and CSS `zoom` vs vw units behave differently there.
+// Non-Chromium WebKit: vertical range inputs and CSS zoom vs vw units behave differently.
 export function isWebKitRuntime(): boolean {
     if (typeof navigator === 'undefined') return false
     const ua = navigator.userAgent
     return /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg\//.test(ua)
 }
 
-// Desktop Linux (WebKitGTK), excluding Android.
 export function isLinuxDesktop(): boolean {
     if (typeof navigator === 'undefined') return false
     const ua = navigator.userAgent

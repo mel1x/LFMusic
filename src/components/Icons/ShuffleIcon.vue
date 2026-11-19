@@ -9,7 +9,7 @@
     stroke-width="2"
     stroke-linecap="round"
     stroke-linejoin="round"
-    class="lucide lucide-shuffle-icon lucide-shuffle"
+    class="lfi lfi-shuffle"
   >
     <path d="m18 14 4 4-4 4" />
     <path d="m18 2 4 4-4 4" />

@@ -10,7 +10,6 @@ function onTracksReadyBackdrop(e: MouseEvent) {
     if (e.target === e.currentTarget) dismissTracksReadyModal();
 }
 
-// Escape-to-close (previously handled centrally in App.vue).
 function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && showTracksReadyModal.value) {
         e.preventDefault();
@@ -96,23 +95,23 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
     font-size: 14px;
     font-weight: 700;
     cursor: pointer;
-    transition: background-color .2s ease, color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .scanReadyButton:hover {
     background: hsla(0, 0%, 100%, 0.14);
     color: #fff;
 }
 .scan-ready-enter-active, .scan-ready-leave-active {
-    transition: opacity .18s ease;
+    transition: opacity var(--duration-modal) var(--ease-smooth);
 }
 .scan-ready-enter-active .scanReadyModal, .scan-ready-leave-active .scanReadyModal {
-    transition: transform .18s ease, opacity .18s ease;
+    transition: transform var(--duration-modal) var(--ease-smooth), opacity var(--duration-modal) var(--ease-smooth);
 }
 .scan-ready-enter-from, .scan-ready-leave-to {
     opacity: 0;
 }
 .scan-ready-enter-from .scanReadyModal, .scan-ready-leave-to .scanReadyModal {
-    transform: scale(0.96) translateY(4px);
+    transform: translateY(8px) scale(.98);
     opacity: 0;
 }
 </style>

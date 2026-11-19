@@ -10,8 +10,6 @@ import { usePlayer } from '../composables/usePlayer'
 import { useDownloads, type ExternalSearchTrack } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 
-// One downloadable track: search results, album/artist pages, link results.
-// The action button doubles as live status — queued → progress ring → check.
 const props = withDefaults(
     defineProps<{
         track: ExternalSearchTrack
@@ -23,7 +21,7 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-    /** Already in the library — parent confirms before re-downloading. */
+    /** Already in the library - parent confirms before re-downloading. */
     (e: 'redownload', track: ExternalSearchTrack): void
     /** Queued; parents use it as a "this search was useful" signal. */
     (e: 'download', track: ExternalSearchTrack): void
@@ -39,7 +37,6 @@ const stage = computed(() => item.value?.stage ?? null)
 const active = computed(() => stage.value !== null && stage.value !== 'done' && stage.value !== 'error')
 const inLibrary = computed(() => props.track.in_library || stage.value === 'done')
 
-// Progress ring geometry (r = 15 → circumference ≈ 94.25).
 const RING = 2 * Math.PI * 15
 const ringOffset = computed(() => RING * (1 - Math.min(1, Math.max(0, item.value?.progress ?? 0))))
 
@@ -110,7 +107,6 @@ function openAlbum() {
             @click.stop="onAction"
             @dblclick.stop
         >
-            <!-- Progress ring (downloading) / spinning arc (searching, processing) -->
             <svg v-if="active && stage !== 'queued'" class="ring" :class="{ spin: stage !== 'downloading' }" viewBox="0 0 36 36">
                 <circle class="ringTrack" cx="18" cy="18" r="15" />
                 <circle
@@ -142,7 +138,7 @@ function openAlbum() {
     padding: 0 8px 0 8px;
     border-radius: 12px;
     box-sizing: border-box;
-    transition: background-color .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .dlRow:hover {
     background-color: hsla(0, 0%, 100%, 0.04);
@@ -200,15 +196,15 @@ function openAlbum() {
 }
 .rowMetaText { color: hsla(0, 0%, 100%, 0.45); }
 .metaDot { margin: 0 5px; opacity: 0.6; }
-.metaLink.clickable { cursor: pointer; transition: color .18s ease; }
+.metaLink.clickable { cursor: pointer; transition: color var(--duration-hover) var(--ease-smooth); }
 .metaLink.clickable:hover { color: hsla(0, 0%, 100%, 0.9); }
 .rowStatus {
     font-variant-numeric: tabular-nums;
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15%), 100%), 78%, 0.95);
+    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15% * var(--accent-k, 1)), 100%), 78%, 0.95);
 }
 .rowStatus.error { color: hsla(2, 78%, 70%, 0.95); }
 
-.statusSwap-enter-active, .statusSwap-leave-active { transition: opacity .16s ease, transform .16s ease; }
+.statusSwap-enter-active, .statusSwap-leave-active { transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth); }
 .statusSwap-enter-from { opacity: 0; transform: translateY(3px); }
 .statusSwap-leave-to { opacity: 0; transform: translateY(-3px); }
 
@@ -236,7 +232,6 @@ function openAlbum() {
     user-select: none;
 }
 
-/* Action button: one circle that morphs between states */
 .actionBtn {
     position: relative;
     flex-shrink: 0;
@@ -247,9 +242,9 @@ function openAlbum() {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15%), 100%), 82%, 1);
+    color: hsla(var(--accent-h), min(calc(var(--accent-s) + 15% * var(--accent-k, 1)), 100%), 82%, 1);
     background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.16);
-    transition: background-color .2s ease, color .2s ease, transform .2s ease;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
 }
 .actionBtn:hover:not(:disabled) {
     background-color: hsla(var(--accent-h), var(--accent-s), 55%, 0.3);
@@ -274,7 +269,7 @@ function openAlbum() {
     background-color: hsla(0, 0%, 100%, 0.05);
 }
 .glyph { position: relative; display: flex; align-items: center; justify-content: center; }
-.cancelGlyph { opacity: 0; transition: opacity .15s ease; color: hsla(0, 0%, 100%, 0.9); }
+.cancelGlyph { opacity: 0; transition: opacity var(--duration-hover) var(--ease-smooth); color: hsla(0, 0%, 100%, 0.9); }
 .actionBtn:hover .cancelGlyph { opacity: 1; }
 .actionBtn:hover .queuedDots { opacity: 0; }
 
@@ -289,10 +284,10 @@ function openAlbum() {
 .ringTrack { fill: none; stroke: hsla(0, 0%, 100%, 0.1); stroke-width: 2.5; }
 .ringFill {
     fill: none;
-    stroke: hsla(var(--accent-h), min(calc(var(--accent-s) + 20%), 100%), 70%, 1);
+    stroke: hsla(var(--accent-h), min(calc(var(--accent-s) + 20% * var(--accent-k, 1)), 100%), 70%, 1);
     stroke-width: 2.5;
     stroke-linecap: round;
-    transition: stroke-dashoffset .3s ease;
+    transition: stroke-dashoffset .3s var(--ease-smooth);
 }
 .actionBtn.processing .ringFill { stroke: hsla(145, 55%, 62%, 0.9); }
 @keyframes ringSpin { to { transform: rotate(270deg); } }
@@ -301,14 +296,14 @@ function openAlbum() {
     position: absolute;
     display: flex;
     gap: 3px;
-    transition: opacity .15s ease;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
 .queuedDots i {
     width: 4px;
     height: 4px;
     border-radius: 50%;
     background: hsla(0, 0%, 100%, 0.55);
-    animation: dotPulse 1.2s ease-in-out infinite;
+    animation: dotPulse 1.2s var(--ease-smooth-in-out) infinite;
 }
 .queuedDots i:nth-child(2) { animation-delay: .15s; }
 .queuedDots i:nth-child(3) { animation-delay: .3s; }

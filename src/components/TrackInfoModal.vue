@@ -8,8 +8,8 @@ import {
     getTrackStatistics,
     type TrackStatisticsUpdateEventDetail,
 } from '../composables/useStatistics'
-import { timesCountText } from '../utils/format'
 import CloseIcon from './Icons/CloseIcon.vue'
+import EmptyIcon from './Icons/EmptyIcon.vue'
 import { useSheetModal } from '../composables/useSheetModal'
 
 const router = useRouter()
@@ -91,11 +91,6 @@ function formatSampleRate(hz: number | null): string {
     return `${(hz / 1000).toFixed(1)} кГц`
 }
 
-function formatBitrate(br: number | null): string {
-    if (br == null) return '-'
-    return `${Math.round(br / 1000)} кбит/с`
-}
-
 function formatChannels(ch: number | null): string {
     if (ch == null) return '-'
     if (ch === 1) return 'Моно'
@@ -103,24 +98,41 @@ function formatChannels(ch: number | null): string {
     return `${ch} каналов`
 }
 
-const generalFields = computed(() => {
+const statTiles = computed(() => {
     const t = currentTrack.value
     if (!t) return []
     return [
-        { label: 'Жанр', value: t.genre || '-' },
         { label: 'Длительность', value: formatDuration(t.duration_secs) },
-        { label: 'Прослушано', value: timesCountText(listenCount.value) },
+        { label: 'Прослушано', value: String(listenCount.value) },
+        { label: 'Битрейт', value: t.bitrate ? `${Math.round(t.bitrate / 1000)}` : '-', unit: t.bitrate ? 'кбит/с' : '' },
     ]
 })
 
-const audioFields = computed(() => {
+const soundRows = computed(() => {
     const t = currentTrack.value
     if (!t) return []
-    return [
+    const rows = [
         { label: 'Частота', value: formatSampleRate(t.sample_rate) },
         { label: 'Разрядность', value: t.bit_depth ? `${t.bit_depth} бит` : '-' },
-        { label: 'Битрейт', value: formatBitrate(t.bitrate) },
         { label: 'Каналы', value: formatChannels(t.channels) },
+    ]
+    if (t.bpm) rows.push({ label: 'Темп', value: `${Math.round(t.bpm)} BPM` })
+    if (t.key) rows.push({ label: 'Тональность', value: t.key })
+    return rows
+})
+
+function pct(v: number | null | undefined): number {
+    return Math.round(Math.min(1, Math.max(0, v ?? 0)) * 100)
+}
+
+/** Analysed audio features as thin bars; empty until the track was analysed. */
+const featureBars = computed(() => {
+    const t = currentTrack.value
+    if (!t || t.energy == null) return []
+    return [
+        { label: 'Энергичность', value: pct(t.energy) },
+        { label: 'Танцевальность', value: pct(t.danceability) },
+        { label: 'Яркость', value: pct((t.spectral_centroid ?? 0) / 4000) },
     ]
 })
 
@@ -168,68 +180,68 @@ onUnmounted(() => {
             >
                 <div ref="modalCardEl" class="modalCard" @mousedown.stop>
                     <div class="sheetHandle" @pointerdown="onSheetDragStart"></div>
-                    <div class="accentGlow"></div>
 
                     <button class="closeBtn" @click="closeTrackInfo" aria-label="Закрыть">
                         <CloseIcon />
                     </button>
 
                     <div class="modalHeader">
-                        <div class="coverWrap">
-                            <div class="coverHalo"></div>
-                            <div class="cover">
-                                <img v-if="currentTrack.cover_art" :src="currentTrack.cover_art" alt="" />
-                                <div v-else class="coverPlaceholder"></div>
-                            </div>
+                        <div class="cover">
+                            <img v-if="currentTrack.cover_art" :src="currentTrack.cover_art" alt="" />
+                            <div v-else class="coverPlaceholder"><EmptyIcon /></div>
                         </div>
                         <div class="headerText">
-                            <div class="overline">О треке</div>
                             <div class="trackTitle">{{ currentTrack.title || fileName }}</div>
                             <div class="trackArtist">{{ currentTrack.artist || 'Неизвестный исполнитель' }}</div>
-                        <div class="badges">
-                            <span class="chip chipFormat" v-tooltip:bottom="'Аудио формат файла - определяет тип сжатия и совместимость'">{{ (currentTrack.format || '-').toUpperCase() }}</span>
-                            <span class="chip" :class="currentTrack.is_lossless ? 'chipLossless' : 'chipLossy'" v-tooltip:bottom="currentTrack.is_lossless ? 'Lossless - сжатие без потери качества (FLAC, ALAC, WAV)' : 'Lossy - меньший размер файла с некоторой потерей качества (MP3, AAC)'">
-                                {{ currentTrack.is_lossless ? 'Lossless' : 'Lossy' }}
-                            </span>
-                        </div>
+                            <button v-if="hasAlbum" class="albumLink" @click="openAlbum">
+                                <span class="albumName">{{ trackAlbumName }}</span>
+                                <svg class="albumChevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                            </button>
+                            <div v-else-if="trackAlbumName" class="albumText">{{ trackAlbumName }}</div>
+                            <div class="badges">
+                                <span class="chip">{{ (currentTrack.format || '-').toUpperCase() }}</span>
+                                <span class="chip" :class="{ chipAccent: currentTrack.is_lossless }">{{ currentTrack.is_lossless ? 'Lossless' : 'Lossy' }}</span>
+                                <span v-if="currentTrack.genre" class="chip chipMuted">{{ currentTrack.genre }}</span>
+                            </div>
                         </div>
                     </div>
 
-                    <div class="sections">
-                        <section class="section">
-                            <div class="sectionTitle">Описание</div>
-                            <div class="fieldsList">
-                                <div v-if="hasAlbum" class="fieldRow">
-                                    <span class="fieldLabel">Альбом</span>
-                                    <span class="fieldValue albumValue">{{ trackAlbumName }}</span>
-                                    <button class="openBtn" @click="openAlbum">Открыть</button>
-                                </div>
-                                <div v-for="f in generalFields" :key="f.label" class="fieldRow">
-                                    <span class="fieldLabel">{{ f.label }}</span>
-                                    <span class="fieldValue">{{ f.value }}</span>
-                                </div>
+                    <div class="body">
+                        <div class="statTiles">
+                            <div v-for="s in statTiles" :key="s.label" class="statTile">
+                                <div class="statValue">{{ s.value }}<span v-if="s.unit" class="statUnit">{{ s.unit }}</span></div>
+                                <div class="statLabel">{{ s.label }}</div>
                             </div>
-                        </section>
+                        </div>
 
                         <section class="section">
                             <div class="sectionTitle">Звук</div>
-                            <div class="fieldsList">
-                                <div v-for="f in audioFields" :key="f.label" class="fieldRow">
-                                    <span class="fieldLabel">{{ f.label }}</span>
-                                    <span class="fieldValue">{{ f.value }}</span>
+                            <div class="rows">
+                                <div v-for="r in soundRows" :key="r.label" class="row">
+                                    <span class="rowLabel">{{ r.label }}</span>
+                                    <span class="rowValue">{{ r.value }}</span>
+                                </div>
+                            </div>
+                            <div v-if="featureBars.length" class="bars">
+                                <div v-for="b in featureBars" :key="b.label" class="bar">
+                                    <div class="barHead">
+                                        <span class="rowLabel">{{ b.label }}</span>
+                                        <span class="barValue">{{ b.value }}%</span>
+                                    </div>
+                                    <div class="barTrack"><div class="barFill" :style="{ width: b.value + '%' }"></div></div>
                                 </div>
                             </div>
                         </section>
 
                         <section class="section">
                             <div class="sectionTitle">Файл</div>
-                                <div class="pathBlock" @click="copyPath">
-                                <div class="pathText">
-                                    <div class="pathName">{{ fileName }}</div>
-                                    <div v-if="fileFolder" class="pathFolder">{{ fileFolder }}</div>
-                                </div>
-                                <span class="copyHint">{{ copiedPath ? 'Скопировано' : 'Копировать' }}</span>
-                            </div>
+                            <button class="pathTile" @click="copyPath">
+                                <span class="pathText">
+                                    <span class="pathName">{{ fileName }}</span>
+                                    <span v-if="fileFolder" class="pathFolder">{{ fileFolder }}</span>
+                                </span>
+                                <span class="copyHint" :class="{ copied: copiedPath }">{{ copiedPath ? 'Скопировано' : 'Копировать' }}</span>
+                            </button>
                         </section>
                     </div>
                 </div>
@@ -249,19 +261,18 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: hsla(0, 0%, 0%, 0.35);
+    background-color: hsla(0, 0%, 0%, 0.4);
     backdrop-filter: blur(6px);
 }
 .modalCard {
+    --tile: hsl(var(--accent-h), min(var(--accent-s), 45%), 19%);
     position: relative;
-    width: 480px;
+    width: 460px;
     max-width: calc(100vw - 40px);
-    padding: 22px 22px 22px;
+    padding: 24px;
     border-radius: 28px;
     background-color: var(--light-bg);
-    box-shadow:
-        0 24px 60px rgba(0, 0, 0, 0.25),
-        0 0 0 1px hsla(0, 0%, 100%, 0.04) inset;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.32);
     display: flex;
     flex-direction: column;
     gap: 22px;
@@ -270,76 +281,43 @@ onUnmounted(() => {
 .sheetHandle {
     display: none;
 }
-.accentGlow {
-    pointer-events: none;
-    position: absolute;
-    top: -60%;
-    left: -20%;
-    right: -20%;
-    height: 220px;
-    background: radial-gradient(
-        ellipse at center,
-        hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.28) 0%,
-        hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0) 70%
-    );
-    filter: blur(8px);
-    z-index: 0;
-}
 .closeBtn {
     position: absolute;
     top: 16px;
     right: 16px;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
     border: none;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    color: hsla(0, 0%, 100%, 0.7);
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.55);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: .24s ease;
+    transition: var(--duration-hover) var(--ease-smooth);
     z-index: 2;
 }
 .closeBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.14);
+    background-color: hsla(0, 0%, 100%, 0.08);
     color: #fff;
 }
+
 .modalHeader {
-    position: relative;
-    z-index: 1;
     display: flex;
     flex-direction: row;
     gap: 18px;
     align-items: center;
-}
-.coverWrap {
-    position: relative;
-    flex-shrink: 0;
-    width: 96px;
-    height: 96px;
-}
-.coverHalo {
-    position: absolute;
-    inset: -10px;
-    border-radius: 22px;
-    background: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.45);
-    filter: blur(20px);
-    opacity: 0.7;
-    z-index: 0;
+    padding-right: 28px;
 }
 .cover {
-    position: relative;
-    width: 100%;
-    height: 100%;
+    flex-shrink: 0;
+    width: 116px;
+    height: 116px;
     border-radius: 16px;
     overflow: hidden;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    box-shadow:
-        0 8px 24px rgba(0, 0, 0, 0.35),
-        0 0 0 1px hsla(0, 0%, 100%, 0.06) inset;
-    z-index: 1;
+    background-color: var(--tile);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
 }
 .cover img {
     width: 100%;
@@ -350,212 +328,276 @@ onUnmounted(() => {
 .coverPlaceholder {
     width: 100%;
     height: 100%;
-    background: linear-gradient(135deg, hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.45), hsla(0, 0%, 100%, 0.04));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: hsla(0, 0%, 100%, 0.35);
+}
+.coverPlaceholder svg {
+    width: 34px;
+    height: 34px;
 }
 .headerText {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
     min-width: 0;
     flex: 1;
 }
-.overline {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.7), 75%, 0.85);
-    margin-bottom: 2px;
-    user-select: none;
-}
 .trackTitle {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-weight: 700;
-    font-size: 19px;
+    font-weight: 800;
+    font-size: 21px;
     line-height: 1.2;
-    color: hsla(0, 0%, 100%, 0.96);
-    white-space: nowrap;
+    color: #fff;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    user-select: none;
+    overflow-wrap: anywhere;
 }
-.trackArtist {
+.trackArtist,
+.albumText {
     font-size: 14px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.72);
+    color: hsla(0, 0%, 100%, 0.7);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    user-select: none;
+}
+.albumText {
+    font-size: 13px;
+    color: hsla(0, 0%, 100%, 0.45);
+}
+.albumLink {
+    align-self: flex-start;
+    max-width: 100%;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0;
+    border: none;
+    background: none;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.45);
+    cursor: pointer;
+    transition: color var(--duration-hover) var(--ease-smooth);
+}
+.albumLink:hover {
+    color: #fff;
+}
+.albumName {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.albumChevron {
+    flex-shrink: 0;
+    transition: transform var(--duration-hover) var(--ease-smooth);
+}
+.albumLink:hover .albumChevron {
+    transform: translateX(2px);
 }
 .badges {
     display: flex;
-    flex-direction: row;
-    gap: 6px;
-    margin-top: 8px;
     flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
 }
 .chip {
     display: inline-flex;
     align-items: center;
-    padding: 3px 9px;
+    height: 22px;
+    padding: 0 9px;
     border-radius: 999px;
-    font-size: 10px;
+    background-color: var(--tile);
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: hsla(0, 0%, 100%, 0.8);
+    white-space: nowrap;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
     user-select: none;
-    line-height: 1.4;
 }
-.chipFormat {
-    background-color: hsla(0, 0%, 100%, 0.08);
-    color: hsla(0, 0%, 100%, 0.85);
+.chipAccent {
+    color: hsl(var(--accent-h), max(var(--accent-s), 55%), 72%);
 }
-.chipLossless {
-    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.18);
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 82%, 1);
-    box-shadow: 0 0 0 1px hsla(var(--accent-h), var(--accent-s), 60%, 0.25) inset;
+.chipMuted {
+    font-weight: 600;
+    letter-spacing: 0;
+    color: hsla(0, 0%, 100%, 0.6);
 }
-.chipLossy {
-    background-color: hsla(0, 0%, 100%, 0.05);
-    color: hsla(0, 0%, 100%, 0.55);
-}
-.sections {
-    position: relative;
-    z-index: 1;
+
+.body {
     display: flex;
     flex-direction: column;
-    gap: 18px;
-    max-height: 390px;
+    gap: 22px;
+    max-height: min(540px, calc(100vh - 240px));
     overflow-y: auto;
-    padding-right: 4px;
-    margin-right: -4px;
+    margin-right: -10px;
+    padding-right: 10px;
 }
-.sections::-webkit-scrollbar {
+.body::-webkit-scrollbar {
     width: 4px;
 }
-.sections::-webkit-scrollbar-track {
-    background: transparent;
-}
-.sections::-webkit-scrollbar-thumb {
+.body::-webkit-scrollbar-thumb {
     background: hsla(0, 0%, 100%, 0.1);
     border-radius: 2px;
 }
-.section {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+
+.statTiles {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
 }
-.sectionTitle {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: hsla(0, 0%, 100%, 0.4);
-    user-select: none;
-    padding-left: 2px;
-}
-.fieldsList {
-    display: flex;
-    flex-direction: column;
-    border-radius: 14px;
-    background-color: hsla(0, 0%, 100%, 0.03);
-    overflow: hidden;
-}
-.fieldRow {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 12px;
-    padding: 9px 14px;
-    border-bottom: 1px solid hsla(0, 0%, 100%, 0.04);
-    transition: background-color .18s ease;
-}
-.fieldRow:last-child {
-    border-bottom: none;
-}
-.fieldRow:hover {
-    background-color: hsla(0, 0%, 100%, 0.025);
-}
-.fieldLabel {
-    flex-shrink: 0;
-    width: 110px;
-    font-size: 12px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.5);
-    user-select: none;
-}
-.fieldValue {
-    flex: 1;
+.statTile {
     min-width: 0;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.88);
-    text-align: right;
+    padding: 12px 14px;
+    border-radius: 16px;
+    background-color: var(--tile);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.statValue {
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 19px;
+    font-weight: 800;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    user-select: text;
 }
-.albumValue {
-    text-align: right;
+.statUnit {
+    margin-left: 4px;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.45);
 }
-.openBtn {
-    flex-shrink: 0;
-    border: none;
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-family: inherit;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.16);
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 85%, 1);
-    cursor: pointer;
-    transition: .24s ease;
+.statLabel {
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.5);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     user-select: none;
 }
-.openBtn:hover {
-    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.28);
-    color: #fff;
+.sectionTitle {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.42);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
 }
-.pathBlock {
-    position: relative;
+
+.section {
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    border-radius: 14px;
-    background-color: hsla(0, 0%, 100%, 0.03);
-    cursor: pointer;
-    transition: background-color .18s ease;
+    flex-direction: column;
+    gap: 10px;
+}
+.rows {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+}
+.row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+}
+.rowLabel {
+    flex-shrink: 0;
+    font-size: 13px;
+    color: hsla(0, 0%, 100%, 0.5);
+    user-select: none;
+}
+.rowValue {
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.9);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.bars {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 6px;
+}
+.barHead {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.barValue {
+    font-size: 12px;
+    font-weight: 700;
+    color: hsla(0, 0%, 100%, 0.75);
+    font-variant-numeric: tabular-nums;
+}
+.barTrack {
+    height: 6px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
     overflow: hidden;
 }
-.pathBlock:hover {
-    background-color: hsla(0, 0%, 100%, 0.06);
+.barFill {
+    height: 100%;
+    border-radius: inherit;
+    background-color: hsl(var(--accent-h), max(var(--accent-s), 55%), 62%);
+}
+
+.pathTile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 14px;
+    border: none;
+    border-radius: 16px;
+    background-color: var(--tile);
+    font-family: inherit;
+    text-align: left;
+    color: inherit;
+    cursor: pointer;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.pathTile:hover {
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 23%);
 }
 .pathText {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
 }
 .pathName {
-    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
-    font-size: 12px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.85);
+    font-size: 13px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.9);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .pathFolder {
-    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
-    font-size: 11px;
-    color: hsla(0, 0%, 100%, 0.45);
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.42);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -564,33 +606,29 @@ onUnmounted(() => {
 }
 .copyHint {
     flex-shrink: 0;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    padding: 4px 9px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    color: hsla(0, 0%, 100%, 0.55);
-    transition: .24s ease;
-    user-select: none;
+    font-size: 12px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.45);
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
-.pathBlock:hover .copyHint {
-    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.2);
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 85%, 1);
+.pathTile:hover .copyHint {
+    color: #fff;
+}
+.copyHint.copied {
+    color: hsl(var(--accent-h), max(var(--accent-s), 55%), 72%);
 }
 
 .modal-enter-active, .modal-leave-active {
-    transition: opacity .22s ease;
+    transition: opacity var(--duration-modal) var(--ease-smooth);
 }
 .modal-enter-active .modalCard, .modal-leave-active .modalCard {
-    transition: transform .26s cubic-bezier(0.22, 1.2, 0.36, 1), opacity .22s ease;
+    transition: transform var(--duration-modal) var(--ease-smooth), opacity var(--duration-modal) var(--ease-smooth);
 }
 .modal-enter-from, .modal-leave-to {
     opacity: 0;
 }
 .modal-enter-from .modalCard, .modal-leave-to .modalCard {
-    transform: scale(0.94) translateY(8px);
+    transform: translateY(8px) scale(.98);
     opacity: 0;
 }
 
@@ -599,32 +637,28 @@ onUnmounted(() => {
         align-items: flex-end !important;
         justify-content: center !important;
         padding: calc(var(--safe-top) + 12px) 0 0 !important;
-        background-color: hsla(0, 0%, 0%, 0.36);
     }
 
     .modalCard {
         width: 100vw !important;
         max-width: none !important;
-        height: calc(100dvh - var(--safe-top) - 12px) !important;
-        max-height: none !important;
+        max-height: calc(100dvh - var(--safe-top) - 12px) !important;
         margin-left: 0 !important;
         margin-right: 0 !important;
-        padding: 0 16px calc(18px + var(--safe-bottom));
-        gap: 18px;
+        padding: 0 18px calc(20px + var(--safe-bottom));
+        gap: 20px;
         border-radius: 28px 28px 0 0 !important;
-        background-color: hsl(var(--accent-h), min(var(--accent-s), 48%), 11%);
         overflow-y: auto !important;
         overscroll-behavior: contain;
         touch-action: pan-y;
-        transition: transform .2s ease;
         will-change: transform;
     }
 
     .sheetHandle {
         display: flex;
         flex: 0 0 auto;
-        height: 34px;
-        margin: 0 -16px;
+        height: 30px;
+        margin: 0 -18px -8px;
         align-items: center;
         justify-content: center;
         cursor: grab;
@@ -643,46 +677,61 @@ onUnmounted(() => {
         display: none;
     }
 
-    .coverWrap {
+    .modalHeader {
+        flex-direction: column;
+        align-items: center;
+        padding-right: 0;
+        gap: 14px;
+    }
+
+    .cover {
         align-self: center;
-        width: min(42vw, 132px);
-        height: min(42vw, 132px);
+        width: min(46vw, 168px);
+        height: min(46vw, 168px);
+        border-radius: 18px;
     }
 
     .headerText {
-        text-align: center;
         align-items: center;
+        text-align: center;
     }
 
-    .trackTitle,
-    .trackArtist {
-        white-space: normal;
-        overflow-wrap: anywhere;
-        text-align: center;
+    .albumLink {
+        align-self: center;
     }
 
     .badges {
         justify-content: center;
     }
 
-    .pathBlock {
-        flex-direction: column;
-        align-items: stretch;
+    .statTile {
+        padding: 12px;
+    }
+
+    .body {
+        max-height: none;
+        overflow: visible;
+        margin-right: 0;
+        padding-right: 0;
     }
 
     .copyHint {
-        align-self: flex-start;
+        display: none;
     }
 
-    .modal-enter-active .modalCard,
+    .modal-enter-active .modalCard {
+        transition: transform var(--duration-modal) var(--ease-smooth);
+    }
+
+    .modal-leave-active,
     .modal-leave-active .modalCard {
-        transition: transform .2s ease, opacity .2s ease;
+        transition: transform .5s var(--ease-sheet), opacity .5s var(--ease-sheet);
     }
 
     .modal-enter-from .modalCard,
     .modal-leave-to .modalCard {
-        transform: translateY(20px);
-        opacity: 0;
+        transform: translateY(100%);
+        opacity: 1;
     }
 
     :global(body.lfmusic-phone) .modalBackdrop {
