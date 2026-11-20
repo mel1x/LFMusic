@@ -131,7 +131,6 @@ watch(resolvedPins, () => requestPinCovers());
             class="pinItem"
             :class="{ active: isPinActive(p), menuOpen: pinMenu?.pin.kind === p.kind && pinMenu?.pin.key === p.key }"
             @click="openPin(p)"
-            v-tooltip="p.name"
           >
             <FavoritesCover v-if="isFavoritesPin(p)" class="pinCover" />
             <AnimatedCover
