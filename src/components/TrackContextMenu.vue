@@ -13,6 +13,7 @@ import AlbumIcon from './Icons/AlbumIcon.vue'
 import InfoIcon from './Icons/InfoIcon.vue'
 import DeleteIcon from './Icons/DeleteIcon.vue'
 import TrashIcon from './Icons/TrashIcon.vue'
+import RadioIcon from './Icons/RadioIcon.vue'
 import defaultPlaylistCover from '../assets/playlistCover.webp'
 import type { TrackMetadata } from '../composables/usePlayer'
 import { usePlayer } from '../composables/usePlayer'
@@ -24,6 +25,7 @@ import { useTrackEditModal } from '../composables/useTrackEditModal'
 import { useDownloads } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 import { currentUiScale } from '../composables/useUiScale'
+import { startTrackMix } from '../composables/useTrackMix'
 
 const props = defineProps<{
     x: number
@@ -342,6 +344,11 @@ function onGoToAlbum() {
     emit('close')
 }
 
+function onStartMix() {
+    void startTrackMix(props.track.file_path)
+    emit('close')
+}
+
 function onAbout() {
     openTrackInfo(props.track)
     emit('close')
@@ -371,6 +378,10 @@ function onAbout() {
             </button>
         </div>
         <div class="ctx-separator"></div>
+        <button class="ctx-item" @click="onStartMix">
+            <RadioIcon width="16" height="16" />
+            <span>{{ t('trackMenu.startMix') }}</span>
+        </button>
         <div
             ref="subTriggerEl"
             class="ctx-submenu-wrapper"

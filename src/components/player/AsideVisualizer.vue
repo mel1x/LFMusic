@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch, onBeforeUnmount } from 'vue';
+import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import trackCover from '../../assets/trackCover.webp';
 
 import TrackArtists from '../TrackArtists.vue';
@@ -9,10 +9,11 @@ import { usePlayer } from '../../composables/usePlayer';
 import { usePlayerUi } from '../../composables/usePlayerUi';
 import { useI18n } from '../../composables/useI18n';
 import { useSpectrum, SPECTRUM_BARS } from '../../composables/useSpectrum';
+import { frameLoop } from '../../utils/frameLoop';
 
 const { settings } = useSettings();
 const { t } = useI18n();
-const { playNext, loadCoversForTracks } = usePlayer();
+const { playNext, loadCoversForTracks, isPlaying } = usePlayer();
 const { nextTrack, nextTrackTitle } = usePlayerUi();
 
 const COLUMNS = Array.from({ length: SPECTRUM_BARS }, (_, i) => i);
@@ -55,7 +56,59 @@ watch(
     { immediate: true },
 );
 
+// Idle state: a slow low wave runs across the columns while nothing plays.
+const IDLE_FRAME_MS = 80;
+const IDLE_DELAY_MS = 700;
+const idleLevels = new Float32Array(SPECTRUM_BARS);
+const idle = ref(false);
+let idleStart = 0;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function idleWave(t: number) {
+    const fade = Math.min(1, t / 1.2);
+    for (let i = 0; i < SPECTRUM_BARS; i++) {
+        const w = 0.5 + 0.5 * Math.sin(t * 2.2 - i * 0.45);
+        const ripple = 0.5 + 0.5 * Math.sin(t * 1.3 + i * 0.9);
+        idleLevels[i] = fade * (0.08 + 0.3 * w * w + 0.06 * ripple);
+    }
+    drawBars(idleLevels);
+}
+
+const idleLoop = frameLoop((now) => {
+    if (!idleStart) idleStart = now;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        idleWave(2);
+        return false;
+    }
+    idleWave((now - idleStart) / 1000);
+}, IDLE_FRAME_MS);
+
+function stopIdle() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
+    if (!idle.value) return;
+    idleLoop.stop();
+    idle.value = false;
+    drawBars(new Float32Array(SPECTRUM_BARS));
+}
+
+watch(
+    () => mode.value === 'visualizer' && !isPlaying.value,
+    (shouldIdle) => {
+        stopIdle();
+        if (!shouldIdle) return;
+        idleTimer = setTimeout(() => {
+            idleTimer = null;
+            idle.value = true;
+            idleStart = 0;
+            idleLoop.start();
+        }, IDLE_DELAY_MS);
+    },
+    { immediate: true },
+);
+
 onBeforeUnmount(() => {
+    stopIdle();
     spectrum.stop();
 });
 
@@ -75,6 +128,7 @@ const nextKey = computed(() => nextTrack.value?.file_path ?? '');
                 v-if="mode === 'visualizer'"
                 :ref="setBarsBox"
                 class="asideMeter"
+                :class="{ idle }"
                 aria-hidden="true"
             >
                 <span v-for="c in COLUMNS" :key="c" class="asideColumn">
@@ -153,6 +207,16 @@ const nextKey = computed(() => nextTrack.value?.file_path ?? '');
 }
 .asideSegment.peak {
     background-color: hsla(0, 0%, 100%, 0.75);
+}
+.asideMeter.idle .asideSegment {
+    transition-duration: .24s;
+}
+.asideMeter.idle .asideSegment.on {
+    background-color: hsla(0, 0%, 100%, 0.16);
+}
+/* Only the crest gets the accent; a one-segment floor stays dim. */
+.asideMeter.idle .asideSegment.peak:not(:first-child) {
+    background-color: hsla(var(--player-accent-h), min(var(--player-accent-s), 70%), 74%, 0.7);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1416,6 +1416,17 @@ fn statistics_get_recommendations(
 }
 
 #[tauri::command(async)]
+fn statistics_get_similar_tracks(
+    state: State<LibraryState>,
+    file_path: String,
+    lossless_only: Option<bool>,
+    limit: usize,
+) -> Result<Vec<audio_player::TrackMetadata>, String> {
+    let library = state.lock()?;
+    Ok(library.get_similar_tracks(&file_path, lossless_only.unwrap_or(false), limit))
+}
+
+#[tauri::command(async)]
 fn statistics_get_taste_profile(
     state: State<LibraryState>,
 ) -> Result<library::TasteProfile, String> {
@@ -2383,6 +2394,7 @@ pub fn run() {
             statistics_get_top_albums,
             statistics_get_summary_stats,
             statistics_get_recommendations,
+            statistics_get_similar_tracks,
             statistics_get_taste_profile,
             eq_set_bands,
             eq_set_gain,

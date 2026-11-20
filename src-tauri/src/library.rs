@@ -2914,6 +2914,192 @@ impl MusicLibrary {
         rows.filter_map(|r| r.ok()).collect()
     }
 
+    /// "Mix from track": the seed first, then tracks close to it by audio features, with a bonus
+    /// for a shared artist or genre and some jitter so every run differs.
+    pub fn get_similar_tracks(&self, seed_path: &str, lossless_only: bool, limit: usize) -> Vec<TrackMetadata> {
+        struct Cand {
+            path: String,
+            /// Same song in another file (album + single, flac + mp3) shares this key.
+            identity: String,
+            fingerprint: Option<String>,
+            artists: Vec<String>,
+            genre: String,
+            feats: Option<[f64; 5]>,
+        }
+
+        fn artist_set(artist: &str) -> Vec<String> {
+            let mut s = artist.to_lowercase();
+            for sep in [" feat. ", " feat ", " ft. ", " ft ", " & ", " x ", "/", ","] {
+                s = s.replace(sep, ";");
+            }
+            s.split(';')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect()
+        }
+
+        let mut stmt = match self.conn.prepare(
+            "SELECT t.file_path, COALESCE(NULLIF(o.artist, ''), t.artist, ''), COALESCE(t.genre, ''), t.is_lossless,
+                    af.energy, af.danceability, af.bpm, af.spectral_centroid, af.loudness,
+                    COALESCE(NULLIF(o.title, ''), t.title, ''), af.audio_fingerprint
+             FROM tracks t
+             LEFT JOIN track_overrides o ON o.file_path = t.file_path
+             LEFT JOIN track_audio_features af ON af.file_path = t.file_path",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map([], |row| {
+            let f = (
+                row.get::<_, Option<f64>>(4)?,
+                row.get::<_, Option<f64>>(5)?,
+                row.get::<_, Option<f64>>(6)?,
+                row.get::<_, Option<f64>>(7)?,
+                row.get::<_, Option<f64>>(8)?,
+            );
+            let feats = match f {
+                (Some(e), Some(d), Some(b), Some(c), Some(l)) => Some([e, d, b, c, l]),
+                _ => None,
+            };
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                feats,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut seed: Option<Cand> = None;
+        let mut cands: Vec<Cand> = Vec::new();
+        for (path, artist, genre, lossless, feats, title, fingerprint) in rows.flatten() {
+            let identity = if title.trim().is_empty() {
+                path.clone()
+            } else {
+                crate::external::track_identity_key(&artist, &title, None)
+            };
+            let fingerprint = fingerprint.filter(|f| !f.is_empty());
+            let c = Cand { artists: artist_set(&artist), genre: genre.trim().to_lowercase(), feats, identity, fingerprint, path };
+            if c.path == seed_path {
+                seed = Some(c);
+            } else if !lossless_only || lossless {
+                cands.push(c);
+            }
+        }
+        let Some(seed) = seed else { return Vec::new() };
+        // Copies of the seed itself would land first (zero distance), so they are dropped.
+        cands.retain(|c| {
+            c.identity != seed.identity
+                && !(seed.fingerprint.is_some() && c.fingerprint == seed.fingerprint)
+        });
+
+        // Per-feature variance over the library, so every feature weighs the same.
+        let mut mean = [0.0f64; 5];
+        let mut var = [0.0f64; 5];
+        let analyzed: Vec<&[f64; 5]> = cands.iter().filter_map(|c| c.feats.as_ref()).collect();
+        if !analyzed.is_empty() {
+            let n = analyzed.len() as f64;
+            for f in &analyzed {
+                for i in 0..5 {
+                    mean[i] += f[i] / n;
+                }
+            }
+            for f in &analyzed {
+                for i in 0..5 {
+                    var[i] += (f[i] - mean[i]).powi(2) / n;
+                }
+            }
+        }
+        const MIN_VAR: [f64; 5] = [1e-3, 1e-3, 4.0, 1e4, 1e-2];
+
+        let mut rng = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x2545_F491_4F6C_DD1D)
+            | 1;
+        let mut next_rand = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        let mut scored: Vec<(f64, bool, usize)> = cands
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| {
+                let mut score = match (&seed.feats, &c.feats) {
+                    (Some(s), Some(f)) => {
+                        (0..5).map(|i| (f[i] - s[i]).powi(2) / var[i].max(MIN_VAR[i])).sum::<f64>() / 5.0
+                    }
+                    _ => 1.5,
+                };
+                let same_artist = c.artists.iter().any(|a| seed.artists.contains(a));
+                if same_artist {
+                    score -= 0.5;
+                }
+                if !seed.genre.is_empty() && c.genre == seed.genre {
+                    score -= 0.5;
+                }
+                score = score * (0.8 + 0.4 * next_rand()) + 0.35 * next_rand();
+                (score, same_artist, idx)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        // Keep the seed's own artist from taking over the whole mix.
+        let take = limit.saturating_sub(1);
+        let artist_cap = (take / 8).max(3);
+        let mut artist_taken = 0;
+        let mut picked: Vec<(usize, bool)> = Vec::with_capacity(take);
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (_, same_artist, idx) in scored {
+            if picked.len() >= take {
+                break;
+            }
+            if !seen.insert(cands[idx].identity.as_str()) {
+                continue;
+            }
+            if same_artist {
+                if artist_taken >= artist_cap {
+                    continue;
+                }
+                artist_taken += 1;
+            }
+            picked.push((idx, same_artist));
+        }
+
+        // Spread artists out: a track waits while its artist played within the last few
+        // positions (longer for the seed's artist), keeping the similarity order otherwise.
+        const GAP: usize = 3;
+        const SEED_ARTIST_GAP: usize = 5;
+        let mut recent: Vec<&[String]> = vec![seed.artists.as_slice()];
+        let mut paths = vec![seed.path.clone()];
+        while !picked.is_empty() {
+            let pos = picked
+                .iter()
+                .position(|&(idx, same_artist)| {
+                    let gap = if same_artist { SEED_ARTIST_GAP } else { GAP };
+                    let artists = &cands[idx].artists;
+                    !recent
+                        .iter()
+                        .rev()
+                        .take(gap)
+                        .any(|r| r.iter().any(|a| artists.contains(a)))
+                })
+                .unwrap_or(0);
+            let (idx, _) = picked.remove(pos);
+            recent.push(cands[idx].artists.as_slice());
+            paths.push(cands[idx].path.clone());
+        }
+        self.get_tracks_by_paths(&paths)
+    }
+
     pub fn get_album_track_order(&self, album_name: &str) -> Result<Option<Vec<String>>, String> {
         let result: Result<String, rusqlite::Error> = self.conn.query_row(
             "SELECT track_paths FROM album_track_order WHERE album_name = ?1",
@@ -4781,6 +4967,52 @@ mod tests {
         let paths: Vec<&str> = recs.iter().map(|t| t.file_path.as_str()).collect();
         assert!(paths.contains(&"/m/energetic.flac"));
         assert!(!paths.contains(&"/m/calm.flac"));
+
+        drop(library);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn get_similar_tracks_starts_with_seed_and_ranks_close_tracks_first() {
+        let dir = temp_library_dir("similar_tracks");
+        let library = MusicLibrary::new(dir.clone()).expect("library init");
+        insert_listened_track(&library, "/m/seed.flac", 1, (0.8, 0.7, 128.0, 3000.0, -6.0));
+        insert_listened_track(&library, "/m/close.flac", 1, (0.78, 0.69, 126.0, 2950.0, -6.5));
+        insert_listened_track(&library, "/m/far1.flac", 1, (0.1, 0.2, 70.0, 1000.0, -20.0));
+        insert_listened_track(&library, "/m/far2.flac", 1, (0.15, 0.1, 80.0, 1200.0, -18.0));
+        insert_listened_track(&library, "/m/far3.flac", 1, (0.2, 0.25, 65.0, 900.0, -22.0));
+        // The same song in another file must not come right after the seed.
+        insert_listened_track(&library, "/m/seed_copy.mp3", 1, (0.8, 0.7, 128.0, 3000.0, -6.0));
+        insert_listened_track(&library, "/m/close_copy.mp3", 1, (0.78, 0.69, 126.0, 2950.0, -6.5));
+        library.conn.execute("UPDATE tracks SET title = file_path", []).unwrap();
+        library
+            .conn
+            .execute("UPDATE tracks SET title = '/m/seed.flac' WHERE file_path = '/m/seed_copy.mp3'", [])
+            .unwrap();
+        library
+            .conn
+            .execute("UPDATE tracks SET title = '/m/close.flac' WHERE file_path = '/m/close_copy.mp3'", [])
+            .unwrap();
+
+        let recs = library.get_similar_tracks("/m/seed.flac", false, 4);
+        let paths: Vec<&str> = recs.iter().map(|t| t.file_path.as_str()).collect();
+        assert_eq!(paths.len(), 4);
+        assert_eq!(paths[0], "/m/seed.flac");
+        assert!(paths[1] == "/m/close.flac" || paths[1] == "/m/close_copy.mp3");
+        assert!(!paths.contains(&"/m/seed_copy.mp3"));
+        assert!(!(paths.contains(&"/m/close.flac") && paths.contains(&"/m/close_copy.mp3")));
+
+        // Same artist everywhere would come back to back; spacing must break that up.
+        library.conn.execute("UPDATE tracks SET artist = 'Other ' || file_path", []).unwrap();
+        library
+            .conn
+            .execute("UPDATE tracks SET artist = 'A' WHERE file_path IN ('/m/seed.flac', '/m/close.flac', '/m/far1.flac')", [])
+            .unwrap();
+        let recs = library.get_similar_tracks("/m/seed.flac", false, 10);
+        let paths: Vec<&str> = recs.iter().map(|t| t.file_path.as_str()).collect();
+        assert_eq!(paths[0], "/m/seed.flac");
+        assert_ne!(recs[1].artist.as_deref(), Some("A"));
+        assert!(library.get_similar_tracks("/m/missing.flac", false, 3).is_empty());
 
         drop(library);
         let _ = fs::remove_dir_all(dir);

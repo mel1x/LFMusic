@@ -234,13 +234,13 @@ watch(resolvedPins, () => requestPinCovers());
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   color: hsla(0, 0%, 100%, 0.55);
   width: 100%;
   font-weight: 600;
-  padding: 9px 12px;
+  padding: 10px 12px;
   border-radius: 12px;
-  font-size: 14px;
+  font-size: 15px;
   box-sizing: border-box;
 
   transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
@@ -251,8 +251,9 @@ watch(resolvedPins, () => requestPinCovers());
   }
 }
 .navLink svg {
-  width: 20px;
-  height: 20px;
+  width: 23px;
+  height: 23px;
+  flex-shrink: 0;
   color: hsla(0, 0%, 100%, 0.55);
   transition: color var(--duration-hover) var(--ease-smooth);
 }
@@ -337,8 +338,8 @@ watch(resolvedPins, () => requestPinCovers());
   background-color: hsla(0, 0%, 100%, 0.04);
 }
 .pinCover {
-  width: 38px;
-  height: 38px;
+  width: 42px;
+  height: 42px;
   border-radius: 5px;
   object-fit: cover;
   background-color: #202020;
@@ -355,7 +356,7 @@ watch(resolvedPins, () => requestPinCovers());
   min-width: 0;
 }
 .pinName {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: hsla(0, 0%, 100%, 0.85);
   white-space: nowrap;
@@ -366,7 +367,7 @@ watch(resolvedPins, () => requestPinCovers());
   color: hsla(0, 0%, 100%, 1);
 }
 .pinMeta {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: hsla(0, 0%, 100%, 0.4);
   white-space: nowrap;

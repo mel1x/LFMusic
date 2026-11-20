@@ -526,8 +526,8 @@ const closeWindow = () => win.close();
     height: 16px;
 }
 .hatBadgeIcon svg.lfi-github {
-    width: 19px;
-    height: 19px;
+    width: 22px;
+    height: 22px;
 }
 .controlsButton {
     cursor: pointer;
