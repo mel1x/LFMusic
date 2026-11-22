@@ -69,7 +69,8 @@ function idleWave(t: number) {
     for (let i = 0; i < SPECTRUM_BARS; i++) {
         const w = 0.5 + 0.5 * Math.sin(t * 2.2 - i * 0.45);
         const ripple = 0.5 + 0.5 * Math.sin(t * 1.3 + i * 0.9);
-        idleLevels[i] = fade * (0.08 + 0.3 * w * w + 0.06 * ripple);
+        // The 1 / SEGMENTS lift keeps the whole wave one cell above the bottom row.
+        idleLevels[i] = fade * (1 / SEGMENTS + 0.08 + 0.3 * w * w + 0.06 * ripple);
     }
     drawBars(idleLevels);
 }

@@ -19,8 +19,12 @@ const props = withDefaults(
         activePaused?: boolean
         /** This row's context menu is open (hides the time, pins the "..." button visible). */
         menuOpen?: boolean
+        /** Position shown before the cover (collection pages). */
+        rank?: number | null
+        /** Taller row with a bigger cover (collection pages). */
+        large?: boolean
     }>(),
-    { active: false, activePaused: false, menuOpen: false },
+    { active: false, activePaused: false, menuOpen: false, rank: null, large: false },
 )
 
 const emit = defineEmits<{
@@ -30,6 +34,7 @@ const emit = defineEmits<{
 }>()
 
 const { formatTime } = usePlayer()
+
 const { isFavorite, toggleFavorite, ensureFavoritesLoaded } = usePlaylists()
 void ensureFavoritesLoaded()
 
@@ -47,9 +52,10 @@ function displayName(track: TrackMetadata): string {
 <template>
     <div
         class="trackElem"
-        :class="{ active, activePaused }"
+        :class="{ active, activePaused, large, ranked: rank != null }"
         @click="emit('rowClick', $event)"
     >
+        <span v-if="rank != null" class="trackRank">{{ rank }}</span>
         <div class="hoverIcon" @click.stop="emit('coverClick')">
             <PauseIcon
                 v-if="active && !activePaused"
@@ -255,6 +261,62 @@ function displayName(track: TrackMetadata): string {
 }
 .trackElem:hover .trackTime {
     opacity: 0;
+}
+.trackRank {
+    flex-shrink: 0;
+    width: 22px;
+    text-align: center;
+    user-select: none;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.42);
+}
+.trackElem.active .trackRank {
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+}
+.trackElem.large {
+    height: 64px;
+    padding: 0 16px;
+    gap: 12px;
+    border-radius: 12px;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.trackElem.large:hover {
+    background-color: hsla(0, 0%, 100%, 0.05);
+}
+.trackElem.large .trackCover {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+}
+.trackElem.large .trackName {
+    font-size: 14px;
+    color: hsla(0, 0%, 100%, 0.94);
+}
+.trackElem.large .trackArtist,
+.trackElem.large .trackTime {
+    font-size: 12px;
+}
+.trackElem.large .trackTime {
+    width: 44px;
+    text-align: right;
+    font-weight: 400;
+}
+.trackElem.large .hoverIcon {
+    left: 30px;
+}
+.trackElem.large .playingAnim {
+    left: 32px;
+    top: 24px;
+}
+.trackElem.large.ranked .hoverIcon {
+    left: 64px;
+}
+.trackElem.large.ranked .playingAnim {
+    left: 66px;
+}
+:global(body.lfmusic-phone .trackRank) {
+    display: none;
 }
 .playingAnim {
     position: absolute;

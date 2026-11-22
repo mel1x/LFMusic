@@ -5,6 +5,7 @@ import { goBackOrHome } from '../router'
 
 import CoverImage from '../components/CoverImage.vue'
 import DownloadIcon from '../components/Icons/DownloadIcon.vue'
+import TimeIcon from '../components/Icons/TimeIcon.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import DownloadTrackRow from '../components/DownloadTrackRow.vue'
@@ -12,8 +13,9 @@ import DownloadTrackRow from '../components/DownloadTrackRow.vue'
 import defaultCover from '../assets/cover.webp'
 
 import { useDownloads, useKeepDownloadedInLibrary, useRedownloadConfirm, type ExternalAlbumDetail } from '../composables/useDownloads'
+import { useCoverTint } from '../composables/useCoverTint'
 import { useI18n } from '../composables/useI18n'
-import { tracksCountText } from '../utils/format'
+import { tracksCountText, formatTotalDuration } from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -28,6 +30,13 @@ const albumId = computed(() => {
 const detail = ref<ExternalAlbumDetail | null>(null)
 const loading = ref(true)
 const notFound = ref(false)
+
+const heroTint = useCoverTint(() => detail.value?.cover_url)
+const heroStyle = computed(() => heroTint.value ? { '--hero-tint': heroTint.value } : {})
+
+const totalDurationSecs = computed(() =>
+    (detail.value?.tracks ?? []).reduce((sum, tr) => sum + (tr.duration_secs ?? 0), 0),
+)
 
 async function load(id: number) {
     loading.value = true
@@ -81,16 +90,16 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 </script>
 
 <template>
-    <div class="pageRoot">
-        <button class="backBtn" @click="goBack">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    <div class="pageRoot" :style="heroStyle">
+        <button type="button" class="backBtn" @click="goBack">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
             <span>{{ t('downloads.back') }}</span>
         </button>
 
         <LoadingSpinner v-if="loading" />
 
         <div v-else-if="notFound || !detail" class="emptyAlbums">
-            <div class="emptyIcon"><DownloadIcon width="22" height="22" /></div>
+            <div class="emptyIcon"><DownloadIcon width="20" height="20" /></div>
             <div class="emptyText">{{ t('downloads.albumNotFound') }}</div>
         </div>
 
@@ -105,43 +114,50 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
                         <div class="listNameRow">
                             <h2 v-truncate class="listName">{{ detail.title }}</h2>
                         </div>
+                        <div
+                            v-truncate
+                            class="heroArtist"
+                            :class="{ clickable: detail.artist_id != null }"
+                            @click="detail.artist_id != null && openArtist()"
+                        >{{ detail.artist }}</div>
                         <div class="badges">
-                            <div
-                                v-truncate
-                                class="badge"
-                                :class="{ clickable: detail.artist_id != null }"
-                                @click="detail.artist_id != null && openArtist()"
-                            >{{ detail.artist }}</div>
                             <div class="badge">{{ tracksCountText(detail.tracks.length) }}</div>
+                            <div v-if="totalDurationSecs > 0" class="badge">{{ formatTotalDuration(totalDurationSecs) }}</div>
                         </div>
                     </div>
                     <div class="controls">
                         <button
-                            class="playListBtn"
+                            type="button"
+                            class="primaryBtn"
                             :class="{ done: doneAll }"
                             :disabled="busyAll || doneAll || ytdlpMissing || detail.tracks.length === 0"
                             @click="downloadAll"
                         >
                             <span v-if="busyAll" class="btnSpinner"></span>
-                            <svg v-else-if="doneAll" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                            <DownloadIcon v-else width="16" height="16" />
-                            {{ doneAll ? t('downloads.albumQueued') : t('downloads.downloadAll') }}
+                            <svg v-else-if="doneAll" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            <DownloadIcon v-else width="17" height="17" />
+                            <span>{{ doneAll ? t('downloads.albumQueued') : t('downloads.downloadAll') }}</span>
                         </button>
                     </div>
                 </div>
             </div>
 
-            <div class="pageLine">
-                <div class="tracksList">
-                    <DownloadTrackRow
-                        v-for="(track, i) in detail.tracks"
-                        :key="i"
-                        :track="track"
-                        :index="i + 1"
-                        :show-album="false"
-                        @redownload="confirmTrack = $event"
-                    />
-                </div>
+            <div v-if="detail.tracks.length" class="listHead">
+                <span class="colRank">#</span>
+                <span class="colTitle">{{ t('downloads.listColTitle') }}</span>
+                <span class="colTime"><TimeIcon width="15" height="15" /></span>
+                <span class="colAction" aria-hidden="true"></span>
+            </div>
+
+            <div class="tracksList">
+                <DownloadTrackRow
+                    v-for="(track, i) in detail.tracks"
+                    :key="i"
+                    :track="track"
+                    :index="i + 1"
+                    :show-album="false"
+                    @redownload="confirmTrack = $event"
+                />
             </div>
         </template>
 
@@ -159,16 +175,22 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
 <style scoped>
 .pageRoot {
-    padding: 20px 28px;
+    --hero-tint: 120, 120, 120;
+    padding: 12px 32px 48px;
     display: flex;
     flex-direction: column;
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
+    background-image: linear-gradient(
+        to bottom,
+        rgba(var(--hero-tint), 0.42) 0px,
+        rgba(var(--hero-tint), 0.14) 240px,
+        rgba(var(--hero-tint), 0) 460px
+    );
     background-repeat: no-repeat;
     background-attachment: local;
-    overflow-y: scroll;
+    overflow-y: auto;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
 .pageRoot::-webkit-scrollbar-track { background: transparent; }
@@ -179,168 +201,210 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
 .backBtn {
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 4px;
-    padding: 6px 12px 6px 8px;
-    margin-bottom: 16px;
+    gap: 8px;
+    width: fit-content;
+    padding: 6px 14px 6px 10px;
+    margin: 0 0 8px -10px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
+    background-color: transparent;
     color: hsla(0, 0%, 100%, 0.8);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
     cursor: pointer;
     user-select: none;
-    transition: var(--duration-hover) var(--ease-smooth);
-    width: fit-content;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: #fff;
 }
-.backBtn svg { color: hsla(0, 0%, 100%, 0.6); transition: var(--duration-hover) var(--ease-smooth); }
-.backBtn:hover svg { color: hsla(0, 0%, 100%, 1); }
+.backBtn svg { transition: transform var(--duration-hover) var(--ease-smooth); }
+.backBtn:hover svg { transform: translateX(-2px); }
 
 .pageHat {
     display: flex;
     flex-direction: row;
-    gap: 30px;
+    align-items: flex-end;
+    gap: 32px;
     width: 100%;
     flex-shrink: 0;
+    padding: 8px 0 0;
 }
 .pageHat .coverWrap {
     position: relative;
-    width: 200px;
-    height: 200px;
+    width: 232px;
+    height: 232px;
     flex-shrink: 0;
     border-radius: 16px;
     overflow: hidden;
     background-color: #202020;
-    box-shadow: 0 12px 34px hsla(0, 0%, 0%, 0.4);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
 }
 .pageHat .cover {
     user-select: none;
-    width: 200px;
-    height: 200px;
+    width: 100%;
+    height: 100%;
     object-fit: cover;
 }
 .pageHat .dataZone {
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
-    gap: 18px;
-    width: calc(100% - 230px);
+    gap: 20px;
+    flex: 1;
+    min-width: 0;
 }
 .pageHat .dataZone .info {
-    width: 100%;
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 .listType {
     user-select: none;
-    margin-left: 1px;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.7);
 }
 .listNameRow {
     display: flex;
-    flex-direction: row;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     margin-top: 2px;
-    width: fit-content;
     max-width: 100%;
 }
 .listName {
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 42px;
+    font-size: 48px;
     font-weight: 900;
-    color: hsla(0, 0%, 100%, 0.9);
+    letter-spacing: -0.02em;
     line-height: 1.1;
+    color: hsla(0, 0%, 100%, 0.96);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+.heroArtist {
+    margin-top: 10px;
+    max-width: 100%;
+    width: fit-content;
+    font-size: 14px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.92);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    user-select: none;
+    transition: color var(--duration-hover) var(--ease-smooth);
 }
+.heroArtist.clickable { cursor: pointer; }
+.heroArtist.clickable:hover { color: hsl(var(--accent-h), min(var(--accent-s), 70%), 74%); }
+
 .badges {
     display: flex;
-    flex-direction: row;
-    gap: 8px;
-    margin-top: 14px;
-    min-width: 0;
+    flex-wrap: wrap;
+    margin-top: 4px;
+    max-width: 100%;
 }
 .badge {
     user-select: none;
-    max-width: 320px;
-    padding: 4px 10px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.06);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.7);
-    font-size: 12px;
-    font-weight: 500;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    transition: var(--duration-hover) var(--ease-smooth);
 }
-.badge.clickable { cursor: pointer; }
-.badge.clickable:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 0.9);
+.badge + .badge::before {
+    content: "\00B7";
+    margin: 0 6px;
 }
+
 .controls {
     display: flex;
-    flex-direction: row;
-    gap: 12px;
+    align-items: center;
+    gap: 10px;
 }
-.playListBtn {
+.primaryBtn {
     user-select: none;
     cursor: pointer;
-    display: flex;
-    flex-direction: row;
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 11px 18px 11px 16px;
+    gap: 8px;
+    height: 46px;
+    padding: 0 22px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 1);
-    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
-    font-size: 12px;
+    background-color: hsla(0, 0%, 100%, 0.96);
+    color: var(--light-bg);
+    font-size: 14px;
     font-weight: 600;
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
 }
-.playListBtn:hover { background-color: hsla(0, 0%, 100%, 0.86); }
-.playListBtn:disabled {
+.primaryBtn:hover:not(:disabled) {
+    transform: scale(1.03);
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+}
+.primaryBtn:active:not(:disabled) {
+    transform: scale(0.96);
+    transition-duration: 80ms;
+}
+.primaryBtn:disabled {
     cursor: not-allowed;
-    background-color: hsla(0, 0%, 100%, 0.3);
+    opacity: 0.35;
 }
-.playListBtn.done {
+.primaryBtn.done {
     cursor: default;
-    color: hsla(0, 0%, 100%, 0.6);
+    opacity: 1;
+    color: hsla(0, 0%, 100%, 0.72);
     background-color: hsla(0, 0%, 100%, 0.1);
 }
 .btnSpinner {
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    border: 2px solid hsla(var(--accent-h), var(--accent-s), 20%, 0.3);
-    border-top-color: hsla(var(--accent-h), var(--accent-s), 20%, 0.9);
+    border: 2px solid hsla(0, 0%, 0%, 0.2);
+    border-top-color: hsla(0, 0%, 0%, 0.75);
     animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.pageLine {
-    width: 100%;
+.listHead {
     display: flex;
-    flex-direction: column;
-    gap: 13px;
-    margin-top: 36px;
+    align-items: center;
+    gap: 12px;
+    height: 36px;
+    margin-top: 32px;
+    margin-bottom: 4px;
+    padding: 0 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.42);
+    user-select: none;
 }
+.listHead .colRank {
+    width: 22px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.listHead .colTitle {
+    flex: 1;
+    min-width: 0;
+}
+.listHead .colTime {
+    display: flex;
+    justify-content: flex-end;
+    width: 44px;
+    flex-shrink: 0;
+}
+.listHead .colAction {
+    width: 38px;
+    flex-shrink: 0;
+}
+
 .tracksList {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
 }
 
 .emptyAlbums {
@@ -353,15 +417,28 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     padding-bottom: 40px;
 }
 .emptyIcon {
-    padding: 10px;
-    border-radius: 9px;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background-color: hsla(0, 0%, 100%, 0.06);
-    color: #fff;
+    color: hsla(0, 0%, 100%, 0.8);
 }
 .emptyText {
     user-select: none;
     font-size: 14px;
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.7);
+}
+
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
+    .pageRoot { padding: 12px 16px 80px; }
+    .pageHat { flex-direction: column; align-items: flex-start; gap: 20px; }
+    .pageHat .coverWrap { width: 180px; height: 180px; }
+    .listName { font-size: 30px; }
+    .listHead { display: none; }
+    .tracksList { margin: 20px -8px 0; }
 }
 </style>

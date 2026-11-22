@@ -5,6 +5,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 
 import CloseIcon from './Icons/CloseIcon.vue'
 import EditIcon from './Icons/EditIcon.vue'
+import EmptyIcon from './Icons/EmptyIcon.vue'
 import { useTrackEditModal } from '../composables/useTrackEditModal'
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import { useSheetModal } from '../composables/useSheetModal'
@@ -230,42 +231,24 @@ onUnmounted(() => {
             >
                 <div ref="modalCardEl" class="modalCard" @mousedown.stop>
                     <div class="sheetHandle" @pointerdown="onSheetDragStart"></div>
-                    <div class="accentGlow"></div>
 
-                    <button class="closeBtn" @click="closeTrackEdit" aria-label="Закрыть">
-                        <CloseIcon />
-                    </button>
-
-                    <div class="modalHeader">
-                        <div class="overline">Редактирование трека</div>
-                        <div class="fileName" v-tooltip="currentTrack.file_path">{{ fileName }}</div>
-                    </div>
+                    <div class="fileName" v-tooltip="currentTrack.file_path">{{ fileName }}</div>
 
                     <div class="editArea">
-                        <div class="coverColumn">
-                            <div class="coverWrap">
-                                <div class="coverHalo"></div>
-                                <div class="cover" :class="{ empty: !coverPreview }">
-                                    <img v-if="coverPreview" :src="coverPreview" alt="" draggable="false" />
-                                    <div v-else class="coverPlaceholder">Без обложки</div>
-                                </div>
-                                <div class="coverActions">
-                                    <button class="coverActionBtn" @click="pickCover" v-tooltip="'Выбрать изображение'">
-                                        <EditIcon width="16" height="16" />
-                                    </button>
-                                    <button
-                                        v-if="coverPreview && !previewIsOriginal"
-                                        class="coverActionBtn coverReset"
-                                        @click="resetCover"
-                                        v-tooltip="'Сбросить обложку'"
-                                    >
-                                        <CloseIcon width="16" height="16" />
-                                    </button>
-                                </div>
-                            </div>
-                            <button class="coverPickBtn" @click="pickCover">
-                                <EditIcon width="14" height="14" />
-                                <span>{{ coverSourcePath ? 'Заменить файл' : 'Выбрать обложку' }}</span>
+                        <div class="coverWrap">
+                            <button class="cover" @click="pickCover" aria-label="Выбрать обложку">
+                                <img v-if="coverPreview" :src="coverPreview" alt="" draggable="false" />
+                                <span v-else class="coverPlaceholder"><EmptyIcon /></span>
+                                <span class="coverOverlay"><EditIcon width="22" height="22" /></span>
+                            </button>
+                            <button
+                                v-if="coverPreview && !previewIsOriginal"
+                                class="coverReset"
+                                @click="resetCover"
+                                aria-label="Сбросить обложку"
+                                v-tooltip="'Сбросить обложку'"
+                            >
+                                <CloseIcon width="14" height="14" />
                             </button>
                         </div>
 
@@ -303,10 +286,10 @@ onUnmounted(() => {
 
                     <div class="footer">
                         <button
-                            class="btn ghost resetBtn"
+                            class="btn quiet"
                             :disabled="!canResetAll || saving || loadingOriginal"
                             @click="resetAllToOriginal"
-                            v-tooltip="'Подставить оригинальные значения из тегов файла'"
+                            v-tooltip="'Вернуть значения из тегов файла'"
                         >
                             Сбросить
                         </button>
@@ -337,85 +320,33 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: hsla(0, 0%, 0%, 0.35);
+    background-color: hsla(0, 0%, 0%, 0.4);
     backdrop-filter: blur(6px);
 }
 .modalCard {
+    --tile: hsl(var(--accent-h), min(var(--accent-s), 45%), 19%);
     position: relative;
-    width: 540px;
+    width: 520px;
     max-width: calc(100vw - 40px);
-    padding: 22px 22px 18px;
+    padding: 24px;
     border-radius: 28px;
     background-color: var(--light-bg);
-    box-shadow:
-        0 24px 60px rgba(0, 0, 0, 0.25),
-        0 0 0 1px hsla(0, 0%, 100%, 0.04) inset;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.32);
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 20px;
     overflow: hidden;
 }
 .sheetHandle {
     display: none;
 }
-.accentGlow {
-    pointer-events: none;
-    position: absolute;
-    top: -60%;
-    left: -20%;
-    right: -20%;
-    height: 220px;
-    background: radial-gradient(
-        ellipse at center,
-        hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.28) 0%,
-        hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0) 70%
-    );
-    filter: blur(8px);
-    z-index: 0;
-}
-.closeBtn {
-    position: absolute;
-    top: 16px;
-    right: 16px;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    border: none;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    color: hsla(0, 0%, 100%, 0.7);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: var(--duration-hover) var(--ease-smooth);
-    z-index: 2;
-}
-.closeBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.14);
-    color: #fff;
-}
 
-.modalHeader {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding-right: 36px;
-}
-.overline {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.7), 75%, 0.85);
-    user-select: none;
-}
 .fileName {
-    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
-    font-size: 12px;
+    align-self: flex-start;
+    max-width: 100%;
+    font-size: 13px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.6);
+    color: hsla(0, 0%, 100%, 0.45);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -423,45 +354,29 @@ onUnmounted(() => {
 }
 
 .editArea {
-    position: relative;
-    z-index: 1;
     display: flex;
     flex-direction: row;
-    gap: 22px;
-    align-items: stretch;
-}
-.coverColumn {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    flex-shrink: 0;
+    gap: 20px;
+    align-items: flex-start;
 }
 .coverWrap {
     position: relative;
-    width: 156px;
-    height: 156px;
-}
-.coverHalo {
-    position: absolute;
-    inset: -10px;
-    border-radius: 22px;
-    background: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.45);
-    filter: blur(20px);
-    opacity: 0.55;
-    z-index: 0;
+    flex-shrink: 0;
+    width: 148px;
+    height: 148px;
 }
 .cover {
     position: relative;
+    display: block;
     width: 100%;
     height: 100%;
+    padding: 0;
+    border: none;
     border-radius: 16px;
     overflow: hidden;
-    background-color: hsla(0, 0%, 100%, 0.04);
-    box-shadow:
-        0 8px 24px rgba(0, 0, 0, 0.35),
-        0 0 0 1px hsla(0, 0%, 100%, 0.06) inset;
-    z-index: 1;
+    background-color: var(--tile);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+    cursor: pointer;
 }
 .cover img {
     width: 100%;
@@ -476,61 +391,46 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    color: hsla(0, 0%, 100%, 0.4);
-    font-size: 12px;
-    font-weight: 600;
-    background: linear-gradient(135deg, hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.35), hsla(0, 0%, 100%, 0.03));
-    user-select: none;
+    color: hsla(0, 0%, 100%, 0.35);
 }
-.coverActions {
+.coverPlaceholder svg {
+    width: 34px;
+    height: 34px;
+}
+.coverOverlay {
     position: absolute;
     inset: 0;
-    z-index: 2;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    color: #fff;
+    background-color: hsla(0, 0%, 0%, 0.45);
     opacity: 0;
     transition: opacity var(--duration-hover) var(--ease-smooth);
-    background-color: hsla(0, 0%, 0%, 0.35);
-    border-radius: 16px;
 }
-.coverWrap:hover .coverActions {
+.cover:hover .coverOverlay,
+.cover:focus-visible .coverOverlay {
     opacity: 1;
 }
-.coverActionBtn {
-    cursor: pointer;
-    padding: 9px;
-    border-radius: 999px;
-    color: #fff;
-    background-color: hsla(0, 0%, 0%, 0.55);
-    backdrop-filter: blur(8px);
+.coverReset {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
     border: none;
-    transition: background-color var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
-}
-.coverActionBtn:hover {
-    background-color: hsla(0, 0%, 0%, 0.78);
-    transform: scale(1.05);
-}
-.coverActionBtn.coverReset:hover {
-    color: hsl(0, 70%, 75%);
-}
-.coverPickBtn {
-    cursor: pointer;
+    border-radius: 50%;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
-    color: hsla(0, 0%, 100%, 0.85);
-    font-size: 12px;
-    font-weight: 600;
-    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
-}
-.coverPickBtn:hover {
-    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.18);
+    justify-content: center;
     color: #fff;
+    background-color: hsla(0, 0%, 0%, 0.6);
+    cursor: pointer;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.coverReset:hover {
+    background-color: hsla(0, 0%, 0%, 0.8);
 }
 
 .fieldsColumn {
@@ -538,8 +438,7 @@ onUnmounted(() => {
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    justify-content: flex-start;
+    gap: 16px;
 }
 .fieldGroup {
     display: flex;
@@ -547,11 +446,9 @@ onUnmounted(() => {
     gap: 6px;
 }
 .fieldLabel {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: hsla(0, 0%, 100%, 0.45);
+    font-size: 12px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.5);
     padding-left: 2px;
     user-select: none;
 }
@@ -560,41 +457,33 @@ onUnmounted(() => {
     box-sizing: border-box;
     width: 100%;
     padding: 10px 14px;
+    border: none;
     border-radius: 12px;
-    background-color: hsla(0, 0%, 100%, 0.04);
+    background-color: hsla(0, 0%, 100%, 0.05);
     color: hsla(0, 0%, 100%, 0.92);
     font-family: inherit;
     font-size: 14px;
     font-weight: 500;
     line-height: 1.35;
-    border: 1px solid hsla(0, 0%, 100%, 0.04);
     resize: none;
     overflow-y: hidden;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    transition: background-color var(--duration-hover) var(--ease-smooth), border-color var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth);
+    outline: none;
+    caret-color: hsl(var(--accent-h), max(var(--accent-s), 55%), 72%);
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
 .fieldInput::placeholder {
     color: hsla(0, 0%, 100%, 0.3);
-    font-weight: 500;
 }
 .fieldInput:hover {
-    background-color: hsla(0, 0%, 100%, 0.06);
+    background-color: hsla(0, 0%, 100%, 0.07);
 }
 .fieldInput:focus {
-    background-color: hsla(0, 0%, 100%, 0.07);
-    border-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.45);
-}
-.hint {
-    font-size: 11px;
-    line-height: 1.45;
-    color: hsla(0, 0%, 100%, 0.4);
-    user-select: none;
+    background-color: var(--tile);
 }
 
 .errorBox {
-    position: relative;
-    z-index: 1;
     padding: 10px 14px;
     border-radius: 12px;
     background-color: hsla(0, 70%, 50%, 0.12);
@@ -604,57 +493,54 @@ onUnmounted(() => {
 }
 
 .footer {
-    position: relative;
-    z-index: 1;
     display: flex;
     flex-direction: row;
     align-items: center;
     gap: 8px;
-    padding-top: 4px;
 }
 .footerSpacer {
     flex: 1;
 }
-.btn.resetBtn {
-    color: hsla(0, 0%, 100%, 0.55);
-}
-.btn.resetBtn:hover:not(:disabled) {
-    background-color: hsla(0, 0%, 100%, 0.08);
-    color: #fff;
-}
 .btn {
     cursor: pointer;
-    padding: 9px 18px;
+    height: 36px;
+    padding: 0 18px;
+    border: none;
     border-radius: 999px;
     font-family: inherit;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.4px;
-    text-transform: uppercase;
-    transition: var(--duration-hover) var(--ease-smooth);
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
     user-select: none;
-    border: none;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), opacity var(--duration-hover) var(--ease-smooth);
 }
 .btn:disabled {
     cursor: default;
-    opacity: 0.5;
+    opacity: 0.4;
+}
+.btn.quiet {
+    padding: 0 12px;
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.55);
+}
+.btn.quiet:hover:not(:disabled) {
+    background-color: hsla(0, 0%, 100%, 0.08);
+    color: #fff;
 }
 .btn.ghost {
-    background-color: hsla(0, 0%, 100%, 0.05);
-    color: hsla(0, 0%, 100%, 0.7);
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.8);
 }
 .btn.ghost:hover:not(:disabled) {
-    background-color: hsla(0, 0%, 100%, 0.1);
+    background-color: hsla(0, 0%, 100%, 0.11);
     color: #fff;
 }
 .btn.primary {
-    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.22);
-    color: hsla(var(--accent-h), calc(var(--accent-s) * 0.6), 88%, 1);
-    box-shadow: 0 0 0 1px hsla(var(--accent-h), var(--accent-s), 60%, 0.25) inset;
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 60%), 62%);
+    color: hsl(var(--accent-h), 40%, 10%);
 }
 .btn.primary:hover:not(:disabled) {
-    background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.34);
-    color: #fff;
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 60%), 68%);
 }
 
 .modal-enter-active, .modal-leave-active {
@@ -686,8 +572,8 @@ onUnmounted(() => {
         max-height: none !important;
         margin-left: 0 !important;
         margin-right: 0 !important;
-        padding: 0 16px calc(18px + var(--safe-bottom));
-        gap: 16px;
+        padding: 0 16px calc(16px + var(--safe-bottom));
+        gap: 20px;
         border-radius: 28px 28px 0 0 !important;
         background-color: hsl(var(--accent-h), min(var(--accent-s), 48%), 11%);
         overflow-y: auto !important;
@@ -700,8 +586,8 @@ onUnmounted(() => {
     .sheetHandle {
         display: flex;
         flex: 0 0 auto;
-        height: 34px;
-        margin: 0 -16px;
+        height: 32px;
+        margin: 0 -16px -12px;
         align-items: center;
         justify-content: center;
         cursor: grab;
@@ -710,46 +596,35 @@ onUnmounted(() => {
 
     .sheetHandle::before {
         content: "";
-        width: 42px;
+        width: 40px;
         height: 4px;
         border-radius: 999px;
         background-color: hsla(0, 0%, 100%, 0.28);
     }
 
-    .modalHeader {
-        padding-right: 0;
+    .fileName {
+        align-self: center;
     }
 
-    .closeBtn {
-        display: none;
-    }
-
-    .coverColumn {
+    .editArea {
+        flex-direction: column;
         align-items: stretch;
+        gap: 24px;
     }
 
     .coverWrap {
         align-self: center;
-        width: min(52vw, 170px);
-        height: min(52vw, 170px);
+        width: min(56vw, 200px);
+        height: min(56vw, 200px);
     }
 
-    .coverActions {
-        opacity: 1;
+    .coverOverlay {
+        display: none;
     }
 
-    .coverActionBtn {
-        width: 44px;
-        height: 44px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .coverPickBtn {
-        min-height: 44px;
-        justify-content: center;
-        border-radius: 14px;
+    .coverReset {
+        width: 36px;
+        height: 36px;
     }
 
     .fieldInput {
@@ -757,8 +632,17 @@ onUnmounted(() => {
         font-size: 16px;
     }
 
-    .hint {
-        font-size: 12px;
+    .footer {
+        margin-top: auto;
+    }
+
+    .btn {
+        height: 44px;
+    }
+
+    .btn.ghost,
+    .btn.primary {
+        flex: 1;
     }
 
     .footerSpacer {

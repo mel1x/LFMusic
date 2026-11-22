@@ -1248,22 +1248,69 @@ onUnmounted(() => {
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
     .pageRoot { padding: 16px 10px; }
+    /* Waves fill the whole page instead of a framed card. */
+    .stageArea { position: static; }
+    .flowBg {
+        inset: 0;
+        border-radius: 0;
+        background-color: transparent;
+        -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 72%, transparent 100%);
+        mask-image: linear-gradient(to bottom, #000 0%, #000 72%, transparent 100%);
+    }
+    /* Mood picker: one dock of icons, the active mood opens into a labelled pill. */
     .moodGrid {
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
         justify-content: center;
-        gap: 8px;
+        gap: 4px;
+        width: auto;
+        max-width: 100%;
+        margin-bottom: 8px;
+        padding: 6px;
+        border-radius: 999px;
+        background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 14%);
     }
     .moodTile {
+        flex: 0 0 auto;
         flex-direction: row;
         align-items: center;
-        gap: 8px;
-        padding: 6px 14px 6px 6px;
+        gap: 0;
+        height: 44px;
+        min-width: 44px;
+        padding: 0;
         border-radius: 999px;
+        background-color: transparent;
+        color: hsla(0, 0%, 100%, 0.7);
     }
-    .moodTileIcon { width: 30px; height: 30px; margin-bottom: 0; }
-    .moodTileName { font-size: 13px; font-weight: 600; }
+    .moodTile:hover { background-color: transparent; }
+    .moodTileIcon {
+        width: 44px;
+        height: 44px;
+        margin-bottom: 0;
+        background-color: transparent;
+        color: inherit;
+    }
+    .moodTileName {
+        max-width: 0;
+        opacity: 0;
+        font-size: 13px;
+        font-weight: 600;
+        transition: max-width .32s var(--ease-smooth), opacity .2s var(--ease-smooth), padding .32s var(--ease-smooth);
+    }
     .moodTileDesc { display: none; }
+    .moodTile.active {
+        background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 52%);
+        color: #fff;
+    }
+    .moodTile.active .moodTileIcon {
+        background-color: transparent;
+        color: #fff;
+    }
+    .moodTile.active .moodTileName {
+        max-width: 130px;
+        opacity: 1;
+        padding-right: 16px;
+    }
     .mixNowTitle { max-width: 240px; }
     .statsBtn { top: 14px; right: 16px; min-height: 40px; }
     .mixName { font-size: 34px; letter-spacing: -0.8px; }

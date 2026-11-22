@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { goBackOrHome } from '../router'
 
 import DownloadIcon from '../components/Icons/DownloadIcon.vue'
+import TimeIcon from '../components/Icons/TimeIcon.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import DownloadTrackRow from '../components/DownloadTrackRow.vue'
@@ -117,8 +118,8 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
 <template>
     <div class="pageRoot" ref="pageEl" @scroll="onScroll">
-        <button class="backBtn" @click="goBack">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+        <button type="button" class="backBtn" @click="goBack">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
             <span>{{ t('downloads.back') }}</span>
         </button>
 
@@ -130,11 +131,16 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
         <LoadingSpinner v-if="loading" />
 
         <div v-else-if="failed || tracks.length === 0" class="emptyState">
-            <div class="emptyIcon"><DownloadIcon width="22" height="22" /></div>
+            <div class="emptyIcon"><DownloadIcon width="20" height="20" /></div>
             <div class="emptyText">{{ failed ? t('downloads.artistNotFound') : t('downloads.artistTracksEmpty') }}</div>
         </div>
 
         <template v-else>
+            <div class="listHead">
+                <span class="colTitle">{{ t('downloads.listColTitle') }}</span>
+                <span class="colTime"><TimeIcon width="15" height="15" /></span>
+                <span class="colAction" aria-hidden="true"></span>
+            </div>
             <div class="tracksList">
                 <DownloadTrackRow
                     v-for="track in tracks"
@@ -160,16 +166,13 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
 <style scoped>
 .pageRoot {
-    padding: 20px 28px;
+    padding: 12px 32px 48px;
     display: flex;
     flex-direction: column;
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
-    background-repeat: no-repeat;
-    background-attachment: local;
-    overflow-y: scroll;
+    overflow-y: auto;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
 .pageRoot::-webkit-scrollbar-track { background: transparent; }
@@ -180,58 +183,88 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
 .backBtn {
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 4px;
-    padding: 6px 12px 6px 8px;
-    margin-bottom: 16px;
+    gap: 8px;
+    width: fit-content;
+    padding: 6px 14px 6px 10px;
+    margin: 0 0 8px -10px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
+    background-color: transparent;
     color: hsla(0, 0%, 100%, 0.8);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
     cursor: pointer;
     user-select: none;
-    transition: var(--duration-hover) var(--ease-smooth);
-    width: fit-content;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: #fff;
 }
-.backBtn svg { color: hsla(0, 0%, 100%, 0.6); transition: var(--duration-hover) var(--ease-smooth); }
-.backBtn:hover svg { color: hsla(0, 0%, 100%, 1); }
+.backBtn svg { transition: transform var(--duration-hover) var(--ease-smooth); }
+.backBtn:hover svg { transform: translateX(-2px); }
 
 .pageHead {
     display: flex;
     flex-direction: column;
-    margin-bottom: 24px;
+    gap: 4px;
+    margin: 6px 0 20px;
     min-width: 0;
 }
 .listType {
     user-select: none;
-    margin-left: 1px;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.45);
 }
 .listName {
     cursor: default;
-    margin-top: 2px;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 34px;
+    font-size: 36px;
     font-weight: 900;
-    color: hsla(0, 0%, 100%, 0.9);
+    letter-spacing: -0.02em;
+    color: hsla(0, 0%, 100%, 0.96);
     line-height: 1.1;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
+.listHead {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 36px;
+    margin-bottom: 4px;
+    padding: 0 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.42);
+    user-select: none;
+}
+.listHead .colTitle {
+    flex: 1;
+    min-width: 0;
+    padding-left: 60px;
+}
+.listHead .colTime {
+    display: flex;
+    justify-content: flex-end;
+    width: 44px;
+    flex-shrink: 0;
+}
+.listHead .colAction {
+    width: 38px;
+    flex-shrink: 0;
+}
+
 .tracksList {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
 }
 .loadMore { display: flex; justify-content: center; padding: 18px 0 4px; }
 .btnSpinner {
@@ -254,10 +287,14 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     padding-bottom: 40px;
 }
 .emptyIcon {
-    padding: 10px;
-    border-radius: 9px;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background-color: hsla(0, 0%, 100%, 0.06);
-    color: #fff;
+    color: hsla(0, 0%, 100%, 0.8);
 }
 .emptyText {
     user-select: none;
@@ -267,7 +304,9 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
-    .pageRoot { padding: 16px 16px 80px; }
+    .pageRoot { padding: 12px 16px 80px; }
     .listName { font-size: 28px; }
+    .listHead { display: none; }
+    .tracksList { margin: 0 -8px; }
 }
 </style>

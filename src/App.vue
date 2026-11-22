@@ -704,6 +704,7 @@ body {
 
   body.lfmusic-phone .mobileHeroPage .badge {
     padding: 3px 9px;
+    border-radius: 999px;
     font-size: 11px;
     background-color: hsla(0, 0%, 100%, 0.1);
     color: hsla(0, 0%, 100%, 0.72);

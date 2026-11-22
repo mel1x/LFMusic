@@ -7,7 +7,7 @@ import MoreIcon from '../components/Icons/MoreIcon.vue'
 import PlayIcon from '../components/Icons/PlayIcon.vue'
 import PauseIcon from '../components/Icons/PauseIcon.vue'
 import PinIcon from '../components/Icons/PinIcon.vue'
-import EmptyIcon from '../components/Icons/EmptyIcon.vue'
+import ShuffleIcon from '../components/Icons/ShuffleIcon.vue'
 import defaultTrackCover from '../assets/trackCover.webp'
 
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
@@ -15,7 +15,8 @@ import { usePlaySource } from '../composables/usePlaySource'
 import { usePlaylists } from '../composables/usePlaylists'
 import { createRipple } from '../composables/useRipple'
 import { isPhoneViewport } from '../composables/usePlatform'
-import { tracksCountText, listenCountText } from '../utils/format'
+import { tracksCountText, pluralizeRu } from '../utils/format'
+import { useI18n } from '../composables/useI18n'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue'
 import TrackRow from '../components/TrackRow.vue'
@@ -45,6 +46,8 @@ const {
     loadCoversForTracks,
     getTrackByPath,
     cacheTracks,
+    shuffled,
+    toggleShuffle,
 } = usePlayer()
 const { playSource } = usePlaySource()
 
@@ -98,7 +101,17 @@ function albumCoverFor(name: string, fallback: string | null): string {
     return fallback || defaultTrackCover
 }
 
-const previewTracks = computed(() => artistTracks.value.slice(0, 6))
+const PREVIEW_COUNT = 6
+const MORE_STEP = 20
+const shownCount = ref(PREVIEW_COUNT)
+const previewTracks = computed(() => artistTracks.value.slice(0, shownCount.value))
+const hiddenCount = computed(() => Math.max(0, artistTracks.value.length - shownCount.value))
+
+function showMoreTracks() {
+    shownCount.value += MORE_STEP
+}
+
+watch(rawArtistName, () => { shownCount.value = PREVIEW_COUNT })
 
 interface AlbumEntry {
     id: number
@@ -187,64 +200,11 @@ onMounted(async () => {
 })
 
 watch(() => artistTracks.value.length, () => requestCovers())
+watch(shownCount, () => requestCovers())
 watch(artistName, () => requestCovers())
-
-const albumsLineEl = ref<HTMLElement | null>(null)
-const scrollLeft = ref(0)
-const scrollMax = ref(0)
-const itemWidth = ref(210)
-const measured = ref(false)
-let albumsRO: ResizeObserver | null = null
-const ALBUMS_GAP = 16
-const ALBUMS_BASE = 210
-
-function measureAlbumsLine() {
-    const node = albumsLineEl.value
-    if (!node) return
-    const cw = node.clientWidth
-    if (cw > 0) {
-        const n = Math.max(1, Math.floor((cw + ALBUMS_GAP) / (ALBUMS_BASE + ALBUMS_GAP)))
-        itemWidth.value = (cw - (n - 1) * ALBUMS_GAP) / n
-        measured.value = true
-    }
-    scrollLeft.value = node.scrollLeft
-    scrollMax.value = Math.max(0, node.scrollWidth - node.clientWidth)
-}
-
-function onAlbumsScroll() {
-    const node = albumsLineEl.value
-    if (!node) return
-    scrollLeft.value = node.scrollLeft
-    scrollMax.value = Math.max(0, node.scrollWidth - node.clientWidth)
-}
-
-function scrollAlbumsBy(dir: 1 | -1) {
-    const node = albumsLineEl.value
-    if (!node) return
-    node.scrollBy({ left: dir * node.clientWidth * 0.9, behavior: 'smooth' })
-}
-
-const canPrev = computed(() => scrollLeft.value > 1)
-const canNext = computed(() => scrollLeft.value < scrollMax.value - 1)
-
-watch(albumsLineEl, (el) => {
-    if (!el) return
-    measureAlbumsLine()
-    if (!albumsRO) {
-        albumsRO = new ResizeObserver(() => measureAlbumsLine())
-        albumsRO.observe(el)
-    }
-})
-
-watch(() => artistAlbums.value.length, async () => {
-    await nextTick()
-    measureAlbumsLine()
-})
 
 onUnmounted(() => {
     window.removeEventListener(TRACK_STATISTICS_UPDATED_EVENT, onTrackStatisticsUpdated)
-    albumsRO?.disconnect()
-    albumsRO = null
 })
 
 const isArtistActive = computed(() =>
@@ -260,6 +220,26 @@ function onPlayArtist() {
     setPlaylistSource(sourceId.value, artistTracks.value)
     playTrack(artistTracks.value[0])
 }
+
+const isShuffleActive = computed(() => isArtistActive.value && shuffled.value)
+
+function onShuffleArtist() {
+    const list = artistTracks.value
+    if (list.length === 0) return
+    if (isArtistActive.value) {
+        toggleShuffle()
+        return
+    }
+    if (!shuffled.value) toggleShuffle()
+    setPlaylistSource(sourceId.value, list)
+    playTrack(list[Math.floor(Math.random() * list.length)], { manualListStart: true })
+}
+
+const { language } = useI18n()
+const listensLabel = computed(() => language.value === 'en'
+    ? (listenCount.value === 1 ? 'listen' : 'listens')
+    : pluralizeRu(listenCount.value, ['прослушивание', 'прослушивания', 'прослушиваний']))
+const tracksLabel = computed(() => tracksCountText(artistTracks.value.length).replace(/^\d+\s*/, ''))
 
 function onTrackClick(e: MouseEvent, track: TrackMetadata) {
     if (isPhoneViewport()) {
@@ -351,10 +331,6 @@ function goBack() {
     goBackOrHome(router)
 }
 
-function openArtistTracks() {
-    router.push(`/artist/${encodeURIComponent(artistName.value)}/tracks`)
-}
-
 function openArtistAlbums() {
     router.push({ path: '/collections/albums', query: { q: artistName.value } })
 }
@@ -386,132 +362,144 @@ function onCoverImgClick() {
         <div class="stickyHeaderAnchor hasMobileScrollHeader">
             <MobileScrollHeader :title="artistName || 'Исполнитель'" :scrolled="scrollY > 16" @top="scrollToTop" />
         </div>
-        <div class="scrollHeader">
-        <button class="backBtn" @click="goBack">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-            <span>Назад</span>
-        </button>
-        <div class="pageHat">
-            <div class="coverWrap cover-edit-host" @click="onCoverImgClick">
-                <AnimatedCover :src="artistCover" class="cover" alt="cover" />
-                <CoverEditor kind="artist" :coverKey="artistName" size="large" />
-            </div>
-            <div class="dataZone">
-                <div class="info">
-                    <div class="listType">Исполнитель</div>
-                    <div class="listNameRow">
-                        <h2 v-truncate class="listName">{{ artistName }}</h2>
+        <div class="artistLayout">
+            <aside class="artistAside scrollHeader">
+                <button class="backBtn" @click="goBack">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+                    <span>Назад</span>
+                </button>
+                <div class="pageHat">
+                    <div class="coverWrap cover-edit-host" @click="onCoverImgClick">
+                        <AnimatedCover :src="artistCover" class="cover" alt="cover" />
+                        <CoverEditor kind="artist" :coverKey="artistName" size="large" />
                     </div>
-                    <div class="badges">
-                        <div class="badge" v-tooltip="'Количество треков исполнителя'">{{ tracksCountText(artistTracks.length) }}</div>
-                        <div class="badge" v-tooltip="'Сколько раз была прослушана музыка этого исполнителя'">{{ listenCountText(listenCount) }}</div>
+                    <div class="dataZone">
+                        <div class="info">
+                            <div class="listType">Исполнитель</div>
+                            <div class="listNameRow">
+                                <h2 v-truncate class="listName">{{ artistName }}</h2>
+                            </div>
+                            <div class="badges">
+                                <span class="badge">
+                                    <b>{{ listenCount }}</b>
+                                    <span>{{ listensLabel }}</span>
+                                </span>
+                                <span class="badge">
+                                    <b>{{ artistTracks.length }}</b>
+                                    <span>{{ tracksLabel }}</span>
+                                </span>
+                            </div>
+                        </div>
+                        <div class="controls">
+                            <button
+                                class="playListBtn"
+                                :disabled="artistTracks.length === 0"
+                                :aria-label="isArtistActive && isPlaying ? 'Пауза' : 'Слушать'"
+                                @click="onPlayArtist"
+                            >
+                                <PauseIcon v-if="isArtistActive && isPlaying" width="22" height="22" />
+                                <PlayIcon v-else width="22" height="22" />
+                            </button>
+                            <button
+                                class="iconBtn shuffleBtn"
+                                :class="{ on: isShuffleActive }"
+                                :disabled="artistTracks.length === 0"
+                                v-tooltip="'Перемешать'"
+                                @click="onShuffleArtist"
+                            >
+                                <ShuffleIcon width="20" height="20" />
+                            </button>
+                            <button class="iconBtn moreBtn" :class="{ menuOpen: !!artistMenu }" v-tooltip="'Меню'" @mousedown.stop="openArtistMenu($event)">
+                                <MoreIcon width="22" height="22" />
+                            </button>
+                        </div>
                     </div>
                 </div>
-                <div class="controls">
-                    <button class="playListBtn" :disabled="artistTracks.length === 0" @click="onPlayArtist">
-                        <PauseIcon v-if="isArtistActive && isPlaying" width="14" height="14" />
-                        <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                        <span class="playListText">Слушать</span>
-                    </button>
-                    <button class="moreBtn" :class="{ menuOpen: !!artistMenu }" @mousedown.stop="openArtistMenu($event)">
-                        <MoreIcon width="22" height="22" />
-                    </button>
-                </div>
-            </div>
-        </div>
-        </div>
+            </aside>
 
-        <div class="pageLine">
-            <div class="lineHat">
-                <div class="lineTitle" @click="openArtistTracks">
-                    Треки артиста
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                </div>
-            </div>
-            <div class="tracksList" v-if="previewTracks.length > 0">
-                <TrackRow
-                    v-for="track in previewTracks"
-                    :key="track.file_path"
-                    :track="track"
-                    :active="currentTrack?.file_path === track.file_path"
-                    :activePaused="currentTrack?.file_path === track.file_path && !isPlaying"
-                    :menuOpen="trackMenu?.track.file_path === track.file_path"
-                    @rowClick="onTrackClick($event, track)"
-                    @coverClick="onCoverClick(track)"
-                    @openMenu="openTrackMenu($event, track)"
-                />
-            </div>
-            <div v-else class="emptyRow">У этого исполнителя пока нет треков</div>
-        </div>
+            <div class="artistMain">
+                <section class="pageLine">
+                    <div class="tracksList" v-if="previewTracks.length > 0">
+                        <TrackRow
+                            v-for="(track, i) in previewTracks"
+                            :key="track.file_path"
+                            large
+                            :rank="i + 1"
+                            :track="track"
+                            :active="currentTrack?.file_path === track.file_path"
+                            :activePaused="currentTrack?.file_path === track.file_path && !isPlaying"
+                            :menuOpen="trackMenu?.track.file_path === track.file_path"
+                            @rowClick="onTrackClick($event, track)"
+                            @coverClick="onCoverClick(track)"
+                            @openMenu="openTrackMenu($event, track)"
+                        />
+                    </div>
+                    <div v-else class="emptyRow">У этого исполнителя пока нет треков</div>
+                    <button v-if="hiddenCount > 0" class="showMoreBtn" @click="showMoreTracks">
+                        <span class="showMoreIcon">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                        </span>
+                        <span class="showMoreText">Показать больше</span>
+                        <span class="showMoreCount">{{ hiddenCount }}</span>
+                    </button>
+                </section>
 
-        <div class="pageLine">
-            <div class="lineHat">
-                <div class="lineTitle" @click="openArtistAlbums">
-                    Альбомы артиста
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                </div>
-                <div class="lineControls" v-if="artistAlbums.length > 0">
-                    <button class="prevBtn" :disabled="!canPrev" @click="scrollAlbumsBy(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
-                    <button class="nextBtn" :disabled="!canNext" @click="scrollAlbumsBy(1)"><svg style="margin-left:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></button>
-                </div>
-            </div>
-            <div
-                v-if="artistAlbums.length > 0"
-                class="lineList"
-                ref="albumsLineEl"
-                :style="{ '--card-w': itemWidth + 'px', visibility: measured ? 'visible' : 'hidden' }"
-                @scroll="onAlbumsScroll"
-            >
-                <div
-                    v-for="album in artistAlbums"
-                    :key="album.id"
-                    class="playlistItem albumItem"
-                    @click="openAlbum(album)"
-                >
-                    <div
-                        class="coverWrap"
-                        :class="{ menuOpen: albumMenu?.album.name === album.name }"
-                        @contextmenu="openAlbumMenuFromCover($event, album)"
-                    >
-                        <AnimatedCover class="cover" :src="albumCoverFor(album.name, album.cover)" />
-                        <button
-                            class="overlayBtn pinBtn"
-                            :class="{ active: isAlbumPinned(album.name) }"
-                            @click="onToggleAlbumPinClick($event, album)"
-                            @contextmenu.stop
-                            v-tooltip="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
-                        >
-                            <PinIcon width="16" height="16" />
-                        </button>
-                        <button
-                            class="overlayBtn playBtn"
-                            :disabled="album.trackCount === 0"
-                            @click="onPlayAlbum($event, album)"
-                            @contextmenu.stop
-                            v-tooltip="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
-                        >
-                            <PauseIcon v-if="isAlbumActive(album) && isPlaying" width="14" height="14" />
-                            <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
-                        </button>
-                        <button
-                            class="overlayBtn moreBtn cardMore"
-                            :class="{ active: albumMenu?.album.name === album.name }"
-                            @mousedown.stop="openAlbumMenu($event, album)"
-                            @click.stop
-                            @contextmenu.stop
-                            v-tooltip="'Меню'"
-                        >
-                            <MoreIcon width="20" height="20" />
+                <section v-if="artistAlbums.length > 0" class="pageLine">
+                    <div class="lineHat">
+                        <h3 class="lineTitle">Альбомы</h3>
+                        <button class="seeAllBtn" @click="openArtistAlbums">
+                            Все
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
                         </button>
                     </div>
-                    <div v-truncate class="title">{{ album.name }}</div>
-                    <div v-truncate class="subtitle">{{ artistName }}</div>
-                </div>
-            </div>
-            <div v-else class="emptyAlbums">
-                <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
-                <div class="emptyText">Альбомов нет</div>
-                <div class="emptyDesc">У этого исполнителя пока не сформированы альбомы.</div>
+                    <div class="albumGrid">
+                        <div
+                            v-for="album in artistAlbums"
+                            :key="album.id"
+                            class="playlistItem albumItem"
+                            @click="openAlbum(album)"
+                        >
+                            <div
+                                class="coverWrap"
+                                :class="{ menuOpen: albumMenu?.album.name === album.name }"
+                                @contextmenu="openAlbumMenuFromCover($event, album)"
+                            >
+                                <AnimatedCover class="cover" :src="albumCoverFor(album.name, album.cover)" />
+                                <button
+                                    class="overlayBtn pinBtn"
+                                    :class="{ active: isAlbumPinned(album.name) }"
+                                    @click="onToggleAlbumPinClick($event, album)"
+                                    @contextmenu.stop
+                                    v-tooltip="isAlbumPinned(album.name) ? 'Открепить' : 'Закрепить'"
+                                >
+                                    <PinIcon width="16" height="16" />
+                                </button>
+                                <button
+                                    class="overlayBtn playBtn"
+                                    :disabled="album.trackCount === 0"
+                                    @click="onPlayAlbum($event, album)"
+                                    @contextmenu.stop
+                                    v-tooltip="isAlbumActive(album) && isPlaying ? 'Пауза' : 'Слушать'"
+                                >
+                                    <PauseIcon v-if="isAlbumActive(album) && isPlaying" width="14" height="14" />
+                                    <PlayIcon v-else width="14" height="14" style="margin-left:1px;" />
+                                </button>
+                                <button
+                                    class="overlayBtn moreBtn cardMore"
+                                    :class="{ active: albumMenu?.album.name === album.name }"
+                                    @mousedown.stop="openAlbumMenu($event, album)"
+                                    @click.stop
+                                    @contextmenu.stop
+                                    v-tooltip="'Меню'"
+                                >
+                                    <MoreIcon width="20" height="20" />
+                                </button>
+                            </div>
+                            <div v-truncate class="title">{{ album.name }}</div>
+                            <div class="subtitle">{{ tracksCountText(album.trackCount) }}</div>
+                        </div>
+                    </div>
+                </section>
             </div>
         </div>
 
@@ -554,17 +542,12 @@ function onCoverImgClick() {
 
 <style scoped>
 .pageRoot {
-    padding: 20px 28px;
+    padding: 12px 32px 48px;
     display: flex;
     flex-direction: column;
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
-    background-repeat: no-repeat;
-    background-attachment: local;
-
     overflow-y: scroll;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
@@ -574,313 +557,316 @@ function onCoverImgClick() {
     border-radius: 3px;
 }
 
-.scrollHeader {
+.artistLayout {
+    display: flex;
+    align-items: flex-start;
+    gap: 40px;
+    width: 100%;
+}
+.artistAside {
+    position: sticky;
+    top: 0;
+    flex-shrink: 0;
+    width: clamp(240px, 28%, 320px);
     display: flex;
     flex-direction: column;
-    flex-shrink: 0;
 }
+.artistMain {
+    flex: 1;
+    min-width: 0;
+    padding-top: 44px;
+}
+
 .backBtn {
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 4px;
-    padding: 6px 12px 6px 8px;
-    margin-bottom: 16px;
+    gap: 8px;
+    width: fit-content;
+    padding: 6px 14px 6px 10px;
+    margin: 0 0 8px -10px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
+    background-color: transparent;
     color: hsla(0, 0%, 100%, 0.8);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
     cursor: pointer;
     user-select: none;
-    transition: var(--duration-hover) var(--ease-smooth);
-    width: fit-content;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
+    background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 1);
 }
 .backBtn svg {
-    color: hsla(0, 0%, 100%, 0.6);
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
-    color: hsla(0, 0%, 100%, 1);
+    transform: translateX(-2px);
 }
 
 .pageHat {
     display: flex;
-    flex-direction: row;
-    gap: 30px;
+    flex-direction: column;
+    gap: 16px;
     width: 100%;
-    flex-shrink: 0;
 }
 .pageHat .coverWrap {
     position: relative;
-    width: 200px;
-    height: 200px;
-    flex-shrink: 0;
-    border-radius: 9999px;
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 16px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
     cursor: pointer;
 }
 .pageHat .cover {
     user-select: none;
-    width: 200px;
-    height: 200px;
+    width: 100%;
+    height: 100%;
     background-color: #202020;
-    border-radius: 9999px;
-    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
+    border-radius: 16px;
     overflow: hidden;
-    flex-shrink: 0;
     object-fit: cover;
-}
-.pageHat .coverWrap:hover .cover {
-    width: 204px;
-    height: 204px;
-    margin: -2px;
+    transition: filter .28s var(--ease-smooth);
 }
 .pageHat .dataZone {
     display: flex;
     flex-direction: column;
-    gap: 35px;
-    width: calc(100% - 230px);
+    gap: 16px;
+    min-width: 0;
 }
 .pageHat .dataZone .info {
-    margin-top: 15px;
-    width: 100%;
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 .pageHat .dataZone .info .listType {
-    user-select: none;
-    margin-left: 1px;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
+    display: none;
 }
-.pageHat .dataZone .info .listNameRow {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    margin-top: 2px;
-    width: fit-content;
-    max-width: 100%;
+:global(body.lfmusic-phone .pageHat .dataZone .info .listType) {
+    display: block;
 }
 .pageHat .dataZone .info .listName {
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 42px;
+    font-size: 36px;
     font-weight: 900;
-    color: hsla(0, 0%, 100%, 0.9);
+    letter-spacing: -0.02em;
     line-height: 1.1;
-    white-space: nowrap;
+    color: hsla(0, 0%, 100%, 0.96);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
     overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 .pageHat .dataZone .info .badges {
     display: flex;
-    flex-direction: row;
+    flex-wrap: wrap;
     gap: 8px;
-    margin-top: 14px;
+    margin-top: 12px;
 }
 .badge {
-    user-select: none;
-    padding: 4px 10px;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 8px 16px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    color: hsla(0, 0%, 100%, 0.7);
-    font-size: 12px;
-    font-weight: 500;
-    transition: var(--duration-hover) var(--ease-smooth);
+    background-color: hsla(0, 0%, 100%, 0.05);
+    user-select: none;
+    white-space: nowrap;
 }
-.badge:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 0.9);
+.badge b {
+    font-size: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.96);
+}
+.badge span {
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.6);
 }
 .pageHat .dataZone .controls {
-    margin-top: 0px;
     display: flex;
-    flex-direction: row;
-    gap: 12px;
+    align-items: center;
+    gap: 8px;
 }
 .pageHat .dataZone .controls .playListBtn {
-    user-select: none;
-    cursor: pointer;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    padding: 11px 16px 11px 14px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 1);
-    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
-    font-size: 12px;
-    font-weight: 600;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.8);
-    }
-}
-.pageHat .dataZone .controls .playListBtn:disabled {
-    cursor: not-allowed;
-    background-color: hsla(0, 0%, 100%, 0.3);
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.3);
-    }
-}
-.playListBtn svg {
-    width: 16px;
-}
-.moreBtn {
+    width: 56px;
+    height: 56px;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 8px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.96);
+    color: var(--light-bg);
+    cursor: pointer;
+    user-select: none;
+    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
+}
+.pageHat .dataZone .controls .playListBtn:hover:not(:disabled) {
+    transform: scale(1.06);
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+}
+.pageHat .dataZone .controls .playListBtn:active:not(:disabled) {
+    transform: scale(0.94);
+    transition-duration: 80ms;
+}
+.pageHat .dataZone .controls .playListBtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
+}
+.iconBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
     border-radius: 999px;
     background-color: transparent;
     color: hsla(0, 0%, 100%, 0.6);
     cursor: pointer;
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), transform 80ms var(--ease-smooth);
 }
-.moreBtn:hover,
-.moreBtn.menuOpen {
-    background-color: hsla(0, 0%, 100%, 0.08);
+.iconBtn:hover:not(:disabled),
+.iconBtn.menuOpen {
     color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 100%, 0.08);
+}
+.iconBtn:active:not(:disabled) {
+    transform: scale(0.92);
+}
+.iconBtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
+}
+.shuffleBtn.on {
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
 
 .pageLine {
     width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 13px;
-    margin-top: 36px;
+}
+.pageLine + .pageLine {
+    margin-top: 40px;
 }
 .lineHat {
     display: flex;
-    flex-direction: row;
-    align-items: center;
+    align-items: flex-end;
     justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
 }
 .lineTitle {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
+    margin: 0;
     user-select: none;
-    cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.85);
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-weight: 800;
-    font-size: 24px;
-
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 1);
-    }
+    font-size: 18px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.96);
 }
-.lineTitle svg {
-    margin-top: 4px;
-    display: block;
-    color: hsla(0, 0%, 100%, 0.4);
-
-    transition: var(--duration-hover) var(--ease-smooth);
-}
-.lineTitle:hover svg {
-    margin-left: 12px;
-    color: hsla(0, 0%, 100%, 1);
-}
-.lineControls {
+.seeAllBtn {
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 4px;
-}
-.lineControls button {
-    cursor: pointer;
-    border-radius: 9999px;
-    padding: 6px;
-    border: 2px solid hsla(0, 0%, 100%, 0.2);
-    background-color: var(--light-bg);
+    gap: 2px;
+    padding: 4px 8px 4px 10px;
+    border-radius: 999px;
+    background-color: transparent;
     color: hsla(0, 0%, 100%, 0.6);
-    opacity: 0;
-
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        border: 2px solid hsla(0, 0%, 100%, 0.4);
-        color: hsla(0, 0%, 100%, 0.95);
-    }
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
-.lineControls button:disabled {
-    &:hover {
-        border: 2px solid hsla(0, 0%, 100%, 0.2);
-        color: hsla(0, 0%, 100%, 0.6);
-    }
+.seeAllBtn:hover {
+    color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 100%, 0.06);
 }
-.pageLine:hover .lineControls button {
-    opacity: 1;
+.seeAllBtn svg {
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
-.pageLine:hover .lineControls button:disabled {
-    opacity: 0.65;
-}
-.lineList {
-    position: relative;
-    display: flex;
-    flex-direction: row;
-    gap: 16px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scroll-behavior: smooth;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-}
-.lineList::-webkit-scrollbar {
-    display: none;
+.seeAllBtn:hover svg {
+    transform: translateX(2px);
 }
 
 .tracksList {
-    margin-top: 0;
     display: flex;
     flex-direction: column;
 }
 .emptyRow {
     user-select: none;
-    padding: 30px 4px;
-    color: hsla(0, 0%, 100%, 0.35);
+    padding: 32px 16px;
+    color: hsla(0, 0%, 100%, 0.45);
     font-size: 14px;
-    font-weight: 500;
+}
+.showMoreBtn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    margin-top: 12px;
+    padding: 12px 16px 12px 12px;
+    border-radius: 16px;
+    background-color: hsla(0, 0%, 100%, 0.04);
+    color: hsla(0, 0%, 100%, 0.94);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.showMoreBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.07);
+}
+.showMoreIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.7);
+}
+.showMoreText {
+    flex: 1;
+    text-align: left;
+    font-size: 14px;
+    font-weight: 600;
+}
+.showMoreCount {
+    padding: 2px 10px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.08);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.7);
 }
 
+.albumGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 24px 16px;
+}
 .playlistItem {
-    flex-shrink: 0;
+    min-width: 0;
     cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 4px;
 }
 .playlistItem .coverWrap {
     position: relative;
-    width: var(--card-w, 210px);
-    height: var(--card-w, 210px);
-    border-radius: 18px;
+    width: 100%;
+    aspect-ratio: 1;
+    margin-bottom: 8px;
+    border-radius: 12px;
     overflow: hidden;
 }
 .playlistItem .cover {
     display: block;
-    width: var(--card-w, 210px);
-    height: var(--card-w, 210px);
-    border-radius: 18px;
+    width: 100%;
+    height: 100%;
+    border-radius: 12px;
     object-fit: cover;
-    transition: filter var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
+    transition: filter var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
 .playlistItem:hover .cover,
@@ -913,15 +899,15 @@ function onCoverImgClick() {
     transform: translateY(0);
 }
 .playlistItem .playBtn {
-    left: 12px;
-    bottom: 12px;
+    left: 10px;
+    bottom: 10px;
     padding: 12px;
-    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
-    background-color: hsla(0, 0%, 100%, 0.95);
+    color: var(--light-bg);
+    background-color: hsla(0, 0%, 100%, 0.96);
 }
 .playlistItem .playBtn:hover {
-    color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
-    background-color: hsla(0, 0%, 100%, 1);
+    color: var(--light-bg);
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
 .playlistItem .playBtn:disabled {
     cursor: default;
@@ -929,8 +915,8 @@ function onCoverImgClick() {
     background-color: hsla(0, 0%, 100%, 0.18);
 }
 .playlistItem .pinBtn {
-    top: 12px;
-    right: 12px;
+    top: 10px;
+    right: 10px;
     padding: 8px;
 }
 .playlistItem .pinBtn.active {
@@ -940,8 +926,8 @@ function onCoverImgClick() {
     fill: currentColor;
 }
 .playlistItem .cardMore {
-    right: 12px;
-    bottom: 12px;
+    right: 10px;
+    bottom: 10px;
     padding: 8px;
 }
 .playlistItem .cardMore.active {
@@ -949,53 +935,34 @@ function onCoverImgClick() {
     background-color: hsla(0, 0%, 0%, 0.65);
 }
 .playlistItem .title {
-    color: hsla(0, 0%, 100%, 0.8);
+    color: hsla(0, 0%, 100%, 0.94);
     font-weight: 500;
     font-size: 14px;
-    margin-left: 4px;
-    max-width: var(--card-w, 210px);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .playlistItem .subtitle {
-    color: hsla(0, 0%, 100%, 0.4);
-    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.45);
     font-size: 12px;
-    margin-left: 4px;
-    margin-top: -4px;
-    max-width: var(--card-w, 210px);
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-.emptyAlbums {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    padding: 36px 0;
+:global(body.lfmusic-phone .artistLayout) {
+    display: block;
 }
-.emptyIcon {
-    padding: 6px;
-    border-radius: 5px;
-    background-color: hsla(0, 0%, 100%, 0.09);
-    color: #ffffff;
+:global(body.lfmusic-phone .artistAside) {
+    position: static;
+    width: 100%;
 }
-.emptyText {
-    user-select: none;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.7);
+:global(body.lfmusic-phone .artistMain) {
+    padding-top: 0;
 }
-.emptyDesc {
-    user-select: none;
-    text-align: center;
-    max-width: 270px;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.3);
+:global(body.lfmusic-phone .albumGrid) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px 12px;
 }
 </style>

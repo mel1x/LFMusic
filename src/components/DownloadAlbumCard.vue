@@ -49,7 +49,6 @@ async function downloadAlbum() {
     <div class="albumCard" @click="openAlbum">
         <div class="coverWrap">
             <CoverImage class="cover" :src="album.cover_url" :fallback="defaultCover" />
-            <div class="coverShade"></div>
             <button
                 class="fab"
                 :class="{ busy, queued }"
@@ -65,7 +64,7 @@ async function downloadAlbum() {
         <div v-truncate class="cardTitle">{{ album.title }}</div>
         <div class="cardSub">
             <span v-truncate class="subArtist" :class="{ clickable: album.artist_id != null }" @click.stop="openArtist">{{ album.artist }}</span>
-            <span v-if="album.nb_tracks" class="subCount">· {{ tracksCountText(album.nb_tracks) }}</span>
+            <span v-if="album.nb_tracks" class="subCount">{{ tracksCountText(album.nb_tracks) }}</span>
         </div>
     </div>
 </template>
@@ -74,18 +73,13 @@ async function downloadAlbum() {
 .albumCard {
     width: var(--card-w, 100%);
     flex-shrink: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 8px;
-    margin: -8px;
-    border-radius: 16px;
+    gap: 4px;
     cursor: pointer;
     user-select: none;
-    box-sizing: content-box;
-    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
-.albumCard:hover { background-color: hsla(0, 0%, 100%, 0.04); }
 .coverWrap {
     position: relative;
     width: 100%;
@@ -93,18 +87,14 @@ async function downloadAlbum() {
     border-radius: 12px;
     overflow: hidden;
     background-color: #202020;
-    margin-bottom: 8px;
-    box-shadow: 0 8px 24px hsla(0, 0%, 0%, 0.25);
+    margin-bottom: 6px;
 }
-.cover { width: 100%; height: 100%; }
-.coverShade {
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(to top, hsla(0, 0%, 0%, 0.45), transparent 45%);
-    opacity: 0;
-    transition: opacity var(--duration-hover) var(--ease-smooth);
+.cover {
+    width: 100%;
+    height: 100%;
+    transition: filter var(--duration-hover) var(--ease-smooth);
 }
-.albumCard:hover .coverShade { opacity: 1; }
+.albumCard:hover .cover { filter: brightness(0.6); }
 .fab {
     position: absolute;
     right: 10px;
@@ -116,12 +106,11 @@ async function downloadAlbum() {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    color: hsla(var(--accent-h), var(--accent-s), 18%, 1);
-    background-color: hsla(0, 0%, 100%, 0.95);
-    box-shadow: 0 6px 18px hsla(0, 0%, 0%, 0.35);
+    color: var(--light-bg);
+    background-color: hsla(0, 0%, 100%, 0.96);
     opacity: 0;
-    transform: translateY(8px) scale(0.92);
-    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
+    transform: translateY(6px) scale(0.92);
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
 }
 .albumCard:hover .fab,
 .fab.busy,
@@ -129,10 +118,17 @@ async function downloadAlbum() {
     opacity: 1;
     transform: translateY(0) scale(1);
 }
-.fab:hover:not(:disabled) { background-color: #fff; transform: scale(1.07); }
+.fab:hover:not(:disabled) {
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+    transform: scale(1.06);
+}
+.fab:active:not(:disabled) {
+    transform: scale(0.94);
+    transition-duration: 80ms;
+}
 .fab:disabled { cursor: default; }
 .fab.queued {
-    color: hsla(145, 55%, 32%, 1);
+    color: hsl(var(--accent-h), min(var(--accent-s), 60%), 30%);
 }
 .fabSpinner {
     width: 16px;
@@ -145,22 +141,27 @@ async function downloadAlbum() {
 @keyframes spin { to { transform: rotate(360deg); } }
 .cardTitle {
     font-size: 14px;
-    font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.92);
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.94);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .cardSub {
     display: flex;
-    gap: 4px;
+    align-items: center;
     min-width: 0;
-    font-size: 12.5px;
-    font-weight: 500;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.45);
     white-space: nowrap;
 }
 .subArtist { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .subArtist.clickable:hover { color: hsla(0, 0%, 100%, 0.9); }
 .subCount { flex-shrink: 0; }
+.subCount::before {
+    content: "\00B7";
+    margin: 0 5px;
+    opacity: 0.6;
+}
 </style>

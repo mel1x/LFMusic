@@ -1,16 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { useRoute } from 'vue-router';
 import MobileScrollHeader from './MobileScrollHeader.vue';
 import { settingsCategories } from '../utils/settingsCategories';
 
 defineProps<{ title: string; description?: string }>();
 
 const route = useRoute();
-const router = useRouter();
-function goBack() {
-    router.push('/settings');
-}
 
 const pageRootEl = ref<HTMLElement | null>(null);
 const scrollY = ref(0);
@@ -32,12 +28,6 @@ const current = computed(() => settingsCategories.find(c => route.path === `/set
             <MobileScrollHeader :title="title" :scrolled="scrollY > 16" @top="scrollToTop" />
         </div>
         <div class="settingsMain">
-            <button type="button" class="backBtn" @click="goBack">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="m15 18-6-6 6-6" />
-                </svg>
-                <span>Все настройки</span>
-            </button>
             <div class="pageHead">
                 <svg v-if="current" class="headIcon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="current.icon"></svg>
                 <h1 class="pageTitle">{{ title }}</h1>
@@ -65,9 +55,6 @@ const current = computed(() => settingsCategories.find(c => route.path === `/set
     display: flex;
     flex-direction: column;
     padding: 20px 28px 28px;
-}
-.backBtn {
-    display: none;
 }
 .pageHead {
     display: flex;
@@ -104,24 +91,8 @@ const current = computed(() => settingsCategories.find(c => route.path === `/set
         max-width: none;
         padding: 14px 14px 24px;
     }
-    .backBtn {
-        user-select: none;
-        align-self: flex-start;
-        display: inline-flex;
-        flex-direction: row;
-        align-items: center;
-        gap: 5px;
-        min-height: 40px;
-        padding: 7px 14px 7px 9px;
-        border-radius: 999px;
-        background-color: transparent;
-        color: hsla(0, 0%, 100%, 0.55);
-        font-weight: 600;
-        font-size: 14px;
-        cursor: pointer;
-    }
     .pageHead {
-        margin-top: 14px;
+        margin-top: 4px;
     }
     .headIcon {
         display: none;

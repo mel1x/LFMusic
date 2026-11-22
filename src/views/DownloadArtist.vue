@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { goBackOrHome } from '../router'
 
@@ -14,7 +14,7 @@ import defaultCover from '../assets/cover.webp'
 
 import { useDownloads, useKeepDownloadedInLibrary, useRedownloadConfirm, type ExternalArtistDetail, type ExternalSearchTrack } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
-import { useScrollLine } from '../composables/useScrollLine'
+import { albumsCountText, tracksCountText } from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -29,8 +29,6 @@ const artistId = computed(() => {
 const detail = ref<ExternalArtistDetail | null>(null)
 const loading = ref(true)
 const notFound = ref(false)
-
-const albumsLine = useScrollLine(190, 16)
 
 async function load(id: number) {
     loading.value = true
@@ -50,14 +48,10 @@ async function load(id: number) {
     } finally {
         loading.value = false
     }
-    // observe() only after loading=false, or the albums row never measures.
-    await nextTick()
-    albumsLine.observe()
 }
 
 watch(artistId, (id) => { void load(id) })
 onMounted(() => { void load(artistId.value) })
-onUnmounted(() => { albumsLine.unobserve() })
 
 useKeepDownloadedInLibrary(() => (detail.value ? [detail.value.top_tracks] : []))
 
@@ -65,6 +59,15 @@ function goBack() { goBackOrHome(router) }
 
 const PREVIEW_COUNT = 5
 const previewTracks = computed(() => detail.value?.top_tracks.slice(0, PREVIEW_COUNT) ?? [])
+
+const albumsLabel = computed(() => {
+    const n = detail.value?.albums.length ?? 0
+    return albumsCountText(n).replace(/^\d+\s*/, '')
+})
+const topTracksLabel = computed(() => {
+    const n = detail.value?.top_tracks.length ?? 0
+    return tracksCountText(n).replace(/^\d+\s*/, '')
+})
 
 function openAllTracks() {
     const d = detail.value
@@ -126,85 +129,97 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
 <template>
     <div class="pageRoot">
-        <button class="backBtn" @click="goBack">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-            <span>{{ t('downloads.back') }}</span>
-        </button>
-
         <LoadingSpinner v-if="loading" />
 
-        <div v-else-if="notFound || !detail" class="emptyAlbums">
-            <div class="emptyIcon"><DownloadIcon width="22" height="22" /></div>
-            <div class="emptyText">{{ t('downloads.artistNotFound') }}</div>
-        </div>
-
-        <template v-else>
-            <div class="pageHat">
-                <div class="coverWrap">
-                    <CoverImage :src="detail.picture_url" :fallback="defaultCover" class="cover" alt="avatar" />
-                </div>
-                <div class="dataZone">
-                    <div class="info">
-                        <div class="listType">{{ t('downloads.artistLabel') }}</div>
-                        <div class="listNameRow">
-                            <h2 v-truncate class="listName">{{ detail.name }}</h2>
-                        </div>
-                        <div class="badges">
-                            <div v-if="detail.albums.length" class="badge">{{ t('downloads.artistAlbumsCount', { count: detail.albums.length }) }}</div>
-                        </div>
-                    </div>
-                    <div class="controls" v-if="detail.top_tracks.length">
-                        <button
-                            class="playListBtn"
-                            :class="{ done: donePopular }"
-                            :disabled="busyPopular || donePopular || ytdlpMissing"
-                            @click="downloadPopular"
-                        >
-                            <span v-if="busyPopular" class="btnSpinner"></span>
-                            <svg v-else-if="donePopular" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                            <DownloadIcon v-else width="16" height="16" />
-                            {{ donePopular ? t('downloads.albumQueued') : t('downloads.downloadPopular') }}
-                        </button>
-                    </div>
-                </div>
-            </div>
-
-            <div v-if="detail.top_tracks.length" class="pageLine">
-                <div class="lineHat">
-                    <div class="lineTitle" @click="openAllTracks">
-                        {{ t('downloads.popularTracks') }}
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                    </div>
-                </div>
-                <div class="tracksList">
-                    <DownloadTrackRow
-                        v-for="(track, i) in previewTracks"
-                        :key="i"
-                        :track="track"
-                        @redownload="confirmTrack = $event"
-                    />
-                </div>
-                <button class="showMoreBtn" @click="openAllTracks">{{ t('downloads.showMore') }}</button>
-            </div>
-
-            <div v-if="detail.albums.length" class="pageLine">
-                <div class="lineHat">
-                    <div class="lineTitle nonClickable">{{ t('downloads.albumsTitle') }}</div>
-                    <div class="lineControls">
-                        <button class="prevBtn" :disabled="!albumsLine.canPrev.value" @click="albumsLine.scrollByPage(-1)"><svg style="margin-right:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" transform="rotate(180 12 12)"/></svg></button>
-                        <button class="nextBtn" :disabled="!albumsLine.canNext.value" @click="albumsLine.scrollByPage(1)"><svg style="margin-left:2px;" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></button>
-                    </div>
-                </div>
-                <div
-                    class="lineList"
-                    :ref="(el: any) => { albumsLine.el.value = el as HTMLElement | null }"
-                    :style="{ '--card-w': albumsLine.itemWidth.value + 'px', visibility: albumsLine.measured.value ? 'visible' : 'hidden' }"
-                    @scroll="albumsLine.onScroll"
-                >
-                    <DownloadAlbumCard v-for="al in detail.albums" :key="al.id" :album="al" />
-                </div>
+        <template v-else-if="notFound || !detail">
+            <button type="button" class="backBtn" @click="goBack">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                <span>{{ t('downloads.back') }}</span>
+            </button>
+            <div class="emptyAlbums">
+                <div class="emptyIcon"><DownloadIcon width="20" height="20" /></div>
+                <div class="emptyText">{{ t('downloads.artistNotFound') }}</div>
             </div>
         </template>
+
+        <div v-else class="artistLayout">
+            <aside class="artistAside">
+                <button type="button" class="backBtn" @click="goBack">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                    <span>{{ t('downloads.back') }}</span>
+                </button>
+                <div class="pageHat">
+                    <div class="coverWrap">
+                        <CoverImage :src="detail.picture_url" :fallback="defaultCover" class="cover" alt="avatar" />
+                    </div>
+                    <div class="dataZone">
+                        <div class="info">
+                            <div class="listType">{{ t('downloads.artistLabel') }}</div>
+                            <h2 v-truncate class="listName">{{ detail.name }}</h2>
+                            <div v-if="detail.albums.length || detail.top_tracks.length" class="badges">
+                                <div v-if="detail.albums.length" class="badge">
+                                    <b>{{ detail.albums.length }}</b>
+                                    <span>{{ albumsLabel }}</span>
+                                </div>
+                                <div v-if="detail.top_tracks.length" class="badge">
+                                    <b>{{ detail.top_tracks.length }}</b>
+                                    <span>{{ topTracksLabel }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div v-if="detail.top_tracks.length" class="controls">
+                            <button
+                                type="button"
+                                class="primaryBtn"
+                                :class="{ done: donePopular }"
+                                :disabled="busyPopular || donePopular || ytdlpMissing"
+                                @click="downloadPopular"
+                            >
+                                <span v-if="busyPopular" class="btnSpinner"></span>
+                                <svg v-else-if="donePopular" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                <DownloadIcon v-else width="17" height="17" />
+                                <span>{{ donePopular ? t('downloads.albumQueued') : t('downloads.downloadPopular') }}</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <div class="artistMain">
+                <section v-if="detail.top_tracks.length" class="pageLine">
+                    <div class="lineHat">
+                        <h3 class="lineTitle">{{ t('downloads.popularTracks') }}</h3>
+                        <button type="button" class="seeAllBtn" @click="openAllTracks">
+                            {{ t('downloads.showAll') }}
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                        </button>
+                    </div>
+                    <div class="tracksList">
+                        <DownloadTrackRow
+                            v-for="(track, i) in previewTracks"
+                            :key="i"
+                            :track="track"
+                            @redownload="confirmTrack = $event"
+                        />
+                    </div>
+                    <button type="button" class="showMoreBtn" @click="openAllTracks">
+                        <span class="showMoreIcon">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                        </span>
+                        <span class="showMoreText">{{ t('downloads.artistAllTracks') }}</span>
+                    </button>
+                </section>
+
+                <section v-if="detail.albums.length" class="pageLine">
+                    <div class="lineHat">
+                        <h3 class="lineTitle">{{ t('downloads.albumsTitle') }}</h3>
+                    </div>
+                    <div class="albumGrid">
+                        <DownloadAlbumCard v-for="al in detail.albums" :key="al.id" :album="al" />
+                    </div>
+                </section>
+            </div>
+        </div>
 
         <ConfirmModal
             :open="confirmTrack !== null"
@@ -230,16 +245,13 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
 <style scoped>
 .pageRoot {
-    padding: 20px 28px;
+    padding: 12px 32px 48px;
     display: flex;
     flex-direction: column;
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
-    background-repeat: no-repeat;
-    background-attachment: local;
-    overflow-y: scroll;
+    overflow-y: auto;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
 .pageRoot::-webkit-scrollbar-track { background: transparent; }
@@ -248,143 +260,174 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     border-radius: 3px;
 }
 
+.artistLayout {
+    display: flex;
+    align-items: flex-start;
+    gap: 40px;
+    width: 100%;
+}
+.artistAside {
+    position: sticky;
+    top: 0;
+    flex-shrink: 0;
+    width: clamp(240px, 28%, 320px);
+    display: flex;
+    flex-direction: column;
+}
+.artistMain {
+    flex: 1;
+    min-width: 0;
+    padding-top: 44px;
+}
+
 .backBtn {
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 4px;
-    padding: 6px 12px 6px 8px;
-    margin-bottom: 16px;
+    gap: 8px;
+    width: fit-content;
+    padding: 6px 14px 6px 10px;
+    margin: 0 0 8px -10px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
+    background-color: transparent;
     color: hsla(0, 0%, 100%, 0.8);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
     cursor: pointer;
     user-select: none;
-    transition: var(--duration-hover) var(--ease-smooth);
-    width: fit-content;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: #fff;
 }
-.backBtn svg { color: hsla(0, 0%, 100%, 0.6); transition: var(--duration-hover) var(--ease-smooth); }
-.backBtn:hover svg { color: hsla(0, 0%, 100%, 1); }
+.backBtn svg { transition: transform var(--duration-hover) var(--ease-smooth); }
+.backBtn:hover svg { transform: translateX(-2px); }
 
 .pageHat {
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 30px;
+    flex-direction: column;
+    gap: 16px;
     width: 100%;
-    flex-shrink: 0;
 }
 .pageHat .coverWrap {
     position: relative;
-    width: 200px;
-    height: 200px;
-    flex-shrink: 0;
-    border-radius: 9999px;
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 16px;
     overflow: hidden;
     background-color: #202020;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
 }
 .pageHat .cover {
     user-select: none;
-    width: 200px;
-    height: 200px;
+    width: 100%;
+    height: 100%;
     object-fit: cover;
 }
 .pageHat .dataZone {
     display: flex;
     flex-direction: column;
-    gap: 22px;
-    width: calc(100% - 230px);
+    gap: 16px;
+    min-width: 0;
 }
 .pageHat .dataZone .info {
-    width: 100%;
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 .listType {
     user-select: none;
-    margin-left: 1px;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
-}
-.listNameRow {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    margin-top: 2px;
-    width: fit-content;
-    max-width: 100%;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.45);
+    margin-bottom: 4px;
 }
 .listName {
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 42px;
+    font-size: 36px;
     font-weight: 900;
-    color: hsla(0, 0%, 100%, 0.9);
+    letter-spacing: -0.02em;
     line-height: 1.1;
-    white-space: nowrap;
+    color: hsla(0, 0%, 100%, 0.96);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
     overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 .badges {
     display: flex;
-    flex-direction: row;
+    flex-wrap: wrap;
     gap: 8px;
-    margin-top: 14px;
+    margin-top: 12px;
 }
 .badge {
-    user-select: none;
-    padding: 4px 10px;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 8px 16px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    color: hsla(0, 0%, 100%, 0.7);
-    font-size: 12px;
-    font-weight: 500;
+    background-color: hsla(0, 0%, 100%, 0.05);
+    user-select: none;
+    white-space: nowrap;
 }
+.badge b {
+    font-size: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.96);
+}
+.badge span {
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.6);
+}
+
 .controls {
     display: flex;
-    flex-direction: row;
-    gap: 12px;
+    align-items: center;
+    gap: 10px;
 }
-.playListBtn {
+.primaryBtn {
     user-select: none;
     cursor: pointer;
-    display: flex;
-    flex-direction: row;
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 11px 18px 11px 16px;
+    gap: 8px;
+    height: 46px;
+    padding: 0 22px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 1);
-    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
-    font-size: 12px;
+    background-color: hsla(0, 0%, 100%, 0.96);
+    color: var(--light-bg);
+    font-size: 13.5px;
     font-weight: 600;
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
 }
-.playListBtn:hover { background-color: hsla(0, 0%, 100%, 0.86); }
-.playListBtn:disabled {
+.primaryBtn:hover:not(:disabled) {
+    transform: scale(1.03);
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+}
+.primaryBtn:active:not(:disabled) {
+    transform: scale(0.96);
+    transition-duration: 80ms;
+}
+.primaryBtn:disabled {
     cursor: not-allowed;
-    background-color: hsla(0, 0%, 100%, 0.3);
+    opacity: 0.35;
 }
-.playListBtn.done {
+.primaryBtn.done {
     cursor: default;
-    color: hsla(0, 0%, 100%, 0.6);
+    opacity: 1;
+    color: hsla(0, 0%, 100%, 0.72);
     background-color: hsla(0, 0%, 100%, 0.1);
 }
 .btnSpinner {
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    border: 2px solid hsla(var(--accent-h), var(--accent-s), 20%, 0.3);
-    border-top-color: hsla(var(--accent-h), var(--accent-s), 20%, 0.9);
+    border: 2px solid hsla(0, 0%, 0%, 0.2);
+    border-top-color: hsla(0, 0%, 0%, 0.75);
     animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -393,94 +436,86 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 13px;
-    margin-top: 36px;
 }
+.pageLine + .pageLine { margin-top: 40px; }
 .lineHat {
     display: flex;
-    flex-direction: row;
-    align-items: center;
+    align-items: flex-end;
     justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
 }
 .lineTitle {
+    margin: 0;
     user-select: none;
-    color: hsla(0, 0%, 100%, 0.85);
-    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-weight: 800;
-    font-size: 24px;
+    font-size: 18px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.96);
 }
-.lineTitle {
-    cursor: pointer;
-    display: flex;
+.seeAllBtn {
+    display: inline-flex;
     align-items: center;
     gap: 2px;
-    transition: var(--duration-hover) var(--ease-smooth);
-}
-.lineTitle svg { color: hsla(0, 0%, 100%, 0.5); transition: var(--duration-hover) var(--ease-smooth); }
-.lineTitle:hover { color: hsla(0, 0%, 100%, 1); }
-.lineTitle:hover svg { color: hsla(0, 0%, 100%, 0.9); transform: translateX(2px); }
-.lineTitle.nonClickable { cursor: default; }
-.showMoreBtn {
-    align-self: flex-start;
-    cursor: pointer;
-    user-select: none;
-    padding: 8px 16px;
+    padding: 4px 8px 4px 10px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    color: hsla(0, 0%, 100%, 0.75);
-    font-size: 13px;
-    font-weight: 600;
-    transition: var(--duration-hover) var(--ease-smooth);
-}
-.showMoreBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 1);
-}
-.lineControls {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 4px;
-}
-.lineControls button {
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.6);
+    font-size: 12px;
+    font-weight: 500;
     cursor: pointer;
-    border-radius: 9999px;
-    padding: 6px;
-    border: 2px solid hsla(0, 0%, 100%, 0.2);
-    background-color: var(--light-bg);
-    color: hsla(0, 0%, 100%, 0.6);
-    opacity: 0;
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
-.lineControls button:hover {
-    border: 2px solid hsla(0, 0%, 100%, 0.4);
-    color: hsla(0, 0%, 100%, 0.95);
+.seeAllBtn:hover {
+    color: #fff;
+    background-color: hsla(0, 0%, 100%, 0.06);
 }
-.lineControls button:disabled:hover {
-    border: 2px solid hsla(0, 0%, 100%, 0.2);
-    color: hsla(0, 0%, 100%, 0.6);
-}
-.pageLine:hover .lineControls button { opacity: 1; }
-.pageLine:hover .lineControls button:disabled { opacity: 0.65; }
-
-.lineList {
-    position: relative;
-    display: flex;
-    flex-direction: row;
-    gap: 16px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scroll-behavior: smooth;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-}
-.lineList::-webkit-scrollbar { display: none; }
+.seeAllBtn svg { transition: transform var(--duration-hover) var(--ease-smooth); }
+.seeAllBtn:hover svg { transform: translateX(2px); }
 
 .tracksList {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
+    margin: 0 -12px;
+}
+.showMoreBtn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    margin-top: 12px;
+    padding: 12px 16px 12px 12px;
+    border-radius: 16px;
+    background-color: hsla(0, 0%, 100%, 0.04);
+    color: hsla(0, 0%, 100%, 0.94);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.showMoreBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.07);
+}
+.showMoreIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.7);
+}
+.showMoreText {
+    flex: 1;
+    text-align: left;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.albumGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 24px 16px;
 }
 
 .emptyAlbums {
@@ -492,15 +527,15 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     gap: 10px;
     padding-bottom: 40px;
 }
-.emptyAlbums.small {
-    flex: none;
-    padding: 36px 0;
-}
 .emptyIcon {
-    padding: 10px;
-    border-radius: 9px;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background-color: hsla(0, 0%, 100%, 0.06);
-    color: #fff;
+    color: hsla(0, 0%, 100%, 0.8);
 }
 .emptyText {
     user-select: none;
@@ -508,8 +543,16 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.7);
 }
-.lineList {
-    padding: 8px;
-    margin: -8px;
+
+@media (max-width: 820px), (pointer: coarse) and (max-width: 900px) {
+    .pageRoot { padding: 12px 16px 80px; }
+    .artistLayout { flex-direction: column; gap: 28px; }
+    .artistAside { position: static; width: 100%; }
+    .pageHat { flex-direction: row; align-items: center; gap: 20px; }
+    .pageHat .coverWrap { width: 128px; flex-shrink: 0; }
+    .listName { font-size: 26px; }
+    .artistMain { padding-top: 0; width: 100%; }
+    .tracksList { margin: 0 -8px; }
+    .albumGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 12px; }
 }
 </style>

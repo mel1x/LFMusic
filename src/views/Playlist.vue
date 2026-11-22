@@ -6,8 +6,8 @@ import { goBackOrHome } from '../router'
 import MoreIcon from '../components/Icons/MoreIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
-import SearchIcon from '../components/Icons/SearchIcon.vue';
-import EmptyIcon from '../components/Icons/EmptyIcon.vue';
+import ShuffleIcon from '../components/Icons/ShuffleIcon.vue';
+import TimeIcon from '../components/Icons/TimeIcon.vue';
 import EditIcon from '../components/Icons/EditIcon.vue';
 import defaultPlaylistCover from '../assets/playlistCover.webp';
 import favoritesCoverAsset from '../assets/favorites.webp';
@@ -18,8 +18,8 @@ import { usePlaylists, type PlaylistInfo } from '../composables/usePlaylists';
 import { createRipple } from '../composables/useRipple';
 import { isPhoneViewport } from '../composables/usePlatform';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
-import { searchRanked } from '../composables/useSearch';
-import { tracksCountText } from '../utils/format';
+import { tracksCountText, formatTotalDuration } from '../utils/format';
+import { useCoverTint } from '../composables/useCoverTint';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import FavoritesCover from '../components/FavoritesCover.vue';
@@ -48,6 +48,8 @@ const {
     setPlaylistSource,
     loadCoversForTracks,
     clearCoverQueue,
+    shuffled,
+    toggleShuffle,
 } = usePlayer();
 
 const { playlists, loadPlaylists, getPlaylistTracks, removeTrackFromPlaylist, deletePlaylist, renamePlaylist, isFavorite } = usePlaylists();
@@ -109,51 +111,21 @@ const playlistCover = computed(() => {
     return firstCoverTrack.value?.cover_art || defaultPlaylistCover
 })
 
-import { useTypeToSearch } from '../composables/useTypeToSearch'
+const coverTintRgb = useCoverTint(() => isFavorites.value ? favoritesCoverAsset : playlistCover.value)
+const heroStyle = computed(() => coverTintRgb.value ? { '--hero-tint': coverTintRgb.value } : {})
+
 import { menuAnchorBelow } from '../utils/menu'
-const searchInput = ref<HTMLInputElement | null>(null)
-useTypeToSearch(searchInput)
-const rawSearch = ref('')
-const debouncedSearch = ref('')
-let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
-
-function onSearchInput(e: Event) {
-    const value = (e.target as HTMLInputElement).value
-    rawSearch.value = value
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
-    searchDebounceTimer = setTimeout(() => {
-        debouncedSearch.value = value
-    }, 250)
-}
-
-const focusSearch = () => {
-    searchInput.value?.focus()
-}
-
-function clearSearch() {
-    rawSearch.value = ''
-    debouncedSearch.value = ''
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
-    searchInput.value?.focus()
-}
-
 const baseTracks = computed(() =>
     isFavorites.value ? playlistTracks.value.filter(t => isFavorite(t.file_path)) : playlistTracks.value
 )
 
-const filteredTracks = computed(() => {
-    const q = debouncedSearch.value.trim()
-    if (!q) return baseTracks.value
-    return searchRanked(
-        baseTracks.value,
-        q,
-        (t) => {
-            const fileName = t.file_path.replace(/\\/g, '/').split('/').pop()?.replace(/\.[^/.]+$/, '') || ''
-            return [t.title || '', t.artist || '', t.album || '', fileName]
-        },
-        { formatPath: (t) => t.file_path },
-    )
-})
+const totalDuration = computed(() =>
+    baseTracks.value.reduce((sum, t) => sum + (t.duration_secs ?? 0), 0)
+)
+
+const rankOf = computed(() => new Map(baseTracks.value.map((t, i) => [t.file_path, i + 1])))
+
+const filteredTracks = baseTracks
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
@@ -192,6 +164,7 @@ onUnmounted(() => {
 
 watch(playlistId, async () => {
     dataReady.value = false
+    resetScroll()
     await reloadPlaylistTracks()
     dataReady.value = true
 })
@@ -209,9 +182,8 @@ const {
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
+} = useVirtualScroll(filteredTracks, { itemHeight: 64, buffer: 5, scrollOffset: scrollHeaderHeight })
 
-watch(debouncedSearch, () => resetScroll())
 
 const isScrollingToTop = ref(false)
 
@@ -237,6 +209,20 @@ function onPlayPlaylist() {
         setPlaylistSource(sourceId.value, filteredTracks.value)
         playTrack(filteredTracks.value[0])
     }
+}
+
+const isShuffleActive = computed(() => isPlaylistActive.value && shuffled.value)
+
+function onShufflePlaylist() {
+    const list = filteredTracks.value
+    if (list.length === 0) return
+    if (isPlaylistActive.value) {
+        toggleShuffle()
+        return
+    }
+    if (!shuffled.value) toggleShuffle()
+    setPlaylistSource(sourceId.value, list)
+    playTrack(list[Math.floor(Math.random() * list.length)], { manualListStart: true })
 }
 
 const scrollY = ref(0)
@@ -399,19 +385,19 @@ function onCoverImgClick() {
 </script>
 
 <template>
-    <div class="pageRoot mobileHeroPage" ref="trackListEl" @scroll="handleScroll">
+    <div class="pageRoot mobileHeroPage" ref="trackListEl" :style="heroStyle" @scroll="handleScroll">
         <div class="stickyHeaderAnchor hasMobileScrollHeader">
             <MobileScrollHeader :title="playlist?.name || 'Плейлист'" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
-                    <div>{{ playlist?.name || 'Плейлист' }}</div>
+                    <div v-truncate class="stickyTitle">{{ playlist?.name || 'Плейлист' }}</div>
                     <button class="toTopBtn" @click="scrollToTop">Вверх</button>
                 </div>
             </Transition>
         </div>
         <div ref="scrollHeaderRef" class="scrollHeader">
             <button class="backBtn" @click="goBack">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
                 <span>Назад</span>
             </button>
             <div class="pageHat">
@@ -438,44 +424,47 @@ function onCoverImgClick() {
                                 @blur="commitEditName"
                                 @keydown="onNameKeydown"
                             />
-                            <button v-if="!isEditingName && !isFavorites" class="editNameBtn" @click="startEditName" v-tooltip="'Переименовать'">
+                            <button v-if="!isEditingName && !isFavorites" class="iconBtn editNameBtn" @click="startEditName" v-tooltip="'Переименовать'">
                                 <EditIcon width="16" height="16" />
                             </button>
                         </div>
                         <div class="badges">
-                            <div class="badge" v-tooltip="playlistTracks.length > 0 ? 'Количество треков в плейлисте' : 'Плейлист пуст - добавте треки'">{{ playlistTracks.length > 0 ? tracksCountText(playlistTracks.length) : 'Пусто' }}</div>
+                            <template v-if="baseTracks.length > 0">
+                                <span class="badge">{{ tracksCountText(baseTracks.length) }}</span>
+                                <span v-if="totalDuration > 0" class="badge">{{ formatTotalDuration(totalDuration) }}</span>
+                            </template>
+                            <span v-else class="badge">Пусто</span>
                         </div>
                     </div>
                     <div class="controls">
-                        <button class="playListBtn" :disabled="playlistTracks.length === 0" @click="onPlayPlaylist">
-                            <PauseIcon v-if="isPlaylistActive && isPlaying" width="14" height="14" />
-                            <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                            <span class="playListText">Слушать</span>
+                        <button
+                            class="playListBtn"
+                            :disabled="baseTracks.length === 0"
+                            :aria-label="isPlaylistActive && isPlaying ? 'Пауза' : 'Слушать'"
+                            @click="onPlayPlaylist"
+                        >
+                            <PauseIcon v-if="isPlaylistActive && isPlaying" width="22" height="22" />
+                            <PlayIcon v-else width="22" height="22" />
                         </button>
-                        <button class="moreBtn" :class="{ menuOpen: !!playlistMenu }" @mousedown.stop="openPlaylistMenu($event)">
+                        <button
+                            class="iconBtn shuffleBtn"
+                            :class="{ on: isShuffleActive }"
+                            :disabled="baseTracks.length === 0"
+                            v-tooltip="'Перемешать'"
+                            @click="onShufflePlaylist"
+                        >
+                            <ShuffleIcon width="20" height="20" />
+                        </button>
+                        <button class="iconBtn moreBtn" :class="{ menuOpen: !!playlistMenu }" v-tooltip="'Меню'" @mousedown.stop="openPlaylistMenu($event)">
                             <MoreIcon width="22" height="22" />
                         </button>
                     </div>
                 </div>
             </div>
-            <div class="searchZone">
-                <SearchIcon class="searchIcon" @click="focusSearch" />
-                <input
-                    ref="searchInput"
-                    type="text"
-                    class="search"
-                    name="search"
-                    id="search"
-                    placeholder="Поиск трека"
-                    autocomplete="off"
-                    :value="rawSearch"
-                    @input="onSearchInput"
-                />
-                <div class="searchClear" v-if="rawSearch" @click="clearSearch">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
-                </div>
+            <div class="listHead">
+                <span class="colRank">#</span>
+                <span class="colTitle">Название</span>
+                <span class="colTime"><TimeIcon width="13" height="13" /></span>
             </div>
         </div>
         <Transition name="gate-fade" mode="out-in">
@@ -489,6 +478,8 @@ function onCoverImgClick() {
             <TrackRow
                 v-for="track in visibleTracks"
                 :key="track.file_path"
+                large
+                :rank="rankOf.get(track.file_path)"
                 :track="track"
                 :active="isPlaylistActive && currentTrack?.file_path === track.file_path"
                 :activePaused="isPlaylistActive && currentTrack?.file_path === track.file_path && !isPlaying"
@@ -499,15 +490,8 @@ function onCoverImgClick() {
             />
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
-        <div class="emptyState" v-else-if="debouncedSearch && filteredTracks.length === 0" key="gate-empty-search">
-            <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
-            <div class="emptyText">Ничего не найдено</div>
-            <div class="emptyDesc">Попробуйте изменить критерии поиска.</div>
-        </div>
         <div class="emptyState" v-else key="gate-empty">
-            <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
             <div class="emptyText">В плейлисте пока нет треков</div>
-            <div class="emptyDesc">Добавьте треки через контекстное меню в каталоге.</div>
             <button class="emptyAction" @click="router.push('/catalog')">Добавить треки</button>
         </div>
         </Transition>
@@ -553,129 +537,124 @@ function onCoverImgClick() {
 
 <style scoped>
 .pageRoot {
-    padding: 20px 28px;
+    --hero-tint: 120, 120, 120;
+    padding: 12px 32px 48px;
     display: flex;
     flex-direction: column;
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
+    background-image: linear-gradient(
+        to bottom,
+        rgba(var(--hero-tint), 0.42) 0px,
+        rgba(var(--hero-tint), 0.14) 240px,
+        rgba(var(--hero-tint), 0) 460px
+    );
     background-repeat: no-repeat;
     background-attachment: local;
-
-    transition: var(--duration-hover) var(--ease-smooth);
-
     overflow-y: scroll;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
-.pageRoot::-webkit-scrollbar-track { background-color: var(--light-bg); }
+.pageRoot::-webkit-scrollbar-track { background-color: transparent; }
 .pageRoot::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.12);
     border-radius: 3px;
 }
+.scrollHeader {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+}
 .backBtn {
     display: flex;
-    flex-direction: row;
     align-items: center;
-    gap: 4px;
-    padding: 6px 12px 6px 8px;
-    margin-bottom: 16px;
+    gap: 8px;
+    width: fit-content;
+    padding: 6px 14px 6px 10px;
+    margin: 0 0 8px -10px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
+    background-color: transparent;
     color: hsla(0, 0%, 100%, 0.8);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 400;
     cursor: pointer;
     user-select: none;
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
+    background-color: hsla(0, 0%, 100%, 0.06);
     color: hsla(0, 0%, 100%, 1);
 }
 .backBtn svg {
-    color: hsla(0, 0%, 100%, 0.6);
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: transform var(--duration-hover) var(--ease-smooth);
 }
 .backBtn:hover svg {
-    color: hsla(0, 0%, 100%, 1);
+    transform: translateX(-2px);
 }
 .pageHat {
     display: flex;
     flex-direction: row;
-    gap: 30px;
+    align-items: flex-end;
+    gap: 32px;
     width: 100%;
     flex-shrink: 0;
+    padding: 8px 0 0;
 }
 .pageHat .coverWrap {
     position: relative;
-    width: 200px;
-    height: 200px;
+    width: 232px;
+    height: 232px;
     flex-shrink: 0;
-    border-radius: 18px;
+    border-radius: 16px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
     cursor: pointer;
 }
 .pageHat .cover {
     user-select: none;
-    width: 200px;
-    height: 200px;
-    background-color: transparent;
-    border-radius: 18px;
-    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
+    width: 100%;
+    height: 100%;
+    border-radius: 16px;
     overflow: hidden;
-    flex-shrink: 0;
     object-fit: cover;
-}
-.pageHat .coverWrap:hover .cover {
-    width: 204px;
-    height: 204px;
-    margin: -2px;
+    transition: filter .28s var(--ease-smooth);
 }
 .pageHat .dataZone {
     display: flex;
     flex-direction: column;
-    gap: 35px;
-    width: calc(100% - 230px);
+    gap: 20px;
+    flex: 1;
+    min-width: 0;
 }
 .pageHat .dataZone .info {
-    margin-top: 15px;
-    width: 100%;
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 .pageHat .dataZone .info .listType {
     user-select: none;
-    margin-left: 1px;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.7);
 }
 .pageHat .dataZone .info .listNameRow {
     display: flex;
-    flex-direction: row;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     margin-top: 2px;
-    width: fit-content;
     max-width: 100%;
 }
 .pageHat .dataZone .info .listName {
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 42px;
+    font-size: 48px;
     font-weight: 900;
-    color: hsla(0, 0%, 100%, 0.9);
+    letter-spacing: -0.02em;
     line-height: 1.1;
-    white-space: nowrap;
+    color: hsla(0, 0%, 100%, 0.96);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 .pageHat .dataZone .info .listNameInput {
     cursor: text;
@@ -685,6 +664,7 @@ function onCoverImgClick() {
     padding: 2px 10px;
     outline: none;
     min-width: 240px;
+    font-size: 40px;
     max-width: 100%;
     transition: border-color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
@@ -692,175 +672,136 @@ function onCoverImgClick() {
     background-color: hsla(0, 0%, 100%, 0.09);
     border-color: hsla(0, 0%, 100%, 0.25);
 }
-.pageHat .dataZone .info .editNameBtn {
+.editNameBtn {
     flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 12px;
-    border-radius: 9999px;
-    background-color: transparent;
-    color: hsla(0, 0%, 100%, 0.55);
-    cursor: pointer;
+    margin-top: 8px;
     opacity: 0;
-    transform: translateX(-4px);
-    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
-.pageHat .dataZone .info .listNameRow:hover .editNameBtn {
+.listNameRow:hover .editNameBtn {
     opacity: 1;
-    transform: translateX(0);
-}
-.pageHat .dataZone .info .editNameBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.08);
-    color: hsla(0, 0%, 100%, 1);
 }
 .pageHat .dataZone .info .badges {
     display: flex;
-    flex-direction: row;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 14px;
+    margin-top: 4px;
     max-width: 100%;
 }
 .badge {
     user-select: none;
-    padding: 4px 10px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.06);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.7);
-    font-size: 12px;
-    font-weight: 500;
-    transition: var(--duration-hover) var(--ease-smooth);
-    max-width: 100%;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
-.badge:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 0.9);
+.badge + .badge::before {
+    content: "\00B7";
+    margin: 0 6px;
+}
+:global(body.lfmusic-phone .badge + .badge::before) {
+    content: none;
 }
 .pageHat .dataZone .controls {
-    margin-top: 0px;
     display: flex;
-    flex-direction: row;
-    gap: 12px;
+    align-items: center;
+    gap: 8px;
 }
 .pageHat .dataZone .controls .playListBtn {
-    user-select: none;
-    cursor: pointer;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    padding: 11px 16px 11px 14px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 1);
-    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
-    font-size: 12px;
-    font-weight: 600;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.8);
-    }
-}
-.pageHat .dataZone .controls .playListBtn:disabled {
-    cursor: not-allowed;
-    background-color: hsla(0, 0%, 100%, 0.3);
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.3);
-    }
-}
-.playListBtn svg {
-    width: 16px;
-}
-.moreBtn {
+    width: 56px;
+    height: 56px;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 8px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.96);
+    color: var(--light-bg);
+    cursor: pointer;
+    user-select: none;
+    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
+}
+.pageHat .dataZone .controls .playListBtn:hover:not(:disabled) {
+    transform: scale(1.06);
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+}
+.pageHat .dataZone .controls .playListBtn:active:not(:disabled) {
+    transform: scale(0.94);
+    transition-duration: 80ms;
+}
+.pageHat .dataZone .controls .playListBtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
+}
+.iconBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
     border-radius: 999px;
     background-color: transparent;
     color: hsla(0, 0%, 100%, 0.6);
     cursor: pointer;
-    transition: var(--duration-hover) var(--ease-smooth);
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), transform 80ms var(--ease-smooth);
 }
-.moreBtn:hover,
-.moreBtn.menuOpen {
-    background-color: hsla(0, 0%, 100%, 0.08);
+.iconBtn:hover:not(:disabled),
+.iconBtn.menuOpen {
     color: hsla(0, 0%, 100%, 1);
+    background-color: hsla(0, 0%, 100%, 0.08);
 }
-.searchZone {
-    position: relative;
-    margin-top: 24px;
-    margin-bottom: 16px;
-    width: 100%;
-    flex-shrink: 0;
+.iconBtn:active:not(:disabled) {
+    transform: scale(0.92);
 }
-.searchIcon {
-    cursor: text;
-    position: absolute;
-    top: 50%;
-    left: 12px;
-    transform: translateY(-50%);
-    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
-    }
+.iconBtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
 }
-.searchZone:hover .searchIcon {
-    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
+.shuffleBtn.on {
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
-.searchClear {
-    position: absolute;
-    height: max-content;
-    width: max-content;
-    top: 50%;
-    right: 9px;
-    transform: translateY(-50%);
-    cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.3);
+.listHead {
     display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 6px;
-    border-radius: 50%;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
-}
-.search {
-    width: 100%;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.04);
-    padding: 10px 36px 11px 40px;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.9);
-}
-.search::placeholder {
+    gap: 12px;
+    height: 36px;
+    margin-top: 36px;
+    margin-bottom: 4px;
+    padding: 0 16px;
+    font-size: 11px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.42);
     user-select: none;
-    color: hsla(0, 0%, 100%, 0.3);
-    font-size: 13px;
-    font-weight: 600;
+}
+.listHead .colRank {
+    width: 22px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.listHead .colTitle {
+    flex: 1;
+    min-width: 0;
+    padding-left: 60px;
+}
+.listHead .colTime {
+    display: flex;
+    justify-content: flex-end;
+    width: 44px;
+    flex-shrink: 0;
+}
+
+:global(body.lfmusic-phone .listHead) {
+    display: none;
 }
 .tracksList {
-    margin-top: 4px;
+    margin-top: 0;
 }
 .vsPad {
     width: 100%;
 }
 .stickyHeaderAnchor {
     position: sticky;
-    top: -20px;
+    top: -12px;
     height: 0;
     z-index: 10;
-    margin: 0 -28px;
+    margin: 0 -32px;
 }
 .stickyHeader {
     user-select: none;
@@ -868,13 +809,19 @@ function onCoverImgClick() {
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
-    padding: 18px 28px;
-    background-color: hsla(var(--accent-h), var(--accent-s), 14%, 0.3);
-    backdrop-filter: blur(12px);
+    gap: 16px;
+    padding: 14px 32px;
+    background-color: var(--light-bg);
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 22px;
-    font-weight: 700;
-    color: hsla(0, 0%, 100%, 0.9);
+    font-size: 20px;
+    font-weight: 800;
+    color: hsla(0, 0%, 100%, 0.94);
+}
+.stickyTitle {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
@@ -886,67 +833,48 @@ function onCoverImgClick() {
     transform: translateY(-8px);
 }
 .toTopBtn {
+    flex-shrink: 0;
     cursor: pointer;
     padding: 6px 16px;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.07);
     color: hsla(0, 0%, 100%, 1);
-    font-size: 14px;
+    font-family: "Inter", sans-serif;
+    font-size: 13px;
     font-weight: 500;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.12);
-    }
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.toTopBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.12);
 }
 .emptyState {
     flex: 1;
     display: flex;
-    gap: 10px;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-}
-.emptyIcon {
-    padding: 6px;
-    border-radius: 5px;
-    background-color: hsla(0, 0%, 100%, 0.09);
-    color: #ffffff;
+    padding: 48px 0;
 }
 .emptyText {
     user-select: none;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.7);
-
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.8);
-    }
+    font-size: 14px;
+    color: hsla(0, 0%, 100%, 0.45);
 }
-.emptyDesc {
-    user-select: none;
-    text-align: center;
-    max-width: 270px;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.3);
+.emptyState {
+    flex-direction: column;
+    gap: 12px;
 }
 .emptyAction {
     user-select: none;
-    margin-top: 4px;
     cursor: pointer;
     padding: 8px 20px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
+    background-color: hsla(0, 0%, 100%, 0.08);
     color: hsla(0, 0%, 100%, 1);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.07);
-    }
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.emptyAction:hover {
+    background-color: hsla(0, 0%, 100%, 0.12);
 }
 </style>

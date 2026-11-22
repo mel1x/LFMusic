@@ -2,12 +2,11 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 import MoreIcon from '../components/Icons/MoreIcon.vue';
-import HeartIcon from '../components/Icons/HeartIcon.vue';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
-import defaultCover from '../assets/trackCover.webp';
+import ShuffleIcon from '../components/Icons/ShuffleIcon.vue';
+import TimeIcon from '../components/Icons/TimeIcon.vue';
 import cover from '../assets/cover.webp';
-import SearchIcon from '../components/Icons/SearchIcon.vue';
 
 import { invoke } from '@tauri-apps/api/core';
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer';
@@ -15,17 +14,16 @@ import { createRipple } from '../composables/useRipple';
 import { isPhoneViewport } from '../composables/usePlatform';
 import { useVirtualScroll } from '../composables/useVirtualScroll';
 import { tracksCountText } from '../utils/format';
-import EmptyIcon from '../components/Icons/EmptyIcon.vue';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import CatalogContextMenu from '../components/CatalogContextMenu.vue';
-import TrackArtists from '../components/TrackArtists.vue';
+import TrackRow from '../components/TrackRow.vue';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
 import MobileScrollHeader from '../components/MobileScrollHeader.vue';
 import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
-import { usePlaylists } from '../composables/usePlaylists';
+import { useCoverTint } from '../composables/useCoverTint';
 
 const {
     catalogCount,
@@ -38,19 +36,20 @@ const {
     moveCatalogTrackToTop,
     getTrackByPath,
     fetchTracksByPaths,
-    formatTime,
     loadCoversForTracks,
     clearCoverQueue,
+    shuffled,
+    toggleShuffle,
 } = usePlayer();
 
 const { getCustomCover } = useCustomCovers();
 const catalogCustomCover = computed(() => getCustomCover('catalog', 'catalog'));
 
-const { isFavorite, toggleFavorite, ensureFavoritesLoaded } = usePlaylists();
-void ensureFavoritesLoaded();
-function onToggleFav(track: TrackMetadata) {
-    void toggleFavorite(track.file_path);
-}
+// The default cover is tinted with the accent, so only a custom cover gives the header its own tint.
+const customTint = useCoverTint(() => catalogCustomCover.value)
+const heroStyle = computed(() => customTint.value && catalogCustomCover.value
+    ? { '--hero-color': `rgb(${customTint.value})` }
+    : {})
 
 const selectedGenre = ref<string | null>(null)
 
@@ -99,48 +98,20 @@ function scrollToActiveGenre() {
     bar.scrollTo({ left: chipLeft - barWidth / 2 + chipWidth / 2, behavior: 'smooth' })
 }
 
-import { useTypeToSearch } from '../composables/useTypeToSearch'
 import { menuAnchorBelow } from '../utils/menu';
-const searchInput = ref<HTMLInputElement | null>(null)
-useTypeToSearch(searchInput)
-const rawSearch = ref('')
-const debouncedSearch = ref('')
-let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
-
-function onSearchInput(e: Event) {
-    const value = (e.target as HTMLInputElement).value
-    rawSearch.value = value
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
-    searchDebounceTimer = setTimeout(() => {
-        debouncedSearch.value = value
-    }, 250)
-}
-
-const focusSearch = () => {
-    searchInput.value?.focus()
-}
-
-function clearSearch() {
-    rawSearch.value = ''
-    debouncedSearch.value = ''
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
-    searchInput.value?.focus()
-}
-
 const filteredPaths = ref<string[]>([])
 let filterReqId = 0
 async function refreshFilteredPaths() {
     const reqId = ++filterReqId
     const genre = selectedGenre.value || undefined
-    const search = debouncedSearch.value.trim() || undefined
     try {
-        const paths = await invoke<string[]>('library_get_catalog_paths', { genre, search })
+        const paths = await invoke<string[]>('library_get_catalog_paths', { genre })
         if (reqId === filterReqId) filteredPaths.value = paths
     } catch {
         if (reqId === filterReqId) filteredPaths.value = []
     }
 }
-watch([debouncedSearch, selectedGenre], refreshFilteredPaths)
+watch(selectedGenre, refreshFilteredPaths)
 watch(catalogCount, () => { void loadGenres(); void refreshFilteredPaths() })
 
 const scrollHeaderRef = ref<HTMLElement | null>(null)
@@ -181,7 +152,7 @@ const {
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(filteredPaths, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
+} = useVirtualScroll(filteredPaths, { itemHeight: 64, buffer: 5, scrollOffset: scrollHeaderHeight })
 
 function stubTrack(path: string): TrackMetadata {
     return {
@@ -197,9 +168,11 @@ const visibleTracks = computed<TrackMetadata[]>(() =>
     visiblePaths.value.map(p => getTrackByPath(p) ?? stubTrack(p))
 )
 
-watch([debouncedSearch, selectedGenre], () => {
+watch(selectedGenre, () => {
     resetScroll()
 })
+
+const rankOf = computed(() => new Map(filteredPaths.value.map((p, i) => [p, i + 1])))
 
 watch(visiblePaths, (paths) => {
     if (paths.length) void fetchTracksByPaths(paths)
@@ -236,6 +209,20 @@ function onPlayCatalog() {
             playTrack(filteredPaths.value[0])
         }
     }
+}
+
+const isShuffleActive = computed(() => isCatalogActive.value && shuffled.value)
+
+function onShuffleCatalog() {
+    const paths = filteredPaths.value
+    if (paths.length === 0) return
+    if (isCatalogActive.value) {
+        toggleShuffle()
+        return
+    }
+    if (!shuffled.value) toggleShuffle()
+    setCatalogSource(catalogSourceId.value, paths)
+    playTrack(paths[Math.floor(Math.random() * paths.length)], { manualListStart: true })
 }
 
 const scrollY = ref(0)
@@ -295,7 +282,6 @@ async function moveTrackToTop(track: TrackMetadata) {
 const catalogSourceId = computed(() => {
     let id = 'catalog'
     if (selectedGenre.value) id += `:genre:${selectedGenre.value}`
-    if (debouncedSearch.value.trim()) id += `:search`
     return id
 })
 
@@ -319,12 +305,12 @@ function onCoverImgClick() {
 </script>
 
 <template>
-    <div class="pageRoot catalogPage mobileHeroPage" ref="trackListEl" @scroll="handleScroll">
+    <div class="pageRoot catalogPage mobileHeroPage" ref="trackListEl" :style="heroStyle" @scroll="handleScroll">
         <div class="stickyHeaderAnchor hasMobileScrollHeader">
             <MobileScrollHeader title="Мой каталог" :scrolled="scrollY > 16" @top="scrollToTop" />
             <Transition name="sticky-header">
                 <div v-if="showStickyHeader" class="stickyHeader">
-                    <div>Мой каталог</div>
+                    <div class="stickyTitle">Мой каталог</div>
                     <button class="toTopBtn" @click="scrollToTop">Вверх</button>
                 </div>
             </Transition>
@@ -338,38 +324,36 @@ function onCoverImgClick() {
                 <div class="dataZone">
                     <div class="info">
                         <div class="listType">Библиотека</div>
-                        <h2 v-truncate class="listName">Мой каталог</h2>
+                        <div class="listNameRow">
+                            <h2 v-truncate class="listName">Мой каталог</h2>
+                        </div>
                         <div class="badges" v-if="catalogCount > 0">
-                            <div class="badge" v-tooltip="'Количество треков в каталоге'">{{ tracksCountText(catalogCount) }}</div>
+                            <span class="badge">{{ tracksCountText(catalogCount) }}</span>
                         </div>
                     </div>
                     <div class="controls">
-                        <button class="playListBtn" type="button" aria-label="Слушать каталог" @click="onPlayCatalog">
-                            <PauseIcon v-if="isCatalogActive && isPlaying" width="14" height="14" />
-                            <PlayIcon v-else width="14" height="14" style="margin-left:0;" />
-                            <span class="playListText">Слушать</span>
+                        <button
+                            class="playListBtn"
+                            type="button"
+                            :disabled="filteredPaths.length === 0"
+                            :aria-label="isCatalogActive && isPlaying ? 'Пауза' : 'Слушать каталог'"
+                            @click="onPlayCatalog"
+                        >
+                            <PauseIcon v-if="isCatalogActive && isPlaying" width="22" height="22" />
+                            <PlayIcon v-else width="22" height="22" />
                         </button>
-                        <button class="moreOptionsBtn" type="button" aria-label="Действия каталога" @mousedown="openCatalogMenu($event)"><MoreIcon width="22" height="22" /></button>
+                        <button
+                            class="iconBtn shuffleBtn"
+                            type="button"
+                            :class="{ on: isShuffleActive }"
+                            :disabled="filteredPaths.length === 0"
+                            v-tooltip="'Перемешать'"
+                            @click="onShuffleCatalog"
+                        >
+                            <ShuffleIcon width="20" height="20" />
+                        </button>
+                        <button class="iconBtn moreOptionsBtn" type="button" :class="{ menuOpen: !!catalogMenu }" aria-label="Действия каталога" @mousedown="openCatalogMenu($event)"><MoreIcon width="22" height="22" /></button>
                     </div>
-                </div>
-            </div>
-            <div class="searchZone" v-if="!isPhoneViewport()">
-                <SearchIcon class="searchIcon" @click="focusSearch" />
-                <input
-                    ref="searchInput"
-                    type="text"
-                    class="search"
-                    name="search"
-                    id="search"
-                    placeholder="Поиск трека"
-                    autocomplete="off"
-                    :value="rawSearch"
-                    @input="onSearchInput"
-                />
-                <div class="searchClear" v-if="rawSearch" @click="clearSearch">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
                 </div>
             </div>
             <div class="genreBarWrap" v-if="genreList.length > 0" @wheel.prevent="onGenreWheel">
@@ -400,6 +384,11 @@ function onCoverImgClick() {
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
                 </button>
             </div>
+            <div class="listHead">
+                <span class="colRank">#</span>
+                <span class="colTitle">Название</span>
+                <span class="colTime"><TimeIcon width="13" height="13" /></span>
+            </div>
         </div>
         <Transition name="gate-fade" mode="out-in">
         <LoadingSpinner v-if="filteredPaths.length > 0 && !coversReady" key="gate-spinner" />
@@ -409,68 +398,24 @@ function onCoverImgClick() {
             key="gate-list"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
-            <div
+            <TrackRow
                 v-for="track in visibleTracks"
                 :key="track.file_path"
-                class="trackElem"
-                :class="{
-                    active: currentTrack?.file_path === track.file_path,
-                    activePaused: currentTrack?.file_path === track.file_path && !isPlaying,
-                }"
-
-
-                @click="onTrackClick($event, track)"
-            >
-                <div class="hoverIcon" @click.stop="onCoverClick(track)">
-                    <PauseIcon
-                        v-if="currentTrack?.file_path === track.file_path && isPlaying"
-                        width="10" height="10"
-                        style="margin-left:0.5px;"
-                    />
-                    <PlayIcon
-                        v-else
-                        width="10" height="10"
-                        style="margin-left:1px;padding-top:0;"
-                    />
-                </div>
-                <div
-                    v-if="currentTrack?.file_path === track.file_path"
-                    class="playingAnim"
-                ></div>
-                <div class="trackCover" @click.stop="onCoverClick(track)">
-                    <img
-                        :src="track.cover_art || defaultCover"
-                        alt=""
-                        draggable="false"
-                        class="trackCoverImg"
-                    />
-                </div>
-                <div class="trackInfo">
-                    <div v-truncate class="trackName">{{ track.title || track.file_path.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') }}</div>
-                    <div class="trackArtist"><TrackArtists :artist="track.artist" /></div>
-                </div>
-                <button
-                    class="trackFavBtn"
-                    :class="{ liked: isFavorite(track.file_path) }"
-                    @click.stop="onToggleFav(track)"
-                    @mousedown.stop
-                >
-                    <HeartIcon width="15" height="15" />
-                </button>
-                <div class="trackTime" :class="{ hidden: trackMenu?.track.file_path === track.file_path }">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
-                <div class="hoverOptionsBtn" :class="{ menuOpen: trackMenu?.track.file_path === track.file_path }" @mousedown.stop="openTrackMenu($event, track)" @click.stop><MoreIcon width="26" height="26" /></div>
-            </div>
+                large
+                :rank="rankOf.get(track.file_path)"
+                :track="track"
+                :active="currentTrack?.file_path === track.file_path"
+                :activePaused="currentTrack?.file_path === track.file_path && !isPlaying"
+                :menuOpen="trackMenu?.track.file_path === track.file_path"
+                @rowClick="onTrackClick($event, track)"
+                @coverClick="onCoverClick(track)"
+                @openMenu="openTrackMenu($event, track)"
+            />
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
-        <div class="emptyState" v-else-if="debouncedSearch && filteredPaths.length === 0" key="gate-empty-search">
-            <div class="emptyIcon"><SearchIcon width="16" height="16" /></div>
-            <div class="emptyText">Ничего не найдено</div>
-            <div class="emptyDesc">Попробуйте изменить критерии поиска или добавить папки с треками в настройках.</div>
-        </div>
         <div class="emptyState" v-else-if="catalogCount === 0" key="gate-empty-lib">
-            <div class="emptyIcon"><EmptyIcon width="16" height="16" /></div>
             <div class="emptyText">Нет треков в каталоге</div>
-            <div class="emptyDesc">Добавьте папки с треками в настройках, чтобы они появились здесь.</div>
+            <div class="emptyDesc">Добавьте папки с треками в настройках.</div>
             <RouterLink to="/settings/library" class="emptyBtn">Библиотека</RouterLink>
         </div>
         </Transition>
@@ -498,57 +443,60 @@ function onCoverImgClick() {
 
 <style scoped>
 .pageRoot {
-    padding: 20px 28px;
+    --hero-color: hsl(var(--accent-h), min(var(--accent-s), 55%), 52%);
+    padding: 12px 32px 48px;
     display: flex;
     flex-direction: column;
     width: 100%;
     height: 100%;
     background-color: var(--light-bg);
-
-    background-image: linear-gradient(to bottom, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0.08) 0px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 80%, 0.04) 95px, hsla(var(--accent-h), calc(42% * var(--accent-k, 1)), 70%, 0) 375px);
+    background-image: linear-gradient(
+        to bottom,
+        color-mix(in srgb, var(--hero-color) 42%, transparent) 0px,
+        color-mix(in srgb, var(--hero-color) 14%, transparent) 240px,
+        transparent 460px
+    );
     background-repeat: no-repeat;
     background-attachment: local;
-
-    transition: var(--duration-hover) var(--ease-smooth);
-    
     overflow-y: scroll;
 }
 .pageRoot::-webkit-scrollbar { width: 6px; }
-.pageRoot::-webkit-scrollbar-track { background-color: var(--light-bg); }
+.pageRoot::-webkit-scrollbar-track { background-color: transparent; }
 .pageRoot::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.12);
     border-radius: 3px;
 }
+.scrollHeader {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+}
 .pageHat {
     display: flex;
     flex-direction: row;
-    gap: 30px;
+    align-items: flex-end;
+    gap: 32px;
     width: 100%;
     flex-shrink: 0;
+    padding: 8px 0 0;
 }
 .pageHat .coverWrap {
     position: relative;
-    width: 200px;
-    height: 200px;
+    width: 232px;
+    height: 232px;
     flex-shrink: 0;
-    border-radius: 18px;
+    border-radius: 16px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
     cursor: pointer;
 }
 .pageHat .cover {
     user-select: none;
-    width: 200px;
-    height: 200px;
-    background-color: transparent;
-    border-radius: 18px;
-    transition: width var(--duration-hover) var(--ease-smooth), height var(--duration-hover) var(--ease-smooth), margin var(--duration-hover) var(--ease-smooth), filter .28s var(--ease-smooth);
+    width: 100%;
+    height: 100%;
+    border-radius: 16px;
     overflow: hidden;
-    flex-shrink: 0;
     object-fit: cover;
-}
-.pageHat .coverWrap:hover .cover {
-    width: 204px;
-    height: 204px;
-    margin: -2px;
+    transition: filter .28s var(--ease-smooth);
 }
 .pageHat .coverWrap.tinted .cover {
     filter: grayscale(1);
@@ -560,174 +508,126 @@ function onCoverImgClick() {
     content: "";
     position: absolute;
     inset: 0;
-    border-radius: 18px;
+    border-radius: 16px;
     background-color: hsla(var(--accent-h), min(var(--accent-s), 45%), 50%, 1);
     mix-blend-mode: color;
     pointer-events: none;
     transition: background-color .28s var(--ease-smooth), inset var(--duration-hover) var(--ease-smooth);
 }
-.pageHat .coverWrap.tinted:hover::after {
-    inset: -2px;
-}
 .pageHat .dataZone {
     display: flex;
     flex-direction: column;
-    gap: 35px;
-    width: calc(100% - 230px);
+    gap: 20px;
+    flex: 1;
+    min-width: 0;
 }
 .pageHat .dataZone .info {
-    margin-top: 15px;
-    width: 100%;
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 .pageHat .dataZone .info .listType {
     user-select: none;
-    margin-left: 1px;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.4);
-    width: fit-content;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.7);
+}
+.pageHat .dataZone .info .listNameRow {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 2px;
+    max-width: 100%;
 }
 .pageHat .dataZone .info .listName {
     cursor: default;
-    margin-top: 2px;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 42px;
+    font-size: 48px;
     font-weight: 900;
-    color: hsla(0, 0%, 100%, 0.9);
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    color: hsla(0, 0%, 100%, 0.96);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
 }
 .pageHat .dataZone .info .badges {
     display: flex;
-    flex-direction: row;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 14px;
+    margin-top: 4px;
     max-width: 100%;
 }
 .badge {
     user-select: none;
-    padding: 4px 10px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.06);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.7);
-    font-size: 12px;
-    font-weight: 500;
-    transition: var(--duration-hover) var(--ease-smooth);
-    max-width: 100%;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
-.badge:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
-    color: hsla(0, 0%, 100%, 0.9);
+.badge + .badge::before {
+    content: "\00B7";
+    margin: 0 6px;
+}
+:global(body.lfmusic-phone .badge + .badge::before) {
+    content: none;
 }
 .pageHat .dataZone .controls {
-    margin-top: 0px;
     display: flex;
-    flex-direction: row;
-    gap: 12px;
+    align-items: center;
+    gap: 8px;
 }
 .pageHat .dataZone .controls .playListBtn {
-    user-select: none;
-    cursor: pointer;
+    width: 56px;
+    height: 56px;
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    padding: 11px 16px 11px 14px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 1);
-    color: hsla(var(--accent-h), var(--accent-s), 20%, 1);
-    font-size: 12px;
-    font-weight: 600;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.8);
-    }
-}
-.playListBtn svg {
-    width: 16px;
-}
-.pageHat .dataZone .controls .moreOptionsBtn {
-    cursor: pointer;
-    display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 8px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.07);
+    background-color: hsla(0, 0%, 100%, 0.96);
+    color: var(--light-bg);
+    cursor: pointer;
+    user-select: none;
+    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
+}
+.pageHat .dataZone .controls .playListBtn:hover:not(:disabled) {
+    transform: scale(1.06);
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+}
+.pageHat .dataZone .controls .playListBtn:active:not(:disabled) {
+    transform: scale(0.94);
+    transition-duration: 80ms;
+}
+.pageHat .dataZone .controls .playListBtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
+}
+.iconBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.6);
+    cursor: pointer;
+    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), transform 80ms var(--ease-smooth);
+}
+.iconBtn:hover:not(:disabled),
+.iconBtn.menuOpen {
     color: hsla(0, 0%, 100%, 1);
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.12);
-    }
+    background-color: hsla(0, 0%, 100%, 0.08);
 }
-.searchZone {
-    position: relative;
-    margin-top: 24px;
-    width: 100%;
-    flex-shrink: 0;
+.iconBtn:active:not(:disabled) {
+    transform: scale(0.92);
 }
-.searchIcon {
-    cursor: text;
-    position: absolute;
-    top: 50%;
-    left: 12px;
-    transform: translateY(-50%);
-    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.4);
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
-    }
+.iconBtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
 }
-.searchZone:hover .searchIcon {
-    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.8);
-}
-.searchClear {
-    position: absolute;
-    height: max-content;
-    width: max-content;
-    top: 50%;
-    right: 9px;
-    transform: translateY(-50%);
-    cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.3);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 6px;
-    border-radius: 50%;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
-}
-.search {
-    width: 100%;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.04);
-    padding: 10px 36px 11px 40px;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.9);
-}
-.search::placeholder {
-    user-select: none;
-    color: hsla(0, 0%, 100%, 0.3);
-    font-size: 13px;
-    font-weight: 600;
+.shuffleBtn.on {
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
 .genreBarWrap {
     position: relative;
@@ -838,204 +738,51 @@ function onCoverImgClick() {
         color: hsla(0, 0%, 0%, 0.85);
     }
 }
-.tracksList {
+.listHead {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 36px;
     margin-top: 4px;
+    margin-bottom: 4px;
+    padding: 0 16px;
+    font-size: 11px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.42);
+    user-select: none;
+}
+.listHead .colRank {
+    width: 22px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.listHead .colTitle {
+    flex: 1;
+    min-width: 0;
+    padding-left: 60px;
+}
+.listHead .colTime {
+    display: flex;
+    justify-content: flex-end;
+    width: 44px;
+    flex-shrink: 0;
+}
+
+:global(body.lfmusic-phone .listHead) {
+    display: none;
+}
+.tracksList {
+    margin-top: 0;
 }
 .vsPad {
     width: 100%;
 }
-.trackElem {
-    position: relative;
-    cursor: pointer;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 16px 8px 8px;
-    border-radius: 9px;
-    background-color: hsla(0, 0%, 100%, 0);
-    transition: .31s var(--ease-smooth-in-out);
-    height: 58px;
-    box-sizing: border-box;
-    overflow: hidden;
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.03);
-    }
-}
-.trackElem :deep(.ripple) {
-    position: absolute;
-    border-radius: 50%;
-    background: hsla(0, 0%, 100%, 0.08);
-    transform: scale(0);
-    animation: ripple-expand 0.5s var(--ease-smooth) forwards;
-    pointer-events: none;
-}
-@keyframes ripple-expand {
-    to {
-        transform: scale(1);
-        opacity: 0;
-    }
-}
-.trackCover {
-    width: 42px;
-    height: 42px;
-    background-color: #202020;
-    border-radius: 5px;
-    transition: .31s var(--ease-smooth);
-    overflow: hidden;
-    flex-shrink: 0;
-}
-.trackCoverImg {
-    user-select: none;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-}
-.trackElem:hover .trackCover,
-.trackElem.activePaused .trackCover {
-    opacity: 0.5;
-}
-.trackElem.active .trackCover {
-    opacity: 0.45;
-}
-.hoverIcon {
-    position: absolute;
-    top: 50%;
-    left: 18.5px;
-    transform: translateY(-50%);
-    opacity: 0;
-    padding: 5px;
-    border-radius: 9999px;
-    color: #242424;
-    background-color: hsla(0, 0%, 100%, 1.0);
-    transition: .31s var(--ease-smooth);
-    z-index: 3;
-}
-.trackElem:hover .hoverIcon,
-.trackElem.activePaused .hoverIcon {
-    opacity: 1;
-}
-.hoverOptionsBtn {
-    position: absolute;
-    top: 50%;
-    right: 12px;
-    padding: 6px;
-    transform: translateY(-50%);
-    cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.45);
-    transition: .31s var(--ease-smooth);
-
-    opacity: 0;
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.7);
-    }
-}
-.trackElem:hover .hoverOptionsBtn,
-.hoverOptionsBtn.menuOpen {
-    opacity: 1;
-}
-.trackFavBtn {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    margin-right: 4px;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.35);
-    transition: color var(--duration-hover) var(--ease-smooth);
-    z-index: 3;
-}
-.trackFavBtn:hover {
-    color: hsla(0, 0%, 100%, 0.85);
-}
-.trackFavBtn.liked {
-    color: hsla(0, 0%, 100%, 0.95);
-}
-.trackFavBtn.liked :deep(svg path) {
-    fill: currentColor;
-}
-.trackTime.hidden {
-    opacity: 0 !important;
-}
-.trackInfo {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    flex: 1;
-    min-width: 0;
-}
-.trackName {
-    user-select: none;
-    font-size: 14px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.trackElem.active .trackName {
-    color: hsla(0, 0%, 100%, 1);
-}
-.trackArtist {
-    user-select: none;
-    font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.4);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.6);
-    }
-}
-.trackTime {
-    margin-left: auto;
-    user-select: none;
-    font-size: 14px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    color: hsla(0, 0%, 100%, 0.45);
-    transition: var(--duration-hover) var(--ease-smooth);
-    flex-shrink: 0;
-
-    opacity: 1;
-}
-.trackElem:hover .trackTime {
-    opacity: 0;
-}
-.playingAnim {
-    position: absolute;
-    left: 21px;
-    top: 21px;
-    width: 16px;
-    height: 16px;
-    background: #fff;
-    border-radius: 50%;
-    transform-origin: center;
-    animation: pulse 0.8s infinite var(--ease-smooth-in-out);
-    z-index: 2;
-}
-
-@keyframes pulse {
-    0%, 100% { transform: scale(0.6); }
-    50% { transform: scale(1); }
-}
-
-
 .stickyHeaderAnchor {
     position: sticky;
-    top: -20px;
+    top: -12px;
     height: 0;
     z-index: 10;
-    margin: 0 -28px;
+    margin: 0 -32px;
 }
 .stickyHeader {
     user-select: none;
@@ -1043,17 +790,19 @@ function onCoverImgClick() {
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    padding: 18px 28px;
-    background-color: hsla(var(--accent-h), var(--accent-s), 14%, 0.3);
-    backdrop-filter: blur(12px);
+    gap: 16px;
+    padding: 14px 32px;
+    background-color: var(--light-bg);
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 22px;
-    font-weight: 700;
-    color: hsla(0, 0%, 100%, 0.9);
+    font-size: 20px;
+    font-weight: 800;
+    color: hsla(0, 0%, 100%, 0.94);
+}
+.stickyTitle {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .sticky-header-enter-active,
 .sticky-header-leave-active {
@@ -1065,68 +814,56 @@ function onCoverImgClick() {
     transform: translateY(-8px);
 }
 .toTopBtn {
+    flex-shrink: 0;
     cursor: pointer;
     padding: 6px 16px;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.07);
     color: hsla(0, 0%, 100%, 1);
-    font-size: 14px;
+    font-family: "Inter", sans-serif;
+    font-size: 13px;
     font-weight: 500;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.12);
-    }
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.toTopBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.12);
 }
 .emptyState {
     flex: 1;
     display: flex;
-    gap: 10px;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-}
-.emptyIcon {
-    padding: 6px;
-    border-radius: 5px;
-    background-color: hsla(0, 0%, 100%, 0.09);
-    color: #ffffff;
+    padding: 48px 0;
 }
 .emptyText {
     user-select: none;
-    font-size: 13px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.7);
-
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        color: hsla(0, 0%, 100%, 0.8);
-    }
+    font-size: 14px;
+    color: hsla(0, 0%, 100%, 0.45);
+}
+.emptyState {
+    flex-direction: column;
+    gap: 12px;
 }
 .emptyDesc {
     user-select: none;
     text-align: center;
     max-width: 270px;
     font-size: 13px;
-    font-weight: 400;
-    color: hsla(0, 0%, 100%, 0.3);
+    color: hsla(0, 0%, 100%, 0.35);
 }
 .emptyBtn {
     user-select: none;
-    margin-top: 4px;
     cursor: pointer;
     padding: 8px 20px;
     border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.05);
+    background-color: hsla(0, 0%, 100%, 0.08);
     color: hsla(0, 0%, 100%, 1);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
-    transition: var(--duration-hover) var(--ease-smooth);
-
-    &:hover {
-        background-color: hsla(0, 0%, 100%, 0.07);
-    }
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.emptyBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.12);
 }
 
 @media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
