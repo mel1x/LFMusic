@@ -881,6 +881,18 @@
     "filter": "Filter by command",
     "noCalls": "No calls yet",
     "noErrors": "No errors",
-    "pending": "pending"
+    "pending": "pending",
+    "events": "Events",
+    "holiday": "Holiday",
+    "recap": "Year recap",
+    "recapBadge": "Home badge",
+    "recapData": "Data source",
+    "auto": "Auto",
+    "off": "Off",
+    "on": "On",
+    "recapReal": "Real",
+    "recapDemo": "Demo",
+    "openRecapReal": "Open (real)",
+    "openRecapDemo": "Open (demo)"
   }
 }

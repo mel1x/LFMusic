@@ -8,6 +8,13 @@ import {
     devCalls, devStats, devErrors, devStartedAt,
     clearDevCalls, clearDevErrors, type DevError,
 } from '../composables/useDevTools';
+import {
+    HOLIDAYS, activeHoliday, holidayOverride, setHolidayOverride, type HolidayOverride,
+} from '../composables/useHoliday';
+import {
+    activeRecapYear, openYearRecap, recapBadgeOverride, recapDemoMode,
+    setRecapBadgeOverride, setRecapDemoMode, type RecapBadgeOverride,
+} from '../composables/useYearRecap';
 import CloseIcon from './Icons/CloseIcon.vue';
 
 interface DevInfo {
@@ -18,7 +25,7 @@ interface DevInfo {
     data_dir: string;
 }
 
-type Tab = 'overview' | 'calls' | 'errors';
+type Tab = 'overview' | 'events' | 'calls' | 'errors';
 
 const { t } = useI18n();
 const { saveState } = usePlayer();
@@ -206,9 +213,33 @@ onBeforeUnmount(() => {
 
 const tabs = computed<{ id: Tab; label: string; count?: number }[]>(() => [
     { id: 'overview', label: t('dev.overview') },
+    { id: 'events', label: t('dev.events') },
     { id: 'calls', label: t('dev.calls'), count: devStats.size || undefined },
     { id: 'errors', label: t('dev.errors'), count: errorCount.value || undefined },
 ]);
+
+const holidayOptions = computed<{ value: HolidayOverride; label: string }[]>(() => [
+    { value: null, label: t('dev.auto') },
+    { value: 'none', label: t('dev.off') },
+    ...HOLIDAYS.map(h => ({ value: h.id as HolidayOverride, label: t(`holiday.${h.id}`) })),
+]);
+
+const recapBadgeOptions = computed<{ value: RecapBadgeOverride; label: string }[]>(() => [
+    { value: null, label: t('dev.auto') },
+    { value: 'off', label: t('dev.off') },
+    { value: 'on', label: t('dev.on') },
+]);
+
+const recapDataOptions = computed<{ value: boolean; label: string }[]>(() => [
+    { value: false, label: t('dev.recapReal') },
+    { value: true, label: t('dev.recapDemo') },
+]);
+
+function launchRecap(demo: boolean) {
+    const year = activeRecapYear.value ?? new Date().getFullYear();
+    open.value = false;
+    openYearRecap(year, { demo });
+}
 
 const overviewRows = computed(() => {
     const i = info.value;
@@ -281,6 +312,62 @@ const overviewRows = computed(() => {
                         <button type="button" class="devBtn" @click="openDataDir">{{ t('dev.openDataDir') }}</button>
                         <button type="button" class="devBtn" @click="reloadUi">{{ t('dev.reloadUi') }}</button>
                         <button type="button" class="devBtn" @click="copyLog">{{ copied ? t('donate.copied') : t('dev.copyLog') }}</button>
+                    </div>
+                </div>
+
+                <div v-else-if="tab === 'events'" class="devBody">
+                    <div class="devEventGroup">
+                        <div class="devEventHead">
+                            <span class="devLabel">{{ t('dev.holiday') }}</span>
+                            <span class="devEventState">{{ activeHoliday ? t(`holiday.${activeHoliday}`) : t('dev.off') }}</span>
+                        </div>
+                        <div class="devChips">
+                            <button
+                                v-for="opt in holidayOptions"
+                                :key="String(opt.value)"
+                                type="button"
+                                class="devChip"
+                                :class="{ active: holidayOverride === opt.value }"
+                                @click="setHolidayOverride(opt.value)"
+                            >{{ opt.label }}</button>
+                        </div>
+                    </div>
+
+                    <div class="devEventGroup">
+                        <div class="devEventHead">
+                            <span class="devLabel">{{ t('dev.recap') }}</span>
+                            <span class="devEventState">{{ activeRecapYear ?? t('dev.off') }}</span>
+                        </div>
+                        <div class="devSubRow">
+                            <span class="devSubLabel">{{ t('dev.recapBadge') }}</span>
+                            <div class="devChips">
+                                <button
+                                    v-for="opt in recapBadgeOptions"
+                                    :key="String(opt.value)"
+                                    type="button"
+                                    class="devChip"
+                                    :class="{ active: recapBadgeOverride === opt.value }"
+                                    @click="setRecapBadgeOverride(opt.value)"
+                                >{{ opt.label }}</button>
+                            </div>
+                        </div>
+                        <div class="devSubRow">
+                            <span class="devSubLabel">{{ t('dev.recapData') }}</span>
+                            <div class="devChips">
+                                <button
+                                    v-for="opt in recapDataOptions"
+                                    :key="String(opt.value)"
+                                    type="button"
+                                    class="devChip"
+                                    :class="{ active: recapDemoMode === opt.value }"
+                                    @click="setRecapDemoMode(opt.value)"
+                                >{{ opt.label }}</button>
+                            </div>
+                        </div>
+                        <div class="devActions">
+                            <button type="button" class="devBtn" @click="launchRecap(false)">{{ t('dev.openRecapReal') }}</button>
+                            <button type="button" class="devBtn" @click="launchRecap(true)">{{ t('dev.openRecapDemo') }}</button>
+                        </div>
                     </div>
                 </div>
 
@@ -526,6 +613,62 @@ const overviewRows = computed(() => {
 .devBtn:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 0.28);
     color: #fff;
+}
+
+.devEventGroup + .devEventGroup {
+    margin-top: 22px;
+}
+.devEventHead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+.devEventState {
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: hsla(0, 0%, 100%, 0.65);
+    user-select: none;
+}
+.devSubRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 10px;
+}
+.devSubLabel {
+    font-size: 13px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.72);
+    user-select: none;
+}
+.devChips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.devChip {
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    color: hsla(0, 0%, 100%, 0.72);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
+}
+.devChip:hover {
+    background-color: hsla(0, 0%, 100%, 0.11);
+    color: #fff;
+}
+.devChip.active {
+    background-color: hsla(0, 0%, 100%, 0.94);
+    color: var(--light-bg);
 }
 
 .devToolbar {

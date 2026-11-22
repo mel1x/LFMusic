@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -38,6 +38,40 @@ const { t } = useI18n();
 const { currentTrack, saveState } = usePlayer();
 const updater = useUpdater();
 const donateOpen = ref(false);
+
+const hatEl = ref<HTMLElement | null>(null);
+const controlsEl = ref<HTMLElement | null>(null);
+const donateEl = ref<HTMLElement | null>(null);
+const githubEl = ref<HTMLElement | null>(null);
+const compactSocial = ref(false);
+let donateTextDelta = 96;
+let githubTextDelta = 64;
+let hatResizeObserver: ResizeObserver | null = null;
+
+function updateCompactSocial() {
+    const hat = hatEl.value;
+    const controls = controlsEl.value;
+    if (!hat || !controls) return;
+    if (!settings.value.show_donate_badge && !settings.value.show_github_badge) {
+        compactSocial.value = false;
+        return;
+    }
+    if (!compactSocial.value) {
+        if (donateEl.value && donateEl.value.offsetWidth > 34) {
+            donateTextDelta = donateEl.value.offsetWidth - 34;
+        }
+        if (githubEl.value && githubEl.value.offsetWidth > 34) {
+            githubTextDelta = githubEl.value.offsetWidth - 34;
+        }
+    }
+    const pill = hat.querySelector('.gsPill') as HTMLElement | null;
+    const searchW = pill ? pill.offsetWidth : Math.min(340, hat.clientWidth * 0.34);
+    const available = hat.clientWidth / 2 - searchW / 2 - 14;
+    const hiddenDelta = compactSocial.value
+        ? (donateEl.value ? donateTextDelta : 0) + (githubEl.value ? githubTextDelta : 0)
+        : 0;
+    compactSocial.value = controls.offsetWidth + hiddenDelta > available;
+}
 
 function installUpdate() {
     updater.install(saveState);
@@ -194,7 +228,26 @@ function publishAndroidFeatureProgress(payload: AudioFeatureProgressPayload) {
     return true;
 }
 
+watch(
+    [
+        activeHoliday,
+        featureProgressVisible,
+        () => updater.availableVersion.value,
+        () => settings.value.show_donate_badge,
+        () => settings.value.show_github_badge,
+        () => settings.value.language,
+    ],
+    () => {
+        void nextTick(updateCompactSocial);
+    },
+);
+
 onMounted(() => {
+    hatResizeObserver = new ResizeObserver(updateCompactSocial);
+    if (hatEl.value) hatResizeObserver.observe(hatEl.value);
+    if (controlsEl.value) hatResizeObserver.observe(controlsEl.value);
+    void nextTick(updateCompactSocial);
+
     void listen<AudioFeatureProgressPayload>('audio_feature_progress', (event) => {
         const payload = event.payload;
         featureProgress.value = payload;
@@ -226,6 +279,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    hatResizeObserver?.disconnect();
+    hatResizeObserver = null;
     if (featureProgressHideTimer) {
         clearTimeout(featureProgressHideTimer);
         featureProgressHideTimer = null;
@@ -243,13 +298,13 @@ const closeWindow = () => win.close();
 </script>
 
 <template>
-    <div class="hat" data-tauri-drag-region>
+    <div ref="hatEl" class="hat" data-tauri-drag-region>
         <div class="winTitle">
             <div class="mainTitle" data-tauri-drag-region>{{ currentTrack ? (currentTrack.title || currentTrack.file_path.split(/[\\/]/).pop()) : 'LFMusic' }}</div>
             <div class="authorTitle" data-tauri-drag-region>{{ currentTrack ? headerArtist : 'by mel1x' }}</div>
         </div>
         <TitleSearch />
-        <div class="winControls">
+        <div ref="controlsEl" class="winControls">
             <DownloadQueueIndicator />
             <div
                 v-if="featureProgressVisible"
@@ -321,13 +376,32 @@ const closeWindow = () => win.close();
                 <span v-if="updater.status.value === 'downloading'" class="updateBadgeProgress">{{ updater.progress.value }}%</span>
                 <span v-else>{{ t('updater.badge', { version: updater.availableVersion.value }) }}</span>
             </button>
-            <button v-if="settings.show_donate_badge" type="button" class="hatBadge" @click="donateOpen = true">
+            <button
+                v-if="settings.show_donate_badge"
+                ref="donateEl"
+                type="button"
+                class="hatBadge"
+                :class="{ iconOnly: compactSocial }"
+                :aria-label="t('donate.badge')"
+                v-tooltip:bottom="compactSocial ? t('donate.badge') : undefined"
+                @click="donateOpen = true"
+            >
                 <span class="hatBadgeIcon"><HeartIcon width="16" height="16" /></span>
-                <span>{{ t('donate.badge') }}</span>
+                <span class="hatBadgeText">{{ t('donate.badge') }}</span>
             </button>
-            <a v-if="settings.show_github_badge" class="hatBadge" href="https://github.com/mel1x/LFMusic" target="_blank" rel="noopener noreferrer">
+            <a
+                v-if="settings.show_github_badge"
+                ref="githubEl"
+                class="hatBadge"
+                :class="{ iconOnly: compactSocial }"
+                href="https://github.com/mel1x/LFMusic"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Github"
+                v-tooltip:bottom="compactSocial ? 'Github' : undefined"
+            >
                 <span class="hatBadgeIcon"><GithubIcon /></span>
-                <span>Github</span>
+                <span class="hatBadgeText">Github</span>
             </a>
             <button class="controlsButton" @click="minimizeWindow"><MinimizeIcon /></button>
             <button class="controlsButton" @click="maximizeWindow"><MaximizeIcon /></button>
@@ -499,6 +573,15 @@ const closeWindow = () => win.close();
 .hatBadge:hover {
     background-color: hsla(0, 0%, 100%, 0.1);
     color: #fff;
+}
+.hatBadge.iconOnly {
+    width: 34px;
+    padding: 0;
+    gap: 0;
+    justify-content: center;
+}
+.hatBadge.iconOnly .hatBadgeText {
+    display: none;
 }
 .hatBadge + .controlsButton {
     margin-left: 4px;

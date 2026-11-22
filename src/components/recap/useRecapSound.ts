@@ -31,6 +31,8 @@ export function useRecapSound() {
   const playingUrl = ref<string | null>(null)
   let ctx: AudioContext | null = null
   let master: GainNode | null = null
+  let analyser: AnalyserNode | null = null
+  let freqData: Uint8Array<ArrayBuffer> | null = null
   let voice: Voice | null = null
   const buffers = new Map<string, Promise<AudioBuffer | null>>()
 
@@ -40,7 +42,28 @@ export function useRecapSound() {
     ctx = new AudioContext()
     master = ctx.createGain()
     master.gain.value = outputGain()
-    master.connect(ctx.destination)
+    analyser = ctx.createAnalyser()
+    analyser.fftSize = 64
+    analyser.smoothingTimeConstant = 0.82
+    freqData = new Uint8Array(analyser.frequencyBinCount)
+    master.connect(analyser)
+    analyser.connect(ctx.destination)
+  }
+
+  /** Fast bass-weighted audio energy (0..1) for reactive shader backgrounds. */
+  function getEnergy(): number {
+    if (!ctx || !analyser || !freqData || !voice || muted.value || ctx.state !== 'running') return 0
+    analyser.getByteFrequencyData(freqData)
+    const len = freqData.length
+    if (len === 0) return 0
+    const bassBins = Math.min(6, len)
+    let bass = 0
+    for (let i = 0; i < bassBins; i++) bass += freqData[i]
+    bass /= bassBins * 255
+    let all = 0
+    for (let i = 0; i < len; i++) all += freqData[i]
+    all /= len * 255
+    return Math.min(1, bass * 0.72 + all * 0.28)
   }
 
   function softenEdges(buffer: AudioBuffer) {
@@ -129,6 +152,8 @@ export function useRecapSound() {
     const closing = ctx
     ctx = null
     master = null
+    analyser = null
+    freqData = null
     buffers.clear()
     if (closing) {
       await new Promise(resolve => setTimeout(resolve, FADE_OUT * 1000))
@@ -167,5 +192,5 @@ export function useRecapSound() {
     else muted.value = !muted.value
   }
 
-  return { muted, volume, playingUrl, start, play, preload, setPaused, stop, setVolume, toggleMute }
+  return { muted, volume, playingUrl, start, play, preload, setPaused, stop, setVolume, toggleMute, getEnergy }
 }

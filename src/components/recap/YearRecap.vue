@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { loadYearRecap, recapOpen, recapYear, type YearRecap } from '../../composables/useYearRecap'
+import { buildDemoYearRecap, loadYearRecap, recapOpen, recapOpenDemo, recapYear, type YearRecap } from '../../composables/useYearRecap'
 import { usePlayer } from '../../composables/usePlayer'
 import { useI18n } from '../../composables/useI18n'
-import { buildRecapCards, type RecapCard as Card } from './recapCards'
+import { buildRecapCards, type BgScene, type RecapCard as Card } from './recapCards'
 import { useRecapSound } from './useRecapSound'
+import RecapBg from './RecapBg.vue'
 import RecapCard from './RecapCard.vue'
 import CloseIcon from '../Icons/CloseIcon.vue'
 import PlayIcon from '../Icons/PlayIcon.vue'
@@ -32,11 +33,34 @@ const cycle = ref(0)
 
 let pausedPlayer = false
 
+function readRootAccent(): { hue: number; sat: number } {
+  const style = document.documentElement.style
+  const rawH = parseFloat(style.getPropertyValue('--accent-h'))
+  const rawS = parseFloat(style.getPropertyValue('--accent-s'))
+  return {
+    hue: Number.isFinite(rawH) ? rawH : 258,
+    sat: Number.isFinite(rawS) ? Math.max(36, rawS) : 56,
+  }
+}
+
 const current = computed(() => cards.value[index.value] ?? null)
 const paused = computed(() => held.value || userPaused.value || hidden.value)
-const backdropStyle = computed(() => {
+const resolvedBg = computed(() => {
   const c = current.value
-  return c?.accent ? { '--rc-h': `${c.accent.hue}`, '--rc-s': `${c.accent.sat}%` } : {}
+  const root = readRootAccent()
+  const hue = c?.accent?.hue ?? root.hue
+  const sat = c?.accent?.sat ?? root.sat
+  const shift = c?.accent?.shift ?? 38
+  const scene: BgScene = c?.scene ?? 'aurora'
+  return { scene, hue, sat, shift }
+})
+const backdropStyle = computed(() => {
+  const { hue, sat, shift } = resolvedBg.value
+  return {
+    '--rc-h': `${hue}`,
+    '--rc-h2': `${(hue + shift) % 360}`,
+    '--rc-s': `${sat}%`,
+  }
 })
 
 async function open() {
@@ -50,7 +74,9 @@ async function open() {
   pausedPlayer = playbackState.value === 'Playing'
   if (pausedPlayer) await togglePlayPause()
   try {
-    const data = await loadYearRecap(recapYear.value)
+    const data = recapOpenDemo.value
+      ? buildDemoYearRecap(recapYear.value)
+      : await loadYearRecap(recapYear.value)
     if (!recapOpen.value) return
     recap.value = data
     cards.value = buildRecapCards(data)
@@ -268,6 +294,15 @@ onUnmounted(() => {
           @pointerleave="onPointerCancel"
           @contextmenu.prevent
         >
+          <RecapBg
+            :scene="resolvedBg.scene"
+            :hue="resolvedBg.hue"
+            :sat="resolvedBg.sat"
+            :hue-shift="resolvedBg.shift"
+            :paused="paused"
+            :get-energy="sound.getEnergy"
+          />
+
           <Transition :name="direction === 1 ? 'recapNext' : 'recapPrev'">
             <RecapCard
               v-if="recap && current"
@@ -275,6 +310,7 @@ onUnmounted(() => {
               :card="current"
               :recap="recap"
               :playing-url="sound.playingUrl.value"
+              :paused="paused"
               @sound="url => sound.play(url)"
               @replay="replay"
             />
@@ -392,19 +428,20 @@ onUnmounted(() => {
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(42% 60% at 50% 50%, hsla(var(--rc-h), var(--rc-s), 45%, 0.14), transparent 72%);
+    radial-gradient(38% 54% at 46% 42%, hsla(var(--rc-h), var(--rc-s), 48%, 0.2), transparent 72%),
+    radial-gradient(34% 48% at 56% 62%, hsla(var(--rc-h2, 290), var(--rc-s), 46%, 0.14), transparent 74%);
   transition: background .8s var(--ease-smooth);
 }
 
 .recapFrame {
   position: relative;
-  height: min(800px, calc(100dvh / var(--overlay-scale, 1) - 64px));
+  height: min(812px, calc(100dvh / var(--overlay-scale, 1) - 56px));
   aspect-ratio: 9 / 16;
   max-width: calc(100vw / var(--overlay-scale, 1) - 32px);
-  border-radius: 22px;
+  border-radius: 26px;
   overflow: hidden;
   background: hsl(var(--rc-h), min(var(--rc-s), 26%), 8%);
-  box-shadow: 0 32px 90px hsla(0, 0%, 0%, 0.55), inset 0 0 0 1px hsla(0, 0%, 100%, 0.05);
+  box-shadow: 0 36px 96px hsla(0, 0%, 0%, 0.62);
   touch-action: none;
   cursor: pointer;
   isolation: isolate;
@@ -416,8 +453,8 @@ onUnmounted(() => {
   left: 0;
   right: 0;
   z-index: 5;
-  padding: 14px 14px 0;
-  background: linear-gradient(180deg, hsla(0, 0%, 0%, 0.28), transparent);
+  padding: 14px 16px 24px;
+  background: linear-gradient(180deg, hsla(0, 0%, 0%, 0.36) 0%, transparent 100%);
   pointer-events: none;
 }
 .recapSegments {
@@ -429,7 +466,7 @@ onUnmounted(() => {
   height: 3px;
   border-radius: 999px;
   overflow: hidden;
-  background: hsla(0, 0%, 100%, 0.28);
+  background: hsla(0, 0%, 100%, 0.24);
 }
 .fill {
   display: block;
@@ -595,14 +632,12 @@ onUnmounted(() => {
 .recapLoading {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 16px;
-  background:
-    radial-gradient(130% 62% at 50% -6%, hsla(var(--rc-h), var(--rc-s), 56%, 0.2), transparent 64%),
-    hsl(var(--rc-h), min(var(--rc-s), 26%), 8%);
 }
 .recapLoadingText {
   font-size: 14px;

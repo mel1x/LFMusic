@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import PlayIcon from '../components/Icons/PlayIcon.vue';
 import PauseIcon from '../components/Icons/PauseIcon.vue';
@@ -23,7 +23,7 @@ import {
 import { timesCountText } from '../utils/format';
 import defaultTrackCover from '../assets/trackCover.webp';
 import { useI18n } from '../composables/useI18n';
-import { openYearRecap, seasonalRecapYear } from '../composables/useYearRecap';
+import { activeRecapYear, openYearRecap, recapBadgeOverride } from '../composables/useYearRecap';
 import { useSpectrum, SPECTRUM_BARS } from '../composables/useSpectrum';
 import ScannerBg from '../components/ScannerBg.vue';
 
@@ -279,7 +279,43 @@ const character = computed(() => {
     return t('stats.characterSentence', { traits });
 });
 
-const seasonYear = seasonalRecapYear();
+const seasonYear = activeRecapYear;
+const showRecapBadge = computed(() => seasonYear.value !== null && (hasLibrary.value || recapBadgeOverride.value === 'on'));
+
+const recapBadgeEl = ref<HTMLElement | null>(null);
+const recapBadgeWidth = ref(0);
+let recapBadgeRO: ResizeObserver | null = null;
+
+watch(recapBadgeEl, (el) => {
+    recapBadgeRO?.disconnect();
+    recapBadgeRO = null;
+    if (!el) {
+        recapBadgeWidth.value = 0;
+        return;
+    }
+    recapBadgeWidth.value = el.offsetWidth;
+    recapBadgeRO = new ResizeObserver(() => {
+        recapBadgeWidth.value = el.offsetWidth;
+    });
+    recapBadgeRO.observe(el);
+});
+
+const flowBgStyle = computed(() => {
+    const d = showRecapBadge.value && recapBadgeWidth.value > 0
+        ? Math.round(recapBadgeWidth.value) + 14
+        : 0;
+    const cw = 84 + d;
+    const path = d > 0
+        ? `M0 0H11.16A18 18 0 0 1 29.1 19.41A33 33 0 0 0 62 55H${62 + d}A33 33 0 0 0 ${(64.59 + d).toFixed(2)} 54.9A18 18 0 0 1 ${cw} 72.84V84H0Z`
+        : 'M0 0H11.16A18 18 0 0 1 29.1 19.41A33 33 0 0 0 64.59 54.9A18 18 0 0 1 84 72.84V84H0Z';
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${cw}' height='84'><path d='${path}'/></svg>`;
+    const mask = [
+        `url("data:image/svg+xml,${encodeURIComponent(svg)}") right top / ${cw}px 84px no-repeat`,
+        `linear-gradient(#000 0 0) left top / calc(100% - ${cw - 1}px) 100% no-repeat`,
+        'linear-gradient(#000 0 0) left bottom / 100% calc(100% - 83px) no-repeat',
+    ].join(', ');
+    return { '--flow-mask': mask };
+});
 
 function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
@@ -294,6 +330,8 @@ onMounted(() => {
 
 onUnmounted(() => {
     window.removeEventListener('keydown', onKeydown);
+    recapBadgeRO?.disconnect();
+    recapBadgeRO = null;
     spectrum.stop();
 });
 </script>
@@ -309,14 +347,13 @@ onUnmounted(() => {
                     <path d="M8 17v-3"/>
                 </svg>
             </button>
-            <button v-if="seasonYear !== null && hasLibrary" class="recapBadge" @click="openYearRecap(seasonYear)">
-                <span class="recapBadgeDot"></span>
+            <button v-if="showRecapBadge && seasonYear !== null" ref="recapBadgeEl" class="recapBadge" @click="openYearRecap(seasonYear)">
                 {{ t('recap.open', { year: seasonYear }) }}
             </button>
 
             <template v-if="hasLibrary">
                 <div class="stageArea">
-                    <div class="flowBg" aria-hidden="true">
+                    <div class="flowBg" :style="flowBgStyle" aria-hidden="true">
                         <ScannerBg ref="scanner" />
                     </div>
                     <div class="mixStage">
@@ -589,14 +626,8 @@ onUnmounted(() => {
     background-color: hsla(0, 0%, 100%, 0.022);
 }
 :global(body:not(.lfmusic-phone) .flowBg) {
-    -webkit-mask:
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='84'%3E%3Cpath d='M0 0H11.16A18 18 0 0 1 29.1 19.41A33 33 0 0 0 64.59 54.9A18 18 0 0 1 84 72.84V84H0Z'/%3E%3C/svg%3E") right top / 84px 84px no-repeat,
-        linear-gradient(#000 0 0) left top / calc(100% - 84px) 100% no-repeat,
-        linear-gradient(#000 0 0) left bottom / 100% calc(100% - 84px) no-repeat;
-    mask:
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='84'%3E%3Cpath d='M0 0H11.16A18 18 0 0 1 29.1 19.41A33 33 0 0 0 64.59 54.9A18 18 0 0 1 84 72.84V84H0Z'/%3E%3C/svg%3E") right top / 84px 84px no-repeat,
-        linear-gradient(#000 0 0) left top / calc(100% - 84px) 100% no-repeat,
-        linear-gradient(#000 0 0) left bottom / 100% calc(100% - 84px) no-repeat;
+    -webkit-mask: var(--flow-mask);
+    mask: var(--flow-mask);
 }
 
 .statsBtn {
@@ -632,9 +663,8 @@ onUnmounted(() => {
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 8px;
     height: 40px;
-    padding: 0 16px 0 14px;
+    padding: 0 18px;
     border: none;
     border-radius: 999px;
     font-size: 13px;
@@ -645,17 +675,6 @@ onUnmounted(() => {
 }
 .recapBadge:hover {
     background-color: hsla(var(--accent-h), var(--accent-s), 60%, 1);
-}
-.recapBadgeDot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #fff;
-    animation: recapBadgePulse 2.4s var(--ease-smooth-in-out) infinite;
-}
-@keyframes recapBadgePulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: .45; transform: scale(.7); }
 }
 
 .mixStage {

@@ -24,15 +24,30 @@ export const HOLIDAYS: HolidayDef[] = [
     { id: 'halloween',    from: [10, 29], to: [11, 1] },
 ]
 
+export type HolidayOverride = HolidayId | 'none' | null
+
 const OVERRIDE_KEY = 'lfmusic_holiday'
 
-function readOverride(): HolidayId | 'none' | null {
+function readOverride(): HolidayOverride {
     try {
         const v = localStorage.getItem(OVERRIDE_KEY)
         if (v === 'none') return 'none'
         return HOLIDAYS.some(h => h.id === v) ? v as HolidayId : null
     } catch {
         return null
+    }
+}
+
+/** Holiday info modal, opened from the titlebar badge. */
+export const holidayModalOpen = ref(false)
+export const holidayOverride = ref<HolidayOverride>(readOverride())
+
+export function setHolidayOverride(next: HolidayOverride) {
+    holidayOverride.value = next
+    try {
+        if (next === null) localStorage.removeItem(OVERRIDE_KEY)
+        else localStorage.setItem(OVERRIDE_KEY, next)
+    } catch {
     }
 }
 
@@ -47,11 +62,7 @@ export function holidayForDate(date: Date): HolidayId | null {
     return null
 }
 
-/** Holiday info modal, opened from the titlebar badge. */
-export const holidayModalOpen = ref(false)
-
 const now = ref(new Date())
-const override = readOverride()
 let started = false
 
 function tick() {
@@ -60,10 +71,11 @@ function tick() {
 }
 
 export const activeHoliday = computed<HolidayId | null>(() => {
+    if (holidayOverride.value === 'none') return null
+    if (holidayOverride.value) return holidayOverride.value
     const { settings } = useSettings()
     if (!settings.value.holiday_events) return null
-    if (override === 'none') return null
-    return override ?? holidayForDate(now.value)
+    return holidayForDate(now.value)
 })
 
 export function useHoliday() {
