@@ -1,4 +1,10 @@
 <script setup lang="ts">
+/*
+ * Procedural WebGL2 slide backdrops for Year Recap.
+ * `sceneHalftone` is adapted from uibrik's Halftone background
+ * (https://uibrik.com/components/halftone, free for commercial use) and uses
+ * 3D simplex noise by Ian McEwan, Ashima Arts, and Stefan Gustavson (MIT).
+ */
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { frameLoop } from '../../utils/frameLoop'
 import type { BgScene } from './recapCards'
@@ -11,7 +17,7 @@ const props = withDefaults(defineProps<{
   paused?: boolean
   getEnergy?: () => number
 }>(), {
-  hueShift: 36,
+  hueShift: 22,
   paused: false,
 })
 
@@ -21,7 +27,7 @@ const SCENE_ID: Record<BgScene, number> = {
   scanner: 2,
   prism: 3,
   beams: 4,
-  vortex: 5,
+  halftone: 5,
 }
 
 const VERT = `#version 300 es
@@ -37,6 +43,11 @@ precision highp float;
 uniform vec2 iResolution;
 uniform float iTime;
 uniform float uEnergy;
+uniform float uDpr;
+uniform vec2 uPointer;
+uniform float uPointerAmt;
+uniform vec3 uTrailPts[16];
+uniform int uTrailCount;
 uniform int uModeA;
 uniform int uModeB;
 uniform float uMix;
@@ -64,6 +75,51 @@ float vnoise(vec2 p) {
   float c = hash21(i + vec2(0.0, 1.0));
   float d = hash21(i + vec2(1.0, 1.0));
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 3D simplex noise by Ian McEwan, Ashima Arts, and Stefan Gustavson (MIT).
+vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+float snoise(vec3 v) {
+  const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min(g.xyz, l.zxy);
+  vec3 i2 = max(g.xyz, l.zxy);
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute(permute(permute(i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+  float n_ = 0.142857142857;
+  vec3 ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_);
+  vec4 x = x_ * ns.x + ns.yyyy;
+  vec4 y = y_ * ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4(x.xy, y.xy);
+  vec4 b1 = vec4(x.zw, y.zw);
+  vec4 s0 = floor(b0) * 2.0 + 1.0;
+  vec4 s1 = floor(b1) * 2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+  vec3 p0 = vec3(a0.xy, h.x);
+  vec3 p1 = vec3(a0.zw, h.y);
+  vec3 p2 = vec3(a1.xy, h.z);
+  vec3 p3 = vec3(a1.zw, h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
 }
 
 mat2 rot(float a) {
@@ -221,33 +277,146 @@ vec3 sceneBeams(vec2 uv, float t, float energy) {
   return col;
 }
 
-// 5: Sonic vortex / vinyl warp (Balatro / Ripple inspired)
-vec3 sceneVortex(vec2 uv, float t, float energy) {
-  vec2 c = uv - vec2(0.0, 0.06);
-  float r = length(c);
-  float a = atan(c.y, c.x);
-
-  float swirl = a + 2.4 / (r + 0.42) - t * 0.38;
-  vec2 wp = vec2(cos(swirl), sin(swirl)) * r;
-
-  float n = fbm(wp * 2.2 + vec2(t * 0.15, -t * 0.12));
-  float bands = 0.5 + 0.5 * sin(swirl * 3.0 + n * 4.2);
-  float rings = pow(0.5 + 0.5 * cos(r * 15.0 - t * 1.35 + n * 2.0), 4.0) * exp(-r * 0.75);
-
-  vec3 col = mix(uBase, uColor1, smoothstep(0.18, 0.88, bands) * 0.76);
-  col = mix(col, uColor2, smoothstep(0.35, 0.95, n) * (0.52 + energy * 0.2));
-  col += uColor3 * rings * (0.42 + energy * 0.32);
-  col += uColor2 * exp(-r * 2.6) * (0.28 + energy * 0.22);
-  return col;
+float cbrtSafe(float x) {
+  return x > 1e-7 ? pow(x, 1.0 / 3.0) : 0.0;
 }
 
-vec3 evalScene(int mode, vec2 uv, float t, float energy) {
+vec3 srgbToLinear(vec3 c) {
+  c = clamp(c, 0.0, 1.0);
+  return mix(c / 12.92, pow(max(c + 0.055, 0.0) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+
+vec3 linearToSrgb(vec3 c) {
+  c = clamp(c, 0.0, 1.0);
+  return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0031308)), vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+vec3 linearToOklab(vec3 c) {
+  float l = cbrtSafe(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b);
+  float m = cbrtSafe(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b);
+  float s = cbrtSafe(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b);
+  return vec3(
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+  );
+}
+
+vec3 oklabToLinear(vec3 c) {
+  float l = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+  float m = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+  float s = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+  l = l * l * l; m = m * m * m; s = s * s * s;
+  return vec3(
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+  );
+}
+
+vec3 mixLch(vec3 a, vec3 b, float t) {
+  float ca = length(a.yz);
+  float cb = length(b.yz);
+  float ha = ca > 1e-4 ? atan(a.z, a.y) : 0.0;
+  float hb = cb > 1e-4 ? atan(b.z, b.y) : 0.0;
+  if (ca < 0.02) ha = hb;
+  if (cb < 0.02) hb = ha;
+  float dh = mod(hb - ha + 3.14159265, 6.2831853) - 3.14159265;
+  float h = ha + dh * t;
+  float c = mix(ca, cb, t);
+  return vec3(mix(a.x, b.x, t), c * cos(h), c * sin(h));
+}
+
+vec3 halftoneRamp(float x, vec3 s0, vec3 s1, vec3 s2, vec3 s3) {
+  float f = clamp(x, 0.0, 1.0) * 3.0;
+  if (f < 1.0) return mixLch(s0, s1, smoothstep(0.0, 1.0, f));
+  if (f < 2.0) return mixLch(s1, s2, smoothstep(0.0, 1.0, f - 1.0));
+  return mixLch(s2, s3, smoothstep(0.0, 1.0, f - 2.0));
+}
+
+float fbm3(vec3 p) {
+  return snoise(p) * 0.78 + snoise(p * 2.03 + 7.1) * 0.22;
+}
+
+float halftoneTone(vec2 q, float t, float energy) {
+  float frequency = 1.42;
+  float flow = 1.2;
+  float bandWidth = 1.02 + energy * 0.14;
+  float contrast = 1.1;
+  vec2 p = q * 0.55 * frequency;
+  vec2 w = vec2(fbm3(vec3(p * 0.5, t)), fbm3(vec3(p * 0.5 + 5.2, t)));
+  float n = fbm3(vec3(p + w * flow * 0.7, t * 0.7));
+  float bw = 0.2 * bandWidth;
+  float v = exp(-n * n / (bw * bw));
+  v *= 0.65 + 0.35 * (snoise(vec3(p * 0.35, t * 0.5)) * 0.5 + 0.5);
+  return clamp((v - 0.5) * contrast + 0.5, 0.0, 1.0);
+}
+
+float liquidTrail(vec2 p, float R, float t) {
+  vec2 q = p / (R * 2.4);
+  p += vec2(snoise(vec3(q, t)), snoise(vec3(q + 7.3, t))) * R * 0.5;
+  float best = 0.0;
+  for (int i = 0; i < 15; i++) {
+    if (i + 1 >= uTrailCount) break;
+    vec3 a = uTrailPts[i];
+    vec3 b = uTrailPts[i + 1];
+    vec2 ab = b.xy - a.xy;
+    float h = clamp(dot(p - a.xy, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0);
+    float s = mix(a.z, b.z, h);
+    float r = R * mix(1.2, 0.8, s);
+    float d = length(p - a.xy - ab * h);
+    best = max(best, exp(-d * d / (r * r)) * s);
+  }
+  if (uTrailCount == 1) {
+    float d = length(p - uTrailPts[0].xy);
+    best = exp(-d * d / (R * R)) * uTrailPts[0].z;
+  }
+  return mix(best, smoothstep(0.05, 0.8, best), 0.7);
+}
+
+// 5: Lit halftone dot screen (adapted from uibrik Halftone)
+vec3 sceneHalftone(vec2 frag, float t, float energy) {
+  float ht = (t + 12.0) * 0.095;
+  float cs = 7.0 * max(uDpr, 0.5);
+  vec2 g = frag / cs;
+  vec2 cell = floor(g) + 0.5;
+  vec2 center = cell * cs;
+
+  float tone = halftoneTone(center / iResolution.y, ht, energy);
+  if (uPointerAmt > 0.001) {
+    float R = 70.0 * max(uDpr, 0.5);
+    vec2 dp = (center - uPointer) / R;
+    float rest = exp(-dot(dp, dp));
+    float trail = uPointerAmt * max(liquidTrail(center, R, (t + 12.0) * 0.5), rest * 0.6);
+    tone = clamp(tone + trail * 0.85, 0.0, 1.0);
+  }
+
+  float dotSize = 0.95;
+  float minDot = 0.30;
+  float r = 0.5 * cs * dotSize * mix(minDot, 1.0, sqrt(tone));
+  float soft = 0.6;
+  float d = length((g - cell) * cs);
+  float m = 1.0 - smoothstep(r - soft, r + soft, d);
+
+  vec3 htBg = srgbToLinear(uBase * 0.40);
+  vec3 s0 = linearToOklab(srgbToLinear(mix(uBase * 1.4, uColor1, 0.24)));
+  vec3 s1 = linearToOklab(srgbToLinear(uColor1));
+  vec3 s2 = linearToOklab(srgbToLinear(mix(uColor2, vec3(0.88, 0.90, 0.93), 0.42)));
+  vec3 s3 = linearToOklab(srgbToLinear(mix(uColor3, vec3(0.96, 0.93, 0.87), 0.48)));
+
+  vec3 dotColor = oklabToLinear(halftoneRamp(tone, s0, s1, s2, s3));
+  float glow = 0.5 + energy * 0.22;
+  vec3 base = htBg + dotColor * glow * 0.12 * tone * tone;
+  return linearToSrgb(mix(base, dotColor, m));
+}
+
+vec3 evalScene(int mode, vec2 uv, vec2 frag, float t, float energy) {
   if (mode == 0) return sceneSilk(uv, t, energy);
   if (mode == 1) return sceneAurora(uv, t, energy);
   if (mode == 2) return sceneScanner(uv, t, energy);
   if (mode == 3) return scenePrism(uv, t, energy);
   if (mode == 4) return sceneBeams(uv, t, energy);
-  return sceneVortex(uv, t, energy);
+  return sceneHalftone(frag, t, energy);
 }
 
 void main() {
@@ -255,22 +424,30 @@ void main() {
   float t = iTime;
 
   vec3 col;
+  float htWeight = 0.0;
   if (uMix >= 0.999 || uModeA == uModeB) {
-    col = evalScene(uModeB, uv, t, uEnergy);
+    col = evalScene(uModeB, uv, gl_FragCoord.xy, t, uEnergy);
+    htWeight = uModeB == 5 ? 1.0 : 0.0;
   } else {
     float k = uMix * uMix * (3.0 - 2.0 * uMix);
-    col = mix(evalScene(uModeA, uv, t, uEnergy), evalScene(uModeB, uv, t, uEnergy), k);
+    col = mix(
+      evalScene(uModeA, uv, gl_FragCoord.xy, t, uEnergy),
+      evalScene(uModeB, uv, gl_FragCoord.xy, t, uEnergy),
+      k
+    );
+    htWeight = mix(uModeA == 5 ? 1.0 : 0.0, uModeB == 5 ? 1.0 : 0.0, k);
   }
 
   // Soft legibility shaping: keep top controls and bottom content grounded while center breathes.
-  float vig = 1.0 - 0.38 * smoothstep(0.55, 1.55, length(uv * vec2(1.05, 0.78)));
+  float vigAmt = mix(0.38, 0.28, htWeight);
+  float vig = 1.0 - vigAmt * smoothstep(0.55, 1.55, length(uv * vec2(1.05, 0.78)));
   float topShade = mix(0.76, 1.0, smoothstep(1.02, 0.35, uv.y));
   float botShade = mix(0.66, 1.0, smoothstep(-1.05, -0.25, uv.y));
   col *= vig * topShade * botShade;
 
-  // Fine film grain to avoid banding on dark tones.
+  // Fine film grain to avoid banding on dark tones; gentler on crisp halftone dots.
   float g = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)) + iTime * 1.7) * 43758.5453);
-  col += (g - 0.5) * 0.032;
+  col += (g - 0.5) * mix(0.032, 0.007, htWeight);
 
   fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
@@ -284,6 +461,11 @@ let prog: WebGLProgram | null = null
 let uRes: WebGLUniformLocation | null = null
 let uTime: WebGLUniformLocation | null = null
 let uEnergy: WebGLUniformLocation | null = null
+let uDpr: WebGLUniformLocation | null = null
+let uPointer: WebGLUniformLocation | null = null
+let uPointerAmt: WebGLUniformLocation | null = null
+let uTrailPts: WebGLUniformLocation | null = null
+let uTrailCount: WebGLUniformLocation | null = null
 let uModeA: WebGLUniformLocation | null = null
 let uModeB: WebGLUniformLocation | null = null
 let uMix: WebGLUniformLocation | null = null
@@ -294,9 +476,17 @@ let uColor3: WebGLUniformLocation | null = null
 
 let time = 1.4
 let energy = 0
+let dprScale = 1
 let modeA = SCENE_ID[props.scene]
 let modeB = SCENE_ID[props.scene]
 let mixT = 1
+
+const TRAIL_MAX = 16
+const TRAIL_LIFE = 0.9
+const FOLLOW = 0.55
+const pointer = { x: 0, y: 0, tx: 0, ty: 0, amt: 0, inside: false, seen: false }
+const trail: { x: number; y: number; t: number }[] = []
+const trailData = new Float32Array(TRAIL_MAX * 3)
 
 type Rgb = [number, number, number]
 interface Palette {
@@ -317,12 +507,12 @@ function hslToRgb(h: number, s: number, l: number): Rgb {
 }
 
 function buildPalette(h: number, s: number, shift: number): Palette {
-  const sat = Math.min(92, Math.max(s, 28) * 1.2)
+  const sat = Math.min(82, Math.max(s, 18) * 1.12)
   return {
-    base: hslToRgb(h, Math.min(sat * 0.42, 34), 7.5),
+    base: hslToRgb(h, Math.min(sat * 0.42, 32), 7.5),
     c1: hslToRgb(h, sat, 44),
-    c2: hslToRgb(h + shift, Math.min(95, sat * 0.96), 58),
-    c3: hslToRgb(h + shift * 0.5, Math.min(sat, 62), 88),
+    c2: hslToRgb(h + shift, Math.min(86, sat * 0.94), 55),
+    c3: hslToRgb(h + shift * 0.5, Math.min(sat, 58), 87),
   }
 }
 
@@ -354,8 +544,22 @@ function lerpRgb(cur: Rgb, dst: Rgb, alpha: number) {
 
 function uploadUniforms() {
   if (!gl) return
+  trailData.fill(0)
+  const nowSec = performance.now() / 1000
+  for (let i = 0; i < trail.length; i++) {
+    const p = trail[i]
+    const a = Math.min(1, Math.max(0, (nowSec - p.t) / TRAIL_LIFE))
+    trailData[i * 3] = p.x
+    trailData[i * 3 + 1] = p.y
+    trailData[i * 3 + 2] = 1 - a * a * (3 - 2 * a)
+  }
   gl.uniform1f(uTime, time)
   gl.uniform1f(uEnergy, energy)
+  gl.uniform1f(uDpr, dprScale)
+  gl.uniform2f(uPointer, pointer.x, pointer.y)
+  gl.uniform1f(uPointerAmt, pointer.amt)
+  gl.uniform3fv(uTrailPts, trailData)
+  gl.uniform1i(uTrailCount, trail.length)
   gl.uniform1i(uModeA, modeA)
   gl.uniform1i(uModeB, modeB)
   gl.uniform1f(uMix, mixT)
@@ -377,9 +581,12 @@ function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
   const w = Math.max(1, Math.round(canvas.clientWidth * dpr))
   const h = Math.max(1, Math.round(canvas.clientHeight * dpr))
+  dprScale = w / Math.max(1, canvas.clientWidth)
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w
     canvas.height = h
+    trail.length = 0
+    pointer.seen = false
   }
   gl.viewport(0, 0, w, h)
   gl.uniform2f(uRes, w, h)
@@ -400,6 +607,30 @@ const loop = frameLoop((_now, frameDt) => {
     mixT = Math.min(1, mixT + dt / TRANSITION_SECS)
   }
 
+  if (!props.paused && !reducedMotion && (modeA === 5 || modeB === 5)) {
+    const ease = (from: number, to: number, rate: number, snap: number) => {
+      const v = from + (to - from) * (1 - Math.exp(-rate * dt))
+      return Math.abs(to - v) < snap ? to : v
+    }
+    const amtTo = pointer.inside ? 1 : 0
+    pointer.amt = ease(pointer.amt, amtTo, 3.5, 0.002)
+    const followRate = 28 * Math.pow(1 / 9, FOLLOW)
+    pointer.x = ease(pointer.x, pointer.tx, followRate, 0.25)
+    pointer.y = ease(pointer.y, pointer.ty, followRate, 0.25)
+    const nowSec = performance.now() / 1000
+    while (trail.length > 0 && nowSec - trail[trail.length - 1].t > TRAIL_LIFE) trail.pop()
+    if (pointer.amt > 0) {
+      const head = trail[0]
+      if (!head || Math.hypot(head.x - pointer.x, head.y - pointer.y) > 6 * dprScale) {
+        trail.unshift({ x: pointer.x, y: pointer.y, t: nowSec })
+        if (trail.length > TRAIL_MAX) trail.pop()
+      }
+    }
+  } else {
+    pointer.amt = 0
+    trail.length = 0
+  }
+
   const colorAlpha = 1 - Math.exp(-dt * 5.2)
   lerpRgb(curPal.base, targetPal.base, colorAlpha)
   lerpRgb(curPal.c1, targetPal.c1, colorAlpha)
@@ -408,6 +639,31 @@ const loop = frameLoop((_now, frameDt) => {
 
   draw()
 }, FRAME_MS)
+
+function onPointerMove(e: PointerEvent) {
+  const canvas = canvasEl.value
+  if (!canvas || reducedMotion) return
+  const rect = canvas.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return
+  const inside =
+    e.clientX >= rect.left &&
+    e.clientX <= rect.right &&
+    e.clientY >= rect.top &&
+    e.clientY <= rect.bottom
+  pointer.inside = inside
+  if (!inside) return
+  pointer.tx = ((e.clientX - rect.left) / rect.width) * canvas.width
+  pointer.ty = ((rect.bottom - e.clientY) / rect.height) * canvas.height
+  if (!pointer.seen || pointer.amt === 0) {
+    pointer.x = pointer.tx
+    pointer.y = pointer.ty
+    pointer.seen = true
+  }
+}
+
+function onPointerLeave() {
+  pointer.inside = false
+}
 
 function start() {
   if (loop.running || !gl || !visible || document.hidden) return
@@ -497,6 +753,11 @@ onMounted(() => {
   uRes = gl.getUniformLocation(prog, 'iResolution')
   uTime = gl.getUniformLocation(prog, 'iTime')
   uEnergy = gl.getUniformLocation(prog, 'uEnergy')
+  uDpr = gl.getUniformLocation(prog, 'uDpr')
+  uPointer = gl.getUniformLocation(prog, 'uPointer')
+  uPointerAmt = gl.getUniformLocation(prog, 'uPointerAmt')
+  uTrailPts = gl.getUniformLocation(prog, 'uTrailPts')
+  uTrailCount = gl.getUniformLocation(prog, 'uTrailCount')
   uModeA = gl.getUniformLocation(prog, 'uModeA')
   uModeB = gl.getUniformLocation(prog, 'uModeB')
   uMix = gl.getUniformLocation(prog, 'uMix')
@@ -516,6 +777,9 @@ onMounted(() => {
   })
   intersectionObserver.observe(canvas)
   document.addEventListener('visibilitychange', onVisibility)
+  window.addEventListener('pointermove', onPointerMove, { passive: true })
+  document.documentElement.addEventListener('pointerleave', onPointerLeave)
+  window.addEventListener('blur', onPointerLeave)
   start()
 })
 
@@ -524,6 +788,9 @@ onUnmounted(() => {
   resizeObserver?.disconnect()
   intersectionObserver?.disconnect()
   document.removeEventListener('visibilitychange', onVisibility)
+  window.removeEventListener('pointermove', onPointerMove)
+  document.documentElement.removeEventListener('pointerleave', onPointerLeave)
+  window.removeEventListener('blur', onPointerLeave)
   gl?.getExtension('WEBGL_lose_context')?.loseContext()
   gl = null
 })
@@ -542,7 +809,7 @@ onUnmounted(() => {
   pointer-events: none;
   z-index: 0;
   overflow: hidden;
-  background: hsl(var(--rc-h, 250), min(var(--rc-s, 45%), 28%), 8%);
+  background: hsl(var(--rc-h, 216), min(var(--rc-s, 45%), 28%), 8%);
 }
 
 .recapBgCanvas {
@@ -555,8 +822,8 @@ onUnmounted(() => {
 
 .recapBgWrap.fallback {
   background:
-    radial-gradient(120% 65% at 25% 15%, hsla(var(--rc-h, 250), var(--rc-s, 45%), 52%, 0.42), transparent 64%),
-    radial-gradient(100% 60% at 85% 80%, hsla(calc(var(--rc-h, 250) + 38), var(--rc-s, 45%), 46%, 0.34), transparent 68%),
-    hsl(var(--rc-h, 250), min(var(--rc-s, 45%), 28%), 7%);
+    radial-gradient(120% 65% at 25% 15%, hsla(var(--rc-h, 216), var(--rc-s, 45%), 52%, 0.42), transparent 64%),
+    radial-gradient(100% 60% at 85% 80%, hsla(calc(var(--rc-h, 216) - 14), var(--rc-s, 45%), 46%, 0.34), transparent 68%),
+    hsl(var(--rc-h, 216), min(var(--rc-s, 45%), 28%), 7%);
 }
 </style>

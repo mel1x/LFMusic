@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { buildDemoYearRecap, loadYearRecap, recapOpen, recapOpenDemo, recapYear, type YearRecap } from '../../composables/useYearRecap'
 import { usePlayer } from '../../composables/usePlayer'
 import { useI18n } from '../../composables/useI18n'
-import { buildRecapCards, type BgScene, type RecapCard as Card } from './recapCards'
+import { buildRecapCards, cleanAccent, type BgScene, type RecapCard as Card } from './recapCards'
 import { useRecapSound } from './useRecapSound'
 import RecapBg from './RecapBg.vue'
 import RecapCard from './RecapCard.vue'
@@ -38,8 +38,8 @@ function readRootAccent(): { hue: number; sat: number } {
   const rawH = parseFloat(style.getPropertyValue('--accent-h'))
   const rawS = parseFloat(style.getPropertyValue('--accent-s'))
   return {
-    hue: Number.isFinite(rawH) ? rawH : 258,
-    sat: Number.isFinite(rawS) ? Math.max(36, rawS) : 56,
+    hue: Number.isFinite(rawH) ? rawH : 216,
+    sat: Number.isFinite(rawS) ? Math.max(36, rawS) : 52,
   }
 }
 
@@ -48,9 +48,10 @@ const paused = computed(() => held.value || userPaused.value || hidden.value)
 const resolvedBg = computed(() => {
   const c = current.value
   const root = readRootAccent()
-  const hue = c?.accent?.hue ?? root.hue
-  const sat = c?.accent?.sat ?? root.sat
-  const shift = c?.accent?.shift ?? 38
+  const fallback = cleanAccent(root.hue, root.sat)
+  const hue = c?.accent?.hue ?? fallback.hue
+  const sat = c?.accent?.sat ?? fallback.sat
+  const shift = c?.accent?.shift ?? fallback.shift ?? 22
   const scene: BgScene = c?.scene ?? 'aurora'
   return { scene, hue, sat, shift }
 })
@@ -58,7 +59,7 @@ const backdropStyle = computed(() => {
   const { hue, sat, shift } = resolvedBg.value
   return {
     '--rc-h': `${hue}`,
-    '--rc-h2': `${(hue + shift) % 360}`,
+    '--rc-h2': `${((hue + shift) % 360 + 360) % 360}`,
     '--rc-s': `${sat}%`,
   }
 })
@@ -406,7 +407,7 @@ onUnmounted(() => {
 
 <style scoped>
 .recapRoot {
-  --rc-h: var(--accent-h, 250);
+  --rc-h: var(--accent-h, 216);
   --rc-s: var(--accent-s, 45%);
   position: fixed;
   top: 0;
@@ -429,7 +430,7 @@ onUnmounted(() => {
   pointer-events: none;
   background:
     radial-gradient(38% 54% at 46% 42%, hsla(var(--rc-h), var(--rc-s), 48%, 0.2), transparent 72%),
-    radial-gradient(34% 48% at 56% 62%, hsla(var(--rc-h2, 290), var(--rc-s), 46%, 0.14), transparent 74%);
+    radial-gradient(34% 48% at 56% 62%, hsla(var(--rc-h2, 202), var(--rc-s), 46%, 0.14), transparent 74%);
   transition: background .8s var(--ease-smooth);
 }
 

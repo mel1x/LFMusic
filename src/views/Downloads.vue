@@ -1,6 +1,36 @@
+<script lang="ts">
+import type {
+    ExternalSearchTrack,
+    ExternalSearchAlbum,
+    ExternalSearchArtist,
+    LinkResult,
+} from '../composables/useDownloads'
+
+type SavedTab = 'all' | 'tracks' | 'albums' | 'artists'
+interface DownloadsSnapshot {
+    rawSearch: string
+    query: string
+    exactMatch: { artist: string; title: string } | null
+    tab: SavedTab
+    tracks: ExternalSearchTrack[]
+    albums: ExternalSearchAlbum[]
+    artists: ExternalSearchArtist[]
+    effectiveQuery: string
+    nextIndex: number
+    hasMore: boolean
+    link: LinkResult | null
+    scrollTop: number
+    wasSearching: boolean
+}
+
+let savedState: DownloadsSnapshot | null = null
+function getSavedState(): DownloadsSnapshot | null { return savedState }
+function setSavedState(next: DownloadsSnapshot | null) { savedState = next }
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 
 import SearchIcon from '../components/Icons/SearchIcon.vue'
@@ -8,6 +38,7 @@ import DownloadIcon from '../components/Icons/DownloadIcon.vue'
 import CloseIcon from '../components/Icons/CloseIcon.vue'
 import FolderIcon from '../components/Icons/FolderIcon.vue'
 import SettingsIcon from '../components/Icons/SettingsIcon.vue'
+import TimeIcon from '../components/Icons/TimeIcon.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import CoverImage from '../components/CoverImage.vue'
 import DownloadTrackRow from '../components/DownloadTrackRow.vue'
@@ -20,10 +51,6 @@ import {
     useDownloads,
     useKeepDownloadedInLibrary,
     useRedownloadConfirm,
-    type ExternalSearchTrack,
-    type ExternalSearchAlbum,
-    type ExternalSearchArtist,
-    type LinkResult,
 } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 import { usePlayer } from '../composables/usePlayer'
@@ -57,22 +84,24 @@ const {
     checkUpdates,
     refreshTools,
     trackKey,
+    formatSpeed,
 } = useDownloads()
+
+const initialRouteQ = (() => {
+    const v = route.query.q
+    return (Array.isArray(v) ? v[0] : v) || ''
+})()
+if (initialRouteQ) setSavedState(null)
+const restored = getSavedState()
 
 const searchInput = ref<HTMLInputElement | null>(null)
 useTypeToSearch(searchInput)
-const rawSearch = ref('')
-const query = ref('')
-const exactMatch = ref<{ artist: string; title: string } | null>(null)
+const rawSearch = ref(restored?.rawSearch ?? '')
+const query = ref(restored?.query ?? '')
+const exactMatch = ref<{ artist: string; title: string } | null>(restored?.exactMatch ?? null)
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const locked = computed(() => ytdlpMissing.value)
-
-const downloadsDirName = computed(() => {
-    const dir = (downloadsDir.value || '').replace(/[\\/]+$/, '')
-    if (!dir) return ''
-    return dir.split(/[\\/]/).pop() || dir
-})
 
 async function openDownloadsFolder() {
     if (!downloadsDir.value) return
@@ -100,13 +129,15 @@ function submitNow() {
 }
 function clearSearch() {
     if (debounceTimer) clearTimeout(debounceTimer)
+    setSavedState(null)
     rawSearch.value = ''
     query.value = ''
     exactMatch.value = null
     searchInput.value?.focus()
 }
 function onKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') submitNow()
+    if (e.key === 'Tab' && !rawSearch.value && hint.value) { e.preventDefault(); useHint() }
+    else if (e.key === 'Enter') submitNow()
     else if (e.key === 'Escape' && rawSearch.value) { e.preventDefault(); clearSearch() }
 }
 
@@ -120,10 +151,15 @@ const linkMode = computed(() => isUrl(query.value))
 const typingLink = computed(() => isUrl(rawSearch.value.trim()))
 
 const RECENT_KEY = 'lfmusic_past_downloads'
-const recent = ref<string[]>([])
-function loadRecent() {
-    try { recent.value = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]') } catch { recent.value = [] }
+function readRecent(): string[] {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]')
+        return Array.isArray(parsed) ? parsed : []
+    } catch {
+        return []
+    }
 }
+const recent = ref<string[]>(readRecent())
 function saveRecent() {
     try { localStorage.setItem(RECENT_KEY, JSON.stringify(recent.value)) } catch {}
 }
@@ -134,34 +170,40 @@ function remember() {
     recent.value = [q, ...recent.value.filter(r => r.toLowerCase() !== q.toLowerCase())].slice(0, 12)
     saveRecent()
 }
-function forgetRecent(q: string) {
-    recent.value = recent.value.filter(r => r !== q)
-    saveRecent()
+
+const hintIndex = ref(0)
+let hintTimer: ReturnType<typeof setInterval> | null = null
+const hint = computed(() => (!locked.value && recent.value.length)
+    ? recent.value[hintIndex.value % recent.value.length]
+    : '')
+function startHints() {
+    if (hintTimer) clearInterval(hintTimer)
+    hintTimer = setInterval(() => {
+        if (!rawSearch.value && !locked.value && recent.value.length > 1) hintIndex.value++
+    }, 2600)
 }
-function clearRecent() {
-    recent.value = []
-    saveRecent()
-}
-function useRecent(q: string) {
+function useHint() {
+    if (!hint.value || locked.value) return
     if (debounceTimer) clearTimeout(debounceTimer)
-    rawSearch.value = q
-    query.value = q
+    rawSearch.value = hint.value
+    query.value = hint.value
     searchInput.value?.focus()
 }
 
-type Tab = 'all' | 'tracks' | 'albums' | 'artists'
-const tab = ref<Tab>('all')
+type Tab = SavedTab
+const tab = ref<Tab>(restored?.tab ?? 'all')
 const PAGE = 30
-const tracks = ref<ExternalSearchTrack[]>([])
-const albums = ref<ExternalSearchAlbum[]>([])
-const artists = ref<ExternalSearchArtist[]>([])
+const tracks = ref<ExternalSearchTrack[]>(restored?.tracks ?? [])
+const albums = ref<ExternalSearchAlbum[]>(restored?.albums ?? [])
+const artists = ref<ExternalSearchArtist[]>(restored?.artists ?? [])
 const searching = ref(false)
 const loadingMore = ref(false)
-const hasMore = ref(false)
+const hasMore = ref(restored?.hasMore ?? false)
 const searchError = ref(false)
-let nextIndex = 0
-let effectiveQuery = ''
+let nextIndex = restored?.nextIndex ?? 0
+let effectiveQuery = restored?.effectiveQuery ?? ''
 let searchSeq = 0
+let tracksEmptyStreak = 0
 
 const anyResults = computed(() => tracks.value.length + albums.value.length + artists.value.length > 0)
 
@@ -186,6 +228,7 @@ async function runSearch(q: string) {
     loadingMore.value = false
     searchError.value = false
     nextIndex = 0
+    tracksEmptyStreak = 0
     tab.value = 'all'
     pageEl.value?.scrollTo({ top: 0 })
     if (!q) { searching.value = false; return }
@@ -218,27 +261,56 @@ async function runSearch(q: string) {
 async function loadMore() {
     if (loadingMore.value || searching.value || !hasMore.value || !hasQuery.value || linkMode.value) return
     const seq = searchSeq
+    const prevNext = nextIndex
+    const prevLen = tracks.value.length
     loadingMore.value = true
     try {
         const page = await search(effectiveQuery, nextIndex, PAGE, exactMatch.value ?? undefined)
         if (seq !== searchSeq) return
         tracks.value = dedupe(tracks.value, page.tracks)
         nextIndex = page.next_index
-        hasMore.value = page.has_more
+        hasMore.value = page.has_more && nextIndex > prevNext
+        tracksEmptyStreak = tracks.value.length > prevLen ? 0 : tracksEmptyStreak + 1
     } catch (e) {
         console.error('Ошибка подгрузки:', e)
     } finally {
-        if (seq === searchSeq) loadingMore.value = false
+        if (seq === searchSeq) {
+            loadingMore.value = false
+            if (hasMore.value && tracksEmptyStreak < 4 && tab.value === 'tracks') {
+                await nextTick()
+                const el = pageEl.value
+                if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 400) void loadMore()
+            }
+        }
     }
 }
 
 const pageEl = ref<HTMLElement | null>(null)
+const dockEl = ref<HTMLElement | null>(null)
+const tracksSentinelEl = ref<HTMLElement | null>(null)
+let tracksObserver: IntersectionObserver | null = null
+watch([pageEl, tracksSentinelEl], () => {
+    tracksObserver?.disconnect()
+    tracksObserver = null
+    if (!pageEl.value || !tracksSentinelEl.value) return
+    tracksObserver = new IntersectionObserver(
+        (entries) => {
+            if (entries.some(e => e.isIntersecting) && tab.value === 'tracks') void loadMore()
+        },
+        { root: pageEl.value, rootMargin: '0px 0px 400px 0px' },
+    )
+    tracksObserver.observe(tracksSentinelEl.value)
+}, { immediate: true })
+// The dock is transparent over the header tint and turns solid once it sticks.
+const dockStuck = ref(false)
 function onScroll(e: Event) {
     const el = e.target as HTMLElement
+    // A stuck sticky element reports its rendered offsetTop, which then equals scrollTop.
+    dockStuck.value = !!dockEl.value && el.scrollTop > 0 && el.scrollTop >= dockEl.value.offsetTop - 1
     if (tab.value === 'tracks' && el.scrollHeight - el.scrollTop - el.clientHeight < 400) void loadMore()
 }
 
-const link = ref<LinkResult | null>(null)
+const link = ref<LinkResult | null>(restored?.link ?? null)
 const linkResolving = ref(false)
 const linkError = ref<string | null>(null)
 let linkSeq = 0
@@ -261,6 +333,17 @@ async function runLink(url: string) {
 }
 
 const linkPending = computed(() => (link.value?.tracks ?? []).filter(t => !t.in_library && !itemFor(t)))
+const linkSingleTrack = computed(() => link.value?.tracks.length === 1 ? link.value.tracks[0] : null)
+const linkSingleItem = computed(() => linkSingleTrack.value ? itemFor(linkSingleTrack.value) : undefined)
+const linkSingleDone = computed(() => {
+    const tr = linkSingleTrack.value
+    if (!tr) return false
+    return tr.in_library || linkSingleItem.value?.stage === 'done'
+})
+const linkSingleActive = computed(() => {
+    const st = linkSingleItem.value?.stage
+    return st != null && st !== 'done' && st !== 'error'
+})
 const linkCover = computed(() => {
     const first = link.value?.tracks[0]
     return first?.cover_url || first?.thumbnail_url || null
@@ -270,6 +353,15 @@ const linkStyle = computed(() => linkTint.value ? { '--link-color': `rgb(${linkT
 
 async function downloadLinkAll() {
     if (linkPending.value.length) await enqueue(linkPending.value).catch(e => console.error(e))
+}
+async function downloadLinkSingle() {
+    const tr = linkSingleTrack.value
+    if (!tr || locked.value || linkSingleActive.value || linkSingleDone.value) return
+    if (linkSingleItem.value?.stage === 'error') {
+        await retry([linkSingleItem.value.id]).catch(e => console.error(e))
+        return
+    }
+    await enqueue(tr).catch(e => console.error(e))
 }
 
 watch(query, (q) => {
@@ -296,7 +388,8 @@ const best = computed<Best | null>(() => {
     if (a) return { kind: 'artist', artist: a }
     return null
 })
-const topTracks = computed(() => tracks.value.slice(0, 4))
+const topTracks = computed(() => tracks.value.slice(0, 5))
+const showArtistsRow = computed(() => artists.value.length > 0 && !(best.value?.kind === 'artist' && artists.value.length === 1))
 const counts = computed(() => ({
     tracks: tracks.value.length + (hasMore.value ? '+' : ''),
     albums: albums.value.length,
@@ -325,10 +418,17 @@ function openArtist(a: ExternalSearchArtist) {
 }
 
 const bestQueued = computed(() => (best.value?.kind === 'track' ? itemFor(best.value.track) : undefined))
+const bestDone = computed(() => best.value?.kind === 'track' && (best.value.track.in_library || bestQueued.value?.stage === 'done'))
+const bestBusy = computed(() => best.value?.kind === 'track' && !!bestQueued.value && bestQueued.value.stage !== 'done' && bestQueued.value.stage !== 'error')
+const bestFailed = computed(() => best.value?.kind === 'track' && bestQueued.value?.stage === 'error')
 async function downloadBest() {
-    if (best.value?.kind !== 'track' || locked.value) return
+    if (best.value?.kind !== 'track' || locked.value || bestBusy.value) return
+    if (bestQueued.value?.stage === 'error') {
+        await retry([bestQueued.value.id]).catch(e => console.error(e))
+        return
+    }
     const tr = best.value.track
-    if (tr.in_library) { confirmTrack.value = tr; return }
+    if (tr.in_library || bestDone.value) { confirmTrack.value = tr; return }
     remember()
     await enqueue(tr).catch(e => console.error(e))
 }
@@ -359,23 +459,40 @@ function itemToTrack(i: QueueItem): ExternalSearchTrack {
     }
 }
 
-// Queued, running and failed items; finished ones move to "recently downloaded".
-const activeDownloads = computed<ExternalSearchTrack[]>(() =>
-    queue.value.filter(i => i.stage !== 'done').map(itemToTrack),
-)
-const failedCount = computed(() => queue.value.filter(i => i.stage === 'error').length)
+type QueueEntry = { id: number; item: QueueItem; track: ExternalSearchTrack }
+const entries = (pred: (i: QueueItem) => boolean): QueueEntry[] =>
+    queue.value.filter(pred).map(i => ({ id: i.id, item: i, track: itemToTrack(i) }))
 
-const recentDownloads = computed<ExternalSearchTrack[]>(() =>
-    queue.value
-        .filter(i => i.stage === 'done')
-        .slice(-8)
-        .reverse()
-        .map(itemToTrack),
+const runningDownloads = computed(() =>
+    entries(i => i.stage === 'downloading' || i.stage === 'processing' || i.stage === 'searching'),
 )
+const queuedDownloads = computed(() => entries(i => i.stage === 'queued'))
+const failedDownloads = computed(() => entries(i => i.stage === 'error'))
+const failedCount = computed(() => failedDownloads.value.length)
 
-const isIdleEmpty = computed(() =>
-    !setupNeeded.value && !activeDownloads.value.length && !recentDownloads.value.length,
-)
+// Finished ones, newest first.
+const recentDownloads = computed<QueueEntry[]>(() => entries(i => i.stage === 'done').slice(-8).reverse())
+
+const hasQueue = computed(() => queue.value.length > 0)
+const pendingCount = computed(() => runningDownloads.value.length + queuedDownloads.value.length)
+const showBatchHeader = computed(() => pendingCount.value > 0 || failedCount.value > 0)
+
+/** Overall progress of the current batch (failed items left out). */
+const batch = computed(() => {
+    const list = queue.value.filter(i => i.stage !== 'error')
+    const done = list.filter(i => i.stage === 'done').length
+    const sum = list.reduce((acc, i) =>
+        acc + (i.stage === 'done' ? 1 : i.stage === 'processing' ? 0.95 : i.stage === 'downloading' ? i.progress * 0.9 : 0), 0)
+    const speed = queue.value.reduce((acc, i) => acc + (i.stage === 'downloading' && i.speed_bps ? i.speed_bps : 0), 0)
+    return {
+        done,
+        total: list.length,
+        pct: list.length ? Math.round((sum / list.length) * 100) : 0,
+        speed: speed > 0 ? formatSpeed(speed) : '',
+    }
+})
+
+const isIdleEmpty = computed(() => !setupNeeded.value && !hasQueue.value)
 
 async function onRetryAll() {
     try { await retry() } catch (e) { console.error('Ошибка повтора загрузок:', e) }
@@ -415,8 +532,31 @@ async function runUpdate() {
     try { await installTools(['ytdlp']) } catch (e) { installError.value = String(e) }
 }
 
+onBeforeRouteLeave((to) => {
+    if ((to.path.startsWith('/downloads/') || to.path.startsWith('/settings'))
+        && (rawSearch.value.trim() || query.value)) {
+        setSavedState({
+            rawSearch: rawSearch.value,
+            query: query.value,
+            exactMatch: exactMatch.value ? { ...exactMatch.value } : null,
+            tab: tab.value,
+            tracks: [...tracks.value],
+            albums: [...albums.value],
+            artists: [...artists.value],
+            effectiveQuery,
+            nextIndex,
+            hasMore: hasMore.value,
+            link: link.value ? { ...link.value, tracks: [...link.value.tracks] } : null,
+            scrollTop: pageEl.value?.scrollTop ?? 0,
+            wasSearching: searching.value || linkResolving.value,
+        })
+    } else {
+        setSavedState(null)
+    }
+})
+
 onMounted(async () => {
-    loadRecent()
+    startHints()
     const pick = (v: unknown) => (Array.isArray(v) ? v[0] : v) as string | undefined
     const q = pick(route.query.q) || ''
     const a = pick(route.query.dlArtist) || ''
@@ -425,9 +565,20 @@ onMounted(async () => {
         rawSearch.value = q
         if (a && ti) exactMatch.value = { artist: a, title: ti }
         query.value = q.trim()
+    } else if (restored) {
+        if (restored.wasSearching && query.value) {
+            if (isUrl(query.value)) void runLink(query.value)
+            else void runSearch(query.value)
+        }
+        await nextTick()
+        albumsLine.observe()
+        if (restored.scrollTop > 0 && pageEl.value) {
+            pageEl.value.scrollTop = restored.scrollTop
+            dockStuck.value = !!dockEl.value && pageEl.value.scrollTop > 0 && pageEl.value.scrollTop >= dockEl.value.offsetTop - 1
+        }
     }
     try { await refreshTools() } catch {}
-    if (!locked.value) {
+    if (!locked.value && !restored?.query) {
         await nextTick()
         searchInput.value?.focus()
     }
@@ -436,6 +587,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
     if (debounceTimer) clearTimeout(debounceTimer)
+    if (hintTimer) clearInterval(hintTimer)
+    tracksObserver?.disconnect()
     albumsLine.unobserve()
 })
 </script>
@@ -446,14 +599,14 @@ onUnmounted(() => {
             <h1 class="dlTitle">{{ t('downloads.title') }}</h1>
             <div class="dlHeaderActions">
                 <button
-                    v-if="downloadsDirName"
+                    v-if="downloadsDir"
                     type="button"
                     class="folderPill"
                     v-tooltip="downloadsDir"
                     @click="openDownloadsFolder"
                 >
-                    <FolderIcon width="15" height="15" />
-                    <span v-truncate class="folderPillName">{{ downloadsDirName }}</span>
+                    <FolderIcon width="16" height="16" />
+                    <span class="folderPillName">{{ t('downloads.folder.open') }}</span>
                 </button>
                 <button
                     type="button"
@@ -467,25 +620,35 @@ onUnmounted(() => {
             </div>
         </header>
 
-        <div class="searchDock">
+        <div ref="dockEl" class="searchDock" :class="{ stuck: dockStuck }">
             <div class="searchBox" :class="{ link: typingLink, disabled: locked, filled: !!rawSearch }">
                 <span class="searchLead" @click="searchInput?.focus()">
                     <svg v-if="typingLink" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                     <SearchIcon v-else width="18" height="18" />
                 </span>
-                <input
-                    ref="searchInput"
-                    class="searchInput"
-                    type="text"
-                    name="downloadSearch"
-                    autocomplete="off"
-                    spellcheck="false"
-                    :placeholder="locked ? t('downloads.searchDisabledPlaceholder') : t('downloads.searchPlaceholder')"
-                    :disabled="locked"
-                    :value="rawSearch"
-                    @input="onInput"
-                    @keydown="onKeydown"
-                />
+                <div class="searchInputWrap">
+                    <input
+                        ref="searchInput"
+                        class="searchInput"
+                        type="text"
+                        name="downloadSearch"
+                        autocomplete="off"
+                        spellcheck="false"
+                        :aria-label="locked ? t('downloads.searchDisabledPlaceholder') : t('downloads.searchPlaceholder')"
+                        :disabled="locked"
+                        :value="rawSearch"
+                        @input="onInput"
+                        @keydown="onKeydown"
+                    />
+                    <span v-if="!rawSearch" class="searchHint" aria-hidden="true">
+                        <Transition name="hintSwap" mode="out-in">
+                            <span :key="locked ? 'locked' : (hint || '-')" class="searchHintText">
+                                {{ locked ? t('downloads.searchDisabledPlaceholder') : (hint || t('downloads.searchPlaceholder')) }}
+                            </span>
+                        </Transition>
+                    </span>
+                </div>
+                <button v-if="!rawSearch && hint && !locked" type="button" class="hintKey" tabindex="-1" @click="useHint">Tab</button>
                 <Transition name="fade">
                     <span v-if="typingLink" class="modeTag">{{ t('downloads.linkTag') }}</span>
                 </Transition>
@@ -510,16 +673,6 @@ onUnmounted(() => {
                     <span v-if="tb.count != null" class="tabCount">{{ tb.count }}</span>
                 </button>
             </nav>
-
-            <div v-else-if="!hasQuery && recent.length && !locked" class="recentBar">
-                <span v-for="r in recent" :key="r" class="recentChip" @click="useRecent(r)">
-                    <span class="recentText">{{ r }}</span>
-                    <button type="button" class="recentRemove" @click.stop="forgetRecent(r)">
-                        <CloseIcon width="10" height="10" />
-                    </button>
-                </span>
-                <button type="button" class="recentClearBtn" @click="clearRecent">{{ t('downloads.clearRecent') }}</button>
-            </div>
         </div>
 
         <section v-if="setupNeeded" class="setupCard">
@@ -560,37 +713,86 @@ onUnmounted(() => {
         </section>
 
         <template v-if="!hasQuery">
-            <section v-if="activeDownloads.length" class="block">
-                <div class="blockHead">
-                    <h3 class="blockTitle">
-                        <span>{{ t('downloads.activeTitle') }}</span>
-                        <span class="blockCount">{{ activeDownloads.length }}</span>
-                    </h3>
-                    <div class="blockActions">
-                        <button v-if="failedCount > 0" type="button" class="actionPill" @click="onRetryAll">
-                            {{ t('downloads.queue.retryAll') }}
-                        </button>
-                        <button v-if="activeCount > 1" type="button" class="actionPill danger" @click="onCancelAll">
-                            {{ t('downloads.queue.cancelAll') }}
-                        </button>
+            <section v-if="hasQueue" class="block queueBlock">
+                <template v-if="showBatchHeader">
+                    <div v-if="pendingCount > 0" class="batchTile">
+                        <div class="batchTop">
+                            <div class="batchMeta">
+                                <h3 class="batchTitle">{{ t('downloads.queue.title') }}</h3>
+                                <span class="batchSep">{{ t('downloads.queue.summary', { done: batch.done, total: batch.total }) }}</span>
+                                <span v-if="batch.speed" class="batchSpeed">{{ batch.speed }}</span>
+                            </div>
+                            <div class="batchRight">
+                                <span class="batchPct">{{ batch.pct }}%</span>
+                                <button v-if="failedCount > 0" type="button" class="actionPill" @click="onRetryAll">
+                                    {{ t('downloads.queue.retryAll') }}
+                                </button>
+                                <button v-if="activeCount > 1" type="button" class="actionPill danger" @click="onCancelAll">
+                                    {{ t('downloads.queue.cancelAll') }}
+                                </button>
+                            </div>
+                        </div>
+                        <div class="batchBar"><span class="batchFill" :style="{ width: batch.pct + '%' }"></span></div>
                     </div>
-                </div>
-                <div class="trackList activeList">
-                    <DownloadTrackRow v-for="tr in activeDownloads" :key="trackKey(tr.artist, tr.title, tr.album)" :track="tr" @redownload="confirmTrack = $event" />
-                </div>
-            </section>
+                    <div v-else class="blockHead">
+                        <h3 class="blockTitle">{{ t('downloads.queue.title') }}</h3>
+                        <div v-if="failedCount > 0" class="blockActions">
+                            <button type="button" class="actionPill" @click="onRetryAll">
+                                {{ t('downloads.queue.retryAll') }}
+                            </button>
+                        </div>
+                    </div>
 
-            <section v-if="recentDownloads.length" class="block">
-                <div class="blockHead">
-                    <h3 class="blockTitle">
-                        <span>{{ t('downloads.recentDownloads') }}</span>
-                        <span class="blockCount">{{ recentDownloads.length }}</span>
-                    </h3>
-                    <button type="button" class="textBtn" @click="onClearFinished">{{ t('downloads.queue.clear') }}</button>
-                </div>
-                <div class="trackList">
-                    <DownloadTrackRow v-for="tr in recentDownloads" :key="trackKey(tr.artist, tr.title, tr.album)" :track="tr" @redownload="confirmTrack = $event" />
-                </div>
+                    <div v-if="runningDownloads.length" class="group">
+                        <div class="groupHead">
+                            <span class="groupLabel">{{ t('downloads.queue.running') }}<span class="groupCount">{{ runningDownloads.length }}</span></span>
+                        </div>
+                        <div class="trackList">
+                            <DownloadTrackRow v-for="e in runningDownloads" :key="e.id" :track="e.track" :queue-item="e.item" queue-mode @redownload="confirmTrack = $event" />
+                        </div>
+                    </div>
+
+                    <div v-if="queuedDownloads.length" class="group">
+                        <div class="groupHead">
+                            <span class="groupLabel">{{ t('downloads.queue.waiting') }}<span class="groupCount">{{ queuedDownloads.length }}</span></span>
+                        </div>
+                        <div class="trackList">
+                            <DownloadTrackRow v-for="e in queuedDownloads" :key="e.id" :track="e.track" :queue-item="e.item" queue-mode @redownload="confirmTrack = $event" />
+                        </div>
+                    </div>
+
+                    <div v-if="failedDownloads.length" class="group">
+                        <div class="groupHead">
+                            <span class="groupLabel">{{ t('downloads.queue.failed') }}<span class="groupCount">{{ failedDownloads.length }}</span></span>
+                        </div>
+                        <div class="trackList">
+                            <DownloadTrackRow v-for="e in failedDownloads" :key="e.id" :track="e.track" :queue-item="e.item" queue-mode @redownload="confirmTrack = $event" />
+                        </div>
+                    </div>
+
+                    <div v-if="recentDownloads.length" class="group">
+                        <div class="groupHead">
+                            <span class="groupLabel">{{ t('downloads.recentDownloads') }}<span class="groupCount">{{ recentDownloads.length }}</span></span>
+                            <button type="button" class="textBtn" @click="onClearFinished">{{ t('downloads.queue.clear') }}</button>
+                        </div>
+                        <div class="trackList">
+                            <DownloadTrackRow v-for="e in recentDownloads" :key="e.id" :track="e.track" :queue-item="e.item" queue-mode @redownload="confirmTrack = $event" />
+                        </div>
+                    </div>
+                </template>
+
+                <template v-else-if="recentDownloads.length">
+                    <div class="blockHead">
+                        <h3 class="blockTitle">
+                            <span>{{ t('downloads.recentDownloads') }}</span>
+                            <span class="blockCount">{{ recentDownloads.length }}</span>
+                        </h3>
+                        <button type="button" class="textBtn" @click="onClearFinished">{{ t('downloads.queue.clear') }}</button>
+                    </div>
+                    <div class="trackList">
+                        <DownloadTrackRow v-for="e in recentDownloads" :key="e.id" :track="e.track" :queue-item="e.item" queue-mode @redownload="confirmTrack = $event" />
+                    </div>
+                </template>
             </section>
 
             <div v-if="isIdleEmpty" class="stateBox">
@@ -609,7 +811,7 @@ onUnmounted(() => {
                 <span class="stateText error">{{ t('downloads.link.errorTitle') }}</span>
                 <span class="stateDesc">{{ linkError }}</span>
             </div>
-            <section v-else-if="link" class="block">
+            <section v-else-if="link" class="block linkBlock">
                 <div class="linkCard" :style="linkStyle">
                     <div class="linkCover">
                         <CoverImage :src="linkCover" :fallback="defaultTrackCover" />
@@ -617,10 +819,29 @@ onUnmounted(() => {
                     <div class="linkInfo">
                         <span class="linkType">{{ link.tracks.length > 1 ? t('downloads.link.collection') : t('downloads.link.single') }}</span>
                         <h3 class="linkTitle" v-truncate>{{ link.collection || link.tracks[0]?.title || t('downloads.link.single') }}</h3>
-                        <span class="linkMeta">{{ tracksCountText(link.tracks.length) }}</span>
+                        <span class="linkMeta">
+                            <template v-if="link.tracks.length === 1 && linkSingleTrack">
+                                <span v-if="linkSingleTrack.artist">{{ linkSingleTrack.artist }}</span>
+                                <span v-if="linkSingleTrack.duration_secs">{{ formatTime(linkSingleTrack.duration_secs) }}</span>
+                            </template>
+                            <template v-else>{{ tracksCountText(link.tracks.length) }}</template>
+                        </span>
                     </div>
                     <button v-if="link.tracks.length > 1" type="button" class="primaryBtn small" :disabled="!linkPending.length || locked" @click="downloadLinkAll">
                         <DownloadIcon width="15" height="15" />{{ t('downloads.link.downloadAll', { count: linkPending.length }) }}
+                    </button>
+                    <button
+                        v-else-if="linkSingleTrack"
+                        type="button"
+                        class="primaryBtn small"
+                        :class="{ done: linkSingleDone || linkSingleActive }"
+                        :disabled="linkSingleDone || linkSingleActive || locked"
+                        @click="downloadLinkSingle"
+                    >
+                        <span v-if="linkSingleActive" class="btnSpinner light"></span>
+                        <svg v-else-if="linkSingleDone" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        <DownloadIcon v-else width="15" height="15" />
+                        {{ linkSingleActive ? t('downloads.action.queued') : linkSingleDone ? t('downloads.stage.done') : t('downloads.action.download') }}
                     </button>
                 </div>
                 <div class="trackList">
@@ -631,14 +852,12 @@ onUnmounted(() => {
 
         <template v-else>
             <div v-if="searching && !anyResults" class="skeleton">
-                <div class="skelTop">
-                    <div class="skelHero">
-                        <span class="skelCover"></span>
-                        <span class="skelLines"><i></i><i></i><i></i></span>
-                    </div>
-                    <div class="skelList">
-                        <div v-for="n in 4" :key="n" class="skelRow"><span class="skelThumb"></span><span class="skelLines"><i></i><i></i></span></div>
-                    </div>
+                <div class="skelBanner">
+                    <span class="skelCover"></span>
+                    <span class="skelLines"><i></i><i></i></span>
+                </div>
+                <div class="skelList">
+                    <div v-for="n in 5" :key="n" class="skelRow"><span class="skelThumb"></span><span class="skelLines"><i></i><i></i></span></div>
                 </div>
             </div>
 
@@ -652,65 +871,72 @@ onUnmounted(() => {
                 <span class="stateDesc">{{ t('downloads.emptyNothingDesc') }}</span>
             </div>
 
-            <template v-else-if="tab === 'all'">
-                <div class="topGrid">
-                    <section v-if="best" class="bestWrap">
-                        <div class="blockHead">
-                            <h3 class="blockTitle">{{ t('downloads.topResult') }}</h3>
-                        </div>
-                        <div v-if="best.kind === 'artist'" class="bestCard" :style="bestStyle" @click="openArtist(best.artist)">
-                            <div class="bestArt round"><CoverImage :src="best.artist.picture_url" :fallback="defaultCover" /></div>
-                            <div class="bestBottom">
-                                <div class="bestText">
-                                    <div class="bestType">{{ t('downloads.typeArtist') }}</div>
-                                    <div class="bestName" v-truncate>{{ best.artist.name }}</div>
-                                    <div v-if="best.artist.nb_album" class="bestMeta">
-                                        <span>{{ albumsCountText(best.artist.nb_album) }}</span>
-                                    </div>
-                                </div>
-                                <span class="bestGo">
-                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                                </span>
+            <div v-else-if="tab === 'all'" class="searchResults">
+                <template v-if="best">
+                    <div v-if="best.kind === 'artist'" class="bestTile" :style="bestStyle" @click="openArtist(best.artist)">
+                        <div class="bestArt round"><CoverImage :src="best.artist.picture_url" :fallback="defaultCover" /></div>
+                        <div class="bestText">
+                            <div class="bestKicker">
+                                <span>{{ t('downloads.topResult') }}</span>
+                                <span>{{ t('downloads.typeArtist') }}</span>
+                            </div>
+                            <div class="bestName" v-truncate>{{ best.artist.name }}</div>
+                            <div v-if="best.artist.nb_album" class="bestMeta">
+                                <span>{{ albumsCountText(best.artist.nb_album) }}</span>
                             </div>
                         </div>
-                        <div v-else class="bestCard" :style="bestStyle" @click="downloadBest">
-                            <div class="bestArt"><CoverImage :src="best.track.cover_url" :fallback="defaultTrackCover" /></div>
-                            <div class="bestBottom">
-                                <div class="bestText">
-                                    <div class="bestType">{{ t('downloads.typeTrack') }}</div>
-                                    <div class="bestName" v-truncate>{{ best.track.title }}</div>
-                                    <div class="bestMeta">
-                                        <span v-truncate>{{ best.track.artist }}</span>
-                                        <span v-if="best.track.duration_secs" class="dim">{{ formatTime(best.track.duration_secs) }}</span>
-                                    </div>
-                                </div>
-                                <span class="bestGo download" :class="{ done: best.track.in_library || bestQueued?.stage === 'done', busy: bestQueued && bestQueued.stage !== 'done' && bestQueued.stage !== 'error' }">
-                                    <span v-if="bestQueued && bestQueued.stage !== 'done' && bestQueued.stage !== 'error'" class="btnSpinner"></span>
-                                    <svg v-else-if="best.track.in_library || bestQueued?.stage === 'done'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                                    <DownloadIcon v-else width="20" height="20" />
-                                </span>
+                        <span class="bestGo" aria-hidden="true">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                        </span>
+                    </div>
+
+                    <div v-else class="bestTile" :style="bestStyle" @click="downloadBest">
+                        <div class="bestArt"><CoverImage :src="best.track.cover_url" :fallback="defaultTrackCover" /></div>
+                        <div class="bestText">
+                            <div class="bestKicker">
+                                <span>{{ t('downloads.topResult') }}</span>
+                                <span>{{ t('downloads.typeTrack') }}</span>
+                            </div>
+                            <div class="bestName" v-truncate>{{ best.track.title }}</div>
+                            <div class="bestMeta">
+                                <span v-truncate>{{ best.track.artist }}</span>
+                                <span v-if="best.track.album" v-truncate>{{ best.track.album }}</span>
+                                <span v-if="best.track.duration_secs" class="dim">{{ formatTime(best.track.duration_secs) }}</span>
                             </div>
                         </div>
-                    </section>
+                        <button
+                            type="button"
+                            class="primaryBtn small"
+                            :class="{ done: bestDone || bestBusy }"
+                            :disabled="bestBusy || locked"
+                            @click.stop="downloadBest"
+                        >
+                            <span v-if="bestBusy" class="btnSpinner light"></span>
+                            <svg v-else-if="bestFailed" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.08 8A8 8 0 1 0 20 12"/><polyline points="20 4 20 8 16 8"/></svg>
+                            <svg v-else-if="bestDone" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            <DownloadIcon v-else width="15" height="15" />
+                            <span>{{ bestBusy ? t('downloads.action.queued') : bestFailed ? t('downloads.action.retry') : bestDone ? t('downloads.stage.done') : t('downloads.action.download') }}</span>
+                        </button>
+                    </div>
+                </template>
 
-                    <section v-if="topTracks.length" class="topTracks">
-                        <div class="blockHead">
-                            <h3 class="blockTitle">{{ t('downloads.tracksTitle') }}</h3>
-                            <button v-if="tracks.length > topTracks.length" type="button" class="seeAllBtn" @click="selectTab('tracks')">
-                                {{ t('downloads.showAll') }}
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                            </button>
-                        </div>
-                        <div class="trackList">
-                            <DownloadTrackRow v-for="tr in topTracks" :key="trackKey(tr.artist, tr.title, tr.album)" :track="tr" @download="remember" @redownload="confirmTrack = $event" />
-                        </div>
-                    </section>
-                </div>
+                <section v-if="topTracks.length" class="group">
+                    <div class="groupHead">
+                        <span class="groupLabel">{{ t('downloads.tracksTitle') }}<span class="groupCount">{{ counts.tracks }}</span></span>
+                        <button v-if="tracks.length > topTracks.length" type="button" class="seeAllBtn" @click="selectTab('tracks')">
+                            {{ t('downloads.showAll') }}
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                        </button>
+                    </div>
+                    <div class="trackList">
+                        <DownloadTrackRow v-for="tr in topTracks" :key="trackKey(tr.artist, tr.title, tr.album)" :track="tr" @download="remember" @redownload="confirmTrack = $event" />
+                    </div>
+                </section>
 
-                <section v-if="artists.length" class="block">
-                    <div class="blockHead">
-                        <h3 class="blockTitle">{{ t('downloads.artistsTitle') }}</h3>
-                        <button v-if="artists.length > 5" type="button" class="seeAllBtn" @click="selectTab('artists')">
+                <section v-if="showArtistsRow" class="group">
+                    <div class="groupHead">
+                        <span class="groupLabel">{{ t('downloads.artistsTitle') }}<span class="groupCount">{{ counts.artists }}</span></span>
+                        <button v-if="artists.length > 7" type="button" class="seeAllBtn" @click="selectTab('artists')">
                             {{ t('downloads.showAll') }}
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
                         </button>
@@ -724,9 +950,9 @@ onUnmounted(() => {
                     </div>
                 </section>
 
-                <section v-if="albums.length" class="block lineBlock">
-                    <div class="blockHead">
-                        <h3 class="blockTitle">{{ t('downloads.albumsTitle') }}</h3>
+                <section v-if="albums.length" class="group lineBlock">
+                    <div class="groupHead">
+                        <span class="groupLabel">{{ t('downloads.albumsTitle') }}<span class="groupCount">{{ counts.albums }}</span></span>
                         <div class="blockActions">
                             <button v-if="albums.length > 4" type="button" class="seeAllBtn" @click="selectTab('albums')">
                                 {{ t('downloads.showAll') }}
@@ -747,12 +973,18 @@ onUnmounted(() => {
                         <DownloadAlbumCard v-for="al in albums" :key="al.id" :album="al" @open="remember" @download="remember" />
                     </div>
                 </section>
-            </template>
+            </div>
 
             <section v-else-if="tab === 'tracks'" class="block compactTop">
+                <div class="listHead">
+                    <span class="colTitle">{{ t('downloads.listColTitle') }}</span>
+                    <span class="colTime"><TimeIcon width="13" height="13" /></span>
+                    <span class="colAction" aria-hidden="true"></span>
+                </div>
                 <div class="trackList">
                     <DownloadTrackRow v-for="tr in tracks" :key="trackKey(tr.artist, tr.title, tr.album)" :track="tr" @download="remember" @redownload="confirmTrack = $event" />
                 </div>
+                <div v-if="hasMore" ref="tracksSentinelEl" class="loadSentinel" aria-hidden="true"></div>
                 <div v-if="loadingMore" class="loadMore"><span class="btnSpinner light"></span></div>
             </section>
 
@@ -804,32 +1036,45 @@ onUnmounted(() => {
     display: flex;
     flex-direction: column;
     background-color: var(--light-bg);
+    background-image: linear-gradient(
+        to bottom,
+        hsla(var(--accent-h), min(var(--accent-s), 55%), 62%, 0.09) 0px,
+        hsla(var(--accent-h), min(var(--accent-s), 55%), 62%, 0.035) 140px,
+        hsla(var(--accent-h), min(var(--accent-s), 55%), 62%, 0) 380px
+    );
+    background-repeat: no-repeat;
+    background-attachment: local;
 }
 .dlPage::-webkit-scrollbar { width: 6px; }
 .dlPage::-webkit-scrollbar-track { background: transparent; }
 .dlPage::-webkit-scrollbar-thumb { background: hsla(0, 0%, 100%, 0.12); border-radius: 3px; }
 
+/* Header */
 .dlHeader {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 4px 0 4px;
+    min-height: 44px;
     flex-shrink: 0;
 }
 .dlTitle {
+    min-width: 0;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 34px;
+    font-size: 36px;
     font-weight: 900;
     line-height: 1.1;
     letter-spacing: -0.02em;
     color: hsla(0, 0%, 100%, 0.96);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     user-select: none;
 }
 .dlHeaderActions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     min-width: 0;
 }
 .folderPill {
@@ -837,12 +1082,12 @@ onUnmounted(() => {
     align-items: center;
     gap: 8px;
     height: 36px;
-    max-width: 240px;
+    max-width: 280px;
     padding: 0 14px 0 12px;
     border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.05);
-    color: hsla(0, 0%, 100%, 0.65);
-    font-size: 12.5px;
+    color: hsla(0, 0%, 100%, 0.72);
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     user-select: none;
@@ -852,7 +1097,7 @@ onUnmounted(() => {
     background-color: hsla(0, 0%, 100%, 0.09);
     color: hsla(0, 0%, 100%, 0.96);
 }
-.folderPill svg { flex-shrink: 0; opacity: 0.7; }
+.folderPill svg { flex-shrink: 0; opacity: 0.75; }
 .folderPillName {
     min-width: 0;
     white-space: nowrap;
@@ -867,34 +1112,37 @@ onUnmounted(() => {
     width: 36px;
     height: 36px;
     border-radius: 50%;
-    background-color: hsla(0, 0%, 100%, 0.05);
-    color: hsla(0, 0%, 100%, 0.65);
+    background-color: transparent;
+    color: hsla(0, 0%, 100%, 0.6);
     cursor: pointer;
     transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), transform 80ms var(--ease-smooth);
 }
 .headerIconBtn:hover {
-    background-color: hsla(0, 0%, 100%, 0.1);
+    background-color: hsla(0, 0%, 100%, 0.08);
     color: #fff;
 }
 .headerIconBtn:active { transform: scale(0.92); }
 
+/* Search */
 .searchDock {
     position: sticky;
     top: -20px;
     z-index: 6;
     margin: 0 -32px;
-    padding: 14px 32px 12px;
+    padding: 18px 32px 14px;
     display: flex;
     flex-direction: column;
     gap: 12px;
-    background-color: var(--light-bg);
+    background-color: transparent;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
 }
+.searchDock.stuck { background-color: var(--light-bg); }
 .searchBox {
     position: relative;
     display: flex;
     align-items: center;
-    height: 50px;
-    border-radius: 16px;
+    height: 48px;
+    border-radius: 999px;
     background-color: hsla(0, 0%, 100%, 0.055);
     transition: background-color var(--duration-hover) var(--ease-smooth);
 }
@@ -903,30 +1151,78 @@ onUnmounted(() => {
     background-color: hsla(0, 0%, 100%, 0.085);
 }
 .searchBox.disabled { opacity: 0.5; }
+.searchBox.disabled:hover { background-color: hsla(0, 0%, 100%, 0.055); }
 .searchLead {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 48px;
+    width: 50px;
     height: 100%;
     flex-shrink: 0;
     cursor: text;
-    color: hsla(0, 0%, 100%, 0.45);
+    color: hsla(var(--accent-h), var(--accent-s), 80%, 0.45);
     transition: color var(--duration-hover) var(--ease-smooth);
 }
-.searchBox:focus-within .searchLead { color: hsla(0, 0%, 100%, 0.85); }
-.searchBox.link .searchLead { color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%); }
-.searchInput {
+.searchBox:hover .searchLead,
+.searchBox:focus-within .searchLead { color: hsla(var(--accent-h), var(--accent-s), 82%, 0.85); }
+.searchBox.link .searchLead { color: hsl(var(--accent-h), min(var(--accent-s), 70%), 70%); }
+.searchInputWrap {
+    position: relative;
     flex: 1;
     min-width: 0;
     height: 100%;
+}
+.searchInput {
+    width: 100%;
+    height: 100%;
     background: transparent;
-    font-size: 15px;
+    font-size: 14.5px;
     font-weight: 500;
     color: hsla(0, 0%, 100%, 0.94);
 }
-.searchInput::placeholder { user-select: none; color: hsla(0, 0%, 100%, 0.36); font-weight: 500; }
 .searchInput:disabled { cursor: not-allowed; }
+.searchHint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    pointer-events: none;
+}
+.searchHintText {
+    display: block;
+    max-width: 100%;
+    font-size: 14.5px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.38);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+}
+.hintSwap-enter-active,
+.hintSwap-leave-active {
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
+}
+.hintSwap-enter-from { opacity: 0; transform: translateY(10px); }
+.hintSwap-leave-to { opacity: 0; transform: translateY(-10px); }
+.hintKey {
+    flex-shrink: 0;
+    margin-right: 12px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background-color: hsla(0, 0%, 100%, 0.06);
+    font-size: 11px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.35);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
+}
+.hintKey:hover {
+    background-color: hsla(0, 0%, 100%, 0.11);
+    color: hsla(0, 0%, 100%, 0.7);
+}
 .modeTag {
     flex-shrink: 0;
     margin-right: 8px;
@@ -936,6 +1232,7 @@ onUnmounted(() => {
     font-weight: 600;
     color: hsl(var(--accent-h), min(var(--accent-s), 70%), 74%);
     background: hsla(0, 0%, 100%, 0.07);
+    user-select: none;
 }
 .searchSpinner {
     flex-shrink: 0;
@@ -949,10 +1246,10 @@ onUnmounted(() => {
 }
 .searchClear {
     flex-shrink: 0;
-    margin-right: 8px;
+    margin-right: 7px;
     width: 34px;
     height: 34px;
-    border-radius: 10px;
+    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -968,128 +1265,74 @@ onUnmounted(() => {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 32px;
+    height: 30px;
     padding: 0 14px;
     border-radius: 999px;
     cursor: pointer;
     font-size: 12.5px;
-    font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.7);
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.65);
     background-color: hsla(0, 0%, 100%, 0.06);
     transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
     user-select: none;
 }
-.tab:hover:not(:disabled) { background-color: hsla(0, 0%, 100%, 0.1); color: #fff; }
+.tab:hover:not(:disabled) { background-color: hsla(0, 0%, 100%, 0.1); color: hsla(0, 0%, 100%, 0.9); }
 .tab:disabled { opacity: 0.35; cursor: default; }
 .tab.active {
-    color: var(--light-bg);
-    background-color: hsla(0, 0%, 100%, 0.94);
+    color: hsla(0, 0%, 0%, 0.85);
+    background-color: hsla(0, 0%, 100%, 0.9);
 }
-.tab.active:hover { background-color: #fff; color: var(--light-bg); }
+.tab.active:hover { background-color: hsla(0, 0%, 100%, 0.8); color: hsla(0, 0%, 0%, 0.85); }
 .tabCount {
     font-size: 11.5px;
     font-variant-numeric: tabular-nums;
-    color: hsla(0, 0%, 100%, 0.45);
-}
-.tab.active .tabCount {
-    color: var(--light-bg);
-    opacity: 0.65;
-}
-
-.recentBar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    overflow-x: auto;
-    scrollbar-width: none;
-    scroll-behavior: smooth;
-}
-.recentBar::-webkit-scrollbar { display: none; }
-.recentChip {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    max-width: 240px;
-    height: 30px;
-    padding: 0 4px 0 13px;
-    border-radius: 999px;
-    cursor: pointer;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.68);
-    background-color: hsla(0, 0%, 100%, 0.055);
-    transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
-    user-select: none;
-}
-.recentChip:hover { background-color: hsla(0, 0%, 100%, 0.1); color: #fff; }
-.recentText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recentRemove {
-    flex-shrink: 0;
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    color: hsla(0, 0%, 100%, 0.32);
-    background: transparent;
-    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
-}
-.recentChip:hover .recentRemove { color: hsla(0, 0%, 100%, 0.6); }
-.recentRemove:hover { color: #fff; background: hsla(0, 0%, 100%, 0.12); }
-.recentClearBtn {
-    flex-shrink: 0;
-    height: 30px;
-    padding: 0 10px;
-    border-radius: 999px;
-    cursor: pointer;
-    background: transparent;
-    font-size: 12px;
-    font-weight: 500;
     color: hsla(0, 0%, 100%, 0.42);
-    user-select: none;
-    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
-.recentClearBtn:hover { color: hsla(0, 0%, 100%, 0.9); background-color: hsla(0, 0%, 100%, 0.06); }
+.tab.active .tabCount { color: hsla(0, 0%, 0%, 0.5); }
 
-.setupCard {
-    margin-top: 12px;
+/* Setup / update tiles */
+.setupCard,
+.updateBar {
+    margin-top: 10px;
     display: flex;
     align-items: center;
-    gap: 24px;
-    padding: 20px 24px;
-    border-radius: 20px;
-    background-color: hsla(0, 0%, 100%, 0.04);
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 19%);
 }
-.setupBody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.setupCard {
+    gap: 28px;
+    padding: 22px 24px 22px 26px;
+    border-radius: 24px;
+}
+.setupBody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .setupTitle {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 800;
     color: hsla(0, 0%, 100%, 0.96);
+    user-select: none;
 }
-.setupText { font-size: 13px; line-height: 1.45; color: hsla(0, 0%, 100%, 0.55); max-width: 620px; }
-.setupChips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.setupText { font-size: 13px; line-height: 1.5; color: hsla(0, 0%, 100%, 0.55); max-width: 620px; }
+.setupChips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .setupChip {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 12px;
+    height: 28px;
+    padding: 0 12px;
     border-radius: 999px;
     font-size: 12px;
     font-weight: 500;
-    color: hsla(0, 0%, 100%, 0.6);
+    color: hsla(0, 0%, 100%, 0.55);
     background: hsla(0, 0%, 100%, 0.06);
+    user-select: none;
 }
-.setupChip em { font-style: normal; opacity: 0.6; }
+.setupChip em { font-style: normal; color: hsla(0, 0%, 100%, 0.38); }
 .chipDot { width: 6px; height: 6px; border-radius: 50%; background: hsla(0, 0%, 100%, 0.25); }
 .setupChip.on { color: hsla(0, 0%, 100%, 0.92); }
 .setupChip.on .chipDot { background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%); }
 .setupChip.busy .chipDot { background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%); animation: pulse 1s var(--ease-smooth-in-out) infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
-.setupProgress { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; max-width: 520px; }
+.setupProgress { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; max-width: 520px; }
 .setupBar { position: relative; height: 6px; border-radius: 3px; overflow: hidden; background: hsla(0, 0%, 100%, 0.06); }
 .setupBarFill {
     position: absolute;
@@ -1100,56 +1343,66 @@ onUnmounted(() => {
 }
 .setupBarFill.indeterminate { width: 30%; animation: slide 1.2s var(--ease-smooth-in-out) infinite; }
 @keyframes slide { 0% { left: -30%; } 100% { left: 100%; } }
-.setupProgressText { font-size: 12px; color: hsla(0, 0%, 100%, 0.58); font-variant-numeric: tabular-nums; }
+.setupProgressText { font-size: 12px; color: hsla(0, 0%, 100%, 0.55); font-variant-numeric: tabular-nums; }
 .setupError { font-size: 12px; color: hsla(2, 80%, 74%, 0.95); }
 
 .updateBar {
-    margin-top: 12px;
-    display: flex;
-    align-items: center;
     gap: 16px;
-    padding: 14px 16px 14px 20px;
-    border-radius: 16px;
-    background-color: hsla(0, 0%, 100%, 0.04);
+    padding: 12px 12px 12px 20px;
+    border-radius: 999px;
 }
-.updateText { flex: 1; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: hsla(0, 0%, 100%, 0.55); }
-.updateText strong { font-size: 14px; font-weight: 600; color: hsla(0, 0%, 100%, 0.94); }
+.updateText { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; color: hsla(0, 0%, 100%, 0.5); white-space: nowrap; overflow: hidden; }
+.updateText strong { flex-shrink: 0; font-size: 13.5px; font-weight: 600; color: hsla(0, 0%, 100%, 0.94); }
+.updateText span { overflow: hidden; text-overflow: ellipsis; }
 
+/* Buttons */
 .primaryBtn {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    height: 44px;
+    height: 46px;
     padding: 0 22px;
     border-radius: 999px;
     cursor: pointer;
+    user-select: none;
     font-size: 14px;
     font-weight: 600;
     color: var(--light-bg);
     background: hsla(0, 0%, 100%, 0.96);
-    transition: transform 80ms var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
+    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
 }
-.primaryBtn:hover:not(:disabled) { background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%); }
-.primaryBtn:active:not(:disabled) { transform: scale(0.96); }
+.primaryBtn:hover:not(:disabled) { transform: scale(1.03); background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%); }
+.primaryBtn:active:not(:disabled) { transform: scale(0.96); transition-duration: 80ms; }
 .primaryBtn:disabled { cursor: default; opacity: 0.45; }
-.primaryBtn.small { height: 38px; padding: 0 18px; font-size: 13px; }
+.primaryBtn.small { height: 40px; padding: 0 18px; font-size: 13px; }
+.primaryBtn.done {
+    opacity: 1;
+    color: hsla(0, 0%, 100%, 0.72);
+    background-color: hsla(0, 0%, 100%, 0.1);
+}
+.primaryBtn.done:hover:not(:disabled) {
+    color: #fff;
+    background-color: hsla(0, 0%, 100%, 0.16);
+}
 .ghostBtn {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    height: 36px;
+    height: 34px;
     padding: 0 16px;
     border-radius: 999px;
     cursor: pointer;
+    user-select: none;
     font-size: 13px;
     font-weight: 600;
-    color: hsla(0, 0%, 100%, 0.94);
-    background: hsla(0, 0%, 100%, 0.08);
+    color: var(--light-bg);
+    background: hsla(0, 0%, 100%, 0.92);
     transition: background-color var(--duration-hover) var(--ease-smooth);
 }
-.ghostBtn:hover:not(:disabled) { background: hsla(0, 0%, 100%, 0.14); }
+.ghostBtn:hover:not(:disabled) { background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%); }
+.ghostBtn:disabled { cursor: default; opacity: 0.5; }
 .btnSpinner {
     width: 16px;
     height: 16px;
@@ -1161,31 +1414,26 @@ onUnmounted(() => {
 .btnSpinner.light { border-color: hsla(0, 0%, 100%, 0.15); border-top-color: hsla(0, 0%, 100%, 0.85); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.block { margin-top: 28px; display: flex; flex-direction: column; gap: 12px; }
-.block.compactTop { margin-top: 12px; }
-.blockHead { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 28px; }
+/* Sections */
+.block { margin-top: 24px; display: flex; flex-direction: column; gap: 10px; }
+.block.compactTop { margin-top: 8px; }
+.block.linkBlock { margin-top: 12px; gap: 16px; }
+.blockHead { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 32px; }
 .blockTitle {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
+    min-width: 0;
     font-size: 18px;
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.96);
     user-select: none;
 }
 .blockCount {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 24px;
-    height: 22px;
-    padding: 0 8px;
-    border-radius: 999px;
-    background-color: hsla(0, 0%, 100%, 0.07);
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 500;
     font-variant-numeric: tabular-nums;
-    color: hsla(0, 0%, 100%, 0.65);
+    color: hsla(0, 0%, 100%, 0.38);
 }
 .blockActions {
     display: flex;
@@ -1194,18 +1442,18 @@ onUnmounted(() => {
 }
 .actionPill {
     height: 30px;
-    padding: 0 12px;
+    padding: 0 14px;
     border-radius: 999px;
     cursor: pointer;
-    background-color: hsla(0, 0%, 100%, 0.06);
-    color: hsla(0, 0%, 100%, 0.72);
+    background-color: hsla(0, 0%, 100%, 0.08);
+    color: hsla(0, 0%, 100%, 0.78);
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     user-select: none;
     transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
-.actionPill:hover { background-color: hsla(0, 0%, 100%, 0.11); color: #fff; }
-.actionPill.danger:hover { background-color: hsla(2, 70%, 55%, 0.16); color: hsla(2, 85%, 78%, 1); }
+.actionPill:hover { background-color: hsla(0, 0%, 100%, 0.14); color: #fff; }
+.actionPill.danger:hover { background-color: hsla(2, 70%, 55%, 0.18); color: hsla(2, 85%, 78%, 1); }
 
 .textBtn,
 .seeAllBtn {
@@ -1232,24 +1480,124 @@ onUnmounted(() => {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    margin: 0 -12px;
-}
-.trackList.activeList {
-    gap: 5px;
+    margin: 0 -16px;
 }
 
+/* Download queue */
+.queueBlock { margin-top: 12px; gap: 0; }
+.queueBlock > .blockHead { margin-bottom: 10px; }
+.queueBlock .trackList { gap: 4px; }
+.batchTile {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 18px 22px;
+    border-radius: 20px;
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 19%);
+}
+.batchTop {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-width: 0;
+}
+.batchMeta {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+    white-space: nowrap;
+}
+.batchTitle {
+    font-size: 18px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.96);
+}
+.batchSep {
+    font-size: 13px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.62);
+}
+.batchSpeed {
+    font-size: 13px;
+    color: hsla(0, 0%, 100%, 0.45);
+}
+.batchSpeed::before {
+    content: "\00B7";
+    margin-right: 10px;
+    opacity: 0.6;
+}
+.batchRight {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.batchPct {
+    font-size: 15px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 72%);
+    margin-right: 4px;
+    user-select: none;
+}
+.batchBar {
+    position: relative;
+    height: 6px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: hsla(0, 0%, 100%, 0.07);
+}
+.batchFill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: 999px;
+    background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+    transition: width .35s var(--ease-smooth);
+}
+.group { display: flex; flex-direction: column; gap: 4px; margin-top: 22px; }
+.groupHead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 28px;
+}
+.groupLabel {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.42);
+    user-select: none;
+}
+.groupCount {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+    color: hsla(0, 0%, 100%, 0.3);
+}
+.groupHead .textBtn { margin-right: -10px; }
+.groupHead > .seeAllBtn { margin-right: -8px; }
+
+/* Link result */
 .linkCard {
     --link-color: hsl(var(--accent-h), min(var(--accent-s), 55%), 52%);
     display: flex;
     align-items: center;
     gap: 20px;
     padding: 18px 20px;
-    border-radius: 20px;
+    border-radius: 24px;
     background-color: color-mix(in srgb, var(--link-color) 18%, var(--light-bg));
 }
 .linkCover {
-    width: 84px;
-    height: 84px;
+    width: 88px;
+    height: 88px;
     border-radius: 12px;
     overflow: hidden;
     flex-shrink: 0;
@@ -1283,59 +1631,60 @@ onUnmounted(() => {
     text-overflow: ellipsis;
 }
 .linkMeta {
+    display: flex;
+    align-items: center;
+    min-width: 0;
     font-size: 13px;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.62);
     user-select: none;
+    white-space: nowrap;
+}
+.linkMeta > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.linkMeta > span + span {
+    flex-shrink: 0;
+}
+.linkMeta > span + span::before {
+    content: "\00B7";
+    margin: 0 6px;
+    opacity: 0.6;
 }
 
-.topGrid {
-    margin-top: 14px;
-    display: grid;
-    grid-template-columns: minmax(270px, 340px) minmax(0, 1fr);
-    gap: 28px;
-    align-items: stretch;
-}
-.bestWrap, .topTracks {
+/* Search results */
+.searchResults {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    min-width: 0;
+    margin-top: 10px;
 }
-.bestCard {
+.searchResults > .group:first-child { margin-top: 6px; }
+
+.bestTile {
     --best-color: hsl(var(--accent-h), min(var(--accent-s), 55%), 52%);
-    flex: 1;
     display: flex;
-    flex-direction: column;
-    justify-content: space-between;
+    align-items: center;
     gap: 18px;
-    padding: 20px;
-    box-sizing: border-box;
+    padding: 16px 20px;
     border-radius: 20px;
     cursor: pointer;
-    background-color: color-mix(in srgb, var(--best-color) 18%, var(--light-bg));
+    background-color: color-mix(in srgb, var(--best-color) 16%, var(--light-bg));
     transition: background-color var(--duration-hover) var(--ease-smooth);
 }
-.bestCard:hover {
-    background-color: color-mix(in srgb, var(--best-color) 26%, var(--light-bg));
+.bestTile:hover {
+    background-color: color-mix(in srgb, var(--best-color) 22%, var(--light-bg));
 }
 .bestArt {
-    width: 100px;
-    height: 100px;
-    border-radius: 12px;
+    width: 76px;
+    height: 76px;
+    border-radius: 10px;
     overflow: hidden;
     flex-shrink: 0;
     background-color: #202020;
-    box-shadow: 0 18px 36px -10px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 14px 32px -8px rgba(0, 0, 0, 0.4);
 }
 .bestArt.round { border-radius: 50%; }
-.bestBottom {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 14px;
-    min-width: 0;
-}
 .bestText {
     flex: 1;
     min-width: 0;
@@ -1343,17 +1692,24 @@ onUnmounted(() => {
     flex-direction: column;
     gap: 3px;
 }
-.bestType {
+.bestKicker {
+    display: flex;
+    align-items: center;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: hsla(0, 0%, 100%, 0.56);
+    color: hsla(0, 0%, 100%, 0.55);
     user-select: none;
+}
+.bestKicker span + span::before {
+    content: "\00B7";
+    margin: 0 6px;
+    opacity: 0.6;
 }
 .bestName {
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 26px;
+    font-size: 22px;
     font-weight: 900;
     letter-spacing: -0.02em;
     line-height: 1.15;
@@ -1365,17 +1721,30 @@ onUnmounted(() => {
 .bestMeta {
     display: flex;
     align-items: center;
-    gap: 8px;
     min-width: 0;
     font-size: 13px;
-    color: hsla(0, 0%, 100%, 0.65);
+    color: hsla(0, 0%, 100%, 0.62);
     white-space: nowrap;
+    user-select: none;
 }
-.bestMeta .dim { color: hsla(0, 0%, 100%, 0.45); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.bestMeta > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.bestMeta > span + span::before {
+    content: "\00B7";
+    margin: 0 6px;
+    opacity: 0.6;
+}
+.bestMeta .dim {
+    color: hsla(0, 0%, 100%, 0.45);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
 .bestGo {
     flex-shrink: 0;
-    width: 48px;
-    height: 48px;
+    width: 42px;
+    height: 42px;
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -1384,11 +1753,39 @@ onUnmounted(() => {
     background: hsla(0, 0%, 100%, 0.96);
     transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
 }
-.bestCard:hover .bestGo:not(.done):not(.busy) {
+.bestTile:hover .bestGo {
     transform: scale(1.06);
     background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
-.bestGo.done { color: hsl(var(--accent-h), min(var(--accent-s), 60%), 30%); }
+
+.listHead {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    height: 34px;
+    margin: 0 -16px 4px;
+    padding: 0 16px;
+    font-size: 11px;
+    font-weight: 500;
+    color: hsla(0, 0%, 100%, 0.42);
+    user-select: none;
+}
+.listHead .colTitle {
+    flex: 1;
+    min-width: 0;
+    padding-left: 62px;
+}
+.listHead .colTime {
+    display: flex;
+    justify-content: flex-end;
+    width: 44px;
+    flex-shrink: 0;
+}
+.listHead .colAction {
+    width: 36px;
+    flex-shrink: 0;
+}
+.loadSentinel { height: 1px; flex-shrink: 0; }
 
 .artistRow {
     display: grid;
@@ -1473,6 +1870,7 @@ onUnmounted(() => {
     margin: 0 -10px;
 }
 
+/* States */
 .stateBox {
     flex: 1;
     min-height: 240px;
@@ -1480,28 +1878,29 @@ onUnmounted(() => {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 6px;
     text-align: center;
     user-select: none;
-    padding-bottom: 24px;
+    padding-bottom: 48px;
 }
 .stateIcon {
-    width: 44px;
-    height: 44px;
-    border-radius: 14px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 4px;
-    background-color: hsla(0, 0%, 100%, 0.055);
-    color: hsla(0, 0%, 100%, 0.78);
+    margin-bottom: 8px;
+    background-color: hsl(var(--accent-h), min(var(--accent-s), 45%), 19%);
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 74%);
 }
-.stateText { font-size: 15px; font-weight: 600; color: hsla(0, 0%, 100%, 0.85); }
+.stateText { font-size: 15px; font-weight: 600; color: hsla(0, 0%, 100%, 0.88); }
 .stateText.error { color: hsla(2, 80%, 74%, 0.95); }
-.stateDesc { max-width: 400px; font-size: 13px; line-height: 1.45; color: hsla(0, 0%, 100%, 0.42); }
+.stateDesc { max-width: 380px; font-size: 13px; line-height: 1.5; color: hsla(0, 0%, 100%, 0.45); }
 .bigSpinner {
     width: 32px;
     height: 32px;
+    margin-bottom: 6px;
     border-radius: 50%;
     border: 3px solid hsla(0, 0%, 100%, 0.1);
     border-top-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
@@ -1509,30 +1908,27 @@ onUnmounted(() => {
 }
 .loadMore { display: flex; justify-content: center; padding: 16px 0 4px; }
 
-.skeleton { margin-top: 20px; }
-.skelTop {
-    display: grid;
-    grid-template-columns: minmax(270px, 340px) minmax(0, 1fr);
-    gap: 28px;
-    align-items: stretch;
-}
-.skelHero {
+.skeleton {
+    margin-top: 10px;
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
-    gap: 20px;
-    padding: 20px;
+    gap: 22px;
+}
+.skelBanner {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 16px 20px;
     border-radius: 20px;
     background: hsla(0, 0%, 100%, 0.035);
 }
-.skelCover { width: 100px; height: 100px; border-radius: 12px; }
-.skelList { display: flex; flex-direction: column; gap: 4px; }
-.skelRow { display: flex; gap: 12px; align-items: center; height: 64px; }
+.skelCover { width: 76px; height: 76px; border-radius: 10px; flex-shrink: 0; }
+.skelList { display: flex; flex-direction: column; gap: 2px; }
+.skelRow { display: flex; gap: 14px; align-items: center; height: 64px; }
 .skelThumb { width: 48px; height: 48px; border-radius: 6px; }
 .skelLines { flex: 1; display: flex; flex-direction: column; gap: 8px; }
 .skelLines i { display: block; height: 12px; border-radius: 6px; width: 52%; }
 .skelLines i:nth-child(2) { width: 32%; }
-.skelLines i:nth-child(3) { width: 22%; }
 .skelCover, .skelThumb, .skelLines i {
     background: linear-gradient(90deg, hsla(0, 0%, 100%, 0.05) 0%, hsla(0, 0%, 100%, 0.1) 50%, hsla(0, 0%, 100%, 0.05) 100%);
     background-size: 200% 100%;
@@ -1542,37 +1938,4 @@ onUnmounted(() => {
 
 .fade-enter-active, .fade-leave-active { transition: opacity var(--duration-hover) var(--ease-smooth); }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
-
-@media (max-width: 900px) {
-    .topGrid,
-    .skelTop { grid-template-columns: minmax(0, 1fr); }
-}
-@media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
-    .dlPage { padding: 14px 16px 80px; }
-    .dlTitle { font-size: 28px; }
-    .folderPill { display: none; }
-    .searchDock { top: -14px; margin: 0 -16px; padding: 12px 16px; }
-    .searchBox { height: 46px; border-radius: 14px; }
-    .tabs,
-    .recentBar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 0 16px; }
-    .tabs::-webkit-scrollbar { display: none; }
-    .tab { flex-shrink: 0; }
-    .trackList { margin: 0 -12px; }
-    .setupCard { flex-direction: column; align-items: flex-start; }
-    .linkCard { flex-wrap: wrap; }
-    .bestArt { width: 84px; height: 84px; }
-    .bestName { font-size: 22px; }
-    .artistRow {
-        display: flex;
-        gap: 4px;
-        margin: 0 -16px;
-        padding: 0 16px;
-        overflow-x: auto;
-        scrollbar-width: none;
-    }
-    .artistRow::-webkit-scrollbar { display: none; }
-    .artistCard { flex: 0 0 104px; padding: 8px 6px 10px; }
-    .artistAvatar { max-width: 84px; }
-    .lineControls { display: none; }
-}
 </style>

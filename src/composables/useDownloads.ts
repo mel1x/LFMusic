@@ -495,5 +495,6 @@ export function useDownloads() {
     trackKey,
     errorText,
     stageText,
+    formatSpeed: formatBytes,
   }
 }

@@ -1382,17 +1382,58 @@ fn deezer_advanced_query(artist: &str, title: &str) -> String {
     format!("artist:\"{}\" track:\"{}\"", a.trim(), t.trim())
 }
 
+/// Offset separating Deezer `/artist/{id}/top` indices from `/search/track` indices.
+const ARTIST_SEARCH_OFFSET: u32 = 100_000;
+
+fn artist_top_next(index: u32, raw: u32, total: u32, has_next: bool) -> (u32, bool) {
+    if (has_next || index + raw < total) && raw > 0 {
+        (index + raw, true)
+    } else {
+        (ARTIST_SEARCH_OFFSET, true)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
+struct DeezerPageResp<T> {
+    #[serde(default = "Vec::new")]
+    data: Vec<T>,
+    #[serde(default)]
+    total: u32,
+    next: Option<String>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
+}
+
+fn deezer_retry_json<T>(
+    build_req: impl Fn() -> reqwest::blocking::RequestBuilder,
+) -> Result<Option<DeezerPageResp<T>>, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    for attempt in 0..2 {
+        let resp = send_throttled(build_req(), "api.deezer.com")?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let parsed: DeezerPageResp<T> = resp.json().map_err(|e| e.to_string())?;
+        if parsed.error.is_none() {
+            return Ok(Some(parsed));
+        }
+        if attempt == 0 {
+            std::thread::sleep(Duration::from_millis(600));
+        }
+    }
+    Err("Deezer API error".to_string())
+}
+
 /// Pagination uses the raw Deezer count: filtering would zero `has_more` too early.
 fn deezer_search_tracks(
     client: &reqwest::blocking::Client,
     query: &str,
     index: u32,
     limit: u32,
-) -> Result<(Vec<ExternalSearchTrack>, u32), String> {
-    #[derive(Deserialize)]
-    struct SearchResp {
-        data: Vec<Hit>,
-    }
+) -> Result<(Vec<ExternalSearchTrack>, u32, bool), String> {
     #[derive(Deserialize)]
     struct Hit {
         title: String,
@@ -1414,18 +1455,19 @@ fn deezer_search_tracks(
         cover_medium: Option<String>,
     }
 
-    let resp: SearchResp = send_throttled(
+    let idx_str = index.to_string();
+    let lim_str = limit.to_string();
+    let resp: DeezerPageResp<Hit> = deezer_retry_json(|| {
         client.get("https://api.deezer.com/search/track").query(&[
             ("q", query),
-            ("index", index.to_string().as_str()),
-            ("limit", limit.to_string().as_str()),
-        ]),
-        "api.deezer.com",
-    )?
-    .json()
-    .map_err(|e| e.to_string())?;
+            ("index", idx_str.as_str()),
+            ("limit", lim_str.as_str()),
+        ])
+    })?
+    .ok_or_else(|| "Deezer HTTP error".to_string())?;
 
     let raw_count = resp.data.len() as u32;
+    let has_next = (resp.next.is_some() || index + raw_count < resp.total) && raw_count > 0;
     let tracks = resp
         .data
         .into_iter()
@@ -1464,7 +1506,7 @@ fn deezer_search_tracks(
             })
         })
         .collect();
-    Ok((tracks, raw_count))
+    Ok((tracks, raw_count, has_next))
 }
 
 fn pick_image(candidates: &[Option<String>]) -> Option<String> {
@@ -1794,15 +1836,7 @@ pub fn artist_tracks(
     let limit = limit.clamp(1, 100);
     let use_top = !top_unavailable().lock().map(|s| s.contains(&id)).unwrap_or(false);
 
-    if use_top {
-        #[derive(Deserialize)]
-        struct TopResp {
-            #[serde(default)]
-            data: Vec<TopHit>,
-            #[serde(default)]
-            total: u32,
-            next: Option<String>,
-        }
+    if index < ARTIST_SEARCH_OFFSET && use_top {
         #[derive(Deserialize)]
         struct TopHit {
             title: String,
@@ -1823,60 +1857,63 @@ pub fn artist_tracks(
             cover_big: Option<String>,
             cover_medium: Option<String>,
         }
-        let resp = send_throttled(
+        let top_url = format!("https://api.deezer.com/artist/{}/top", id);
+        let idx_str = index.to_string();
+        let lim_str = limit.to_string();
+        if let Some(parsed) = deezer_retry_json::<TopHit>(|| {
             client
-                .get(format!("https://api.deezer.com/artist/{}/top", id))
-                .query(&[("index", index.to_string()), ("limit", limit.to_string())]),
-            "api.deezer.com",
-        )?;
-        if resp.status().is_success() {
-            let parsed: TopResp = resp.json().map_err(|e| e.to_string())?;
-            if parsed.total > 0 || !parsed.data.is_empty() {
-                let raw = parsed.data.len() as u32;
-                let tracks = parsed
-                    .data
-                    .into_iter()
-                    .map(|t| {
-                        let (album, album_id, cover_url) = match t.album {
-                            Some(a) => (
-                                a.title.filter(|t| !t.is_empty()),
-                                a.id,
-                                pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
-                            ),
-                            None => (None, None, None),
-                        };
-                        let artist = t
-                            .artist
-                            .and_then(|a| a.name.filter(|n| !n.is_empty()).map(|n| (n, a.id)));
-                        let (artist, artist_id) = match artist {
-                            Some((n, aid)) => (n, aid.or(Some(id))),
-                            None => (name.unwrap_or_default().to_string(), Some(id)),
-                        };
-                        ExternalSearchTrack {
-                            title: t.title,
-                            artist,
-                            album,
-                            duration_secs: t.duration,
-                            cover_url,
-                            source: "Deezer".to_string(),
-                            in_library: false,
-                            artist_id,
-                            album_id,
-                            genre: None,
-                            source_url: None,
-                        }
-                    })
-                    .collect();
-                return Ok(ExternalSearchPage {
-                    tracks,
-                    albums: Vec::new(),
-                    artists: Vec::new(),
-                    next_index: index + raw,
-                    has_more: parsed.next.is_some() && raw > 0,
-                });
-            }
+                .get(&top_url)
+                .query(&[("index", idx_str.as_str()), ("limit", lim_str.as_str())])
+        })? && (parsed.total > 0 || !parsed.data.is_empty())
+        {
+            let raw = parsed.data.len() as u32;
+            let (next_index, has_more) =
+                artist_top_next(index, raw, parsed.total, parsed.next.is_some());
+            let tracks = parsed
+                .data
+                .into_iter()
+                .map(|t| {
+                    let (album, album_id, cover_url) = match t.album {
+                        Some(a) => (
+                            a.title.filter(|t| !t.is_empty()),
+                            a.id,
+                            pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
+                        ),
+                        None => (None, None, None),
+                    };
+                    let artist = t
+                        .artist
+                        .and_then(|a| a.name.filter(|n| !n.is_empty()).map(|n| (n, a.id)));
+                    let (artist, artist_id) = match artist {
+                        Some((n, aid)) => (n, aid.or(Some(id))),
+                        None => (name.unwrap_or_default().to_string(), Some(id)),
+                    };
+                    ExternalSearchTrack {
+                        title: t.title,
+                        artist,
+                        album,
+                        duration_secs: t.duration,
+                        cover_url,
+                        source: "Deezer".to_string(),
+                        in_library: false,
+                        artist_id,
+                        album_id,
+                        genre: None,
+                        source_url: None,
+                    }
+                })
+                .collect();
+            return Ok(ExternalSearchPage {
+                tracks,
+                albums: Vec::new(),
+                artists: Vec::new(),
+                next_index,
+                has_more,
+            });
         }
-        if let Ok(mut s) = top_unavailable().lock() {
+        if index == 0
+            && let Ok(mut s) = top_unavailable().lock()
+        {
             s.insert(id);
         }
     }
@@ -1903,12 +1940,12 @@ pub fn artist_tracks(
     const MAX_REQUESTS: u32 = 4;
     let batch = limit.max(50);
     let mut tracks: Vec<ExternalSearchTrack> = Vec::new();
-    let mut cursor = index;
+    let mut cursor = index.saturating_sub(ARTIST_SEARCH_OFFSET);
     let mut has_more = true;
     for _ in 0..MAX_REQUESTS {
-        let (hits, raw) = deezer_search_tracks(client, &name, cursor, batch)?;
+        let (hits, raw, has_next) = deezer_search_tracks(client, &name, cursor, batch)?;
         cursor += raw;
-        has_more = raw >= batch;
+        has_more = has_next;
         tracks.extend(hits.into_iter().filter(|t| t.artist_id == Some(id)));
         if !has_more || tracks.len() as u32 >= limit / 2 {
             break;
@@ -1918,7 +1955,7 @@ pub fn artist_tracks(
         tracks,
         albums: Vec::new(),
         artists: Vec::new(),
-        next_index: cursor,
+        next_index: ARTIST_SEARCH_OFFSET + cursor,
         has_more,
     })
 }
@@ -2023,16 +2060,16 @@ pub fn search_tracks(
     }
     let client = client();
 
-    let (mut results, deezer_raw) = match deezer_search_tracks(client, q, index, limit) {
-        Ok(pair) => pair,
+    let (mut results, deezer_raw, deezer_has_more) = match deezer_search_tracks(client, q, index, limit) {
+        Ok(triple) => triple,
         Err(e) => {
             eprintln!("[external] deezer track search error: {}", e);
-            (Vec::new(), 0)
+            (Vec::new(), 0, false)
         }
     };
 
     let next_index = index + deezer_raw;
-    let has_more = deezer_raw >= limit;
+    let has_more = deezer_has_more;
 
     if index == 0
         && let (Some(a), Some(t)) = (artist, title) {
@@ -2040,7 +2077,7 @@ pub fn search_tracks(
             if !a.is_empty() && !t.is_empty() {
                 let adv = deezer_advanced_query(a, t);
                 match deezer_search_tracks(client, &adv, 0, limit) {
-                    Ok((exact, _)) if !exact.is_empty() => {
+                    Ok((exact, _, _)) if !exact.is_empty() => {
                         let mut seen: std::collections::HashSet<String> = exact
                             .iter()
                             .map(|t| track_identity_key(&t.artist, &t.title, t.album.as_deref()))
@@ -2902,6 +2939,24 @@ mod tests {
         assert!(cover_file.ends_with(".webp"));
         assert!(cover_file.starts_with('c'));
         assert_ne!(artist_file, cover_file);
+    }
+
+    #[test]
+    fn artist_top_next_advances_then_switches_to_search_offset() {
+        assert_eq!(artist_top_next(0, 40, 94, true), (40, true));
+        assert_eq!(artist_top_next(40, 40, 94, false), (80, true));
+        assert_eq!(artist_top_next(0, 32, 32, false), (ARTIST_SEARCH_OFFSET, true));
+        assert_eq!(artist_top_next(80, 20, 100, false), (ARTIST_SEARCH_OFFSET, true));
+        assert_eq!(artist_top_next(80, 0, 100, true), (ARTIST_SEARCH_OFFSET, true));
+    }
+
+    #[test]
+    fn deezer_page_resp_captures_http_200_error_payload() {
+        let raw = r#"{"error":{"type":"QuotaException","message":"Quota limit exceeded","code":4}}"#;
+        let parsed: DeezerPageResp<serde_json::Value> = serde_json::from_str(raw).unwrap();
+        assert!(parsed.error.is_some());
+        assert!(parsed.data.is_empty());
+        assert_eq!(parsed.total, 0);
     }
 
 }

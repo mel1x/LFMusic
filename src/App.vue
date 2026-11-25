@@ -743,7 +743,7 @@ body {
     backdrop-filter: blur(12px);
   }
 
-  body.lfmusic-phone .mobileHeroPage .pageHat .dataZone .controls .playListBtn:hover {
+  body.lfmusic-phone .mobileHeroPage .pageHat .dataZone .controls .playListBtn:not(.staticPlaybackBtn):hover {
     background-color: hsla(0, 0%, 100%, 1);
   }
 
@@ -898,13 +898,12 @@ body {
   }
 
   body.lfmusic-phone .trackElem {
-    min-height: 60px !important;
     padding: 7px 46px 7px 7px !important;
     border-radius: 12px !important;
     gap: 9px !important;
   }
 
-  body.lfmusic-phone .trackCover,
+  body.lfmusic-phone img.trackCover,
   body.lfmusic-phone .trackCoverWrap,
   body.lfmusic-phone .trackElem .coverWrap {
     border-radius: 12px !important;
@@ -915,17 +914,9 @@ body {
 
   body.lfmusic-phone .catalogPage .trackElem,
   body.lfmusic-phone .mobileHeroPage .trackElem {
-    min-height: 54px !important;
     padding: 5px 46px 5px 5px !important;
     border-radius: 10px !important;
     gap: 10px !important;
-  }
-
-  body.lfmusic-phone .catalogPage .trackCover,
-  body.lfmusic-phone .mobileHeroPage .trackCover {
-    border-radius: 6px !important;
-    width: 44px !important;
-    height: 44px !important;
   }
 
   body.lfmusic-phone .trackName,
@@ -941,33 +932,12 @@ body {
   }
 
   body.lfmusic-phone .hoverOptionsBtn,
-  body.lfmusic-phone .hoverOptions,
-  body.lfmusic-phone .hoverIcon {
+  body.lfmusic-phone .hoverOptions {
     opacity: 1 !important;
   }
 
-  body.lfmusic-phone .hoverIcon {
-    display: none !important;
-  }
-
-  body.lfmusic-phone .trackElem.activePaused .playingAnim {
-    animation-play-state: paused !important;
-    opacity: 0.82 !important;
-  }
-
-  body.lfmusic-phone .trackElem .playingAnim {
-    left: 27px !important;
-    top: 50% !important;
-    margin-top: -8px !important;
-  }
-
-  body.lfmusic-phone .catalogPage .trackElem .playingAnim,
-  body.lfmusic-phone .mobileHeroPage .trackElem .playingAnim {
-    left: 19px !important;
-  }
-
-  body.lfmusic-phone .searchPage .trackElem .playingAnim {
-    left: 17px !important;
+  body.lfmusic-phone .trackElem:not(.activePaused) .hoverIcon {
+    display: none;
   }
 
   body.lfmusic-phone .hoverOptionsBtn,

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { RecapArtist, RecapTrack, YearRecap } from '../../composables/useYearRecap'
+import { MIN_RECAP_PLAYS, type RecapArtist, type RecapTrack, type YearRecap } from '../../composables/useYearRecap'
 import { useI18n } from '../../composables/useI18n'
 import { useExternalSources } from '../../composables/useExternalSources'
 import { formatTotalDuration, pluralizeRu } from '../../utils/format'
 import { genreDisplayName } from '../../utils/genres'
-import { peakIndex, recapCovers, type CharacterId, type MomentMode, type RecapCard } from './recapCards'
+import { peakIndex, recapCovers, type CharacterId, type RecapCard } from './recapCards'
 import CountUp from './CountUp.vue'
 import RecapCover from './RecapCover.vue'
 
@@ -86,14 +86,6 @@ const daysInYear = computed(() => {
   const y = r.value.year
   return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0 ? 366 : 365
 })
-const yearDaysPct = computed(() => Math.min(100, Math.round((r.value.days_listened / daysInYear.value) * 100)))
-
-const minutesEquivalent = computed(() => {
-  const hours = r.value.total_secs / 3600
-  if (hours >= 48) return t('recap.minutes.days', { days: count(Math.floor(hours / 24), 'days') })
-  return t('recap.minutes.hours', { hours: count(Math.max(1, Math.round(hours)), 'hours') })
-})
-
 const introCovers = computed(() => {
   const covers = recapCovers(r.value, 9)
   return covers.slice(0, covers.length - (covers.length % 3))
@@ -116,8 +108,6 @@ const monthBars = computed(() => {
 })
 const peakMonth = computed(() => monthName(peakIndex(r.value.months)))
 
-const maxTrackPlays = computed(() => Math.max(1, ...(props.card.tracks ?? []).map(tr => tr.plays)))
-const maxArtistSecs = computed(() => Math.max(1, ...(props.card.artists ?? []).map(a => a.secs)))
 const maxGenreShare = computed(() => Math.max(0.01, ...(props.card.genres ?? []).map(g => g.share)))
 
 const fullShare = computed(() => (r.value.plays > 0 ? Math.min(1, r.value.full_listens / r.value.plays) : 0))
@@ -128,10 +118,10 @@ const ringOffset = computed(() => RING_C * (1 - fullShare.value))
 const cardStyle = computed(() => {
   const a = props.card.accent
   if (!a) return {}
-  const shift = a.shift ?? 38
+  const shift = a.shift ?? 22
   return {
     '--rc-h': `${a.hue}`,
-    '--rc-h2': `${(a.hue + shift) % 360}`,
+    '--rc-h2': `${((a.hue + shift) % 360 + 360) % 360}`,
     '--rc-s': `${a.sat}%`,
   }
 })
@@ -142,27 +132,45 @@ const backdropCover = computed(() => {
     ?? (c.artist ? avatar(c.artist) : null)
 })
 
-const MOMENT_ICON: Record<MomentMode, string> = {
-  night: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
-  morning: '<path d="M12 2v8"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m8 6 4-4 4 4"/><path d="M16 18a4 4 0 0 0-8 0"/>',
-  day: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
-  evening: '<path d="M12 10V2"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m16 6-4 4-4-4"/><path d="M16 18a4 4 0 0 0-8 0"/>',
-}
-
 const CHARACTER_ICON: Record<CharacterId, string> = {
-  nightOwl: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
-  fan: '<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>',
-  explorer: '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
-  marathoner: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
-  energy: '<path d="M2 12h4l3-9 6 18 3-9h4"/>',
-  calm: '<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/><path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/><path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/>',
-  dancer: '<path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/>',
-  completist: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
-  shuffler: '<path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/>',
-  melomane: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  nightOwl:
+    '<path fill="currentColor" d="M25.6 18.9A10.6 10.6 0 1 1 13.1 6.4a8.6 8.6 0 0 0 12.5 12.5Z"/>'
+    + '<path fill="var(--accent-soft)" d="M22.5 6l1 2.8 2.8 1-2.8 1-1 2.8-1-2.8-2.8-1 2.8-1Z"/>',
+  fan:
+    '<path fill="var(--accent-soft)" opacity="0.35" d="M18.2 26c-.4 0-.8-.15-1.1-.43-4.1-3.7-8.7-7.7-8.7-12.5 0-3.4 2.6-6.1 5.9-6.1 1.9 0 3.2 1 3.9 2.1.7-1.1 2-2.1 3.9-2.1 3.3 0 5.9 2.7 5.9 6.1 0 4.8-4.6 8.8-8.7 12.5-.3.28-.7.43-1.1.43Z"/>'
+    + '<path fill="currentColor" d="M15 26.8c-.4 0-.8-.15-1.1-.43C9.6 22.5 4.8 18.3 4.8 13.3 4.8 9.7 7.5 7 11 7c2 0 3.35 1.02 4 2.15C15.65 8.02 17 7 19 7c3.5 0 6.2 2.7 6.2 6.3 0 5-4.8 9.2-9.1 13.07-.3.28-.7.43-1.1.43Z"/>',
+  explorer:
+    '<circle cx="16" cy="16" r="11" fill="var(--accent-soft)" opacity="0.22"/>'
+    + '<path fill="currentColor" d="M22.6 9.4 18.7 18.7 13.3 13.3Z"/>'
+    + '<path fill="var(--accent-soft)" d="M9.4 22.6 13.3 13.3 18.7 18.7Z"/>',
+  marathoner:
+    '<path fill="none" stroke="var(--accent-soft)" stroke-width="3.2" stroke-linecap="round" opacity="0.4" d="M16 16c2.2-3.2 4.3-4.8 6.8-4.8a4.8 4.8 0 1 1 0 9.6c-2.5 0-4.6-1.6-6.8-4.8Z"/>'
+    + '<path fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" d="M16 16c-2.2 3.2-4.3 4.8-6.8 4.8a4.8 4.8 0 1 1 0-9.6c2.5 0 4.6 1.6 6.8 4.8c2.2-3.2 4.3-4.8 6.8-4.8a4.8 4.8 0 1 1 0 9.6"/>',
+  energy:
+    '<path fill="var(--accent-soft)" opacity="0.35" d="M20.4 5.2 11.4 16.6h6l-1.5 9.2 9-11.4h-6Z"/>'
+    + '<path fill="currentColor" d="M18.2 4.5 8.4 16.8h6.4L13.1 27.5l10.5-12.3h-6.4Z"/>',
+  calm:
+    '<path fill="var(--accent-soft)" opacity="0.45" d="M9.5 16.5a6.5 6.5 0 0 1 13 0Z"/>'
+    + '<path fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" d="M5 19.5c2.2 0 2.8-1.6 5.5-1.6s3.3 1.6 5.5 1.6 2.8-1.6 5.5-1.6 3.3 1.6 5.5 1.6"/>'
+    + '<path fill="none" stroke="var(--accent-soft)" stroke-width="2.6" stroke-linecap="round" d="M7.5 24c2 0 2.6-1.4 4.8-1.4s2.8 1.4 4.8 1.4 2.6-1.4 4.8-1.4c1.3 0 2 .5 2.8.9"/>',
+  dancer:
+    '<rect x="5" y="13" width="3.4" height="10" rx="1.7" fill="var(--accent-soft)"/>'
+    + '<rect x="10.2" y="8" width="3.4" height="17" rx="1.7" fill="currentColor"/>'
+    + '<rect x="15.4" y="5" width="3.4" height="22" rx="1.7" fill="var(--accent-soft)"/>'
+    + '<rect x="20.6" y="10" width="3.4" height="15" rx="1.7" fill="currentColor"/>'
+    + '<rect x="25.8" y="14" width="3.4" height="8" rx="1.7" fill="var(--accent-soft)" opacity="0.7"/>',
+  completist:
+    '<circle cx="16" cy="16" r="11" fill="currentColor"/>'
+    + '<circle cx="16" cy="16" r="7.5" fill="none" stroke="#000" stroke-opacity="0.16" stroke-width="1.2"/>'
+    + '<circle cx="16" cy="16" r="4.4" fill="var(--accent-soft)"/>'
+    + '<circle cx="16" cy="16" r="1.5" fill="#101216"/>',
+  shuffler:
+    '<path fill="none" stroke="var(--accent-soft)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" d="M5.5 10h3.6c1.8 0 3.3.9 4.5 2.5l4.8 7c1.2 1.6 2.7 2.5 4.5 2.5H26m-3-3.2L26.2 22 23 25.2"/>'
+    + '<path fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" d="M5.5 22h3.6c1.8 0 3.3-.9 4.5-2.5l4.8-7C19.6 10.9 21.1 10 22.9 10H26m-3-3.2L26.2 10 23 13.2"/>',
+  melomane:
+    '<path fill="var(--accent-soft)" d="M13 8.8 25.5 6.5v3.8L13 12.6Z"/>'
+    + '<path fill="currentColor" d="M13 8.8h2.6v13.4a4 4 0 1 1-2.6-3.75V8.8Zm9.9-1.8h2.6v12.8a4 4 0 1 1-2.6-3.75V7Z"/>',
 }
-
-const MARATHON_WAVE = [24, 48, 72, 40, 88, 60, 96, 52, 80, 68, 44, 76, 56, 36]
 
 function playRow(url: string | null) {
   if (url) emit('sound', url)
@@ -188,25 +196,15 @@ function playRow(url: string | null) {
       <!-- EMPTY -->
       <template v-if="card.kind === 'empty'">
         <div class="rcCenter">
-          <div class="rcEmblem s0">
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 18V5l12-2v13" />
-              <circle cx="6" cy="18" r="3" />
-              <circle cx="18" cy="16" r="3" />
-            </svg>
-          </div>
-          <div class="rcPill s0">{{ t('recap.title', { year: recap.year }) }}</div>
-          <div class="rcTitle s1">{{ t('recap.empty.title') }}</div>
-          <p class="rcText s2">{{ t('recap.empty.text') }}</p>
+          <div class="rcTitle s1">{{ t('recap.title', { year: recap.year }) }}</div>
+          <p class="rcText s2">{{ t('recap.empty.text', { plays: count(MIN_RECAP_PLAYS, 'plays') }) }}</p>
         </div>
       </template>
 
       <!-- INTRO -->
       <template v-else-if="card.kind === 'intro'">
         <div class="rcMain end">
-          <div class="rcPill s0"><span class="rcDot"></span>LFMusic</div>
-          <div class="rcDisplay xl s1">{{ t('recap.intro.title', { year: recap.year }) }}</div>
-          <p class="rcText s2">{{ t('recap.intro.text') }}</p>
+          <div class="rcDisplay xl s1">{{ t('recap.title', { year: recap.year }) }}</div>
         </div>
         <div class="rcTapHint s3">
           <span>{{ t('recap.intro.hint') }}</span>
@@ -219,24 +217,20 @@ function playRow(url: string | null) {
 
       <!-- MINUTES -->
       <template v-else-if="card.kind === 'minutes'">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.minutes.kicker') }}</div>
+        <div class="rcSection s0">{{ t('recap.minutes.kicker') }}</div>
         <div class="rcMain">
           <div class="rcNumber xl s1"><CountUp :value="minutesTotal" :locale="locale" /></div>
           <div class="rcUnit s1">{{ unit(minutesTotal, 'minutes') }}</div>
-          <div class="rcHighlightPill s2">{{ minutesEquivalent }}</div>
         </div>
         <div class="rcPanel s3">
-          <div class="rcPanelHead">
-            <span class="rcPanelSub">{{ t('recap.minutes.daysListened', { days: count(recap.days_listened, 'days'), total: daysInYear }) }}</span>
-            <span class="rcPanelPct">{{ yearDaysPct }}%</span>
-          </div>
+          <div class="rcPanelSub">{{ t('recap.minutes.daysListened', { days: count(recap.days_listened, 'days'), total: daysInYear }) }}</div>
           <div class="rcMeter"><span :style="{ '--w': recap.days_listened / daysInYear }"></span></div>
         </div>
       </template>
 
       <!-- FIRST TRACK -->
       <template v-else-if="card.kind === 'first' && card.track">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.first.kicker') }}</div>
+        <div class="rcSection s0">{{ t('recap.first.kicker') }}</div>
         <div class="rcMain center">
           <div class="rcCoverStage s1">
             <div class="rcCoverHalo"></div>
@@ -246,13 +240,12 @@ function playRow(url: string | null) {
           <div class="rcTrackArtist center s2">{{ artistOf(card.track) }}</div>
         </div>
         <div v-if="recap.first_listen_at" class="rcPanel compact center s3">
-          <span class="rcPanelText">{{ t('recap.first.text', { date: dateTime(recap.first_listen_at) }) }}</span>
+          <span class="rcPanelText">{{ dateTime(recap.first_listen_at) }}</span>
         </div>
       </template>
 
       <!-- VARIETY -->
       <template v-else-if="card.kind === 'variety'">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.variety.kicker') }}</div>
         <div class="rcMain">
           <div class="rcNumber s1"><CountUp :value="recap.unique_tracks" :locale="locale" /></div>
           <div class="rcUnit s1">{{ unit(recap.unique_tracks, 'differentTracks') }}</div>
@@ -278,10 +271,7 @@ function playRow(url: string | null) {
 
       <!-- TOP TRACK -->
       <template v-else-if="card.kind === 'topTrack' && card.track">
-        <div class="rcTopRow s0">
-          <div class="rcPill"><span class="rcDot"></span>{{ t('recap.topTrack.kicker') }}</div>
-          <span class="rcRankBadge">#1</span>
-        </div>
+        <div class="rcSection s0">{{ t('recap.topTrack.kicker') }}</div>
         <div class="rcMain">
           <div class="rcVinylStage s1">
             <div class="rcVinyl" aria-hidden="true">
@@ -298,7 +288,7 @@ function playRow(url: string | null) {
             <span class="rcTileLbl">{{ t('recap.labels.played') }}</span>
           </div>
           <div class="rcTile">
-            <span class="rcTileVal">{{ formatTotalDuration(card.track.secs) }}</span>
+            <span class="rcTileVal">{{ formatTotalDuration(card.track.secs, true) }}</span>
             <span class="rcTileLbl">{{ t('recap.labels.time') }}</span>
           </div>
         </div>
@@ -306,7 +296,6 @@ function playRow(url: string | null) {
 
       <!-- TOP TRACKS -->
       <template v-else-if="card.kind === 'topTracks' && card.tracks">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.topTracks.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.topTracks.title') }}</div>
         <div class="rcList">
           <button
@@ -329,17 +318,13 @@ function playRow(url: string | null) {
               <span class="rcRowSub">{{ artistOf(tr) }}</span>
             </span>
             <span class="rcRowValue">{{ count(tr.plays, 'times') }}</span>
-            <span class="rcRowFill" :style="{ '--w': tr.plays / maxTrackPlays }" aria-hidden="true"></span>
           </button>
         </div>
       </template>
 
       <!-- TOP ARTIST / DISCOVERY -->
       <template v-else-if="(card.kind === 'topArtist' || card.kind === 'discovery') && card.artist">
-        <div class="rcTopRow s0">
-          <div class="rcPill"><span class="rcDot"></span>{{ t(`recap.${card.kind}.kicker`) }}</div>
-          <span v-if="card.kind === 'topArtist'" class="rcRankBadge">#1</span>
-        </div>
+        <div class="rcSection s0">{{ t(`recap.${card.kind}.kicker`) }}</div>
         <div class="rcMain center">
           <div class="rcAvatarStage s1">
             <span class="rcSonicRing r1" aria-hidden="true"></span>
@@ -348,10 +333,10 @@ function playRow(url: string | null) {
           </div>
           <div class="rcArtistName s2">{{ card.artist.name }}</div>
           <div class="rcHighlightPill center s2" v-if="card.kind === 'topArtist'">
-            {{ t('recap.topArtist.text', { minutes: count(Math.round(card.artist.secs / 60), 'minutes') }) }}
+            {{ count(Math.round(card.artist.secs / 60), 'minutes') }}
           </div>
           <div class="rcHighlightPill center s2" v-else>
-            {{ t('recap.discovery.text', { plays: count(card.artist.plays, 'plays') }) }}
+            {{ count(card.artist.plays, 'plays') }}
           </div>
         </div>
         <div class="rcMiniCard s3">
@@ -365,7 +350,6 @@ function playRow(url: string | null) {
 
       <!-- TOP ARTISTS -->
       <template v-else-if="card.kind === 'topArtists' && card.artists">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.topArtists.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.topArtists.title') }}</div>
         <div class="rcList">
           <button
@@ -388,17 +372,13 @@ function playRow(url: string | null) {
               <span class="rcRowSub">{{ count(a.track_count, 'tracks') }}</span>
             </span>
             <span class="rcRowValue">{{ count(Math.round(a.secs / 60), 'minutesShort') }}</span>
-            <span class="rcRowFill" :style="{ '--w': a.secs / maxArtistSecs }" aria-hidden="true"></span>
           </button>
         </div>
       </template>
 
       <!-- TOP ALBUM -->
       <template v-else-if="card.kind === 'topAlbum' && card.album">
-        <div class="rcTopRow s0">
-          <div class="rcPill"><span class="rcDot"></span>{{ t('recap.topAlbum.kicker') }}</div>
-          <span class="rcRankBadge">#1</span>
-        </div>
+        <div class="rcSection s0">{{ t('recap.topAlbum.kicker') }}</div>
         <div class="rcMain center">
           <div class="rcSleeveStack s1">
             <span class="rcSleeveLayer l2" aria-hidden="true"></span>
@@ -414,7 +394,7 @@ function playRow(url: string | null) {
             <span class="rcTileLbl">{{ t('recap.labels.plays') }}</span>
           </div>
           <div class="rcTile">
-            <span class="rcTileVal">{{ formatTotalDuration(card.album.secs) }}</span>
+            <span class="rcTileVal">{{ formatTotalDuration(card.album.secs, true) }}</span>
             <span class="rcTileLbl">{{ t('recap.labels.time') }}</span>
           </div>
         </div>
@@ -422,7 +402,6 @@ function playRow(url: string | null) {
 
       <!-- GENRES -->
       <template v-else-if="card.kind === 'genres' && card.genres">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.genres.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.genres.title') }}</div>
         <div class="rcMain">
           <div class="rcPanel genresPanel s2">
@@ -444,22 +423,14 @@ function playRow(url: string | null) {
 
       <!-- MOMENTS -->
       <template v-else-if="card.kind === 'moments' && card.moment">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.moments.kicker') }}</div>
         <div class="rcMain">
-          <div class="rcEmblem small s1">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="MOMENT_ICON[card.moment.mode]"></svg>
-          </div>
           <div class="rcTitle large s1">{{ t(`recap.moments.${card.moment.mode}.title`) }}</div>
           <p class="rcText s2" v-if="card.moment.count > 0">
-            {{ t(`recap.moments.${card.moment.mode}.text`, { tracks: count(card.moment.count, 'tracks') }) }}
+            {{ t(`recap.moments.${card.moment.mode}.text`, { plays: count(card.moment.count, 'plays') }) }}
           </p>
-          <p class="rcText s2" v-else>{{ t(`recap.moments.${card.moment.mode}.text2`) }}</p>
         </div>
         <div class="rcPanel chartPanel s3">
-          <div class="rcChartHead">
-            <span class="rcPanelSub">{{ t('recap.moments.peak', { hour: hourLabel(card.moment.peakHour) }) }}</span>
-            <span class="rcPeakChip">{{ hourLabel(card.moment.peakHour) }}</span>
-          </div>
+          <div class="rcPanelSub">{{ t('recap.moments.peak', { hour: hourLabel(card.moment.peakHour) }) }}</div>
           <div class="rcBars">
             <span
               v-for="b in hourBars"
@@ -474,15 +445,12 @@ function playRow(url: string | null) {
 
       <!-- OBSESSION -->
       <template v-else-if="card.kind === 'obsession' && card.obsession">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.obsession.kicker') }}</div>
+        <div class="rcSection s0">{{ t('recap.obsession.kicker') }}</div>
         <div class="rcMain center">
           <div class="rcEchoStage s1">
             <span class="rcEcho e2" aria-hidden="true"></span>
             <span class="rcEcho e1" aria-hidden="true"></span>
-            <div class="rcHeroWrap">
-              <RecapCover class="rcHeroCover" :url="card.obsession.track.cover_url" />
-              <span class="rcBadge">x{{ card.obsession.plays }}</span>
-            </div>
+            <RecapCover class="rcHeroCover" :url="card.obsession.track.cover_url" />
           </div>
           <div class="rcTrackTitle center s2">{{ title(card.obsession.track) }}</div>
           <div class="rcTrackArtist center s2">{{ artistOf(card.obsession.track) }}</div>
@@ -496,16 +464,13 @@ function playRow(url: string | null) {
 
       <!-- MARATHON -->
       <template v-else-if="card.kind === 'marathon' && card.session">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.marathon.kicker') }}</div>
+        <div class="rcSection s0">{{ t('recap.marathon.kicker') }}</div>
         <div class="rcMain">
           <div class="rcNumber marathon s1">
             <CountUp :value="Math.floor(card.session.secs / 3600)" :locale="locale" /><span class="rcNumberUnit">{{ t('recap.units.h') }}</span>
             <CountUp :value="Math.floor((card.session.secs % 3600) / 60)" :locale="locale" /><span class="rcNumberUnit">{{ t('recap.units.min') }}</span>
           </div>
           <p class="rcText s2">{{ t('recap.marathon.text') }}</p>
-          <div class="rcPulseWave s2" aria-hidden="true">
-            <span v-for="(h, i) in MARATHON_WAVE" :key="i" :style="{ '--hgt': h, '--i': i }"></span>
-          </div>
         </div>
         <div class="rcBento cols2 s3">
           <div class="rcTile">
@@ -521,7 +486,6 @@ function playRow(url: string | null) {
 
       <!-- RHYTHM -->
       <template v-else-if="card.kind === 'rhythm'">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.rhythm.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.rhythm.title', { month: peakMonth }) }}</div>
         <div class="rcMain">
           <div class="rcPanel chartPanel s2">
@@ -540,11 +504,11 @@ function playRow(url: string | null) {
         </div>
         <div class="rcBento s3" :class="recap.busiest_day ? 'cols2' : 'cols1'">
           <div class="rcTile">
-            <span class="rcTileVal">{{ count(recap.longest_streak, 'days') }}</span>
+            <span class="rcTileVal">{{ num(recap.longest_streak) }}</span>
             <span class="rcTileLbl">{{ t('recap.labels.streak') }}</span>
           </div>
           <div v-if="recap.busiest_day" class="rcTile">
-            <span class="rcTileVal">{{ formatTotalDuration(recap.busiest_day.secs) }}</span>
+            <span class="rcTileVal">{{ formatTotalDuration(recap.busiest_day.secs, true) }}</span>
             <span class="rcTileLbl">{{ day(recap.busiest_day.day) }}</span>
           </div>
         </div>
@@ -552,34 +516,18 @@ function playRow(url: string | null) {
 
       <!-- COLLECTION -->
       <template v-else-if="card.kind === 'collection'">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.collection.kicker') }}</div>
         <div class="rcTitle s1">{{ t('recap.collection.title') }}</div>
         <div class="rcMain">
           <div class="rcFacts">
             <div v-if="recap.likes > 0" class="rcFactCard" style="--i: 0">
-              <span class="rcFactIcon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
-                </svg>
-              </span>
               <span class="rcFactValue">+<CountUp :value="recap.likes" :locale="locale" :duration="1100" /></span>
               <span class="rcFactLabel">{{ t('recap.collection.likes', { tracks: unit(recap.likes, 'tracks') }) }}</span>
             </div>
             <div v-if="recap.playlists_created > 0" class="rcFactCard" style="--i: 1">
-              <span class="rcFactIcon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15V6"/><path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/>
-                </svg>
-              </span>
               <span class="rcFactValue"><CountUp :value="recap.playlists_created" :locale="locale" :duration="900" /></span>
               <span class="rcFactLabel">{{ unit(recap.playlists_created, 'newPlaylists') }}</span>
             </div>
             <div v-if="recap.downloads > 0" class="rcFactCard" style="--i: 2">
-              <span class="rcFactIcon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>
-                </svg>
-              </span>
               <span class="rcFactValue"><CountUp :value="recap.downloads" :locale="locale" :duration="1100" /></span>
               <span class="rcFactLabel">{{ unit(recap.downloads, 'downloads') }}</span>
             </div>
@@ -596,7 +544,7 @@ function playRow(url: string | null) {
 
       <!-- HABITS -->
       <template v-else-if="card.kind === 'habits'">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.habits.kicker') }}</div>
+        <div class="rcSection s0">{{ t('recap.habits.kicker') }}</div>
         <div class="rcMain center">
           <div class="rcGaugeWrap s1">
             <svg class="rcGauge" viewBox="0 0 168 168" aria-hidden="true">
@@ -638,16 +586,15 @@ function playRow(url: string | null) {
 
       <!-- CHARACTER -->
       <template v-else-if="card.kind === 'character' && card.character">
-        <div class="rcPill s0"><span class="rcDot"></span>{{ t('recap.character.kicker') }}</div>
+        <div class="rcSection s0">{{ t('recap.character.kicker') }}</div>
         <div class="rcMain center">
           <div class="rcEmblem hero s1">
-            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" v-html="CHARACTER_ICON[card.character.id]"></svg>
+            <svg width="42" height="42" viewBox="0 0 32 32" aria-hidden="true" v-html="CHARACTER_ICON[card.character.id]"></svg>
           </div>
           <div class="rcDisplay center s1">{{ t(`recap.character.${card.character.id}.title`) }}</div>
-          <p class="rcText center s2">{{ t(`recap.character.${card.character.id}.desc`) }}</p>
+          <p v-if="card.character.id !== 'melomane'" class="rcText center s2">{{ t(`recap.character.${card.character.id}.desc`) }}</p>
           <div class="rcChips s3" v-if="card.character.traits.length > 0">
             <span v-for="trait in card.character.traits" :key="trait" class="rcChip">
-              <span class="rcChipDot"></span>
               {{ t(`recap.character.${trait}.title`) }}
             </span>
           </div>
@@ -656,11 +603,7 @@ function playRow(url: string | null) {
 
       <!-- OUTRO / SUMMARY POSTER -->
       <template v-else-if="card.kind === 'outro'">
-        <div class="rcTopRow s0">
-          <div class="rcPill"><span class="rcDot"></span>LFMusic</div>
-          <span class="rcYearBadge">{{ recap.year }}</span>
-        </div>
-        <div class="rcTitle s1">{{ t('recap.outro.title') }}</div>
+        <div class="rcTitle s1">{{ t('recap.title', { year: recap.year }) }}</div>
         <div class="rcMain outroMain">
           <div class="rcSummaryHero s2" v-if="recap.top_tracks[0]">
             <RecapCover class="rcSummaryCover" :url="recap.top_tracks[0].cover_url" />
@@ -703,8 +646,8 @@ function playRow(url: string | null) {
 
 <style scoped>
 .rc {
-  --h: var(--rc-h, var(--accent-h, 255));
-  --h2: var(--rc-h2, 295);
+  --h: var(--rc-h, var(--accent-h, 216));
+  --h2: var(--rc-h2, 202);
   --s: var(--rc-s, var(--accent-s, 52%));
   --display: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --accent-soft: hsl(var(--h), min(var(--s), 76%), 74%);
@@ -849,54 +792,11 @@ function playRow(url: string | null) {
   to { opacity: 1; transform: none; }
 }
 
-/* Kicker pill & badges */
-.rcTopRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.rcPill {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  background: var(--surface);
-  backdrop-filter: blur(14px);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+/* Slide headings */
+.rcSection {
+  font-size: 15px;
+  font-weight: 600;
   color: hsla(0, 0%, 100%, 0.9);
-}
-.rcCenter .rcPill {
-  align-self: center;
-}
-.rcDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent-soft);
-  box-shadow: 0 0 10px var(--accent-bright);
-  flex-shrink: 0;
-}
-.rcRankBadge,
-.rcYearBadge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 26px;
-  padding: 0 11px;
-  border-radius: 999px;
-  font-family: var(--display);
-  font-size: 12px;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  color: #fff;
-  background: hsla(var(--h), min(var(--s), 75%), 52%, 0.65);
-  backdrop-filter: blur(12px);
 }
 
 /* Typography */
@@ -1024,15 +924,8 @@ function playRow(url: string | null) {
 .rcPanel.center {
   text-align: center;
 }
-.rcPanelHead,
-.rcChartHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
-}
 .rcPanelSub {
+  margin-bottom: 10px;
   font-size: 12.5px;
   font-weight: 500;
   color: hsla(0, 0%, 100%, 0.72);
@@ -1042,17 +935,6 @@ function playRow(url: string | null) {
   font-weight: 500;
   line-height: 1.45;
   color: hsla(0, 0%, 100%, 0.84);
-}
-.rcPanelPct,
-.rcPeakChip {
-  flex-shrink: 0;
-  padding: 3px 9px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: #fff;
-  background: hsla(var(--h), min(var(--s), 75%), 52%, 0.45);
 }
 
 .rcMeter {
@@ -1223,27 +1105,6 @@ function playRow(url: string | null) {
   transform: translate(11px, -8px) rotate(3.5deg);
   background: hsla(var(--h2), min(var(--s), 65%), 62%, 0.14);
 }
-.rcHeroWrap {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-}
-.rcBadge {
-  position: absolute;
-  left: 12px;
-  bottom: 12px;
-  z-index: 2;
-  padding: 6px 13px;
-  border-radius: 999px;
-  font-family: var(--display);
-  font-size: 14px;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  color: #fff;
-  background: hsla(var(--h), min(var(--s), 80%), 48%, 0.86);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 8px 20px hsla(0, 0%, 0%, 0.4);
-}
 
 .rcTrackTitle {
   margin-top: 20px;
@@ -1394,18 +1255,6 @@ function playRow(url: string | null) {
 }
 .rcRow.playing {
   background: hsla(var(--h), min(var(--s), 75%), 54%, 0.34);
-}
-.rcRowFill {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 3px;
-  width: calc(var(--w) * 100%);
-  background: linear-gradient(90deg, var(--accent-bright), var(--accent-alt));
-  opacity: 0.72;
-  transform-origin: left;
-  animation: rcGrow 0.9s var(--ease-out) both;
-  animation-delay: calc(0.32s + var(--i) * 0.06s);
 }
 .rcRank {
   width: 22px;
@@ -1603,27 +1452,6 @@ function playRow(url: string | null) {
   font-weight: 800;
 }
 
-/* Marathon decorative pulse wave */
-.rcPulseWave {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 46px;
-  margin-top: 26px;
-}
-.rcPulseWave span {
-  width: 6px;
-  height: calc(var(--hgt) * 1%);
-  border-radius: 999px;
-  background: linear-gradient(180deg, var(--accent-soft), hsla(var(--h), min(var(--s), 70%), 55%, 0.35));
-  animation: rcWaveBeat 2.2s ease-in-out infinite alternate;
-  animation-delay: calc(var(--i) * -0.14s);
-}
-@keyframes rcWaveBeat {
-  from { transform: scaleY(0.55); opacity: 0.5; }
-  to { transform: scaleY(1); opacity: 1; }
-}
-
 /* Collection Bento Facts */
 .rcFacts {
   display: flex;
@@ -1640,17 +1468,6 @@ function playRow(url: string | null) {
   backdrop-filter: blur(18px);
   animation: rcRise 0.55s var(--ease-out) both;
   animation-delay: calc(0.18s + var(--i) * 0.08s);
-}
-.rcFactIcon {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent-soft);
-  background: hsla(var(--h), min(var(--s), 70%), 55%, 0.2);
 }
 .rcFactValue {
   font-family: var(--display);
@@ -1693,7 +1510,6 @@ function playRow(url: string | null) {
   stroke-width: 10;
   stroke-linecap: round;
   stroke-dashoffset: var(--off);
-  filter: drop-shadow(0 0 10px hsla(var(--h), min(var(--s), 80%), 62%, 0.5));
   animation: rcRingDraw 1.25s var(--ease-out) 0.25s both;
 }
 @keyframes rcRingDraw {
@@ -1715,32 +1531,26 @@ function playRow(url: string | null) {
   line-height: 1;
 }
 
-/* Emblem medallions (Empty, Moments, Character) */
+/* Character emblem */
 .rcEmblem {
-  width: 58px;
-  height: 58px;
-  border-radius: 18px;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--accent-soft);
-  background: var(--surface);
+  background: hsla(var(--h), min(var(--s), 36%), 16%, 0.78);
   backdrop-filter: blur(18px);
 }
-.rcEmblem.small {
-  width: 46px;
-  height: 46px;
-  border-radius: 14px;
-  margin-bottom: 14px;
-}
 .rcEmblem.hero {
-  width: 78px;
-  height: 78px;
-  border-radius: 24px;
-  margin-bottom: 10px;
-  color: #fff;
-  background: linear-gradient(145deg, hsla(var(--h), min(var(--s), 75%), 56%, 0.42), var(--surface-strong));
-  box-shadow: 0 16px 40px hsla(0, 0%, 0%, 0.42);
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  margin-bottom: 14px;
+  color: hsla(0, 0%, 100%, 0.96);
+  background: hsla(var(--h), min(var(--s), 38%), 17%, 0.84);
+  backdrop-filter: blur(20px);
 }
 
 .rcChips {
@@ -1759,17 +1569,14 @@ function playRow(url: string | null) {
   font-size: 13px;
   font-weight: 600;
   color: hsla(0, 0%, 100%, 0.92);
-  background: var(--surface);
+  background: hsla(var(--h), min(var(--s), 36%), 17%, 0.78);
   backdrop-filter: blur(14px);
-}
-.rcChipDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent-alt);
 }
 
 /* Outro poster card */
+.outroMain .rcTileVal:not(.accent) {
+  font-size: clamp(16px, 4.5cqw, 20px);
+}
 .rcSummaryHero {
   display: flex;
   align-items: center;
@@ -1821,7 +1628,6 @@ function playRow(url: string | null) {
 /* Pause continuous motion while story is held/paused */
 .rc.paused .rcVinyl,
 .rc.paused .rcSonicRing,
-.rc.paused .rcPulseWave span,
 .rc.paused .rcCoverAura,
 .rc.paused .rcIntroGrid,
 .rc.paused .rcTapArrow,
@@ -1843,7 +1649,6 @@ function playRow(url: string | null) {
 @media (prefers-reduced-motion: reduce) {
   .rcVinyl,
   .rcSonicRing,
-  .rcPulseWave span,
   .rcCoverAura,
   .rcIntroGrid,
   .rcTapArrow,

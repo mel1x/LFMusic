@@ -39,6 +39,8 @@ const totalDurationSecs = computed(() =>
 )
 
 async function load(id: number) {
+    scrollY.value = 0
+    pageEl.value?.scrollTo({ top: 0 })
     loading.value = true
     notFound.value = false
     detail.value = null
@@ -70,10 +72,23 @@ function openArtist() {
 
 const busyAll = ref(false)
 const doneAll = ref(false)
+const allReady = computed(() =>
+    doneAll.value || (!!detail.value?.tracks.length && notQueued(detail.value.tracks).length === 0),
+)
+
+const pageEl = ref<HTMLElement | null>(null)
+const scrollY = ref(0)
+const showStickyHeader = computed(() => scrollY.value > 300)
+function onScroll(e: Event) {
+    scrollY.value = (e.target as HTMLElement).scrollTop
+}
+function scrollToTop() {
+    pageEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
+}
 
 async function downloadAll() {
     const d = detail.value
-    if (!d || busyAll.value || doneAll.value || ytdlpMissing.value) return
+    if (!d || busyAll.value || allReady.value || ytdlpMissing.value) return
     busyAll.value = true
     try {
         const pending = notQueued(d.tracks)
@@ -90,9 +105,18 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 </script>
 
 <template>
-    <div class="pageRoot" :style="heroStyle">
+    <div class="pageRoot" ref="pageEl" :style="heroStyle" @scroll="onScroll">
+        <div class="stickyHeaderAnchor">
+            <Transition name="sticky-header">
+                <div v-if="showStickyHeader" class="stickyHeader">
+                    <div v-truncate class="stickyTitle">{{ detail?.title || t('downloads.albumLabel') }}</div>
+                    <button type="button" class="toTopBtn" @click="scrollToTop">Вверх</button>
+                </div>
+            </Transition>
+        </div>
+
         <button type="button" class="backBtn" @click="goBack">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
             <span>{{ t('downloads.back') }}</span>
         </button>
 
@@ -129,14 +153,14 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
                         <button
                             type="button"
                             class="primaryBtn"
-                            :class="{ done: doneAll }"
-                            :disabled="busyAll || doneAll || ytdlpMissing || detail.tracks.length === 0"
+                            :class="{ done: allReady }"
+                            :disabled="busyAll || allReady || ytdlpMissing || detail.tracks.length === 0"
                             @click="downloadAll"
                         >
                             <span v-if="busyAll" class="btnSpinner"></span>
-                            <svg v-else-if="doneAll" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            <svg v-else-if="allReady" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                             <DownloadIcon v-else width="17" height="17" />
-                            <span>{{ doneAll ? t('downloads.albumQueued') : t('downloads.downloadAll') }}</span>
+                            <span>{{ allReady ? t('downloads.albumQueued') : t('downloads.downloadAll') }}</span>
                         </button>
                     </div>
                 </div>
@@ -145,7 +169,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
             <div v-if="detail.tracks.length" class="listHead">
                 <span class="colRank">#</span>
                 <span class="colTitle">{{ t('downloads.listColTitle') }}</span>
-                <span class="colTime"><TimeIcon width="15" height="15" /></span>
+                <span class="colTime"><TimeIcon width="13" height="13" /></span>
                 <span class="colAction" aria-hidden="true"></span>
             </div>
 
@@ -369,15 +393,13 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 .listHead {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
     height: 36px;
     margin-top: 32px;
     margin-bottom: 4px;
-    padding: 0 12px;
+    padding: 0 16px;
     font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font-weight: 500;
     color: hsla(0, 0%, 100%, 0.42);
     user-select: none;
 }
@@ -397,8 +419,60 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     flex-shrink: 0;
 }
 .listHead .colAction {
-    width: 38px;
+    width: 36px;
     flex-shrink: 0;
+}
+
+.stickyHeaderAnchor {
+    position: sticky;
+    top: -12px;
+    height: 0;
+    z-index: 10;
+    margin: 0 -32px;
+}
+.stickyHeader {
+    user-select: none;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 32px;
+    background-color: var(--light-bg);
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 20px;
+    font-weight: 800;
+    color: hsla(0, 0%, 100%, 0.94);
+}
+.stickyTitle {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sticky-header-enter-active,
+.sticky-header-leave-active {
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth);
+}
+.sticky-header-enter-from,
+.sticky-header-leave-to {
+    opacity: 0;
+    transform: translateY(-8px);
+}
+.toTopBtn {
+    flex-shrink: 0;
+    cursor: pointer;
+    padding: 6px 16px;
+    border-radius: 999px;
+    background-color: hsla(0, 0%, 100%, 0.07);
+    color: hsla(0, 0%, 100%, 1);
+    font-family: "Inter", sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background-color var(--duration-hover) var(--ease-smooth);
+}
+.toTopBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.12);
 }
 
 .tracksList {
@@ -431,14 +505,5 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-size: 14px;
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.7);
-}
-
-@media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
-    .pageRoot { padding: 12px 16px 80px; }
-    .pageHat { flex-direction: column; align-items: flex-start; gap: 20px; }
-    .pageHat .coverWrap { width: 180px; height: 180px; }
-    .listName { font-size: 30px; }
-    .listHead { display: none; }
-    .tracksList { margin: 20px -8px 0; }
 }
 </style>

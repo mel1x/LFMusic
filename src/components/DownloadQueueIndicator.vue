@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 
 import CoverImage from './CoverImage.vue'
 import defaultTrackCover from '../assets/trackCover.webp'
@@ -8,7 +9,13 @@ import { useDownloads, type DownloadItem } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 
 const { t } = useI18n()
+const router = useRouter()
 const { queue, activeCount, cancel, retry, clearFinished, cancelAll, stageText } = useDownloads()
+
+function openDownloads(e?: MouseEvent) {
+    ;(e?.currentTarget as HTMLElement | undefined)?.blur()
+    void router.push('/downloads')
+}
 
 const STAGE_ORDER: Record<DownloadItem['stage'], number> = {
     downloading: 0, processing: 0, searching: 1, queued: 2, error: 3, done: 4,
@@ -46,7 +53,7 @@ async function run(fn: () => Promise<unknown>) {
 
 <template>
     <div v-if="queue.length > 0" class="dlIndicator">
-        <button class="dlButton" :class="{ busy: activeCount > 0, hasError: failedCount > 0 && activeCount === 0 }" :aria-label="t('downloads.queue.title')">
+        <button type="button" class="dlButton" :class="{ busy: activeCount > 0, hasError: failedCount > 0 && activeCount === 0 }" :aria-label="t('downloads.queue.title')" @click="openDownloads($event)">
             <svg class="dlRing" viewBox="0 0 25 25">
                 <circle class="dlRingTrack" cx="12.5" cy="12.5" r="10.5" />
                 <circle class="dlRingFill" cx="12.5" cy="12.5" r="10.5" :stroke-dasharray="RING" :stroke-dashoffset="ringOffset" />
@@ -62,7 +69,7 @@ async function run(fn: () => Promise<unknown>) {
             <div class="dlCard">
                 <div class="dlHead">
                     <div class="dlHeadText">
-                        <span class="dlTitle">{{ t('downloads.queue.title') }}</span>
+                        <button type="button" class="dlTitle" @click="openDownloads($event)">{{ t('downloads.queue.title') }}</button>
                         <span class="dlSummary">{{ summary }}</span>
                     </div>
                     <div class="dlHeadActions">
@@ -83,7 +90,7 @@ async function run(fn: () => Promise<unknown>) {
                                 <template v-if="item.stage === 'done'">{{ item.artist }}</template>
                                 <template v-else>{{ stageText(item) }}</template>
                             </div>
-                            <div v-if="isActive(item)" class="dlBar">
+                            <div v-if="isActive(item) && item.stage !== 'queued'" class="dlBar">
                                 <span
                                     class="dlBarFill"
                                     :class="{ indeterminate: item.stage !== 'downloading' }"
@@ -186,7 +193,7 @@ async function run(fn: () => Promise<unknown>) {
     top: 100%;
     right: -8px;
     padding-top: 10px;
-    width: 360px;
+    width: 424px;
     opacity: 0;
     pointer-events: none;
     transform: translateY(-4px);
@@ -200,11 +207,10 @@ async function run(fn: () => Promise<unknown>) {
     transform: translateY(0);
 }
 .dlCard {
-    padding: 12px 8px 8px;
-    border-radius: 16px;
-    background: hsla(var(--accent-h), min(var(--accent-s), 40%), 10%, 0.98);
-    border: 1px solid hsla(0, 0%, 100%, 0.08);
-    box-shadow: 0 18px 44px hsla(0, 0%, 0%, 0.4);
+    padding: 14px 10px 10px;
+    border-radius: 20px;
+    background-color: var(--light-bg);
+    box-shadow: 0 20px 56px rgba(0, 0, 0, 0.48);
 }
 .dlHead {
     display: flex;
@@ -214,7 +220,19 @@ async function run(fn: () => Promise<unknown>) {
     padding: 0 6px 10px;
 }
 .dlHeadText { display: flex; flex-direction: column; gap: 1px; }
-.dlTitle { font-size: 13px; font-weight: 800; color: hsla(0, 0%, 100%, 0.95); user-select: none; }
+.dlTitle {
+    padding: 0;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    font-weight: 800;
+    color: hsla(0, 0%, 100%, 0.95);
+    user-select: none;
+    transition: color var(--duration-hover) var(--ease-smooth);
+}
+.dlTitle:hover { color: #fff; }
 .dlSummary { font-size: 11px; font-weight: 600; color: hsla(0, 0%, 100%, 0.4); font-variant-numeric: tabular-nums; }
 .dlHeadActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .chip {
@@ -280,17 +298,17 @@ async function run(fn: () => Promise<unknown>) {
 .dlLine.error { color: hsla(2, 78%, 70%, 0.95); }
 .dlBar {
     position: relative;
-    height: 3px;
+    height: 4px;
     margin-top: 3px;
-    border-radius: 2px;
+    border-radius: 999px;
     overflow: hidden;
-    background: hsla(0, 0%, 100%, 0.08);
+    background: hsla(0, 0%, 100%, 0.07);
 }
 .dlBarFill {
     position: absolute;
     inset: 0 auto 0 0;
-    border-radius: 2px;
-    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 20% * var(--accent-k, 1)), 100%), 66%, 1);
+    border-radius: 999px;
+    background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
     transition: width .3s var(--ease-smooth);
 }
 .dlBarFill.indeterminate {
@@ -322,7 +340,7 @@ async function run(fn: () => Promise<unknown>) {
 .doneMark {
     flex-shrink: 0;
     display: flex;
-    color: hsla(145, 55%, 62%, 0.95);
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
 .dlItem:hover .doneMark { display: none; }
 </style>

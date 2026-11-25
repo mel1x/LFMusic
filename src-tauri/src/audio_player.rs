@@ -334,6 +334,7 @@ enum AudioCmd {
         resp: Resp,
     },
     PlayCrossfade {
+        mix_profile: Option<MixProfile>,
         file_path: String,
         seek_secs: f64,
         volume: f32,
@@ -624,6 +625,220 @@ impl<S: Source<Item = f32>> Source for FadeOut<S> {
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
+type MixPoints = [[f32; 2]; 3];
+
+#[derive(Clone, Copy, Deserialize, Default)]
+struct LaneCurves {
+    volume: Option<MixPoints>,
+    eq: Option<MixPoints>,
+    filter: Option<MixPoints>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MixProfile {
+    #[serde(default)]
+    volume_curve: Option<MixVolume>,
+    curves: Option<Box<[LaneCurves; 2]>>,
+    equal_power: bool,
+    eq_band: MixBand,
+    filter: MixFilter,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum MixFilter { Off, LowPass, HighPass }
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum MixBand { Off, Bass, CenterBass, Mids, Highs }
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum MixVolume { Linear, Smooth, Overlap, Rise, Cut }
+
+impl MixProfile {
+    fn gain(&self, weight: f32) -> f32 {
+        match self.volume_curve {
+            Some(MixVolume::Overlap) => (weight * 8.0).min(1.0),
+            Some(MixVolume::Rise) => weight * weight,
+            Some(MixVolume::Cut) => if weight >= 0.5 { 1.0 } else { 0.0 },
+            Some(MixVolume::Linear) => weight,
+            None if !self.equal_power => weight,
+            _ => (weight * std::f32::consts::FRAC_PI_2).sin(),
+        }
+    }
+}
+
+fn curve_value(points: &Option<MixPoints>, time: f32, fallback: f32) -> f32 {
+    let Some(points) = points else { return fallback };
+    let [a, b, c] = points;
+    if time < a[0] { return a[1].clamp(0.0, 1.0); }
+    if time >= c[0] { return c[1].clamp(0.0, 1.0); }
+    // Equal timestamps make a step. Interpolate only across a non-empty interval.
+    let (left, right) = if time < b[0] { (a, b) } else { (b, c) };
+    let t = (time - left[0]) / (right[0] - left[0]);
+    (left[1] + (right[1] - left[1]) * t).clamp(0.0, 1.0)
+}
+
+struct MixEnvelope {
+    curves: LaneCurves,
+    eq_amount: f32,
+    profile: MixProfile,
+    incoming: bool,
+    frames: usize,
+    frame: usize,
+    channel: usize,
+    low: Vec<f32>,
+    mid_lowpass: Vec<f32>,
+    mid_alpha: f32,
+    filtered: Vec<f32>,
+    bass_alpha: f32,
+    rate: f32,
+    gain: f32,
+    weight: f32,
+    alpha: f32,
+}
+
+impl MixEnvelope {
+    fn new(profile: MixProfile, incoming: bool, seconds: f64, channels: u16, rate: u32) -> Self {
+        let rate = rate as f32;
+        Self {
+            curves: profile.curves.as_ref().map(|lanes| lanes[incoming as usize]).unwrap_or_default(),
+            eq_amount: 0.0, profile, incoming, frames: ((seconds * rate as f64) as usize).max(1),
+            frame: 0, channel: 0, low: vec![0.0; channels as usize],
+            mid_lowpass: vec![0.0; channels as usize],
+            mid_alpha: 1.0 - (-std::f32::consts::TAU * 2500.0 / rate).exp(),
+            filtered: vec![0.0; channels as usize], rate,
+            bass_alpha: 1.0 - (-std::f32::consts::TAU * 180.0 / rate).exp(),
+            gain: 0.0, weight: 0.0, alpha: 0.0,
+        }
+    }
+
+    fn sample(&mut self, mut x: f32) -> f32 {
+        let ch = self.channel;
+        if ch == 0 {
+            let progress = self.frame as f32 / self.frames as f32;
+            self.weight = if self.incoming { progress } else { 1.0 - progress };
+            self.gain = curve_value(&self.curves.volume, progress, self.profile.gain(self.weight));
+            let band_level = if matches!(self.profile.eq_band, MixBand::CenterBass) {
+                (self.weight * 10.0 - 4.5).clamp(0.0, 1.0)
+            } else { self.weight };
+            self.eq_amount = 1.0 - curve_value(&self.curves.eq, progress, band_level);
+            if !matches!(self.profile.filter, MixFilter::Off) {
+                let high_pass = matches!(self.profile.filter, MixFilter::HighPass);
+                let level = if high_pass { 1.0 - self.weight } else { self.weight };
+                let level = curve_value(&self.curves.filter, progress, level);
+                self.weight = if high_pass { 1.0 - level } else { level };
+                let cutoff = match self.profile.filter {
+                    MixFilter::LowPass => 250.0 * 64.0_f32.powf(self.weight),
+                    _ => 30.0 * 64.0_f32.powf(1.0 - self.weight),
+                };
+                self.alpha = 1.0 - (-std::f32::consts::TAU * cutoff / self.rate).exp();
+            }
+        }
+        if !matches!(self.profile.eq_band, MixBand::Off) {
+            self.low[ch] += self.bass_alpha * (x - self.low[ch]);
+            self.mid_lowpass[ch] += self.mid_alpha * (x - self.mid_lowpass[ch]);
+            let band = match self.profile.eq_band {
+                MixBand::Bass | MixBand::CenterBass => self.low[ch],
+                MixBand::Mids => self.mid_lowpass[ch] - self.low[ch],
+                MixBand::Highs => x - self.mid_lowpass[ch],
+                MixBand::Off => 0.0,
+            };
+            x -= band * self.eq_amount;
+        }
+        if !matches!(self.profile.filter, MixFilter::Off) {
+            self.filtered[ch] += self.alpha * (x - self.filtered[ch]);
+            let wet = match self.profile.filter {
+                MixFilter::LowPass => self.filtered[ch],
+                _ => x - self.filtered[ch],
+            };
+            x += (wet - x) * (1.0 - self.weight);
+        }
+        self.channel += 1;
+        if self.channel == self.low.len() {
+            self.channel = 0;
+            self.frame += 1;
+        }
+        x * self.gain
+    }
+}
+
+pub(crate) fn track_waveform(path: &str, duration: f64) -> Result<Vec<u8>, String> {
+    let mut audio = OpenedAudio::open(path)?;
+    let frames = audio.num_frames.filter(|n| *n > 0)
+        .unwrap_or((duration * audio.sample_rate as f64) as u64).max(1);
+    // Interleaved low, mid and high peak envelopes for each time bin.
+    let mut peaks = vec![0u8; 8192 * 3];
+    let mut low = vec![0.0; audio.channels as usize];
+    let mut mid = low.clone();
+    let alpha = |hz: f32| 1.0 - (-std::f32::consts::TAU * hz / audio.sample_rate as f32).exp();
+    let bass_alpha = alpha(180.0);
+    let mid_alpha = alpha(2500.0);
+    let mut frame = 0u64;
+    let mut samples = Vec::new();
+    while audio.decode_next(&mut samples) {
+        for channels in samples.chunks(audio.channels as usize) {
+            let bin = (frame * 8192 / frames).min(8191) as usize * 3;
+            for (ch, &sample) in channels.iter().enumerate() {
+                low[ch] += bass_alpha * (sample - low[ch]);
+                mid[ch] += mid_alpha * (sample - mid[ch]);
+                for (band, value) in [low[ch], mid[ch] - low[ch], sample - mid[ch]].iter().enumerate() {
+                    peaks[bin + band] = peaks[bin + band].max((value.abs().sqrt() * 255.0) as u8);
+                }
+            }
+            frame += 1;
+        }
+    }
+    if frame == 0 { return Err("Empty audio stream".into()); }
+    Ok(peaks)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreviewRegion {
+    from_path: String,
+    to_path: String,
+    from_start: f64,
+    to_start: f64,
+    lead: f64,
+    overlap: f64,
+    tail: f64,
+    profile: MixProfile,
+}
+
+pub(crate) fn render_mix_preview(region: PreviewRegion) -> Result<Vec<u8>, String> {
+    use rodio::source::UniformSourceIterator;
+    const RATE: u32 = 32000;
+    let open = |path: &str, start: f64| -> Result<_, String> {
+        let source = SymphoniaSource::new_with_seek(path, start)?;
+        Ok(UniformSourceIterator::new(source, nz_channels(2), nz_rate(RATE)))
+    };
+    let mut outgoing = open(&region.from_path, region.from_start)?;
+    let mut incoming = open(&region.to_path, region.to_start)?;
+    let overlap = region.overlap.clamp(0.0, 32.0);
+    let frames = |secs: f64| (secs * RATE as f64).round() as usize;
+    let start = frames(region.lead.clamp(0.0, 3.0));
+    let end = start + frames(overlap);
+    let total = end + frames(region.tail.clamp(0.0, 3.0));
+    let mut fade_out = MixEnvelope::new(region.profile.clone(), false, overlap, 2, RATE);
+    let mut fade_in = MixEnvelope::new(region.profile, true, overlap, 2, RATE);
+    let mut pcm = Vec::with_capacity(total * 4);
+    for frame in 0..total {
+        for _ in 0..2 {
+            let sample = if frame < start { outgoing.next().unwrap_or(0.0) }
+                else if frame >= end { incoming.next().unwrap_or(0.0) }
+                else { fade_out.sample(outgoing.next().unwrap_or(0.0)) +
+                       fade_in.sample(incoming.next().unwrap_or(0.0)) };
+            pcm.extend_from_slice(&((sample.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+        }
+    }
+    Ok(pcm)
+}
+
+type FadeRequest = Arc<OnceLock<(MixProfile, f64)>>;
+
 /// Atomic "sink empty" flag for lock-free status reads, plus a condvar for the track-end watcher.
 pub struct SinkEndSignal {
     empty: AtomicBool,
@@ -672,6 +887,8 @@ struct AnalyzerSource<S: Source<Item = f32>> {
     channels: u16,
     sample_rate: u32,
     ch_idx: u16,
+    outgoing: FadeRequest,
+    envelope: Option<MixEnvelope>,
     frame_sum: f32,
     block: Vec<f32>,
 }
@@ -679,7 +896,7 @@ struct AnalyzerSource<S: Source<Item = f32>> {
 impl<S: Source<Item = f32>> AnalyzerSource<S> {
     const BLOCK: usize = 256;
 
-    fn new(source: S, analyzer: Arc<SpectrumAnalyzer>, finished: Arc<SinkEndSignal>) -> Self {
+    fn new(source: S, analyzer: Arc<SpectrumAnalyzer>, finished: Arc<SinkEndSignal>, outgoing: FadeRequest) -> Self {
         let channels = source.channels().get();
         let sample_rate = source.sample_rate().get();
         Self {
@@ -688,6 +905,8 @@ impl<S: Source<Item = f32>> AnalyzerSource<S> {
             finished,
             channels,
             sample_rate,
+            outgoing,
+            envelope: None,
             ch_idx: 0,
             frame_sum: 0.0,
             block: Vec::with_capacity(Self::BLOCK),
@@ -699,15 +918,26 @@ impl<S: Source<Item = f32>> Iterator for AnalyzerSource<S> {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        let sample = match self.source.next() {
+        if let Some((profile, seconds)) = self.outgoing.get()
+            && self.envelope.as_ref().is_none_or(|e| e.incoming) {
+            self.envelope = Some(MixEnvelope::new(profile.clone(), false, *seconds, self.channels, self.sample_rate));
+        }
+        if self.envelope.as_ref().is_some_and(|e| !e.incoming && e.frame >= e.frames) {
+            return None;
+        }
+        let mut sample = match self.source.next() {
             Some(s) => s,
             None => {
-                self.finished.set_finished();
+                if self.outgoing.get().is_none() { self.finished.set_finished(); }
                 return None;
             }
         };
 
-        if !self.analyzer.is_enabled() {
+        if let Some(envelope) = &mut self.envelope {
+            if envelope.frame < envelope.frames { sample = envelope.sample(sample); }
+            else { self.envelope = None; }
+        }
+        if self.outgoing.get().is_some() || !self.analyzer.is_enabled() {
             return Some(sample);
         }
 
@@ -1103,6 +1333,7 @@ fn audio_thread_loop(
     let mut stream: Option<MixerDeviceSink> = None;
     let mut sink: Option<Player> = None;
     let mut fadeout_sink: Option<Player> = None;
+    let mut outgoing = FadeRequest::default();
     let mut idle_since: Option<Instant> = None;
 
     loop {
@@ -1140,17 +1371,19 @@ fn audio_thread_loop(
 
         match cmd {
             AudioCmd::PlayFrom { file_path, seek_secs, volume, resp } => {
+                if let Some(old) = fadeout_sink.take() { old.stop(); }
                 if let Some(ref s) = sink { s.stop(); }
                 let result = (|| -> Result<(), String> {
                     let output = ensure_output(&mut stream, &enhance)?;
                     let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
+                    outgoing = FadeRequest::default();
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
                         effects(source, &eq_settings, &enhance, &fx),
                         spectrum.clone(),
-                        sink_empty.clone(),
+                        sink_empty.clone(), outgoing.clone(),
                     ));
                     sink = Some(new_sink);
                     Ok(())
@@ -1162,11 +1395,13 @@ fn audio_thread_loop(
             }
 
             AudioCmd::Pause => {
+                if let Some(old) = &fadeout_sink { old.pause(); }
                 if let Some(ref s) = sink
                     && !s.is_paused() { s.pause(); }
             }
 
             AudioCmd::Resume { file_path, position_secs, volume } => {
+                if let Some(old) = &fadeout_sink { old.play(); }
                 if let Some(ref s) = sink {
                     if s.is_paused() { s.play(); }
                 } else if let Some(file_path) = file_path {
@@ -1175,11 +1410,12 @@ fn audio_thread_loop(
                         let new_sink = Player::connect_new(output.mixer());
                         new_sink.set_volume(volume);
                         let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                        outgoing = FadeRequest::default();
                         sink_empty.set_playing();
                         new_sink.append(AnalyzerSource::new(
                             effects(source, &eq_settings, &enhance, &fx),
                             spectrum.clone(),
-                            sink_empty.clone(),
+                            sink_empty.clone(), outgoing.clone(),
                         ));
                         sink = Some(new_sink);
                         Ok(())
@@ -1199,21 +1435,24 @@ fn audio_thread_loop(
             }
 
             AudioCmd::SetVolume(vol) => {
+                if let Some(old) = &fadeout_sink { old.set_volume(vol); }
                 if let Some(ref s) = sink { s.set_volume(vol); }
             }
 
             AudioCmd::Seek { file_path, position_secs, volume, was_paused, resp } => {
+                if let Some(old) = fadeout_sink.take() { old.stop(); }
                 if let Some(ref s) = sink { s.stop(); }
                 let result = (|| -> Result<(), String> {
                     let output = ensure_output(&mut stream, &enhance)?;
                     let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                    outgoing = FadeRequest::default();
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
                         effects(source, &eq_settings, &enhance, &fx),
                         spectrum.clone(),
-                        sink_empty.clone(),
+                        sink_empty.clone(), outgoing.clone(),
                     ));
                     if was_paused { new_sink.pause(); }
                     sink = Some(new_sink);
@@ -1249,11 +1488,12 @@ fn audio_thread_loop(
                     let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, position_secs)?;
+                    outgoing = FadeRequest::default();
                     sink_empty.set_playing();
                     new_sink.append(AnalyzerSource::new(
                         effects(source, &eq_settings, &enhance, &fx).fade_in(dur),
                         spectrum.clone(),
-                        sink_empty.clone(),
+                        sink_empty.clone(), outgoing.clone(),
                     ));
                     if was_paused { new_sink.pause(); }
                     sink = Some(new_sink);
@@ -1266,25 +1506,34 @@ fn audio_thread_loop(
             }
 
             AudioCmd::PlayCrossfade {
-                file_path, seek_secs, volume, crossfade_secs, resp,
+                file_path, seek_secs, volume, crossfade_secs, mix_profile, resp,
             } => {
                 let result = (|| -> Result<(), String> {
                     let dur = Duration::from_secs_f64(crossfade_secs);
 
                     if let Some(old_fade) = fadeout_sink.take() { old_fade.stop(); }
 
-                    if let Some(old_sink) = sink.take() { old_sink.stop(); }
-
                     let output = ensure_output(&mut stream, &enhance)?;
                     let new_sink = Player::connect_new(output.mixer());
                     new_sink.set_volume(volume);
                     let source = BufferedSymphoniaSource::new_with_seek(&file_path, seek_secs)?;
+                    if let Some(old) = sink.take() {
+                        if let Some(profile) = &mix_profile {
+                            let _ = outgoing.set((profile.clone(), crossfade_secs));
+                            fadeout_sink = Some(old);
+                        } else { old.stop(); }
+                    }
+                    outgoing = FadeRequest::default();
                     sink_empty.set_playing();
-                    new_sink.append(AnalyzerSource::new(
-                        effects(source, &eq_settings, &enhance, &fx).fade_in(dur),
+                    let mut input = AnalyzerSource::new(
+                        effects(source, &eq_settings, &enhance, &fx),
                         spectrum.clone(),
-                        sink_empty.clone(),
-                    ));
+                        sink_empty.clone(), outgoing.clone(),
+                    );
+                    if let Some(profile) = mix_profile {
+                        input.envelope = Some(MixEnvelope::new(profile, true, crossfade_secs, input.channels, input.sample_rate));
+                        new_sink.append(input);
+                    } else { new_sink.append(input.fade_in(dur)); }
                     sink = Some(new_sink);
                     Ok(())
                 })();
@@ -1594,16 +1843,21 @@ impl AudioPlayer {
         &mut self,
         file_path: &str,
         crossfade_secs: f64,
+        mix_profile: Option<MixProfile>,
+        position_secs: f64,
         metadata: TrackMetadata,
     ) -> Result<TrackMetadata, String> {
-        if crossfade_secs <= 0.0 || self.state == PlaybackState::Stopped {
-            return self.play_from(file_path, 0.0, metadata);
+        let seek_secs = position_secs.max(0.0).min(metadata.duration_secs.unwrap_or(f64::MAX));
+        let crossfade_secs = crossfade_secs.clamp(0.0, 32.0);
+        if !crossfade_secs.is_finite() || crossfade_secs <= 0.0 || self.state == PlaybackState::Stopped {
+            return self.play_from(file_path, seek_secs, metadata);
         }
 
         let volume = self.volume;
         self.send_play(|resp| AudioCmd::PlayCrossfade {
+            mix_profile,
             file_path: file_path.to_string(),
-            seek_secs: 0.0,
+            seek_secs,
             volume,
             crossfade_secs,
             resp,
@@ -1612,7 +1866,7 @@ impl AudioPlayer {
         self.current_track = Some(metadata.clone());
         self.state = PlaybackState::Playing;
         self.playback_started_at = Some(Instant::now());
-        self.accumulated_position = 0.0;
+        self.accumulated_position = seek_secs;
 
         Ok(metadata)
     }
@@ -2172,6 +2426,28 @@ mod metadata_tests {
     }
 
     #[test]
+    fn mix_editor_decodes_waveform_and_renders_stereo_preview() {
+        let path = temp_path("mix-preview.wav");
+        write_test_wav(&path, 8_000, 1, 16_000);
+        let file = path.to_str().unwrap();
+        let peaks = track_waveform(file, 2.0).unwrap();
+        assert_eq!(peaks.len(), 8192 * 3);
+        assert!(peaks.iter().any(|&peak| peak > 127));
+        let region = PreviewRegion {
+            from_path: file.into(), to_path: file.into(), from_start: 0.25, to_start: 0.5,
+            lead: 0.25, overlap: 0.5, tail: 0.25,
+            profile: MixProfile { curves: None, volume_curve: Some(MixVolume::Smooth), equal_power: true,
+                eq_band: MixBand::CenterBass, filter: MixFilter::LowPass },
+        };
+        let pcm = render_mix_preview(region).unwrap();
+        assert_eq!(pcm.len(), 32_000 * 4);
+        for part in pcm.chunks(32_000) {
+            assert!(part.as_chunks::<2>().0.iter().any(|s| i16::from_le_bytes(*s).unsigned_abs() > 100));
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn symphonia_source_decodes_24_bit_wav_as_audible_samples() {
         let path = temp_path("clip24.wav");
         write_test_wav_24(&path, 8_000, 2, 4_000);
@@ -2307,5 +2583,66 @@ mod player_instance_tests {
         assert_eq!(read_back.enabled, custom.enabled);
         assert_eq!(read_back.bands, custom.bands);
         assert_eq!(read_back.gain, custom.gain);
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+
+    #[test]
+    fn outgoing_audio_ends_without_advancing_the_new_track() {
+        let source = rodio::buffer::SamplesBuffer::new(nz_channels(1), nz_rate(100), vec![1.0; 200]);
+        let signal = Arc::new(SinkEndSignal::new(false));
+        let request = FadeRequest::default();
+        let mut audio = AnalyzerSource::new(source, Arc::new(SpectrumAnalyzer::new()), signal.clone(), request.clone());
+        assert_eq!(audio.next(), Some(1.0));
+        let profile = MixProfile { curves: None, volume_curve: None, equal_power: false, eq_band: MixBand::Off, filter: MixFilter::Off };
+        assert!(request.set((profile, 0.5)).is_ok());
+        let tail: Vec<_> = audio.collect();
+        assert_eq!(tail.len(), 50);
+        assert!(tail[0] > 0.99 && tail[49] < 0.03);
+        assert!(!signal.is_finished());
+    }
+
+    #[test]
+    fn aligned_points_hold_then_step_on_the_selected_frame() {
+        let points = Some([[0.0, 1.0], [0.5, 1.0], [0.5, 0.0]]);
+        assert_eq!(curve_value(&points, 0.49999, 0.0), 1.0);
+        assert_eq!(curve_value(&points, 0.5, 1.0), 0.0);
+        assert_eq!(curve_value(&points, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn custom_points_control_gain_eq_and_filter_on_the_selected_lane() {
+        let points = Some([[0.1, 0.2], [0.4, 0.8], [0.9, 0.4]]);
+        let lane = LaneCurves { volume: points, eq: points, filter: points };
+        let profile = MixProfile {
+            curves: Some(Box::new([LaneCurves::default(), lane])),
+            volume_curve: None, equal_power: false, eq_band: MixBand::Bass, filter: MixFilter::LowPass,
+        };
+        let mut input = MixEnvelope::new(profile.clone(), true, 1.0, 1, 100);
+        let mut output = MixEnvelope::new(profile, false, 1.0, 1, 100);
+        for _ in 0..=40 { input.sample(1.0); output.sample(1.0); }
+        assert!((input.gain - 0.8).abs() < 1e-5);
+        assert!((input.eq_amount - 0.2).abs() < 1e-5);
+        assert!((input.weight - 0.8).abs() < 1e-5);
+        assert!((output.gain - 0.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn linear_mix_preserves_level_and_stereo_alignment() {
+        let profile = MixProfile { curves: None, volume_curve: None, equal_power: false, eq_band: MixBand::Off, filter: MixFilter::Off };
+        let mut incoming = MixEnvelope::new(profile.clone(), true, 1.0, 2, 100);
+        let mut outgoing = MixEnvelope::new(profile, false, 1.0, 2, 100);
+        for frame in 0..100 {
+            for _ in 0..2 {
+                let a = incoming.sample(1.0);
+                let b = outgoing.sample(1.0);
+                assert!((a - frame as f32 / 100.0).abs() < 1e-6);
+                assert!((a + b - 1.0).abs() < 1e-6);
+            }
+        }
+        assert_eq!(outgoing.frame, outgoing.frames);
     }
 }

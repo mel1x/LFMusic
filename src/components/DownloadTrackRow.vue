@@ -4,10 +4,12 @@ import { useRouter } from 'vue-router'
 
 import CoverImage from './CoverImage.vue'
 import DownloadIcon from './Icons/DownloadIcon.vue'
+import PlayIcon from './Icons/PlayIcon.vue'
+import PauseIcon from './Icons/PauseIcon.vue'
 import defaultTrackCover from '../assets/trackCover.webp'
 
 import { usePlayer } from '../composables/usePlayer'
-import { useDownloads, type ExternalSearchTrack } from '../composables/useDownloads'
+import { useDownloads, type DownloadItem, type ExternalSearchTrack } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
 
 const props = withDefaults(
@@ -16,8 +18,12 @@ const props = withDefaults(
         /** Position number instead of the cover (album page). */
         index?: number | null
         showAlbum?: boolean
+        /** Explicit queue item when rendered inside the downloads queue. */
+        queueItem?: DownloadItem | null
+        /** Enables queue-specific hover actions (remove completed entry). */
+        queueMode?: boolean
     }>(),
-    { index: null, showAlbum: true },
+    { index: null, showAlbum: true, queueItem: null, queueMode: false },
 )
 
 const emit = defineEmits<{
@@ -29,22 +35,30 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const router = useRouter()
-const { formatTime } = usePlayer()
-const { itemFor, enqueue, cancel, retry, ytdlpMissing, stageText } = useDownloads()
+const { currentTrack, isPlaying, playTrack, togglePlayPause, formatTime } = usePlayer()
+const { itemFor, enqueue, cancel, retry, ytdlpMissing, stageText, formatSpeed } = useDownloads()
 
-const item = computed(() => itemFor(props.track))
+const item = computed(() => props.queueItem ?? itemFor(props.track))
 const stage = computed(() => item.value?.stage ?? null)
-const active = computed(() => stage.value !== null && stage.value !== 'done' && stage.value !== 'error')
+const running = computed(() => stage.value === 'downloading' || stage.value === 'searching' || stage.value === 'processing')
+const queued = computed(() => stage.value === 'queued')
+const active = computed(() => running.value || queued.value)
+const failed = computed(() => stage.value === 'error')
 const inLibrary = computed(() => props.track.in_library || stage.value === 'done')
 
-const RING = 2 * Math.PI * 15
-const progressPct = computed(() => Math.round(Math.min(1, Math.max(0, item.value?.progress ?? 0)) * 100))
-const ringOffset = computed(() => RING * (1 - Math.min(1, Math.max(0, item.value?.progress ?? 0))))
+const playablePath = computed(() => (stage.value === 'done' && item.value?.file_path) ? item.value.file_path : null)
+const isCurrent = computed(() => !!playablePath.value && currentTrack.value?.file_path === playablePath.value)
+const isCurrentPlaying = computed(() => isCurrent.value && isPlaying.value)
+const rowInteractive = computed(() => !!playablePath.value || !!item.value || !ytdlpMissing.value)
 
-const statusLine = computed(() => (item.value && stage.value !== 'done' ? stageText(item.value) : ''))
+const progressPct = computed(() => Math.round(Math.min(1, Math.max(0, item.value?.progress ?? 0)) * 100))
+const speedText = computed(() => item.value?.stage === 'downloading' && item.value.speed_bps ? formatSpeed(item.value.speed_bps) : '')
+const errorMessage = computed(() => (item.value && failed.value) ? stageText(item.value) : '')
+const runningLabel = computed(() => (item.value && (stage.value === 'searching' || stage.value === 'processing')) ? stageText(item.value) : '')
+const showDismiss = computed(() => !!item.value && (failed.value || (props.queueMode && stage.value === 'done')))
 
 const buttonTooltip = computed(() => {
-    if (stage.value === 'error') return t('downloads.action.retry')
+    if (failed.value) return t('downloads.action.retry')
     if (active.value) return t('downloads.action.cancel')
     if (inLibrary.value) return t('downloads.action.redownload')
     return t('downloads.action.download')
@@ -53,7 +67,7 @@ const buttonTooltip = computed(() => {
 async function onAction() {
     const it = item.value
     try {
-        if (it && stage.value === 'error') { await retry([it.id]); return }
+        if (it && failed.value) { await retry([it.id]); return }
         if (it && active.value) { await cancel(it.id); return }
         if (ytdlpMissing.value) return
         if (inLibrary.value) { emit('redownload', props.track); return }
@@ -64,71 +78,126 @@ async function onAction() {
     }
 }
 
+function onCoverPlay() {
+    if (!playablePath.value) return
+    if (isCurrent.value) {
+        void togglePlayPause()
+        return
+    }
+    void playTrack(playablePath.value)
+}
+
+async function onDismiss() {
+    if (!item.value) return
+    try {
+        await cancel(item.value.id)
+    } catch (e) {
+        console.error('Ошибка удаления элемента очереди:', e)
+    }
+}
+
+function onRowClick() {
+    if (playablePath.value) {
+        onCoverPlay()
+        return
+    }
+    void onAction()
+}
+
 const artistClickable = computed(() => props.track.artist_id != null)
 const albumClickable = computed(() => props.showAlbum && !!props.track.album && props.track.album_id != null)
-function openArtist() {
-    if (artistClickable.value) router.push(`/downloads/artist/${props.track.artist_id}`)
+function onArtistClick(e: MouseEvent) {
+    if (!artistClickable.value) return
+    e.stopPropagation()
+    router.push(`/downloads/artist/${props.track.artist_id}`)
 }
-function openAlbum() {
-    if (albumClickable.value) router.push(`/downloads/album/${props.track.album_id}`)
+function onAlbumClick(e: MouseEvent) {
+    if (!albumClickable.value) return
+    e.stopPropagation()
+    router.push(`/downloads/album/${props.track.album_id}`)
 }
 </script>
 
 <template>
-    <div class="dlRow" :class="{ active, failed: stage === 'error', owned: inLibrary && !active }" @dblclick="onAction">
+    <div
+        class="dlRow"
+        :class="{ running, failed, playable: !!playablePath, playing: isCurrent, paused: isCurrent && !isPlaying, clickable: rowInteractive }"
+        @click="onRowClick"
+    >
         <div v-if="index != null" class="rowIndex">{{ index }}</div>
-        <div v-else class="rowCover">
-            <CoverImage :src="track.cover_url" :fallback="defaultTrackCover" />
+        <div v-else class="rowCoverWrap">
+            <div class="rowCover">
+                <CoverImage :src="track.cover_url" :fallback="defaultTrackCover" />
+            </div>
+            <template v-if="playablePath">
+                <div v-if="isCurrentPlaying" class="playingDot"></div>
+                <button
+                    type="button"
+                    class="coverPlayBtn"
+                    :aria-label="isCurrentPlaying ? 'Пауза' : 'Воспроизвести'"
+                    @click.stop="onCoverPlay"
+                >
+                    <PauseIcon v-if="isCurrentPlaying" width="10" height="10" style="margin-left:0.5px;" />
+                    <PlayIcon v-else width="10" height="10" style="margin-left:1px;" />
+                </button>
+            </template>
         </div>
 
         <div class="rowInfo">
             <div v-truncate class="rowTitle">{{ track.title }}</div>
             <div class="rowMeta">
-                <Transition name="statusSwap" mode="out-in">
-                    <span v-if="statusLine" :key="'s'" class="rowStatus" :class="{ error: stage === 'error' }" v-truncate>{{ statusLine }}</span>
-                    <span v-else :key="'m'" class="rowMetaText" v-truncate>
-                        <span class="metaLink" :class="{ clickable: artistClickable }" @click.stop="openArtist">{{ track.artist }}</span>
-                        <span v-if="showAlbum && track.album" class="metaAlbum metaLink" :class="{ clickable: albumClickable }" @click.stop="openAlbum">{{ track.album }}</span>
-                    </span>
-                </Transition>
+                <span class="rowMetaText" v-truncate>
+                    <span v-if="track.artist" class="metaLink" :class="{ clickable: artistClickable }" @click="onArtistClick">{{ track.artist }}</span>
+                    <span v-if="failed" class="metaErr">{{ errorMessage }}</span>
+                    <span v-else-if="showAlbum && track.album" class="metaAlbum metaLink" :class="{ clickable: albumClickable }" @click="onAlbumClick">{{ track.album }}</span>
+                </span>
             </div>
         </div>
 
+        <div v-if="running" class="rowProgress">
+            <div class="progHead">
+                <template v-if="stage === 'downloading'">
+                    <span v-if="speedText" class="progDim">{{ speedText }}</span>
+                    <span class="progPct">{{ progressPct }}%</span>
+                </template>
+                <span v-else class="progStage" v-truncate>{{ runningLabel }}</span>
+            </div>
+            <div class="progTrack">
+                <span
+                    class="progFill"
+                    :class="{ indeterminate: stage === 'searching' || stage === 'processing' }"
+                    :style="stage === 'downloading' ? { width: progressPct + '%' } : undefined"
+                ></span>
+            </div>
+        </div>
+        <span v-else-if="queued" class="rowQueued">{{ t('downloads.stage.queued') }}</span>
+
         <div class="rowTime">{{ track.duration_secs ? formatTime(track.duration_secs) : '' }}</div>
 
-        <button
-            class="actionBtn"
-            :class="[stage ?? 'idle', { owned: inLibrary && !active && stage !== 'error' }]"
-            :disabled="!item && ytdlpMissing"
-            v-tooltip:left="buttonTooltip"
-            @click.stop="onAction"
-            @dblclick.stop
-        >
-            <svg v-if="active && stage !== 'queued'" class="ring" :class="{ spin: stage !== 'downloading' }" viewBox="0 0 36 36">
-                <circle class="ringTrack" cx="18" cy="18" r="15" />
-                <circle
-                    class="ringFill"
-                    cx="18" cy="18" r="15"
-                    :stroke-dasharray="RING"
-                    :stroke-dashoffset="stage === 'downloading' ? ringOffset : RING * 0.72"
-                />
-            </svg>
-            <span v-if="stage === 'queued'" class="queuedDots"><i></i><i></i><i></i></span>
-
-            <span class="glyph">
-                <svg v-if="active" class="cancelGlyph" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                <svg v-else-if="stage === 'error'" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.08 8A8 8 0 1 0 20 12"/><polyline points="20 4 20 8 16 8"/></svg>
+        <div class="rowActions">
+            <button
+                type="button"
+                class="actionBtn"
+                :class="[stage ?? 'idle', { owned: inLibrary && !active && !failed }]"
+                :disabled="!item && ytdlpMissing"
+                v-tooltip:left="buttonTooltip"
+                @click.stop="onAction"
+            >
+                <svg v-if="active" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                <svg v-else-if="failed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.08 8A8 8 0 1 0 20 12"/><polyline points="20 4 20 8 16 8"/></svg>
                 <svg v-else-if="inLibrary" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                 <DownloadIcon v-else width="17" height="17" />
-            </span>
-        </button>
-
-        <div v-if="active" class="rowBar" aria-hidden="true">
-            <span
-                class="rowBarFill"
-                :class="{ indeterminate: stage === 'searching' || stage === 'processing', queued: stage === 'queued' }"
-                :style="stage === 'downloading' ? { width: progressPct + '%' } : undefined"
-            ></span>
+            </button>
+            <button
+                v-if="showDismiss"
+                type="button"
+                class="dismissBtn"
+                :class="{ visible: failed }"
+                v-tooltip:left="t('downloads.action.remove')"
+                @click.stop="onDismiss"
+            >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
         </div>
     </div>
 </template>
@@ -138,37 +207,107 @@ function openAlbum() {
     position: relative;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
     height: 64px;
-    padding: 0 12px;
+    flex-shrink: 0;
+    padding: 0 16px;
     border-radius: 12px;
     box-sizing: border-box;
     overflow: hidden;
     transition: background-color var(--duration-hover) var(--ease-smooth);
 }
+.dlRow.clickable {
+    cursor: pointer;
+}
 .dlRow:hover {
     background-color: hsla(0, 0%, 100%, 0.05);
 }
-.dlRow.active {
-    background-color: hsla(0, 0%, 100%, 0.04);
+.dlRow.clickable:active {
+    background-color: hsla(0, 0%, 100%, 0.075);
 }
-.dlRow.active:hover {
-    background-color: hsla(0, 0%, 100%, 0.065);
+.dlRow.running {
+    background-color: hsla(0, 0%, 100%, 0.035);
+}
+.dlRow.running:hover {
+    background-color: hsla(0, 0%, 100%, 0.06);
+}
+.dlRow.running.clickable:active {
+    background-color: hsla(0, 0%, 100%, 0.085);
 }
 .dlRow.failed {
-    background-color: hsla(2, 70%, 55%, 0.07);
+    background-color: hsla(2, 70%, 55%, 0.06);
 }
 .dlRow.failed:hover {
-    background-color: hsla(2, 70%, 55%, 0.11);
+    background-color: hsla(2, 70%, 55%, 0.1);
 }
-.rowCover {
+.dlRow.failed.clickable:active {
+    background-color: hsla(2, 70%, 55%, 0.14);
+}
+.rowCoverWrap {
+    position: relative;
     width: 48px;
     height: 48px;
+    flex-shrink: 0;
+}
+.rowCover {
+    width: 100%;
+    height: 100%;
     border-radius: 6px;
     overflow: hidden;
-    flex-shrink: 0;
     background-color: #202020;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
 }
+.dlRow.playable:hover .rowCover,
+.dlRow.playing .rowCover {
+    opacity: 0.45;
+}
+.playingDot {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
+    border-radius: 50%;
+    background: #fff;
+    animation: playingPulse 0.8s infinite var(--ease-smooth-in-out);
+    pointer-events: none;
+    z-index: 2;
+    transition: opacity var(--duration-hover) var(--ease-smooth);
+}
+.dlRow.playable:hover .playingDot {
+    opacity: 0;
+}
+@keyframes playingPulse {
+    0%, 100% { transform: scale(0.6); }
+    50% { transform: scale(1); }
+}
+.coverPlayBtn {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: #242424;
+    background-color: hsla(0, 0%, 100%, 0.96);
+    opacity: 0;
+    z-index: 3;
+    transition: opacity var(--duration-hover) var(--ease-smooth), transform 80ms var(--ease-smooth);
+}
+.coverPlayBtn:active {
+    transform: translate(-50%, -50%) scale(0.92);
+}
+.dlRow.playable:hover .coverPlayBtn,
+.dlRow.playing.paused .coverPlayBtn {
+    opacity: 1;
+}
+
 .rowIndex {
     width: 22px;
     flex-shrink: 0;
@@ -200,30 +339,86 @@ function openAlbum() {
     user-select: none;
     min-width: 0;
 }
-.rowMetaText,
-.rowStatus {
+.rowMetaText {
     display: block;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    color: hsla(0, 0%, 100%, 0.45);
 }
-.rowMetaText { color: hsla(0, 0%, 100%, 0.45); }
-.metaAlbum::before {
+.metaLink + .metaAlbum::before,
+.metaLink + .metaErr::before {
     content: "\00B7";
     margin: 0 5px;
     opacity: 0.6;
 }
 .metaLink.clickable { cursor: pointer; transition: color var(--duration-hover) var(--ease-smooth); }
 .metaLink.clickable:hover { color: hsla(0, 0%, 100%, 0.9); }
-.rowStatus {
+.metaErr {
+    color: hsla(2, 80%, 74%, 0.95);
+}
+
+.rowProgress {
+    width: 196px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    user-select: none;
+}
+.progHead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
     font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+}
+.progDim {
+    color: hsla(0, 0%, 100%, 0.45);
+    white-space: nowrap;
+}
+.progPct {
+    margin-left: auto;
+    font-weight: 600;
     color: hsl(var(--accent-h), min(var(--accent-s), 70%), 72%);
 }
-.rowStatus.error { color: hsla(2, 78%, 72%, 0.95); }
-
-.statusSwap-enter-active, .statusSwap-leave-active { transition: opacity var(--duration-hover) var(--ease-smooth), transform var(--duration-hover) var(--ease-smooth); }
-.statusSwap-enter-from { opacity: 0; transform: translateY(3px); }
-.statusSwap-leave-to { opacity: 0; transform: translateY(-3px); }
+.progStage {
+    min-width: 0;
+    color: hsl(var(--accent-h), min(var(--accent-s), 70%), 72%);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.progTrack {
+    position: relative;
+    height: 5px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: hsla(0, 0%, 100%, 0.07);
+}
+.progFill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: 999px;
+    background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
+    transition: width .28s var(--ease-smooth);
+}
+.progFill.indeterminate {
+    width: 30%;
+    animation: progSlide 1.25s var(--ease-smooth-in-out) infinite;
+}
+@keyframes progSlide {
+    0% { left: -30%; }
+    100% { left: 100%; }
+}
+.rowQueued {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.38);
+    user-select: none;
+}
 
 .rowTime {
     width: 44px;
@@ -235,11 +430,17 @@ function openAlbum() {
     user-select: none;
 }
 
+.rowActions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
 .actionBtn {
     position: relative;
     flex-shrink: 0;
-    width: 38px;
-    height: 38px;
+    width: 36px;
+    height: 36px;
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -262,79 +463,36 @@ function openAlbum() {
 }
 .actionBtn.owned:hover:not(:disabled) { background-color: hsla(0, 0%, 100%, 0.08); color: hsl(var(--accent-h), min(var(--accent-s), 70%), 76%); }
 .actionBtn.error {
-    color: hsla(2, 80%, 72%, 1);
+    color: hsla(2, 80%, 74%, 1);
 }
 .actionBtn.error:hover:not(:disabled) { background-color: hsla(2, 70%, 55%, 0.16); color: hsla(2, 80%, 82%, 1); }
-.glyph { position: relative; display: flex; align-items: center; justify-content: center; }
-.cancelGlyph { opacity: 0; transition: opacity var(--duration-hover) var(--ease-smooth); color: hsla(0, 0%, 100%, 0.9); }
-.actionBtn:hover .cancelGlyph { opacity: 1; }
-.actionBtn:hover .queuedDots { opacity: 0; }
 
-.ring {
-    position: absolute;
-    inset: 1px;
-    width: 36px;
-    height: 36px;
-    transform: rotate(-90deg);
-}
-.ring.spin { animation: ringSpin 1s linear infinite; }
-.ringTrack { fill: none; stroke: hsla(0, 0%, 100%, 0.1); stroke-width: 2.5; }
-.ringFill {
-    fill: none;
-    stroke: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
-    stroke-width: 2.5;
-    stroke-linecap: round;
-    transition: stroke-dashoffset .3s var(--ease-smooth);
-}
-@keyframes ringSpin { to { transform: rotate(270deg); } }
-
-.queuedDots {
-    position: absolute;
-    display: flex;
-    gap: 3px;
-    transition: opacity var(--duration-hover) var(--ease-smooth);
-}
-.queuedDots i {
-    width: 4px;
-    height: 4px;
+.dismissBtn {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
-    background: hsla(0, 0%, 100%, 0.55);
-    animation: dotPulse 1.2s var(--ease-smooth-in-out) infinite;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: hsla(0, 0%, 100%, 0.45);
+    background-color: transparent;
+    opacity: 0;
+    transition: opacity var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth), transform 80ms var(--ease-smooth);
 }
-.queuedDots i:nth-child(2) { animation-delay: .15s; }
-.queuedDots i:nth-child(3) { animation-delay: .3s; }
-@keyframes dotPulse {
-    0%, 100% { opacity: 0.25; transform: translateY(0); }
-    50% { opacity: 1; transform: translateY(-2px); }
+.dismissBtn.visible {
+    opacity: 1;
+    color: hsla(0, 0%, 100%, 0.55);
 }
-
-.rowBar {
-    position: absolute;
-    left: 12px;
-    right: 12px;
-    bottom: 0;
-    height: 2.5px;
-    border-radius: 2px;
-    overflow: hidden;
-    background: hsla(0, 0%, 100%, 0.05);
-    pointer-events: none;
+.dlRow:hover .dismissBtn {
+    opacity: 1;
 }
-.rowBarFill {
-    position: absolute;
-    inset: 0 auto 0 0;
-    border-radius: 2px;
-    background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
-    transition: width .28s var(--ease-smooth);
+.dismissBtn:hover {
+    background-color: hsla(0, 0%, 100%, 0.08);
+    color: #fff;
 }
-.rowBarFill.queued {
-    width: 0;
-}
-.rowBarFill.indeterminate {
-    width: 30%;
-    animation: rowBarSlide 1.25s var(--ease-smooth-in-out) infinite;
-}
-@keyframes rowBarSlide {
-    0% { left: -30%; }
-    100% { left: 100%; }
+.dismissBtn:active {
+    transform: scale(0.92);
 }
 </style>

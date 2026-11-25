@@ -12,7 +12,7 @@
   :is(a, button, [role="button"], .lfi-host):hover .lfi-album > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-spin .52s var(--icon-ease); }
   :is(a, button, [role="button"], .lfi-host):hover .lfi-heart > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-beat .64s var(--ease-smooth-in-out); }
   :is(a, button, [role="button"], .lfi-host):hover :is(.lfi-close, .lfi-delete, .lfi-plus) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-quarter .52s var(--icon-ease); }
-  :is(a, button, [role="button"], .lfi-host):hover :is(.lfi-arrowup, .lfi-back, .lfi-next, .lfi-prev, .lfi-play, .lfi-pause) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-pop .48s var(--icon-ease); }
+  :is(a, button, [role="button"], .lfi-host):not(.staticPlaybackBtn):hover :is(.lfi-arrowup, .lfi-back, .lfi-next, .lfi-prev, .lfi-play, .lfi-pause) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-pop .48s var(--icon-ease); }
   :is(a, button, [role="button"], .lfi-host):hover :is(.lfi-edit, .lfi-search) > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-wiggle .56s var(--ease-smooth-in-out); }
   :is(a, button, [role="button"], .lfi-host):hover .lfi-pin > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-pin .56s var(--ease-smooth-in-out); }
   :is(a, button, [role="button"], .lfi-host):hover .lfi-refresh > * { transform-box: view-box; transform-origin: 50% 50%; animation: lfi-spin .52s var(--icon-ease); }

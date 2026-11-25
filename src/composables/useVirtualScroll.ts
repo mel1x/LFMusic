@@ -1,7 +1,7 @@
-import { ref, computed, watch, onUnmounted, type Ref, type ComputedRef } from 'vue'
+import { unref, ref, computed, watch, onUnmounted, type Ref, type ComputedRef } from 'vue'
 
 export interface VirtualScrollOptions {
-    itemHeight: number
+    itemHeight: number | ComputedRef<number>
     buffer?: number
     scrollOffset?: Ref<number> | ComputedRef<number>
 }
@@ -46,16 +46,16 @@ export function useVirtualScroll<T>(
         if (containerHeight.value) {
             const offset = scrollOffset?.value ?? 0
             const adjustedScroll = Math.max(0, scrollTop.value - offset)
-            start = Math.max(0, Math.floor(adjustedScroll / itemHeight) - buffer)
-            end = Math.min(total, Math.ceil((adjustedScroll + containerHeight.value) / itemHeight) + buffer)
+            start = Math.max(0, Math.floor(adjustedScroll / unref(itemHeight)) - buffer)
+            end = Math.min(total, Math.ceil((adjustedScroll + containerHeight.value) / unref(itemHeight)) + buffer)
         }
         if (prev && prev.start === start && prev.end === end) return prev
         return { start, end }
     })
 
     const visibleItems = computed(() => items.value.slice(range.value.start, range.value.end))
-    const paddingTop = computed(() => range.value.start * itemHeight)
-    const paddingBottom = computed(() => Math.max(0, (items.value.length - range.value.end) * itemHeight))
+    const paddingTop = computed(() => range.value.start * unref(itemHeight))
+    const paddingBottom = computed(() => Math.max(0, (items.value.length - range.value.end) * unref(itemHeight)))
 
     function resetScroll() {
         scrollTop.value = 0

@@ -24,7 +24,7 @@ import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import FavoritesCover from '../components/FavoritesCover.vue';
 import ConfirmModal from '../components/ConfirmModal.vue';
-import TrackRow from '../components/TrackRow.vue';
+import TrackRow, { TRACK_ROW_HEIGHT } from '../components/TrackRow.vue';
 import { usePins } from '../composables/usePins';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
@@ -33,6 +33,12 @@ import LoadingSpinner from '../components/LoadingSpinner.vue';
 import { useCustomCovers } from '../composables/useCustomCovers';
 import { useCoverGate } from '../composables/useCoverGate';
 
+import TuneIcon from '../components/Icons/TuneIcon.vue'
+import PlaylistTransition from '../components/PlaylistTransition.vue'
+import { playlistMix, togglePlaylistMix, savedTransition } from '../composables/usePlaylistMix'
+import { useI18n } from '../composables/useI18n'
+
+const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 
@@ -126,7 +132,21 @@ const totalDuration = computed(() =>
 const rankOf = computed(() => new Map(baseTracks.value.map((t, i) => [t.file_path, i + 1])))
 
 const filteredTracks = baseTracks
-
+const mixing = computed(() => playlist.value?.kind === 'User' && playlistMix(sourceId.value).enabled)
+const editingPair = ref<{ from: TrackMetadata, to: TrackMetadata } | null>(null)
+watch(playlistId, () => { editingPair.value = null })
+function nextAfter(track: TrackMetadata) {
+    return filteredTracks.value[rankOf.value.get(track.file_path) ?? filteredTracks.value.length]
+}
+function editTransition(track: TrackMetadata) {
+    const next = nextAfter(track)
+    if (next) editingPair.value = { from: track, to: next }
+}
+function transitionLabel(track: TrackMetadata) {
+    const next = nextAfter(track)
+    const settings = next && savedTransition(sourceId.value, track.file_path, next.file_path)
+    return t('playlistMix.' + (settings ? settings.preset ?? 'custom' : 'auto'))
+}
 const scrollHeaderRef = ref<HTMLElement | null>(null)
 const scrollHeaderHeight = ref(0)
 let headerResizeObserver: ResizeObserver | null = null
@@ -182,7 +202,7 @@ const {
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(filteredTracks, { itemHeight: 64, buffer: 5, scrollOffset: scrollHeaderHeight })
+} = useVirtualScroll(filteredTracks, { itemHeight: computed(() => TRACK_ROW_HEIGHT + (mixing.value ? 32 : 0)), buffer: 5, scrollOffset: scrollHeaderHeight })
 
 
 const isScrollingToTop = ref(false)
@@ -438,7 +458,7 @@ function onCoverImgClick() {
                     </div>
                     <div class="controls">
                         <button
-                            class="playListBtn"
+                            class="playListBtn staticPlaybackBtn"
                             :disabled="baseTracks.length === 0"
                             :aria-label="isPlaylistActive && isPlaying ? 'Пауза' : 'Слушать'"
                             @click="onPlayPlaylist"
@@ -455,6 +475,7 @@ function onCoverImgClick() {
                         >
                             <ShuffleIcon width="20" height="20" />
                         </button>
+                        <button v-if="playlist?.kind === 'User' && baseTracks.length > 1" class="iconBtn shuffleBtn" :class="{ on: mixing }" :aria-pressed="mixing" :aria-label="t('playlistMix.mode')" v-tooltip="t('playlistMix.mode')" @click="togglePlaylistMix(sourceId)"><TuneIcon /></button>
                         <button class="iconBtn moreBtn" :class="{ menuOpen: !!playlistMenu }" v-tooltip="'Меню'" @mousedown.stop="openPlaylistMenu($event)">
                             <MoreIcon width="22" height="22" />
                         </button>
@@ -475,9 +496,8 @@ function onCoverImgClick() {
             key="gate-list"
         >
             <div class="vsPad" :style="{ height: vsPaddingTop + 'px' }"></div>
+            <template v-for="track in visibleTracks" :key="track.file_path">
             <TrackRow
-                v-for="track in visibleTracks"
-                :key="track.file_path"
                 large
                 :rank="rankOf.get(track.file_path)"
                 :track="track"
@@ -488,6 +508,10 @@ function onCoverImgClick() {
                 @coverClick="onCoverClick(track)"
                 @openMenu="openTrackMenu($event, track)"
             />
+            <div v-if="mixing" class="mixRow">
+                <button v-if="nextAfter(track)" :aria-label="t('playlistMix.title') + ': ' + transitionLabel(track)" @click="editTransition(track)"><TuneIcon width="12" height="12" />{{ transitionLabel(track) }}</button>
+            </div>
+            </template>
             <div class="vsPad" :style="{ height: vsPaddingBottom + 'px' }"></div>
         </div>
         <div class="emptyState" v-else key="gate-empty">
@@ -495,6 +519,7 @@ function onCoverImgClick() {
             <button class="emptyAction" @click="router.push('/catalog')">Добавить треки</button>
         </div>
         </Transition>
+        <PlaylistTransition v-if="editingPair" :source="sourceId" v-bind="editingPair" @close="editingPair = null" />
         <TrackContextMenu
             v-if="trackMenu"
             :key="trackMenu.track.file_path"
@@ -594,7 +619,7 @@ function onCoverImgClick() {
 .pageHat {
     display: flex;
     flex-direction: row;
-    align-items: flex-end;
+    align-items: flex-start;
     gap: 32px;
     width: 100%;
     flex-shrink: 0;
@@ -619,9 +644,11 @@ function onCoverImgClick() {
     transition: filter .28s var(--ease-smooth);
 }
 .pageHat .dataZone {
+    align-self: center;
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 24px;
     flex: 1;
     min-width: 0;
 }
@@ -632,21 +659,24 @@ function onCoverImgClick() {
 }
 .pageHat .dataZone .info .listType {
     user-select: none;
-    font-size: 12px;
-    color: hsla(0, 0%, 100%, 0.7);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.55);
 }
 .pageHat .dataZone .info .listNameRow {
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    margin-top: 2px;
+    margin-top: 6px;
     max-width: 100%;
 }
 .pageHat .dataZone .info .listName {
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 48px;
-    font-weight: 900;
+    font-size: clamp(32px, 7cqi, 40px);
+    font-weight: 800;
     letter-spacing: -0.02em;
     line-height: 1.1;
     color: hsla(0, 0%, 100%, 0.96);
@@ -663,8 +693,8 @@ function onCoverImgClick() {
     border-radius: 8px;
     padding: 2px 10px;
     outline: none;
-    min-width: 240px;
-    font-size: 40px;
+    min-width: 0;
+    width: 100%;
     max-width: 100%;
     transition: border-color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
 }
@@ -674,7 +704,7 @@ function onCoverImgClick() {
 }
 .editNameBtn {
     flex-shrink: 0;
-    margin-top: 8px;
+    margin-top: 2px;
     opacity: 0;
 }
 .listNameRow:hover .editNameBtn {
@@ -683,12 +713,12 @@ function onCoverImgClick() {
 .pageHat .dataZone .info .badges {
     display: flex;
     flex-wrap: wrap;
-    margin-top: 4px;
+    margin-top: 8px;
     max-width: 100%;
 }
 .badge {
     user-select: none;
-    font-size: 14px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.7);
     white-space: nowrap;
@@ -703,11 +733,11 @@ function onCoverImgClick() {
 .pageHat .dataZone .controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
 }
 .pageHat .dataZone .controls .playListBtn {
-    width: 56px;
-    height: 56px;
+    width: 46px;
+    height: 46px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -716,15 +746,6 @@ function onCoverImgClick() {
     color: var(--light-bg);
     cursor: pointer;
     user-select: none;
-    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
-}
-.pageHat .dataZone .controls .playListBtn:hover:not(:disabled) {
-    transform: scale(1.06);
-    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
-}
-.pageHat .dataZone .controls .playListBtn:active:not(:disabled) {
-    transform: scale(0.94);
-    transition-duration: 80ms;
 }
 .pageHat .dataZone .controls .playListBtn:disabled {
     cursor: not-allowed;
@@ -790,6 +811,12 @@ function onCoverImgClick() {
 :global(body.lfmusic-phone .listHead) {
     display: none;
 }
+.mixRow { height:32px; display:flex; align-items:center; position:relative; padding-left:calc(16px + 22px + 12px); }
+.mixRow:has(button)::before { content:''; position:absolute; left:27px; top:1px; bottom:1px; width:2px; border-radius:2px; background:#ffffff26; }
+:global(body.lfmusic-phone .mixRow) { padding-left:5px; }
+:global(body.lfmusic-phone .mixRow:has(button)::before) { left:0; }
+.mixRow button { display: inline-flex; align-items: center; gap: 6px; height: 26px; background: var(--dark-bg); border: 0; color: #fffb; cursor: pointer; border-radius: 14px; padding: 0 10px; font-size: 12px; }
+.mixRow button:hover { background: #ffffff0e; color: white; }
 .tracksList {
     margin-top: 0;
 }

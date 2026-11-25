@@ -14,7 +14,7 @@ import {
 export type CardTone = 'plain' | 'cover'
 
 /** Procedural WebGL2 backdrop style for a slide. */
-export type BgScene = 'silk' | 'aurora' | 'scanner' | 'prism' | 'beams' | 'vortex'
+export type BgScene = 'silk' | 'aurora' | 'scanner' | 'prism' | 'beams' | 'halftone'
 
 export type CardKind =
   | 'empty' | 'intro' | 'minutes' | 'first' | 'variety' | 'topTrack' | 'topTracks'
@@ -64,46 +64,81 @@ export interface RecapCard {
 }
 
 const MOMENT_ACCENTS: Record<MomentMode, CardAccent> = {
-  night: { hue: 236, sat: 64, shift: 44 },
-  morning: { hue: 28, sat: 68, shift: 34 },
-  day: { hue: 202, sat: 64, shift: 36 },
-  evening: { hue: 282, sat: 62, shift: 46 },
+  night: { hue: 218, sat: 54, shift: -16 },
+  morning: { hue: 34, sat: 66, shift: -18 },
+  day: { hue: 208, sat: 58, shift: 14 },
+  evening: { hue: 348, sat: 64, shift: 22 },
 }
 
 const CHARACTER_ACCENTS: Record<CharacterId, CardAccent> = {
-  nightOwl: { hue: 244, sat: 66, shift: 48 },
-  fan: { hue: 344, sat: 68, shift: 32 },
-  explorer: { hue: 168, sat: 62, shift: 42 },
-  marathoner: { hue: 18, sat: 70, shift: 34 },
-  energy: { hue: 356, sat: 70, shift: 38 },
-  calm: { hue: 196, sat: 58, shift: 36 },
-  dancer: { hue: 302, sat: 68, shift: 44 },
-  completist: { hue: 218, sat: 62, shift: 38 },
-  shuffler: { hue: 266, sat: 64, shift: 52 },
-  melomane: { hue: 274, sat: 64, shift: 42 },
+  nightOwl: { hue: 216, sat: 50, shift: -14 },
+  fan: { hue: 348, sat: 68, shift: 20 },
+  explorer: { hue: 28, sat: 64, shift: -16 },
+  marathoner: { hue: 16, sat: 68, shift: 22 },
+  energy: { hue: 356, sat: 70, shift: 24 },
+  calm: { hue: 212, sat: 46, shift: -12 },
+  dancer: { hue: 342, sat: 68, shift: 24 },
+  completist: { hue: 220, sat: 56, shift: -14 },
+  shuffler: { hue: 38, sat: 66, shift: -20 },
+  melomane: { hue: 352, sat: 62, shift: 22 },
 }
 
-const SCENE_ROTATION: BgScene[] = ['silk', 'aurora', 'scanner', 'prism', 'beams', 'vortex']
+const SCENE_ROTATION: BgScene[] = ['silk', 'aurora', 'scanner', 'prism', 'beams', 'halftone']
+
+/**
+ * Keeps recap accents inside clean warm (burgundy/crimson/terracotta/gold) or clean blue
+ * (cobalt/steel) islands so neither track covers nor offsets slip into muddy green-teal or
+ * AI-like violet/purple.
+ */
+export function cleanAccent(hue: number, sat: number, shift?: number): CardAccent {
+  let h = ((hue % 360) + 360) % 360
+  let s = Math.min(72, Math.max(36, sat))
+
+  if (h >= 50 && h < 115) {
+    h = 36
+    s = Math.min(s, 66)
+  } else if (h >= 115 && h < 155) {
+    h = 26
+    s = Math.min(s, 62)
+  } else if (h >= 155 && h < 198) {
+    h = 212
+    s = Math.min(s, 54)
+  } else if (h >= 226 && h < 268) {
+    h = 216
+    s = Math.min(s, 56)
+  } else if (h >= 268 && h < 336) {
+    h = 346
+    s = Math.min(s, 64)
+  }
+
+  let resolvedShift: number
+  if (h >= 198 && h < 226) {
+    h = Math.min(222, Math.max(204, h))
+    s = Math.min(s, 60)
+    resolvedShift = h >= 212 ? -14 : 12
+  } else if (h >= 26 && h < 50) {
+    h = Math.min(44, h)
+    resolvedShift = -16
+  } else if (h >= 10 && h < 26) {
+    const targetShift = shift ?? 16
+    resolvedShift = Math.max(12, Math.min(18, Math.min(targetShift, 42 - h)))
+  } else {
+    resolvedShift = Math.min(16, Math.max(12, Math.abs(shift ?? 14)))
+  }
+
+  return { hue: h, sat: s, shift: resolvedShift }
+}
 
 /**
  * Cover accent, tamed like the app's dynamic accent: grey covers give none, loud ones are toned
- * down.
+ * down and kept out of muddy or purple ranges.
  */
-function accentOf(track: RecapTrack | null | undefined, shift = 36): CardAccent | null {
+function accentOf(track: RecapTrack | null | undefined, shift = 22): CardAccent | null {
   const hex = track?.accent_color
   if (!hex || !/^#[0-9a-f]{6}$/i.test(hex)) return null
   const { h, s } = hexToHSL(hex)
   if (s < 12) return null
-  return { hue: h, sat: Math.min(72, Math.max(36, s)), shift }
-}
-
-function shiftAccent(base: CardAccent | null, deg: number, shift = 38): CardAccent | null {
-  if (!base) return null
-  return {
-    hue: ((base.hue + deg) % 360 + 360) % 360,
-    sat: base.sat,
-    shift,
-  }
+  return cleanAccent(h, s, shift)
 }
 
 function share(part: number, total: number): number {
@@ -185,19 +220,17 @@ export function buildRecapCards(recap: YearRecap): RecapCard[] {
   const top = recap.top_tracks
   const pick = (i: number) => top.length > 0 ? top[i % top.length] : undefined
   const sound = (track: RecapTrack | null | undefined) => track?.snippet_url ?? pick(0)?.snippet_url ?? null
-  const yearAccent = top.map(t => accentOf(t, 42)).find(a => a !== null) ?? null
-  const trackAccent = (track?: RecapTrack | null, shift = 36) => accentOf(track, shift) ?? yearAccent
+  const yearAccent = top.map(t => accentOf(t, 22)).find(a => a !== null) ?? null
+  const trackAccent = (track?: RecapTrack | null, shift = 22) => accentOf(track, shift) ?? yearAccent
 
   const cards: RecapCard[] = []
   const push = (
-    card: Omit<RecapCard, 'accent'> & { color?: RecapTrack | null; customAccent?: CardAccent | null; hueOffset?: number; shift?: number },
+    card: Omit<RecapCard, 'accent'> & { color?: RecapTrack | null; customAccent?: CardAccent | null; shift?: number },
   ) => {
-    const { color, customAccent, hueOffset, shift, ...rest } = card
+    const { color, customAccent, shift, ...rest } = card
     const resolvedAccent = customAccent !== undefined
       ? customAccent
-      : hueOffset !== undefined
-        ? shiftAccent(yearAccent, hueOffset, shift ?? 40)
-        : trackAccent(color, shift ?? 36)
+      : trackAccent(color, shift ?? 22)
 
     // Ensure two consecutive slides never reuse the exact same shader scene.
     let scene = rest.scene
@@ -209,46 +242,46 @@ export function buildRecapCards(recap: YearRecap): RecapCard[] {
     cards.push({ ...rest, scene, accent: resolvedAccent })
   }
 
-  push({ id: 'intro', kind: 'intro', tone: 'plain', scene: 'silk', sound: sound(pick(0)), duration: 6500, shift: 46 })
-  push({ id: 'minutes', kind: 'minutes', tone: 'plain', scene: 'aurora', sound: sound(pick(0)), duration: 8000, hueOffset: 28, shift: 44 })
+  push({ id: 'intro', kind: 'intro', tone: 'plain', scene: 'silk', sound: sound(pick(0)), duration: 6500, shift: 22 })
+  push({ id: 'minutes', kind: 'minutes', tone: 'plain', scene: 'aurora', sound: sound(pick(0)), duration: 8000, customAccent: { hue: 36, sat: 66, shift: -18 } })
 
   if (recap.first_track) {
     push({
       id: 'first', kind: 'first', tone: 'cover', scene: 'beams', track: recap.first_track,
-      sound: sound(recap.first_track), duration: 8000, color: recap.first_track, shift: 34,
+      sound: sound(recap.first_track), duration: 8000, color: recap.first_track, shift: 20,
     })
   }
 
-  push({ id: 'variety', kind: 'variety', tone: 'plain', scene: 'prism', sound: sound(pick(1)), duration: 8000, color: pick(1), shift: 48 })
+  push({ id: 'variety', kind: 'variety', tone: 'plain', scene: 'prism', sound: sound(pick(1)), duration: 8000, color: pick(1), shift: 22 })
 
   if (top[0]) {
-    push({ id: 'topTrack', kind: 'topTrack', tone: 'cover', scene: 'silk', track: top[0], sound: sound(top[0]), duration: 9000, color: top[0], shift: 38 })
+    push({ id: 'topTrack', kind: 'topTrack', tone: 'cover', scene: 'silk', track: top[0], sound: sound(top[0]), duration: 9000, color: top[0], shift: 22 })
   }
   if (top.length >= 3) {
-    push({ id: 'topTracks', kind: 'topTracks', tone: 'plain', scene: 'scanner', tracks: top, sound: sound(top[0]), duration: 12000, color: top[0], shift: 34 })
+    push({ id: 'topTracks', kind: 'topTracks', tone: 'plain', scene: 'scanner', tracks: top, sound: sound(top[0]), duration: 12000, color: top[0], shift: 22 })
   }
 
   const artist = recap.top_artists[0]
   if (artist) {
     push({
-      id: 'topArtist', kind: 'topArtist', tone: 'cover', scene: 'prism', artist,
-      sound: sound(artist.top_track), duration: 9000, color: artist.top_track, shift: 42,
+      id: 'topArtist', kind: 'topArtist', tone: 'plain', scene: 'prism', artist,
+      sound: sound(artist.top_track), duration: 9000, customAccent: { hue: 214, sat: 22, shift: -8 },
     })
   }
   if (recap.top_artists.length >= 3) {
     push({
-      id: 'topArtists', kind: 'topArtists', tone: 'plain', scene: 'vortex', artists: recap.top_artists,
-      sound: sound(recap.top_artists[1]?.top_track), duration: 12000, color: recap.top_artists[1]?.top_track, shift: 40,
+      id: 'topArtists', kind: 'topArtists', tone: 'plain', scene: 'halftone', artists: recap.top_artists,
+      sound: sound(recap.top_artists[1]?.top_track), duration: 12000, color: recap.top_artists[1]?.top_track, shift: 20,
     })
   }
 
   const album = recap.top_albums[0]
   if (album && album.plays >= 5) {
-    push({ id: 'topAlbum', kind: 'topAlbum', tone: 'cover', scene: 'beams', album, sound: sound(album.top_track), duration: 8000, color: album.top_track, shift: 34 })
+    push({ id: 'topAlbum', kind: 'topAlbum', tone: 'cover', scene: 'beams', album, sound: sound(album.top_track), duration: 8000, color: album.top_track, shift: 22 })
   }
 
   if (recap.top_genres.length > 0) {
-    push({ id: 'genres', kind: 'genres', tone: 'plain', scene: 'silk', genres: recap.top_genres, sound: sound(pick(2)), duration: 9000, color: pick(2), shift: 52 })
+    push({ id: 'genres', kind: 'genres', tone: 'plain', scene: 'silk', genres: recap.top_genres, sound: sound(pick(2)), duration: 9000, color: pick(2), shift: 22 })
   }
 
   const moment = momentOf(recap)
@@ -256,35 +289,35 @@ export function buildRecapCards(recap: YearRecap): RecapCard[] {
 
   if (recap.obsession) {
     push({
-      id: 'obsession', kind: 'obsession', tone: 'cover', scene: 'vortex', obsession: recap.obsession,
-      sound: sound(recap.obsession.track), duration: 8000, color: recap.obsession.track, shift: 44,
+      id: 'obsession', kind: 'obsession', tone: 'cover', scene: 'halftone', obsession: recap.obsession,
+      sound: sound(recap.obsession.track), duration: 8000, color: recap.obsession.track, shift: 22,
     })
   }
 
   if (recap.marathon && recap.marathon.secs >= 3600) {
-    push({ id: 'marathon', kind: 'marathon', tone: 'plain', scene: 'scanner', session: recap.marathon, sound: sound(pick(4)), duration: 8000, hueOffset: -36, shift: 42 })
+    push({ id: 'marathon', kind: 'marathon', tone: 'plain', scene: 'scanner', session: recap.marathon, sound: sound(pick(4)), duration: 8000, customAccent: { hue: 348, sat: 66, shift: 22 } })
   }
 
   if (recap.days_listened >= 7) {
-    push({ id: 'rhythm', kind: 'rhythm', tone: 'plain', scene: 'beams', sound: sound(pick(1)), duration: 9000, hueOffset: 148, shift: 38 })
+    push({ id: 'rhythm', kind: 'rhythm', tone: 'plain', scene: 'beams', sound: sound(pick(1)), duration: 9000, customAccent: { hue: 32, sat: 66, shift: -18 } })
   }
 
   if (recap.discovery) {
     push({
       id: 'discovery', kind: 'discovery', tone: 'cover', scene: 'aurora', artist: recap.discovery,
-      sound: sound(recap.discovery.top_track), duration: 8000, color: recap.discovery.top_track, shift: 44,
+      sound: sound(recap.discovery.top_track), duration: 8000, color: recap.discovery.top_track, shift: 20,
     })
   }
 
   if (recap.likes > 0 || recap.playlists_created > 0 || recap.downloads > 0 || recap.top_playlist) {
-    push({ id: 'collection', kind: 'collection', tone: 'plain', scene: 'prism', sound: sound(pick(2)), duration: 9000, hueOffset: -64, shift: 46 })
+    push({ id: 'collection', kind: 'collection', tone: 'plain', scene: 'prism', sound: sound(pick(2)), duration: 9000, customAccent: { hue: 344, sat: 64, shift: 20 } })
   }
 
-  push({ id: 'habits', kind: 'habits', tone: 'plain', scene: 'scanner', sound: sound(pick(3)), duration: 9000, hueOffset: 204, shift: 36 })
+  push({ id: 'habits', kind: 'habits', tone: 'plain', scene: 'scanner', sound: sound(pick(3)), duration: 9000, customAccent: { hue: 22, sat: 64, shift: 18 } })
 
   const character = characterOf(recap)
-  push({ id: 'character', kind: 'character', tone: 'plain', scene: 'vortex', character, sound: sound(pick(0)), duration: 10000, customAccent: CHARACTER_ACCENTS[character.id] })
-  push({ id: 'outro', kind: 'outro', tone: 'plain', scene: 'silk', character, sound: sound(pick(0)), duration: 0, shift: 46 })
+  push({ id: 'character', kind: 'character', tone: 'plain', scene: 'halftone', character, sound: sound(pick(0)), duration: 10000, customAccent: CHARACTER_ACCENTS[character.id] })
+  push({ id: 'outro', kind: 'outro', tone: 'plain', scene: 'silk', character, sound: sound(pick(0)), duration: 0, shift: 22 })
 
   return cards
 }

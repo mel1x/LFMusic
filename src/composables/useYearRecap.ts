@@ -212,13 +212,13 @@ export function buildDemoYearRecap(year: number): YearRecap {
 
   const t1 = mkTrack(1, 'Midnight Signal', 'Kino Wave', 'Night Lines', '#e05a47', '#b83227', '#261015', 'MW', 118, 214)
   const t2 = mkTrack(2, 'Glass Horizon', 'Nora Vale', 'Static Bloom', '#3b9be8', '#1f6fb8', '#0d1b2e', 'GH', 94, 198)
-  const t3 = mkTrack(3, 'Velvet Pulse', 'Sora & Kael', 'Afterhours', '#a855f7', '#7c2bd6', '#1c0f2e', 'VP', 82, 232)
+  const t3 = mkTrack(3, 'Velvet Pulse', 'Sora & Kael', 'Afterhours', '#c43858', '#8a1d3a', '#260b14', 'VP', 82, 232)
   const t4 = mkTrack(4, 'Neon Rain', 'Kino Wave', 'Night Lines', '#f59e0b', '#c97608', '#291a08', 'NR', 71, 186)
-  const t5 = mkTrack(5, 'Echoes of May', 'Mireille', 'Paper Cities', '#10b981', '#0c8a60', '#0a241c', 'EM', 65, 241)
+  const t5 = mkTrack(5, 'Echoes of May', 'Mireille', 'Paper Cities', '#c97a4b', '#8f4c24', '#24140a', 'EM', 65, 241)
   const t6 = mkTrack(6, 'First Snow', 'Nordic Tape', 'Winter Loop', '#60a5fa', '#2d68b8', '#101a2c', 'FS', 52, 205)
   const t7 = mkTrack(7, 'Subway Lights', 'Vektor 9', 'Concrete Sky', '#f43f5e', '#be123c', '#2b0d17', 'SL', 47, 192)
   const t8 = mkTrack(8, 'Solar Drift', 'Lumen', 'Orbit 04', '#eab308', '#b47d09', '#261e09', 'SD', 41, 224)
-  const t9 = mkTrack(9, 'Quiet Room', 'Asta', 'Low Tide', '#14b8a6', '#0f766e', '#0a2221', 'QR', 36, 178)
+  const t9 = mkTrack(9, 'Quiet Room', 'Asta', 'Low Tide', '#4a84b8', '#275580', '#0c1824', 'QR', 36, 178)
 
   const topTracks = [t1, t2, t3, t4, t5]
   const topArtists: RecapArtist[] = [

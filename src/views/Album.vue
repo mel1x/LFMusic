@@ -20,7 +20,7 @@ import { useCoverTint } from '../composables/useCoverTint';
 import TrackContextMenu from '../components/TrackContextMenu.vue';
 import PlaylistContextMenu from '../components/PlaylistContextMenu.vue';
 import { usePins } from '../composables/usePins';
-import TrackRow from '../components/TrackRow.vue';
+import TrackRow, { TRACK_ROW_HEIGHT } from '../components/TrackRow.vue';
 import TrackArtists from '../components/TrackArtists.vue';
 import CoverEditor from '../components/CoverEditor.vue';
 import AnimatedCover from '../components/AnimatedCover.vue';
@@ -378,7 +378,7 @@ const {
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(displayRows, { itemHeight: 64, buffer: 5, scrollOffset: scrollHeaderHeight })
+} = useVirtualScroll(displayRows, { itemHeight: TRACK_ROW_HEIGHT, buffer: 5, scrollOffset: scrollHeaderHeight })
 
 watch(albumName, () => resetScroll())
 
@@ -544,11 +544,9 @@ function onCoverImgClick() {
                         <div class="listNameRow">
                             <h2 v-truncate class="listName">{{ albumName }}</h2>
                         </div>
-                        <div v-if="albumTracks.length > 0" class="heroArtist">
-                            <TrackArtists :artist="albumArtist" />
-                        </div>
                         <div class="badges">
                             <template v-if="albumTracks.length > 0">
+                                <span class="heroArtist"><TrackArtists :artist="albumArtist" /></span>
                                 <span class="badge">{{ tracksCountText(albumTracks.length) }}</span>
                                 <span v-if="totalDuration > 0" class="badge">{{ formatTotalDuration(totalDuration) }}</span>
                             </template>
@@ -557,7 +555,7 @@ function onCoverImgClick() {
                     </div>
                     <div class="controls">
                         <button
-                            class="playListBtn"
+                            class="playListBtn staticPlaybackBtn"
                             :disabled="albumTracks.length === 0"
                             :aria-label="isAlbumActive && isPlaying ? 'Пауза' : 'Слушать'"
                             @click="onPlayAlbum"
@@ -598,6 +596,7 @@ function onCoverImgClick() {
                 <div
                     v-if="row.phantom"
                     class="trackElem phantom"
+                    :style="{ height: TRACK_ROW_HEIGHT + 'px' }"
                     :class="{ downloadable: phantomClickable }"
                     @click="onPhantomClick(row)"
                     v-tooltip="phantomClickable ? 'Найти и скачать этот трек' : ''"
@@ -723,7 +722,7 @@ function onCoverImgClick() {
 .pageHat {
     display: flex;
     flex-direction: row;
-    align-items: flex-end;
+    align-items: flex-start;
     gap: 32px;
     width: 100%;
     flex-shrink: 0;
@@ -748,9 +747,11 @@ function onCoverImgClick() {
     transition: filter .28s var(--ease-smooth);
 }
 .pageHat .dataZone {
+    align-self: center;
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 24px;
     flex: 1;
     min-width: 0;
 }
@@ -761,21 +762,24 @@ function onCoverImgClick() {
 }
 .pageHat .dataZone .info .listType {
     user-select: none;
-    font-size: 12px;
-    color: hsla(0, 0%, 100%, 0.7);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.55);
 }
 .pageHat .dataZone .info .listNameRow {
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    margin-top: 2px;
+    margin-top: 6px;
     max-width: 100%;
 }
 .pageHat .dataZone .info .listName {
     cursor: default;
     font-family: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 48px;
-    font-weight: 900;
+    font-size: clamp(32px, 7cqi, 40px);
+    font-weight: 800;
     letter-spacing: -0.02em;
     line-height: 1.1;
     color: hsla(0, 0%, 100%, 0.96);
@@ -786,7 +790,7 @@ function onCoverImgClick() {
     overflow-wrap: anywhere;
 }
 .heroArtist {
-    margin-top: 10px;
+    min-width: 0;
     max-width: 100%;
     font-size: 14px;
     font-weight: 500;
@@ -797,32 +801,37 @@ function onCoverImgClick() {
 }
 .pageHat .dataZone .info .badges {
     display: flex;
-    flex-wrap: wrap;
-    margin-top: 4px;
+    align-items: baseline;
+    margin-top: 8px;
     max-width: 100%;
 }
 .badge {
     user-select: none;
-    font-size: 14px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
     color: hsla(0, 0%, 100%, 0.7);
     white-space: nowrap;
 }
+.heroArtist + .badge::before,
 .badge + .badge::before {
     content: "\00B7";
     margin: 0 6px;
 }
-:global(body.lfmusic-phone .badge + .badge::before) {
+body.lfmusic-phone .heroArtist {
+    flex-basis: 100%;
+}
+body.lfmusic-phone .heroArtist + .badge::before,
+body.lfmusic-phone .badge + .badge::before {
     content: none;
 }
 .pageHat .dataZone .controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
 }
 .pageHat .dataZone .controls .playListBtn {
-    width: 56px;
-    height: 56px;
+    width: 46px;
+    height: 46px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -831,15 +840,6 @@ function onCoverImgClick() {
     color: var(--light-bg);
     cursor: pointer;
     user-select: none;
-    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color var(--duration-hover) var(--ease-smooth);
-}
-.pageHat .dataZone .controls .playListBtn:hover:not(:disabled) {
-    transform: scale(1.06);
-    background-color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
-}
-.pageHat .dataZone .controls .playListBtn:active:not(:disabled) {
-    transform: scale(0.94);
-    transition-duration: 80ms;
 }
 .pageHat .dataZone .controls .playListBtn:disabled {
     cursor: not-allowed;
@@ -921,7 +921,6 @@ function onCoverImgClick() {
     padding: 0 16px;
     border-radius: 12px;
     transition: background-color var(--duration-hover) var(--ease-smooth);
-    height: 64px;
     box-sizing: border-box;
     overflow: hidden;
 }
@@ -938,8 +937,8 @@ function onCoverImgClick() {
     display: none;
 }
 .trackCover {
-    width: 48px;
-    height: 48px;
+    width: 38px;
+    height: 38px;
     background-color: #202020;
     border-radius: 6px;
     overflow: hidden;

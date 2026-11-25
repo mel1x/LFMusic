@@ -334,16 +334,28 @@ fn player_play(
     Ok(metadata)
 }
 
+#[tauri::command]
+async fn playlist_mix_waveform(file_path: String, duration: f64) -> Result<tauri::ipc::Response, String> {
+    run_blocking(move || audio_player::track_waveform(&file_path, duration).map(tauri::ipc::Response::new)).await
+}
+
+#[tauri::command]
+async fn playlist_mix_preview(region: audio_player::PreviewRegion) -> Result<tauri::ipc::Response, String> {
+    run_blocking(move || audio_player::render_mix_preview(region).map(tauri::ipc::Response::new)).await
+}
+
 #[tauri::command(async)]
 fn player_play_crossfade(
     state: State<PlayerState>,
     library: State<LibraryState>,
     file_path: String,
     crossfade_secs: f64,
+    mix_profile: Option<audio_player::MixProfile>,
+    position_secs: Option<f64>,
 ) -> Result<TrackMetadata, String> {
     let metadata = AudioPlayer::get_metadata(&file_path)?;
     let mut player = state.write()?;
-    let mut metadata = player.play_crossfade_preloaded(&file_path, crossfade_secs, metadata)?;
+    let mut metadata = player.play_crossfade_preloaded(&file_path, crossfade_secs, mix_profile, position_secs.unwrap_or(0.0), metadata)?;
     drop(player);
     apply_accent_color(&library, &file_path, &mut metadata);
     Ok(metadata)
@@ -2316,6 +2328,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             player_play,
             player_play_crossfade,
+            playlist_mix_waveform,
+            playlist_mix_preview,
             player_play_paused,
             player_pause,
             player_resume,

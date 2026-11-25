@@ -17,7 +17,7 @@ import { useVirtualScroll } from '../composables/useVirtualScroll'
 import { searchRanked } from '../composables/useSearch'
 import { tracksCountText } from '../utils/format'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
-import TrackRow from '../components/TrackRow.vue'
+import TrackRow, { TRACK_ROW_HEIGHT } from '../components/TrackRow.vue'
 import CoverEditor from '../components/CoverEditor.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import MobileScrollHeader from '../components/MobileScrollHeader.vue'
@@ -158,7 +158,7 @@ const {
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
     resetScroll,
-} = useVirtualScroll(filteredTracks, { itemHeight: 58, buffer: 5, scrollOffset: scrollHeaderHeight })
+} = useVirtualScroll(filteredTracks, { itemHeight: TRACK_ROW_HEIGHT, buffer: 5, scrollOffset: scrollHeaderHeight })
 
 watch(debouncedSearch, () => resetScroll())
 watch(artistName, () => resetScroll())

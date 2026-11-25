@@ -1,4 +1,55 @@
 {
+  "playlistMix": {
+    "loading": "Loading waveforms",
+    "straighten": "Straighten line: double-click or press Enter",
+    "custom": "Custom",
+    "seconds": "In seconds",
+    "edit": "Edit transition",
+    "mode": "Mix tracks",
+    "entry": "Incoming cue",
+    "exit": "Transition start",
+    "bars": "bars",
+    "smooth": "Smooth crossfade",
+    "overlap": "Overlap",
+    "cut": "Cut",
+    "centerBass": "Center bass swap",
+    "fade": "Fade",
+    "rise": "Rise",
+    "blend": "Blend",
+    "wave": "Wave",
+    "melt": "Melt",
+    "slam": "Slam",
+    "none": "No transition",
+    "stop": "Stop",
+    "listen": "Preview",
+    "preparing": "Preparing",
+    "previewError": "Could not play the preview",
+    "waveError": "Could not load waveform",
+    "presets": "Presets",
+    "expand": "Expand",
+    "collapse": "Collapse",
+    "skipOutro": "Skip outro, s",
+    "skipIntro": "Skip intro, s",
+    "title": "Transition",
+    "auto": "Auto",
+    "duration": "Duration",
+    "volume": "Volume curve",
+    "linear": "Linear",
+    "power": "Equal power",
+    "eq": "EQ blend",
+    "bass": "Bass",
+    "mids": "Mids",
+    "highs": "Highs",
+    "filter": "Filter",
+    "off": "Off",
+    "lowPass": "Low-pass",
+    "highPass": "High-pass",
+    "save": "Save",
+    "preview": "Save and listen",
+    "close": "Close",
+    "reset": "Reset to Auto",
+    "unit": "s"
+  },
   "settings": {
     "enhance": {
       "title": "Auto sound enhancement",
@@ -153,7 +204,11 @@
       "clear": "Clear",
       "retryAll": "Retry failed",
       "cancelAll": "Cancel all",
-      "summary": "{done} of {total}"
+      "summary": "{done} of {total}",
+      "running": "Downloading",
+      "waiting": "Queued",
+      "failed": "Failed",
+      "retry": "Retry"
     },
     "redownloadTitle": "Already in your library",
     "redownloadText": "“{title}” is already in your library. Download it again?",
@@ -322,7 +377,6 @@
     "units": {
       "minutes": "minute|minutes",
       "minutesShort": "min|min",
-      "hours": "hour|hours",
       "days": "day|days",
       "tracks": "track|tracks",
       "differentTracks": "different track|different tracks",
@@ -335,76 +389,58 @@
       "min": "min"
     },
     "empty": {
-      "title": "Not enough music yet",
-      "text": "Keep listening - the cards appear once there is some listening history."
+      "text": "Your recap appears after {plays} in a year."
     },
     "intro": {
-      "title": "Your {year}",
-      "text": "A year told by your music",
       "hint": "Tap to continue"
     },
     "minutes": {
       "kicker": "Time with music",
-      "days": "That is {days} of nonstop music",
-      "hours": "That is {hours} of music",
       "daysListened": "Music played on {days} out of {total}"
     },
     "first": {
-      "kicker": "First track of the year",
-      "text": "It all started here: {date}"
-    },
-    "variety": {
-      "kicker": "Variety"
+      "kicker": "First track of the year"
     },
     "topTrack": {
       "kicker": "Track of the year"
     },
     "topTracks": {
-      "kicker": "Your top 5",
-      "title": "Tracks that stayed with you"
+      "title": "Top tracks"
     },
     "topArtist": {
-      "kicker": "Artist of the year",
-      "text": "{minutes} together"
+      "kicker": "Artist of the year"
     },
     "topArtists": {
-      "kicker": "Favorite artists",
-      "title": "The ones you played the most"
+      "title": "Top artists"
     },
     "topAlbum": {
       "kicker": "Album of the year"
     },
     "genres": {
-      "kicker": "Genres of the year",
-      "title": "Your sound",
+      "title": "Genres of the year",
       "more": "{count} in total this year"
     },
     "moments": {
-      "kicker": "Your time",
-      "peak": "Music played most around {hour}",
+      "peak": "Listening peaked around {hour}",
       "night": {
         "title": "Night mode",
-        "text": "{tracks} between midnight and 5 am",
-        "text2": "Your music plays while the city sleeps"
+        "text": "{plays} between midnight and 5 am"
       },
       "morning": {
         "title": "Early bird",
-        "text": "{tracks} before 9 am",
-        "text2": "Your day starts with music"
+        "text": "{plays} between 5 and 9 am"
       },
       "day": {
         "title": "Daytime listener",
-        "text": "{tracks} during the day",
-        "text2": "Music carries you through the day"
+        "text": "{plays} during the day"
       },
       "evening": {
         "title": "Evening listener",
-        "text": "{tracks} in the evening",
-        "text2": "You save the best tracks for the evening"
+        "text": "{plays} in the evening"
       }
     },
     "obsession": {
-      "kicker": "Could not stop",
+      "kicker": "On repeat",
       "text": "On {date} you played it {times}"
     },
     "marathon": {
@@ -412,16 +448,13 @@
       "text": "of music without a break"
     },
     "rhythm": {
-      "kicker": "Rhythm of the year",
-      "title": "Most musical month: {month}"
+      "title": "You listened most in {month}"
     },
     "discovery": {
-      "kicker": "Discovery of the year",
-      "text": "New this year and already {plays}"
+      "kicker": "Discovery of the year"
     },
     "collection": {
-      "kicker": "Your collection grew",
-      "title": "Your library got bigger",
+      "title": "Your library",
       "likes": "{tracks} liked",
       "playlist": "Favorite playlist",
       "favorites": "Liked"
@@ -434,47 +467,45 @@
       "kicker": "Your music character",
       "nightOwl": {
         "title": "Night owl",
-        "desc": "The best music plays while everyone sleeps"
+        "desc": "You often listen after midnight."
       },
       "fan": {
         "title": "True fan",
-        "desc": "Found your artist and never let go"
+        "desc": "You often come back to the same artist."
       },
       "explorer": {
         "title": "Explorer",
-        "desc": "Always new names and new sounds"
+        "desc": "You listen to a wide range of artists."
       },
       "marathoner": {
         "title": "Marathoner",
-        "desc": "Your music plays for hours"
+        "desc": "You average several hours on the days you listen."
       },
       "energy": {
         "title": "Full charge",
-        "desc": "Loud, fast and driven"
+        "desc": "Your tracks tend to be energetic."
       },
       "calm": {
         "title": "Calm harbor",
-        "desc": "Calm sound for a clear head"
+        "desc": "Your tracks tend to be mellow."
       },
       "dancer": {
         "title": "Dance floor",
-        "desc": "Impossible to stand still to your year"
+        "desc": "You often play dance music."
       },
       "completist": {
         "title": "Connoisseur",
-        "desc": "You listen to the very last note"
+        "desc": "You finish most tracks."
       },
       "shuffler": {
         "title": "Surprise lover",
-        "desc": "Hit shuffle and let the music surprise you"
+        "desc": "You spend most of your listening time on shuffle."
       },
       "melomane": {
-        "title": "Music lover",
-        "desc": "Music is always somewhere near"
+        "title": "Music lover"
       }
     },
     "outro": {
-      "title": "Thanks for this year in music",
       "track": "Track of the year",
       "minutes": "Minutes",
       "artist": "Artist of the year",
@@ -491,7 +522,7 @@
       "favoriteTrack": "Favorite track",
       "tracksInRow": "Tracks in a row",
       "date": "Date",
-      "streak": "Days in a row with music",
+      "streak": "Consecutive days",
       "record": "Day record",
       "shuffle": "On shuffle",
       "skips": "Skips",

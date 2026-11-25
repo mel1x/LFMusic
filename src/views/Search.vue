@@ -17,7 +17,7 @@ import { searchRanked } from '../composables/useSearch'
 import { createRipple } from '../composables/useRipple'
 import { isPhoneViewport } from '../composables/usePlatform'
 
-import TrackRow from '../components/TrackRow.vue'
+import TrackRow, { TRACK_ROW_HEIGHT } from '../components/TrackRow.vue'
 import TrackContextMenu from '../components/TrackContextMenu.vue'
 import AnimatedCover from '../components/AnimatedCover.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
@@ -300,7 +300,6 @@ watch(query, async (q) => {
 
 const tracksExpanded = ref(false)
 
-// The 58px row height must match the CSS.
 const tracksListEl = ref<HTMLElement | null>(null)
 const tracksOffset = ref(0)
 
@@ -310,7 +309,7 @@ const {
     visibleItems: vsVisibleTracks,
     paddingTop: vsPaddingTop,
     paddingBottom: vsPaddingBottom,
-} = useVirtualScroll(trackResults, { itemHeight: 58, buffer: 6, scrollOffset: tracksOffset })
+} = useVirtualScroll(trackResults, { itemHeight: TRACK_ROW_HEIGHT, buffer: 6, scrollOffset: tracksOffset })
 
 const renderedTracks = computed(() =>
     tracksExpanded.value ? vsVisibleTracks.value : trackResults.value.slice(0, 8),
@@ -1442,26 +1441,14 @@ function scrollToTop() {
     }
 
     :deep(.trackElem) {
-        height: 54px !important;
-        min-height: 54px !important;
         padding: 5px 46px 5px 5px !important;
         border-radius: 10px !important;
         gap: 10px !important;
     }
 
-    :deep(.trackCover) {
-        border-radius: 6px !important;
-        width: 40px !important;
-        height: 40px !important;
-    }
-
     :deep(.trackCoverImg) {
         width: 100% !important;
         height: 100% !important;
-    }
-
-    :deep(.playingAnim) {
-        left: 17px !important;
     }
 
     :deep(.trackTime) {

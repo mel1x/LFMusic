@@ -1,3 +1,4 @@
+import { autoTransition, mixOverlap, playlistMix, savedTransition, type MixTransition } from "./usePlaylistMix";
 import { ref, shallowRef, reactive, computed, watch, effectScope } from "vue";
 import { playbackSpeed } from "./useSoundFx";
 import { frameLoop } from "../utils/frameLoop";
@@ -61,6 +62,7 @@ export interface PlayerStatus {
 export interface PlayTrackOptions {
   /** Load the track paused at 0:00 (sleep timer "after this track"). */
   startPaused?: boolean;
+  transition?: MixTransition;
   skipAttempt?: boolean;
   orderIndex?: number;
   finishPrevious?: boolean;
@@ -936,8 +938,8 @@ function createPlayer() {
       const useCrossfade = !options.startPaused && settings.value.crossfade_between_tracks && playbackState.value === "Playing";
       const metadata = options.startPaused
         ? await invoke<TrackMetadata>("player_play_paused", { filePath, positionSecs: 0 })
-        : useCrossfade
-          ? await invoke<TrackMetadata>("player_play_crossfade", { filePath, crossfadeSecs: 0.25 })
+        : useCrossfade || options.transition
+          ? await invoke<TrackMetadata>("player_play_crossfade", { filePath, crossfadeSecs: options.transition?.seconds ?? 0.25, positionSecs: options.transition?.skipIntro, mixProfile: options.transition })
           : await invoke<TrackMetadata>("player_play", { filePath });
 
       if (!metadata.cover_art) {
@@ -967,8 +969,8 @@ function createPlayer() {
       if (shuffled.value) ensureLookahead();
       const startState = options.startPaused ? "Paused" : "Playing";
       playbackState.value = startState;
-      positionSecs.value = 0;
-      beginStatsSession(metadata, 0, startState);
+      positionSecs.value = options.transition?.skipIntro ?? 0;
+      beginStatsSession(metadata, positionSecs.value, startState);
       recordTrackStartStatistics(metadata.file_path, options);
       showSettings.value = false;
       scheduleSaveState();
@@ -1141,9 +1143,51 @@ function createPlayer() {
   const PERIODIC_SAVE_MS = 15_000;
   let lastPeriodicSaveMs = performance.now();
 
+  const mixPlaybackAllowed = () => !shuffled.value && repeatMode.value === "queue" && !trackEndPauseHook;
+  let mixDeadline: ReturnType<typeof setTimeout> | undefined;
+
+  async function checkMixTransition(status: PlayerStatus) {
+    clearTimeout(mixDeadline);
+    const source = activePlaylistSource.value;
+    const from = currentTrack.value;
+    const idx = currentOrderIndex.value;
+    const next = playbackOrder.value[idx + 1];
+    if (!source?.startsWith("playlist:") || !playlistMix(source).enabled ||
+        !from?.duration_secs || status.current_file_path !== from.file_path ||
+        idx < 0 || !next || !mixPlaybackAllowed() ||
+        isSeeking.value || isLoading.value || isHandlingTrackEnd ||
+        status.state !== "Playing") return;
+    const incoming = peekTrackByPath(next);
+    const transition = savedTransition(source, from.file_path, next) ?? autoTransition(from, incoming);
+    const speed = playbackSpeed.value || 1;
+    const end = Math.max(1, from.duration_secs - transition.skipOutro);
+    const remaining = (end - status.position_secs) / speed;
+    const nextDuration = incoming?.duration_secs ?? Infinity;
+    const skipIntro = Math.min(transition.skipIntro, Math.max(0, nextDuration - 1));
+    const overlap = mixOverlap(transition.seconds, end, nextDuration - skipIntro, speed);
+    if (overlap <= 0) return;
+    const delay = remaining - overlap;
+    if (delay > 0.04) {
+      if (delay < STATUS_POLL_MS / 1000) mixDeadline = setTimeout(pollStatus, delay * 1000);
+      return;
+    }
+    isHandlingTrackEnd = true;
+    try {
+      await finishCurrentStatsSession({ fullListen: transition.skipOutro === 0 });
+      if (!playlistMix(source).enabled || isSeeking.value || !mixPlaybackAllowed() ||
+           currentTrack.value?.file_path !== from.file_path || activePlaylistSource.value !== source ||
+          isLoading.value || playbackState.value !== "Playing" || playbackOrder.value[idx + 1] !== next) return;
+      await playTrack(next, { orderIndex: idx + 1, finishPrevious: false,
+        transition: { ...transition, skipIntro, seconds: Math.max(0.05, Math.min(remaining, overlap)) } });
+    } finally {
+      isHandlingTrackEnd = false;
+    }
+  }
+
   async function pollStatus() {
     try {
       const status = await invoke<PlayerStatus>("player_get_status");
+      if (isHandlingTrackEnd || isLoading.value) return;
       playbackState.value = status.state;
       volume.value = status.volume;
 
@@ -1158,17 +1202,19 @@ function createPlayer() {
       }
 
       if (status.current_file_path) {
-        if (currentTrack.value?.file_path !== status.current_file_path) {
-          const cached = trackCache.get(status.current_file_path);
-          if (cached) {
-            currentTrack.value = cached;
-            beginStatsSession(cached, status.position_secs, status.state);
-          } else {
-            const meta = await invoke<TrackMetadata>("get_track_metadata", { filePath: status.current_file_path });
-            currentTrack.value = meta;
-            cacheTrack(meta);
-            beginStatsSession(meta, status.position_secs, status.state);
-          }
+        if (currentTrack.value?.file_path === status.current_file_path) {
+          await checkMixTransition(status);
+          return;
+        }
+        const cached = trackCache.get(status.current_file_path);
+        if (cached) {
+          currentTrack.value = cached;
+          beginStatsSession(cached, status.position_secs, status.state);
+        } else {
+          const meta = await invoke<TrackMetadata>("get_track_metadata", { filePath: status.current_file_path });
+          currentTrack.value = meta;
+          cacheTrack(meta);
+          beginStatsSession(meta, status.position_secs, status.state);
         }
       } else if (status.state === "Stopped") {
         if (currentTrack.value) {
@@ -1201,6 +1247,7 @@ function createPlayer() {
   }
 
   function stopStatusPolling() {
+    clearTimeout(mixDeadline);
     if (statusInterval) {
       clearInterval(statusInterval);
       statusInterval = null;

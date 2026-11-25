@@ -133,7 +133,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
         <template v-else-if="notFound || !detail">
             <button type="button" class="backBtn" @click="goBack">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
                 <span>{{ t('downloads.back') }}</span>
             </button>
             <div class="emptyAlbums">
@@ -145,7 +145,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
         <div v-else class="artistLayout">
             <aside class="artistAside">
                 <button type="button" class="backBtn" @click="goBack">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
                     <span>{{ t('downloads.back') }}</span>
                 </button>
                 <div class="pageHat">
@@ -189,10 +189,6 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
                 <section v-if="detail.top_tracks.length" class="pageLine">
                     <div class="lineHat">
                         <h3 class="lineTitle">{{ t('downloads.popularTracks') }}</h3>
-                        <button type="button" class="seeAllBtn" @click="openAllTracks">
-                            {{ t('downloads.showAll') }}
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                        </button>
                     </div>
                     <div class="tracksList">
                         <DownloadTrackRow
@@ -452,31 +448,12 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.96);
 }
-.seeAllBtn {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    padding: 4px 8px 4px 10px;
-    border-radius: 999px;
-    background-color: transparent;
-    color: hsla(0, 0%, 100%, 0.6);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: color var(--duration-hover) var(--ease-smooth), background-color var(--duration-hover) var(--ease-smooth);
-}
-.seeAllBtn:hover {
-    color: #fff;
-    background-color: hsla(0, 0%, 100%, 0.06);
-}
-.seeAllBtn svg { transition: transform var(--duration-hover) var(--ease-smooth); }
-.seeAllBtn:hover svg { transform: translateX(2px); }
 
 .tracksList {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    margin: 0 -12px;
+    margin: 0 -16px;
 }
 .showMoreBtn {
     display: flex;
@@ -542,17 +519,5 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-size: 14px;
     font-weight: 600;
     color: hsla(0, 0%, 100%, 0.7);
-}
-
-@media (max-width: 820px), (pointer: coarse) and (max-width: 900px) {
-    .pageRoot { padding: 12px 16px 80px; }
-    .artistLayout { flex-direction: column; gap: 28px; }
-    .artistAside { position: static; width: 100%; }
-    .pageHat { flex-direction: row; align-items: center; gap: 20px; }
-    .pageHat .coverWrap { width: 128px; flex-shrink: 0; }
-    .listName { font-size: 26px; }
-    .artistMain { padding-top: 0; width: 100%; }
-    .tracksList { margin: 0 -8px; }
-    .albumGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 12px; }
 }
 </style>

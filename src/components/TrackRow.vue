@@ -1,3 +1,8 @@
+<script lang="ts">
+export const TRACK_ROW_HEIGHT = 52
+const rowStyle = { height: TRACK_ROW_HEIGHT + 'px' }
+</script>
+
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { TrackMetadata } from '../composables/usePlayer'
@@ -21,7 +26,7 @@ const props = withDefaults(
         menuOpen?: boolean
         /** Position shown before the cover (collection pages). */
         rank?: number | null
-        /** Taller row with a bigger cover (collection pages). */
+        /** Collection layout with room for a rank and duration. */
         large?: boolean
     }>(),
     { active: false, activePaused: false, menuOpen: false, rank: null, large: false },
@@ -52,23 +57,11 @@ function displayName(track: TrackMetadata): string {
 <template>
     <div
         class="trackElem"
-        :class="{ active, activePaused, large, ranked: rank != null }"
+        :style="rowStyle"
+        :class="{ active, activePaused, large }"
         @click="emit('rowClick', $event)"
     >
         <span v-if="rank != null" class="trackRank">{{ rank }}</span>
-        <div class="hoverIcon" @click.stop="emit('coverClick')">
-            <PauseIcon
-                v-if="active && !activePaused"
-                width="10" height="10"
-                style="margin-left:0.5px;"
-            />
-            <PlayIcon
-                v-else
-                width="10" height="10"
-                style="margin-left:1px;padding-top:0;"
-            />
-        </div>
-        <div v-if="active" class="playingAnim"></div>
         <div class="trackCover" @click.stop="emit('coverClick')">
             <img
                 :src="track.cover_art || defaultTrackCover"
@@ -76,6 +69,11 @@ function displayName(track: TrackMetadata): string {
                 draggable="false"
                 class="trackCoverImg"
             />
+            <span v-if="active && !activePaused" class="playingAnim"></span>
+            <span class="hoverIcon">
+                <PauseIcon v-if="active && !activePaused" width="12" height="12" />
+                <PlayIcon v-else width="12" height="12" style="margin: 0; padding: 0;" />
+            </span>
         </div>
         <div class="trackInfo">
             <div v-truncate class="trackName">{{ displayName(track) }}</div>
@@ -102,11 +100,10 @@ function displayName(track: TrackMetadata): string {
     flex-direction: row;
     align-items: center;
     gap: 8px;
-    padding: 8px 16px 8px 8px;
+    padding: 0 16px 0 8px;
     border-radius: 9px;
     background-color: hsla(0, 0%, 100%, 0);
     transition: .31s var(--ease-smooth-in-out);
-    height: 58px;
     box-sizing: border-box;
     overflow: hidden;
 
@@ -129,11 +126,11 @@ function displayName(track: TrackMetadata): string {
     }
 }
 .trackCover {
-    width: 42px;
-    height: 42px;
+    position: relative;
+    width: 38px;
+    height: 38px;
     background-color: #202020;
     border-radius: 5px;
-    transition: .31s var(--ease-smooth);
     overflow: hidden;
     flex-shrink: 0;
 }
@@ -143,22 +140,25 @@ function displayName(track: TrackMetadata): string {
     height: 100%;
     object-fit: cover;
     display: block;
+    transition: opacity .31s var(--ease-smooth);
 }
-.trackElem:hover .trackCover,
-.trackElem.activePaused .trackCover {
+.trackElem:hover .trackCoverImg,
+.trackElem.activePaused .trackCoverImg {
     opacity: 0.5;
 }
-.trackElem.active .trackCover {
+.trackElem.active .trackCoverImg {
     opacity: 0.45;
 }
 .hoverIcon {
     position: absolute;
-    top: 50%;
-    left: 18.5px;
-    transform: translateY(-50%);
+    inset: 0;
+    margin: auto;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
     opacity: 0;
-    padding: 5px;
-    border-radius: 9999px;
+    border-radius: 50%;
     color: #242424;
     background-color: hsla(0, 0%, 100%, 1.0);
     transition: .31s var(--ease-smooth);
@@ -275,7 +275,6 @@ function displayName(track: TrackMetadata): string {
     color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
 .trackElem.large {
-    height: 64px;
     padding: 0 16px;
     gap: 12px;
     border-radius: 12px;
@@ -285,8 +284,6 @@ function displayName(track: TrackMetadata): string {
     background-color: hsla(0, 0%, 100%, 0.05);
 }
 .trackElem.large .trackCover {
-    width: 48px;
-    height: 48px;
     border-radius: 6px;
 }
 .trackElem.large .trackName {
@@ -302,26 +299,13 @@ function displayName(track: TrackMetadata): string {
     text-align: right;
     font-weight: 400;
 }
-.trackElem.large .hoverIcon {
-    left: 30px;
-}
-.trackElem.large .playingAnim {
-    left: 32px;
-    top: 24px;
-}
-.trackElem.large.ranked .hoverIcon {
-    left: 64px;
-}
-.trackElem.large.ranked .playingAnim {
-    left: 66px;
-}
 :global(body.lfmusic-phone .trackRank) {
     display: none;
 }
 .playingAnim {
     position: absolute;
-    left: 21px;
-    top: 21px;
+    inset: 0;
+    margin: auto;
     width: 16px;
     height: 16px;
     background: #fff;

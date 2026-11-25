@@ -75,10 +75,11 @@ export function joinArtists(input: string, separators: string[]): string {
     return splitArtistsList(input, separators).join(', ') || input
 }
 
-export function formatTotalDuration(secs: number): string {
+export function formatTotalDuration(secs: number, compact = false): string {
     const total = Math.max(0, Math.floor(secs))
     const h = Math.floor(total / 3600)
     const m = Math.floor((total % 3600) / 60)
+    if (compact && h > 0) return isEnglish() ? `${h} h ${m} min` : `${h} ч ${m} мин`
     if (isEnglish()) {
         if (h > 0) return `${h} ${pluralizeEn(h, 'hour', 'hours')} ${m} min`
         return `${m} min`
