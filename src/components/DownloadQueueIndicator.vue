@@ -29,12 +29,11 @@ const finishedCount = computed(() => queue.value.filter(i => i.stage === 'done' 
 const overall = computed(() => {
     const list = queue.value.filter(i => i.stage !== 'error')
     if (list.length === 0) return 0
-    const sum = list.reduce((acc, i) => acc + (i.stage === 'done' ? 1 : i.stage === 'processing' ? 0.95 : i.progress * 0.9), 0)
+    const sum = list.reduce((acc, i) => acc + i.progress, 0)
     return sum / list.length
 })
 const RING = 2 * Math.PI * 10.5
 const ringOffset = computed(() => RING * (1 - overall.value))
-const badge = computed(() => (activeCount.value > 99 ? '99+' : String(activeCount.value)))
 
 const summary = computed(() => {
     const total = queue.value.filter(i => i.stage !== 'error').length
@@ -58,11 +57,10 @@ async function run(fn: () => Promise<unknown>) {
                 <circle class="dlRingTrack" cx="12.5" cy="12.5" r="10.5" />
                 <circle class="dlRingFill" cx="12.5" cy="12.5" r="10.5" :stroke-dasharray="RING" :stroke-dashoffset="ringOffset" />
             </svg>
-            <svg class="dlArrowIcon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="dlArrowIcon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
                 <path class="dlArrow" d="M12 4v11m0 0 4-4m-4 4-4-4" />
                 <path d="M6 20h12" />
             </svg>
-            <span v-if="activeCount > 0" class="dlBadge">{{ badge }}</span>
         </button>
 
         <div class="dlPopover" role="dialog">
@@ -91,11 +89,7 @@ async function run(fn: () => Promise<unknown>) {
                                 <template v-else>{{ stageText(item) }}</template>
                             </div>
                             <div v-if="isActive(item) && item.stage !== 'queued'" class="dlBar">
-                                <span
-                                    class="dlBarFill"
-                                    :class="{ indeterminate: item.stage !== 'downloading' }"
-                                    :style="item.stage === 'downloading' ? { width: Math.round(item.progress * 100) + '%' } : undefined"
-                                ></span>
+                                <span class="dlBarFill" :style="{ width: Math.round(item.progress * 100) + '%' }"></span>
                             </div>
                         </div>
                         <button
@@ -106,16 +100,18 @@ async function run(fn: () => Promise<unknown>) {
                         >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.08 8A8 8 0 1 0 20 12"/><polyline points="20 4 20 8 16 8"/></svg>
                         </button>
-                        <span v-if="item.stage === 'done'" class="doneMark">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                        </span>
-                        <button
-                            class="iconBtn remove"
-                            v-tooltip="isActive(item) ? t('downloads.action.cancel') : t('downloads.action.remove')"
-                            @click="run(() => cancel(item.id))"
-                        >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                        </button>
+                        <div class="dlEndAction">
+                            <span v-if="item.stage === 'done'" class="doneMark">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            </span>
+                            <button
+                                class="iconBtn remove"
+                                v-tooltip="isActive(item) ? t('downloads.action.cancel') : t('downloads.action.remove')"
+                                @click="run(() => cancel(item.id))"
+                            >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -126,15 +122,17 @@ async function run(fn: () => Promise<unknown>) {
 <style scoped>
 .dlIndicator {
     position: relative;
-    height: 25px;
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
     margin-right: 10px;
     display: flex;
     align-items: center;
 }
 .dlButton {
     position: relative;
-    width: 25px;
-    height: 25px;
+    width: 100%;
+    height: 100%;
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -148,15 +146,15 @@ async function run(fn: () => Promise<unknown>) {
 .dlRing {
     position: absolute;
     inset: 0;
-    width: 25px;
-    height: 25px;
+    width: 100%;
+    height: 100%;
     transform: rotate(-90deg);
 }
-.dlRingTrack { fill: none; stroke: hsla(0, 0%, 100%, 0.1); stroke-width: 2; }
+.dlRingTrack { fill: none; stroke: hsla(0, 0%, 100%, 0.1); stroke-width: 1.25; }
 .dlRingFill {
     fill: none;
     stroke: hsla(var(--accent-h), min(calc(var(--accent-s) + 20% * var(--accent-k, 1)), 100%), 70%, 1);
-    stroke-width: 2;
+    stroke-width: 1.25;
     stroke-linecap: round;
     transition: stroke-dashoffset .4s var(--ease-smooth);
 }
@@ -167,27 +165,6 @@ async function run(fn: () => Promise<unknown>) {
     0%, 100% { transform: translateY(-1px); }
     50% { transform: translateY(2px); }
 }
-.dlBadge {
-    position: absolute;
-    top: -5px;
-    right: -6px;
-    min-width: 14px;
-    height: 14px;
-    padding: 0 3px;
-    box-sizing: border-box;
-    border-radius: 999px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 8px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    color: #fff;
-    background: hsla(var(--accent-h), min(calc(var(--accent-s) + 16% * var(--accent-k, 1)), 100%), 52%, 1);
-    border: 1.5px solid var(--dark-bg);
-    user-select: none;
-}
-
 .dlPopover {
     position: absolute;
     top: 100%;
@@ -311,15 +288,6 @@ async function run(fn: () => Promise<unknown>) {
     background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
     transition: width .3s var(--ease-smooth);
 }
-.dlBarFill.indeterminate {
-    width: 30%;
-    animation: slide 1.2s var(--ease-smooth-in-out) infinite;
-}
-.dlItem.queued .dlBarFill.indeterminate { animation: none; width: 0; }
-@keyframes slide {
-    0% { left: -30%; }
-    100% { left: 100%; }
-}
 .iconBtn {
     flex-shrink: 0;
     width: 26px;
@@ -334,13 +302,21 @@ async function run(fn: () => Promise<unknown>) {
     transition: var(--duration-hover) var(--ease-smooth);
 }
 .iconBtn:hover { color: #fff; background-color: hsla(0, 0%, 100%, 0.12); }
+.dlEndAction {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+}
+.dlEndAction > * { grid-area: 1 / 1; }
 .iconBtn.remove { opacity: 0; }
 .dlItem:hover .iconBtn.remove,
+.dlEndAction:focus-within .iconBtn.remove,
 .dlItem.error .iconBtn.remove { opacity: 1; }
 .doneMark {
-    flex-shrink: 0;
     display: flex;
+    pointer-events: none;
     color: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
 }
-.dlItem:hover .doneMark { display: none; }
+.dlItem:hover .doneMark,
+.dlEndAction:focus-within .doneMark { visibility: hidden; }
 </style>

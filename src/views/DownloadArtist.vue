@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { goBackOrHome } from '../router'
 
@@ -19,7 +19,7 @@ import { albumsCountText, tracksCountText } from '../utils/format'
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
-const { artistDetail, enqueue, notQueued, ytdlpMissing } = useDownloads()
+const { artistDetail, artistTracks, enqueue, notQueued, ytdlpMissing } = useDownloads()
 
 const artistId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -29,9 +29,13 @@ const artistId = computed(() => {
 const detail = ref<ExternalArtistDetail | null>(null)
 const loading = ref(true)
 const notFound = ref(false)
+const trackCount = ref<number | null>(null)
+let loadId = 0
 
 async function load(id: number) {
+    const requestId = ++loadId
     loading.value = true
+    trackCount.value = null
     notFound.value = false
     detail.value = null
     busyPopular.value = false
@@ -40,18 +44,32 @@ async function load(id: number) {
     if (!Number.isFinite(id)) { loading.value = false; notFound.value = true; return }
     try {
         const d = await artistDetail(id)
+        if (requestId !== loadId) return
         detail.value = d
         notFound.value = d === null
+        if (d?.albums.length) {
+            void artistTracks(id).then(
+                tracks => {
+                    if (requestId !== loadId || !detail.value) return
+                    trackCount.value = tracks.length
+                    if (!detail.value.top_tracks.length) {
+                        detail.value.top_tracks = tracks.slice(0, PREVIEW_COUNT).map(track => ({ ...track }))
+                    }
+                },
+                error => console.error('Ошибка загрузки каталога исполнителя:', error),
+            )
+        }
     } catch (e) {
         console.error('Ошибка загрузки исполнителя:', e)
-        notFound.value = true
+        if (requestId === loadId) notFound.value = true
     } finally {
-        loading.value = false
+        if (requestId === loadId) loading.value = false
     }
 }
 
 watch(artistId, (id) => { void load(id) })
 onMounted(() => { void load(artistId.value) })
+onUnmounted(() => { loadId++ })
 
 useKeepDownloadedInLibrary(() => (detail.value ? [detail.value.top_tracks] : []))
 
@@ -61,11 +79,11 @@ const PREVIEW_COUNT = 5
 const previewTracks = computed(() => detail.value?.top_tracks.slice(0, PREVIEW_COUNT) ?? [])
 
 const albumsLabel = computed(() => {
-    const n = detail.value?.albums.length ?? 0
+    const n = detail.value?.album_count ?? 0
     return albumsCountText(n).replace(/^\d+\s*/, '')
 })
-const topTracksLabel = computed(() => {
-    const n = detail.value?.top_tracks.length ?? 0
+const tracksLabel = computed(() => {
+    const n = trackCount.value ?? 0
     return tracksCountText(n).replace(/^\d+\s*/, '')
 })
 
@@ -156,14 +174,14 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
                         <div class="info">
                             <div class="listType">{{ t('downloads.artistLabel') }}</div>
                             <h2 v-truncate class="listName">{{ detail.name }}</h2>
-                            <div v-if="detail.albums.length || detail.top_tracks.length" class="badges">
-                                <div v-if="detail.albums.length" class="badge">
-                                    <b>{{ detail.albums.length }}</b>
+                            <div v-if="detail.album_count || trackCount !== null" class="badges">
+                                <div v-if="detail.album_count" class="badge">
+                                    <b>{{ detail.album_count }}</b>
                                     <span>{{ albumsLabel }}</span>
                                 </div>
-                                <div v-if="detail.top_tracks.length" class="badge">
-                                    <b>{{ detail.top_tracks.length }}</b>
-                                    <span>{{ topTracksLabel }}</span>
+                                <div v-if="trackCount !== null" class="badge">
+                                    <b>{{ trackCount }}</b>
+                                    <span>{{ tracksLabel }}</span>
                                 </div>
                             </div>
                         </div>
@@ -186,11 +204,11 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
             </aside>
 
             <div class="artistMain">
-                <section v-if="detail.top_tracks.length" class="pageLine">
-                    <div class="lineHat">
+                <section v-if="detail.top_tracks.length || detail.albums.length" class="pageLine">
+                    <div v-if="detail.top_tracks.length" class="lineHat">
                         <h3 class="lineTitle">{{ t('downloads.popularTracks') }}</h3>
                     </div>
-                    <div class="tracksList">
+                    <div v-if="previewTracks.length" class="tracksList">
                         <DownloadTrackRow
                             v-for="(track, i) in previewTracks"
                             :key="i"
@@ -198,7 +216,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
                             @redownload="confirmTrack = $event"
                         />
                     </div>
-                    <button type="button" class="showMoreBtn" @click="openAllTracks">
+                    <button v-if="detail.albums.length" type="button" class="showMoreBtn" @click="openAllTracks">
                         <span class="showMoreIcon">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
                         </span>
@@ -208,7 +226,7 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
 
                 <section v-if="detail.albums.length" class="pageLine">
                     <div class="lineHat">
-                        <h3 class="lineTitle">{{ t('downloads.albumsTitle') }}</h3>
+                        <h3 class="lineTitle">{{ t('downloads.artistReleases') }}</h3>
                     </div>
                     <div class="albumGrid">
                         <DownloadAlbumCard v-for="al in detail.albums" :key="al.id" :album="al" />

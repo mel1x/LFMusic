@@ -156,18 +156,12 @@ function onAlbumClick(e: MouseEvent) {
 
         <div v-if="running" class="rowProgress">
             <div class="progHead">
-                <template v-if="stage === 'downloading'">
-                    <span v-if="speedText" class="progDim">{{ speedText }}</span>
-                    <span class="progPct">{{ progressPct }}%</span>
-                </template>
-                <span v-else class="progStage" v-truncate>{{ runningLabel }}</span>
+                <span v-if="runningLabel" class="progStage" v-truncate>{{ runningLabel }}</span>
+                <span v-else-if="speedText" class="progDim">{{ speedText }}</span>
+                <span v-if="stage !== 'processing'" class="progPct">{{ progressPct }}%</span>
             </div>
             <div class="progTrack">
-                <span
-                    class="progFill"
-                    :class="{ indeterminate: stage === 'searching' || stage === 'processing' }"
-                    :style="stage === 'downloading' ? { width: progressPct + '%' } : undefined"
-                ></span>
+                <span class="progFill" :style="{ width: progressPct + '%' }"></span>
             </div>
         </div>
         <span v-else-if="queued" class="rowQueued">{{ t('downloads.stage.queued') }}</span>
@@ -405,14 +399,6 @@ function onAlbumClick(e: MouseEvent) {
     background: hsl(var(--accent-h), min(var(--accent-s), 70%), 68%);
     transition: width .28s var(--ease-smooth);
 }
-.progFill.indeterminate {
-    width: 30%;
-    animation: progSlide 1.25s var(--ease-smooth-in-out) infinite;
-}
-@keyframes progSlide {
-    0% { left: -30%; }
-    100% { left: 100%; }
-}
 .rowQueued {
     flex-shrink: 0;
     font-size: 12px;
@@ -494,5 +480,19 @@ function onAlbumClick(e: MouseEvent) {
 }
 .dismissBtn:active {
     transform: scale(0.92);
+}
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .dlRow.running {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        align-content: center;
+        gap: 4px 10px;
+    }
+    .running .rowCoverWrap,
+    .running .rowIndex { grid-area: 1 / 1 / 3 / 2; }
+    .running .rowInfo { grid-area: 1 / 2; }
+    .running .rowProgress { grid-area: 2 / 2; width: auto; gap: 3px; }
+    .running .rowTime { grid-area: 1 / 3 / 3 / 4; }
+    .running .rowActions { grid-area: 1 / 4 / 3 / 5; }
 }
 </style>

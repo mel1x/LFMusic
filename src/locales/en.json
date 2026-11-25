@@ -220,6 +220,7 @@
     "downloadAll": "Download album",
     "albumQueued": "Queued",
     "albumNotFound": "Couldn't load the album",
+    "artistReleases": "Releases",
     "artistNotFound": "Couldn't load the artist",
     "artistEmpty": "No albums or popular tracks",
     "popularTracks": "Popular tracks",
@@ -230,6 +231,7 @@
     "artistTopCount": "Popular tracks: {count}",
     "showMore": "Show more",
     "artistAllTracks": "All tracks",
+    "artistTracksLoadError": "Couldn't load the artist's tracks",
     "artistTracksEmpty": "No tracks found",
     "folder": {
       "sectionTitle": "Download folder",

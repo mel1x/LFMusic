@@ -3,6 +3,8 @@ import type { TrackMetadata } from './usePlayer'
 
 export const mixPresets = ['auto', 'fade', 'rise', 'blend', 'wave', 'melt', 'slam', 'none'] as const
 export type MixPreset = typeof mixPresets[number]
+const PRESET_BARS = 8
+
 export type VolumeCurve = 'smooth' | 'linear' | 'overlap' | 'rise' | 'cut'
 
 export type MixEffect = 'volume' | 'eq' | 'filter'
@@ -66,12 +68,16 @@ export function mixKey(key: string | null) {
     return index < 0 ? key : String(index + 1) + (minor ? 'A' : 'B')
 }
 
-export function autoTransition(from: TrackMetadata, to?: TrackMetadata): MixTransition {
+export function mixBarSeconds(from: TrackMetadata, to?: TrackMetadata) {
+    return 240 / (from.bpm || to?.bpm || 120)
+}
+
+function autoTransition(from: TrackMetadata, to?: TrackMetadata): MixTransition {
     const bpm = from.bpm
     const tempoGap = bpm && to?.bpm ? Math.abs(bpm - to.bpm) / bpm : 0
     const rising = to?.energy != null && from.energy != null && to.energy - from.energy > 0.24
     return {
-        seconds: bpm && bpm > 0 ? Math.max(2, Math.min(32, (tempoGap > 0.12 ? 480 : 960) / bpm)) : 6,
+        seconds: PRESET_BARS * mixBarSeconds(from, to),
         skipIntro: 0, skipOutro: 0,
         preset: 'auto', volumeCurve: rising ? 'rise' : 'smooth', equalPower: true,
         eqBand: 'centerBass', filter: tempoGap > 0.12 ? 'lowPass' : rising ? 'highPass' : 'off',
@@ -91,9 +97,16 @@ export function applyMixPreset(preset: MixPreset, from: TrackMetadata, draft: Mi
         none: ['linear', 'off', 'off'],
     }
     const [volumeCurve, eqBand, filter] = profiles[preset]
-    return { ...draft, curves: undefined, seconds: preset === 'none' ? 0 : draft.seconds || auto.seconds,
+    return { ...draft, curves: undefined, seconds: preset === 'none' ? 0 : auto.seconds,
         preset, volumeCurve, eqBand, filter,
         skipIntro: preset === 'none' ? 0 : draft.skipIntro, skipOutro: preset === 'none' ? 0 : draft.skipOutro }
+}
+
+export function resolveMixTransition(source: string, from: TrackMetadata, toPath: string, to?: TrackMetadata): MixTransition {
+    const saved = savedTransition(source, from.file_path, toPath)
+    if (!saved) return autoTransition(from, to)
+    if (!saved.preset || saved.preset === 'custom' || saved.preset === 'none') return saved
+    return { ...saved, seconds: PRESET_BARS * mixBarSeconds(from, to) }
 }
 
 export function mixOverlap(seconds: number, outgoing: number, incoming: number, speed = 1) {

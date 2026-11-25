@@ -1,6 +1,7 @@
 //! Free, keyless metadata sources (iTunes, Deezer, MusicBrainz/CAA, Wikipedia) for album order,
 //! covers and artist avatars. Images are cached as WebP and served via `lfmusic-external://`.
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1249,7 +1250,6 @@ pub struct ExternalSearchArtist {
     pub id: u64,
     pub name: String,
     pub picture_url: Option<String>,
-    pub nb_album: Option<u32>,
     pub source: String,
 }
 
@@ -1269,6 +1269,7 @@ pub struct ExternalArtistDetail {
     pub name: String,
     pub picture_url: Option<String>,
     pub albums: Vec<ExternalSearchAlbum>,
+    pub album_count: usize,
     pub top_tracks: Vec<ExternalSearchTrack>,
 }
 
@@ -1380,17 +1381,6 @@ fn deezer_advanced_query(artist: &str, title: &str) -> String {
     let a = artist.replace('"', " ");
     let t = title.replace('"', " ");
     format!("artist:\"{}\" track:\"{}\"", a.trim(), t.trim())
-}
-
-/// Offset separating Deezer `/artist/{id}/top` indices from `/search/track` indices.
-const ARTIST_SEARCH_OFFSET: u32 = 100_000;
-
-fn artist_top_next(index: u32, raw: u32, total: u32, has_next: bool) -> (u32, bool) {
-    if (has_next || index + raw < total) && raw > 0 {
-        (index + raw, true)
-    } else {
-        (ARTIST_SEARCH_OFFSET, true)
-    }
 }
 
 #[derive(Deserialize)]
@@ -1589,7 +1579,6 @@ fn deezer_search_artists(
         picture_xl: Option<String>,
         picture_big: Option<String>,
         picture_medium: Option<String>,
-        nb_album: Option<u32>,
     }
 
     let resp: SearchResp = send_throttled(
@@ -1609,7 +1598,6 @@ fn deezer_search_artists(
             id: h.id,
             name: h.name,
             picture_url: pick_image(&[h.picture_xl, h.picture_big, h.picture_medium]),
-            nb_album: h.nb_album,
             source: "Deezer".to_string(),
         })
         .collect())
@@ -1763,49 +1751,28 @@ pub fn artist_detail(id: u64) -> Result<Option<ExternalArtistDetail>, String> {
     let artist: ArtistResp = resp.json().map_err(|e| e.to_string())?;
     let picture_url = pick_image(&[artist.picture_xl, artist.picture_big, artist.picture_medium]);
 
-    #[derive(Deserialize)]
-    struct AlbumsResp {
-        #[serde(default)]
-        data: Vec<AlbumHit>,
-    }
-    #[derive(Deserialize)]
-    struct AlbumHit {
-        id: u64,
-        title: String,
-        cover_xl: Option<String>,
-        cover_big: Option<String>,
-        cover_medium: Option<String>,
-        nb_tracks: Option<u32>,
-    }
-    let albums = match send_throttled(
-        client
-            .get(format!("https://api.deezer.com/artist/{}/albums", id))
-            .query(&[("limit", "50")]),
-        "api.deezer.com",
-    ) {
-        Ok(r) if r.status().is_success() => {
-            let parsed: AlbumsResp = r.json().map_err(|e| e.to_string())?;
-            parsed
-                .data
-                .into_iter()
-                .map(|a| ExternalSearchAlbum {
-                    id: a.id,
-                    title: a.title,
-                    artist: artist.name.clone(),
-                    artist_id: Some(artist.id),
-                    cover_url: pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
-                    nb_tracks: a.nb_tracks,
-                    source: "Deezer".to_string(),
-                })
-                .collect()
-        }
-        _ => Vec::new(),
-    };
+    let releases = artist_releases(id)?;
+    let album_count = releases
+        .iter()
+        .filter(|release| release.record_type.as_deref() == Some("album"))
+        .count();
+    let albums = releases
+        .into_iter()
+        .map(|a| ExternalSearchAlbum {
+            id: a.id,
+            title: a.title,
+            artist: artist.name.clone(),
+            artist_id: Some(artist.id),
+            cover_url: pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
+            nb_tracks: a.nb_tracks,
+            source: "Deezer".to_string(),
+        })
+        .collect();
 
-    let top_tracks = match artist_tracks(id, Some(&artist.name), 0, 20) {
-        Ok(page) => page.tracks,
+    let top_tracks = match artist_top_tracks(id) {
+        Ok(tracks) => tracks,
         Err(e) => {
-            eprintln!("[external] deezer artist tracks error: {}", e);
+            eprintln!("[external] deezer artist top tracks error: {}", e);
             Vec::new()
         }
     };
@@ -1815,149 +1782,163 @@ pub fn artist_detail(id: u64) -> Result<Option<ExternalArtistDetail>, String> {
         name: artist.name,
         picture_url,
         albums,
+        album_count,
         top_tracks,
     }))
 }
 
-/// Artists whose `/top` came back empty (Deezer geo-restriction) page through name search instead.
-fn top_unavailable() -> &'static Mutex<std::collections::HashSet<u64>> {
-    static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+#[derive(Deserialize)]
+struct DeezerArtistRef {
+    id: u64,
+    name: String,
 }
 
-/// One page of an artist's tracks, most popular first.
-pub fn artist_tracks(
+#[derive(Deserialize)]
+struct DeezerRelease {
     id: u64,
-    name: Option<&str>,
-    index: u32,
-    limit: u32,
-) -> Result<ExternalSearchPage, String> {
-    let client = client();
-    let limit = limit.clamp(1, 100);
-    let use_top = !top_unavailable().lock().map(|s| s.contains(&id)).unwrap_or(false);
+    title: String,
+    cover_xl: Option<String>,
+    cover_big: Option<String>,
+    cover_medium: Option<String>,
+    nb_tracks: Option<u32>,
+    record_type: Option<String>,
+}
 
-    if index < ARTIST_SEARCH_OFFSET && use_top {
-        #[derive(Deserialize)]
-        struct TopHit {
-            title: String,
-            duration: Option<u32>,
-            artist: Option<ArtistRef>,
-            album: Option<AlbumRef>,
+fn deezer_catalog_items<T: serde::de::DeserializeOwned>(path: &str) -> Result<Vec<T>, String> {
+    let url = format!("https://api.deezer.com/{}", path);
+    let mut items = Vec::new();
+    loop {
+        let index = items.len();
+        let page: DeezerPageResp<T> = deezer_retry_json(|| {
+            client().get(&url).query(&[("limit", 100), ("index", index)])
+        })?
+        .ok_or_else(|| format!("Deezer HTTP error: {}", path))?;
+
+        let more = page.next.is_some() || index + page.data.len() < page.total as usize;
+        if more && page.data.is_empty() {
+            return Err(format!("Deezer returned an incomplete catalog: {}", path));
         }
-        #[derive(Deserialize)]
-        struct ArtistRef {
-            id: Option<u64>,
-            name: Option<String>,
-        }
-        #[derive(Deserialize)]
-        struct AlbumRef {
-            id: Option<u64>,
-            title: Option<String>,
-            cover_xl: Option<String>,
-            cover_big: Option<String>,
-            cover_medium: Option<String>,
-        }
-        let top_url = format!("https://api.deezer.com/artist/{}/top", id);
-        let idx_str = index.to_string();
-        let lim_str = limit.to_string();
-        if let Some(parsed) = deezer_retry_json::<TopHit>(|| {
-            client
-                .get(&top_url)
-                .query(&[("index", idx_str.as_str()), ("limit", lim_str.as_str())])
-        })? && (parsed.total > 0 || !parsed.data.is_empty())
-        {
-            let raw = parsed.data.len() as u32;
-            let (next_index, has_more) =
-                artist_top_next(index, raw, parsed.total, parsed.next.is_some());
-            let tracks = parsed
-                .data
-                .into_iter()
-                .map(|t| {
-                    let (album, album_id, cover_url) = match t.album {
-                        Some(a) => (
-                            a.title.filter(|t| !t.is_empty()),
-                            a.id,
-                            pick_image(&[a.cover_xl, a.cover_big, a.cover_medium]),
-                        ),
-                        None => (None, None, None),
-                    };
-                    let artist = t
-                        .artist
-                        .and_then(|a| a.name.filter(|n| !n.is_empty()).map(|n| (n, a.id)));
-                    let (artist, artist_id) = match artist {
-                        Some((n, aid)) => (n, aid.or(Some(id))),
-                        None => (name.unwrap_or_default().to_string(), Some(id)),
-                    };
-                    ExternalSearchTrack {
-                        title: t.title,
-                        artist,
-                        album,
-                        duration_secs: t.duration,
-                        cover_url,
-                        source: "Deezer".to_string(),
-                        in_library: false,
-                        artist_id,
-                        album_id,
-                        genre: None,
-                        source_url: None,
-                    }
-                })
-                .collect();
-            return Ok(ExternalSearchPage {
-                tracks,
-                albums: Vec::new(),
-                artists: Vec::new(),
-                next_index,
-                has_more,
-            });
-        }
-        if index == 0
-            && let Ok(mut s) = top_unavailable().lock()
-        {
-            s.insert(id);
+        items.extend(page.data);
+        if !more {
+            return Ok(items);
         }
     }
+}
 
-    let name = match name.map(str::trim).filter(|n| !n.is_empty()) {
-        Some(n) => n.to_string(),
-        None => {
-            #[derive(Deserialize)]
-            struct ArtistResp {
-                name: String,
-            }
-            let resp = send_throttled(
-                client.get(format!("https://api.deezer.com/artist/{}", id)),
-                "api.deezer.com",
-            )?;
-            if !resp.status().is_success() {
-                return Err(format!("artist {} not found", id));
-            }
-            resp.json::<ArtistResp>().map_err(|e| e.to_string())?.name
+fn artist_releases(id: u64) -> Result<Vec<DeezerRelease>, String> {
+    let mut releases = deezer_catalog_items::<DeezerRelease>(&format!("artist/{}/albums", id))?;
+    let mut seen = HashSet::new();
+    releases.retain(|release| seen.insert(release.id));
+    Ok(releases)
+}
+
+fn artist_top_tracks(id: u64) -> Result<Vec<ExternalSearchTrack>, String> {
+    #[derive(Deserialize)]
+    struct TopHit {
+        title: String,
+        duration: Option<u32>,
+        artist: DeezerArtistRef,
+        album: Option<DeezerRelease>,
+    }
+
+    let page = deezer_retry_json::<TopHit>(|| {
+        client().get(format!("https://api.deezer.com/artist/{}/top", id))
+            .query(&[("limit", 20)])
+    })?
+    .ok_or_else(|| "Deezer HTTP error".to_string())?;
+
+    let tracks = page.data.into_iter().map(|t| {
+        let (album, album_id, cover_url) = match t.album {
+            Some(a) => (Some(a.title), Some(a.id), pick_image(&[a.cover_xl, a.cover_big, a.cover_medium])),
+            None => (None, None, None),
+        };
+        ExternalSearchTrack {
+            title: t.title,
+            artist: t.artist.name,
+            album,
+            duration_secs: t.duration,
+            cover_url,
+            source: "Deezer".to_string(),
+            in_library: false,
+            artist_id: Some(t.artist.id),
+            album_id,
+            genre: None,
+            source_url: None,
         }
-    };
+    }).collect();
+    Ok(tracks)
+}
 
-    // A short first page may not overflow the view: keep pulling pages until it can scroll.
-    const MAX_REQUESTS: u32 = 4;
-    let batch = limit.max(50);
-    let mut tracks: Vec<ExternalSearchTrack> = Vec::new();
-    let mut cursor = index.saturating_sub(ARTIST_SEARCH_OFFSET);
-    let mut has_more = true;
-    for _ in 0..MAX_REQUESTS {
-        let (hits, raw, has_next) = deezer_search_tracks(client, &name, cursor, batch)?;
-        cursor += raw;
-        has_more = has_next;
-        tracks.extend(hits.into_iter().filter(|t| t.artist_id == Some(id)));
-        if !has_more || tracks.len() as u32 >= limit / 2 {
-            break;
+#[derive(Deserialize)]
+struct DeezerReleaseTrack {
+    id: u64,
+    title: String,
+    duration: Option<u32>,
+    #[serde(default)]
+    rank: u32,
+    isrc: Option<String>,
+    artist: DeezerArtistRef,
+    #[serde(default)]
+    contributors: Vec<DeezerArtistRef>,
+}
+
+/// The same recording can appear on several releases under different track ids.
+fn unique_artist_recordings(
+    id: u64,
+    mut tracks: Vec<(&DeezerRelease, DeezerReleaseTrack)>,
+) -> Vec<(&DeezerRelease, DeezerReleaseTrack)> {
+    tracks.sort_by_key(|(_, track)| std::cmp::Reverse(track.rank));
+    let mut ids = HashSet::new();
+    let mut recordings = HashSet::new();
+    tracks.retain(|(_, track)| {
+        let credited = track.artist.id == id || track.contributors.iter().any(|artist| artist.id == id);
+        if !credited || !ids.insert(track.id) {
+            return false;
+        }
+        match track.isrc.as_deref().map(str::trim).filter(|isrc| !isrc.is_empty()) {
+            Some(isrc) => recordings.insert(isrc.to_ascii_uppercase()),
+            None => true,
+        }
+    });
+    tracks
+}
+
+/// Tracks credited to the artist on their Deezer releases, ordered by rank.
+pub fn artist_tracks(id: u64) -> Result<Vec<ExternalSearchTrack>, String> {
+    let releases = artist_releases(id)?;
+    let mut tracks = Vec::new();
+    // Keep only a few requests in flight so large catalogs do not crowd out search.
+    for batch in releases.chunks(4) {
+        let pages = batch
+            .par_iter()
+            .map(|release| {
+                deezer_catalog_items::<DeezerReleaseTrack>(&format!("album/{}/tracks", release.id))
+            })
+            .collect::<Vec<_>>();
+        for (release, page) in batch.iter().zip(pages) {
+            tracks.extend(page?.into_iter().map(|track| (release, track)));
         }
     }
-    Ok(ExternalSearchPage {
-        tracks,
-        albums: Vec::new(),
-        artists: Vec::new(),
-        next_index: ARTIST_SEARCH_OFFSET + cursor,
-        has_more,
-    })
+    Ok(unique_artist_recordings(id, tracks)
+        .into_iter()
+        .map(|(release, track)| ExternalSearchTrack {
+            title: track.title,
+            artist: track.artist.name,
+            album: Some(release.title.clone()),
+            duration_secs: track.duration,
+            cover_url: pick_image(&[
+                release.cover_xl.clone(),
+                release.cover_big.clone(),
+                release.cover_medium.clone(),
+            ]),
+            source: "Deezer".to_string(),
+            in_library: false,
+            artist_id: Some(track.artist.id),
+            album_id: Some(release.id),
+            genre: None,
+            source_url: None,
+        })
+        .collect())
 }
 
 fn itunes_search_tracks(
@@ -2942,12 +2923,22 @@ mod tests {
     }
 
     #[test]
-    fn artist_top_next_advances_then_switches_to_search_offset() {
-        assert_eq!(artist_top_next(0, 40, 94, true), (40, true));
-        assert_eq!(artist_top_next(40, 40, 94, false), (80, true));
-        assert_eq!(artist_top_next(0, 32, 32, false), (ARTIST_SEARCH_OFFSET, true));
-        assert_eq!(artist_top_next(80, 20, 100, false), (ARTIST_SEARCH_OFFSET, true));
-        assert_eq!(artist_top_next(80, 0, 100, true), (ARTIST_SEARCH_OFFSET, true));
+    fn artist_recordings_match_credits_and_deduplicate_reissues() {
+        let release: DeezerRelease = serde_json::from_str(r#"{"id":1,"title":"Release"}"#).unwrap();
+        let tracks: Vec<DeezerReleaseTrack> = serde_json::from_str(r#"[
+            {"id":11,"title":"Song","rank":5,"isrc":"SAME","artist":{"id":27,"name":"Artist"}},
+            {"id":12,"title":"Song","rank":8,"isrc":"SAME","artist":{"id":27,"name":"Artist"}},
+            {"id":13,"title":"Song (Live)","rank":2,"isrc":"LIVE","artist":{"id":27,"name":"Artist"}},
+            {"id":14,"title":"Another Song","rank":9,"artist":{"id":28,"name":"Artist"}},
+            {"id":15,"title":"Duet","rank":4,"artist":{"id":28,"name":"Other"},
+             "contributors":[{"id":27,"name":"Artist"}]},
+            {"id":15,"title":"Duet","rank":3,"artist":{"id":28,"name":"Other"},
+             "contributors":[{"id":27,"name":"Artist"}]}
+        ]"#).unwrap();
+
+        let recordings = unique_artist_recordings(27, tracks.into_iter().map(|track| (&release, track)).collect());
+        let ids: Vec<_> = recordings.into_iter().map(|(_, track)| track.id).collect();
+        assert_eq!(ids, vec![12, 15, 13]);
     }
 
     #[test]

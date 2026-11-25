@@ -162,8 +162,24 @@ fn spawn(mut cmd: std::process::Command, control: &Control) -> Result<Child, Job
     Ok(child)
 }
 
-fn finish(mut child: Child, control: &Control) -> Result<std::process::ExitStatus, JobError> {
-    let status = child.wait();
+fn finish(
+    mut child: Child,
+    control: &Control,
+    on_wait: Option<&mut dyn FnMut()>,
+) -> Result<std::process::ExitStatus, JobError> {
+    let status = match on_wait {
+        None => child.wait(),
+        Some(on_wait) => loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Err(error) => break Err(error),
+                Ok(None) => {
+                    on_wait();
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        },
+    };
     *control.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
     control.check()?;
     status.map_err(|e| JobError::new(ErrorKind::Unknown, e.to_string()))
@@ -184,7 +200,7 @@ fn run_capture(cmd: std::process::Command, control: &Control) -> Result<String, 
     let mut child = spawn(cmd, control)?;
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
-    let status = finish(child, control)?;
+    let status = finish(child, control, None)?;
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
     if !status.success() {
@@ -223,6 +239,7 @@ pub fn search(
     query: &str,
     count: u32,
     control: &Control,
+    on_wait: Option<&mut dyn FnMut()>,
 ) -> Result<Vec<Candidate>, JobError> {
     let mut cmd = base_command(tools, net);
     cmd.arg("--dump-json").arg("--ignore-errors");
@@ -239,7 +256,7 @@ pub fn search(
     let mut child = spawn(cmd, control)?;
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
-    let status = finish(child, control)?;
+    let status = finish(child, control, on_wait)?;
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
     let found: Vec<Candidate> = stdout
@@ -392,7 +409,7 @@ fn parse_progress(line: &str) -> Option<Progress> {
         return None;
     }
     let done = parse_num(parts[0]);
-    let total = parse_num(parts[1]).or_else(|| parse_num(parts[2]));
+    let total = parse_num(parts[1]).filter(|total| *total > 0.0).or_else(|| parse_num(parts[2]));
     let fraction = match (done, total) {
         (Some(d), Some(t)) if t > 0.0 => Some((d / t).clamp(0.0, 1.0)),
         _ => None,
@@ -422,6 +439,8 @@ pub fn download(
         ))
         .arg("--print")
         .arg(format!("after_move:{}%(filepath)s", FILE_TAG))
+        // Keep progress on stdout even when --print enables quiet mode.
+        .arg("--no-quiet")
         .arg("-f")
         .arg(FORMAT_SELECTOR)
         .arg("-o")
@@ -455,7 +474,7 @@ pub fn download(
             }
         }
     }
-    let status = finish(child, control)?;
+    let status = finish(child, control, None)?;
     let stderr = err.join().unwrap_or_default();
     if !status.success() {
         return Err(classify(&stderr));
@@ -615,6 +634,8 @@ mod tests {
         let p = parse_progress("[lfm-progress]512|NA|2048|NA|NA").unwrap();
         assert_eq!(p.fraction, Some(0.25));
         assert!(p.speed_bps.is_none());
+        assert_eq!(parse_progress("[lfm-progress]512|0|2048|NA|NA").unwrap().fraction, Some(0.25));
+        assert_eq!(parse_progress("[lfm-progress]512|NA|NA|NA|NA").unwrap().fraction, None);
         assert!(parse_progress("[download] 50%").is_none());
     }
 

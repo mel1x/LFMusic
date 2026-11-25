@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { goBackOrHome } from '../router'
 
@@ -11,14 +11,16 @@ import DownloadTrackRow from '../components/DownloadTrackRow.vue'
 
 import { useDownloads, useKeepDownloadedInLibrary, useRedownloadConfirm, type ExternalSearchTrack } from '../composables/useDownloads'
 import { useI18n } from '../composables/useI18n'
+import { useVirtualScroll } from '../composables/useVirtualScroll'
 
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
-const { artistTracks, trackKey } = useDownloads()
+const { artistTracks } = useDownloads()
 
-const PAGE = 40
-const MAX_EMPTY_PAGES = 6
+const ROW_HEIGHT = 64
+const ROW_GAP = 2
+const ROW_STRIDE = ROW_HEIGHT + ROW_GAP
 
 const artistId = computed(() => {
     const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
@@ -29,131 +31,59 @@ const artistName = computed(() => {
     return (raw as string | null | undefined) || ''
 })
 
-const pageEl = ref<HTMLElement | null>(null)
-const sentinelEl = ref<HTMLElement | null>(null)
 const tracks = ref<ExternalSearchTrack[]>([])
 const loading = ref(true)
-const loadingMore = ref(false)
-const loadMoreError = ref(false)
-const hasMore = ref(false)
 const failed = ref(false)
-let nextIndex = 0
 let seq = 0
-let emptyStreak = 0
-let observer: IntersectionObserver | null = null
 
-function append(page: ExternalSearchTrack[]): number {
-    const seen = new Set(tracks.value.map(tr => trackKey(tr.artist, tr.title, tr.album)))
-    let added = 0
-    for (const tr of page) {
-        const k = trackKey(tr.artist, tr.title, tr.album)
-        if (seen.has(k)) continue
-        seen.add(k)
-        tracks.value.push(tr)
-        added++
-    }
-    return added
-}
+const headerEl = ref<HTMLElement | null>(null)
+const headerHeight = ref(0)
+watch(headerEl, (el, _previous, onCleanup) => {
+    if (!el) return
+    const update = () => { headerHeight.value = el.offsetHeight }
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(el)
+    onCleanup(() => observer.disconnect())
+})
 
-function isNearBottom(): boolean {
-    const el = pageEl.value
-    if (!el) return false
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 600
-}
+const {
+    containerEl: pageEl,
+    scrollTop: scrollY,
+    visibleItems: visibleTracks,
+    paddingTop,
+    paddingBottom,
+    onScroll,
+    resetScroll,
+} = useVirtualScroll(tracks, { itemHeight: ROW_STRIDE, scrollOffset: headerHeight })
+const firstVisibleIndex = computed(() => paddingTop.value / ROW_STRIDE)
 
 async function load(id: number) {
     const mySeq = ++seq
-    scrollY.value = 0
-    pageEl.value?.scrollTo({ top: 0 })
+    resetScroll()
     tracks.value = []
-    hasMore.value = false
-    loadingMore.value = false
-    loadMoreError.value = false
     failed.value = false
-    nextIndex = 0
-    emptyStreak = 0
     loading.value = true
     if (!Number.isFinite(id)) { loading.value = false; failed.value = true; return }
     try {
-        const prevIndex = nextIndex
-        const page = await artistTracks(id, 0, PAGE, artistName.value)
-        if (mySeq !== seq) return
-        const added = append(page.tracks)
-        emptyStreak = added > 0 ? 0 : 1
-        nextIndex = page.next_index
-        hasMore.value = page.has_more && page.next_index > prevIndex && emptyStreak < MAX_EMPTY_PAGES
+        const catalog = await artistTracks(id)
+        if (mySeq === seq) tracks.value = catalog.map(track => ({ ...track }))
     } catch (e) {
         console.error('Ошибка загрузки треков исполнителя:', e)
         if (mySeq === seq) failed.value = true
     } finally {
         if (mySeq === seq) loading.value = false
     }
-    await nextTick()
-    if (mySeq === seq && hasMore.value && isNearBottom()) void loadMore()
 }
 
-async function loadMore() {
-    if (loading.value || loadingMore.value || !hasMore.value) return
-    const mySeq = seq
-    loadMoreError.value = false
-    loadingMore.value = true
-    try {
-        let totalAdded = 0
-        while (hasMore.value) {
-            const prevIndex = nextIndex
-            const page = await artistTracks(artistId.value, prevIndex, PAGE, artistName.value)
-            if (mySeq !== seq) return
-            const added = append(page.tracks)
-            totalAdded += added
-            emptyStreak = added > 0 ? 0 : emptyStreak + 1
-            nextIndex = page.next_index
-            hasMore.value = page.has_more && page.next_index > prevIndex && emptyStreak < MAX_EMPTY_PAGES
-            if (totalAdded > 0 || !hasMore.value) break
-        }
-    } catch (e) {
-        console.error('Ошибка подгрузки треков исполнителя:', e)
-        if (mySeq === seq) loadMoreError.value = true
-    } finally {
-        if (mySeq === seq) loadingMore.value = false
-    }
-    await nextTick()
-    if (mySeq === seq && hasMore.value && !loadMoreError.value && emptyStreak < MAX_EMPTY_PAGES && isNearBottom()) {
-        void loadMore()
-    }
-}
-
-function syncObserver() {
-    observer?.disconnect()
-    observer = null
-    if (!pageEl.value || !sentinelEl.value || typeof IntersectionObserver === 'undefined') return
-    observer = new IntersectionObserver(
-        (entries) => {
-            if (!loadMoreError.value && entries.some(e => e.isIntersecting)) void loadMore()
-        },
-        { root: pageEl.value, rootMargin: '0px 0px 600px 0px' },
-    )
-    observer.observe(sentinelEl.value)
-}
-
-const scrollY = ref(0)
 const showStickyHeader = computed(() => scrollY.value > 140)
 function scrollToTop() {
     pageEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function onScroll(e: Event) {
-    const el = e.target as HTMLElement
-    scrollY.value = el.scrollTop
-    if (!loadMoreError.value && isNearBottom()) void loadMore()
-}
-
 watch(artistId, (id) => { void load(id) })
-watch([pageEl, sentinelEl], syncObserver, { flush: 'post' })
 onMounted(() => { void load(artistId.value) })
-onUnmounted(() => {
-    observer?.disconnect()
-    observer = null
-})
+onUnmounted(() => { seq++ })
 
 useKeepDownloadedInLibrary(() => [tracks.value])
 
@@ -173,43 +103,44 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
             </Transition>
         </div>
 
-        <button type="button" class="backBtn" @click="goBack">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
-            <span>{{ t('downloads.back') }}</span>
-        </button>
+        <div ref="headerEl" class="tracksHeader">
+            <button type="button" class="backBtn" @click="goBack">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+                <span>{{ t('downloads.back') }}</span>
+            </button>
 
-        <div class="pageHead">
-            <div class="listType">{{ t('downloads.artistAllTracks') }}</div>
-            <h2 v-truncate class="listName">{{ artistName || t('downloads.artistLabel') }}</h2>
-        </div>
-
-        <LoadingSpinner v-if="loading || (tracks.length === 0 && hasMore)" />
-
-        <div v-else-if="failed || tracks.length === 0" class="emptyState">
-            <div class="emptyIcon"><DownloadIcon width="20" height="20" /></div>
-            <div class="emptyText">{{ failed ? t('downloads.artistNotFound') : t('downloads.artistTracksEmpty') }}</div>
-        </div>
-
-        <template v-else>
-            <div class="listHead">
+            <div class="pageHead">
+                <div class="listType">{{ t('downloads.artistAllTracks') }}</div>
+                <h2 v-truncate class="listName">{{ artistName || t('downloads.artistLabel') }}</h2>
+            </div>
+            <div v-if="tracks.length" class="listHead">
                 <span class="colTitle">{{ t('downloads.listColTitle') }}</span>
                 <span class="colTime"><TimeIcon width="13" height="13" /></span>
                 <span class="colAction" aria-hidden="true"></span>
             </div>
-            <div class="tracksList">
-                <DownloadTrackRow
-                    v-for="track in tracks"
-                    :key="trackKey(track.artist, track.title, track.album)"
-                    :track="track"
-                    @redownload="confirmTrack = $event"
-                />
-            </div>
-            <div v-if="loadingMore || (loadMoreError && hasMore)" class="loadMore">
-                <span v-if="loadingMore" class="btnSpinner"></span>
-                <button v-else type="button" class="retryMoreBtn" @click="loadMore">{{ t('downloads.action.retry') }}</button>
-            </div>
-            <div v-if="hasMore" ref="sentinelEl" class="loadSentinel" aria-hidden="true"></div>
-        </template>
+        </div>
+
+        <LoadingSpinner v-if="loading" />
+
+        <div v-else-if="failed || tracks.length === 0" class="emptyState">
+            <div class="emptyIcon"><DownloadIcon width="20" height="20" /></div>
+            <div class="emptyText">{{ failed ? t('downloads.artistTracksLoadError') : t('downloads.artistTracksEmpty') }}</div>
+            <button v-if="failed" type="button" class="retryBtn" @click="load(artistId)">{{ t('downloads.action.retry') }}</button>
+        </div>
+
+        <div
+            v-else
+            class="tracksList"
+            :style="{ paddingTop: paddingTop + 'px', paddingBottom: paddingBottom + 'px' }"
+        >
+            <DownloadTrackRow
+                v-for="(track, index) in visibleTracks"
+                :key="firstVisibleIndex + index"
+                :track="track"
+                :style="{ height: ROW_HEIGHT + 'px', marginBottom: ROW_GAP + 'px' }"
+                @redownload="confirmTrack = $event"
+            />
+        </div>
 
         <ConfirmModal
             :open="confirmTrack !== null"
@@ -240,6 +171,11 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     border-radius: 3px;
 }
 
+.tracksHeader {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+}
 .backBtn {
     display: flex;
     align-items: center;
@@ -313,6 +249,15 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     font-weight: 800;
     color: hsla(0, 0%, 100%, 0.94);
 }
+@media (max-width: 768px), (pointer: coarse) and (max-width: 900px), (hover: none) and (max-width: 900px) {
+    .stickyHeaderAnchor {
+        top: 0;
+        margin: 0;
+    }
+    .stickyHeaderAnchor .stickyHeader {
+        margin: 0 !important;
+    }
+}
 .stickyTitle {
     min-width: 0;
     white-space: nowrap;
@@ -377,10 +322,9 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
-    gap: 2px;
+    overflow-anchor: none;
 }
-.loadMore { display: flex; justify-content: center; flex-shrink: 0; padding: 18px 0 4px; }
-.retryMoreBtn {
+.retryBtn {
     height: 32px;
     padding: 0 16px;
     border-radius: 999px;
@@ -392,20 +336,10 @@ const { confirmTrack, confirmMessage, confirmRedownload } = useRedownloadConfirm
     user-select: none;
     transition: background-color var(--duration-hover) var(--ease-smooth), color var(--duration-hover) var(--ease-smooth);
 }
-.retryMoreBtn:hover {
+.retryBtn:hover {
     background-color: hsla(0, 0%, 100%, 0.13);
     color: #fff;
 }
-.loadSentinel { height: 1px; flex-shrink: 0; }
-.btnSpinner {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    border: 2px solid hsla(0, 0%, 100%, 0.15);
-    border-top-color: hsla(0, 0%, 100%, 0.85);
-    animation: spin 0.8s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
 
 .emptyState {
     flex: 1;

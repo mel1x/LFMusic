@@ -39,7 +39,6 @@ export interface ExternalSearchArtist {
   id: number
   name: string
   picture_url: string | null
-  nb_album: number | null
   source: string
 }
 
@@ -57,6 +56,7 @@ export interface ExternalArtistDetail {
   name: string
   picture_url: string | null
   albums: ExternalSearchAlbum[]
+  album_count: number
   top_tracks: ExternalSearchTrack[]
 }
 
@@ -116,7 +116,7 @@ export interface DownloadItem {
   source_url: string | null
   thumbnail_url: string | null
   stage: DownloadStage
-  /** 0..1 within the download step. */
+  /** 0..1 across search and download. */
   progress: number
   speed_bps: number | null
   eta_secs: number | null
@@ -432,6 +432,24 @@ function formatBytes(bps: number): string {
   return `${Math.max(1, Math.round(bps / 1024))} КБ/с`
 }
 
+// Share the catalog request between the artist profile and its track list.
+let recentArtistCatalog: { id: number; request: Promise<ExternalSearchTrack[]>; expiresAt: number } | undefined
+
+function artistTracks(id: number): Promise<ExternalSearchTrack[]> {
+  if (recentArtistCatalog?.id === id && recentArtistCatalog.expiresAt > Date.now()) {
+    return recentArtistCatalog.request
+  }
+
+  const request = invoke<ExternalSearchTrack[]>('downloads_artist_tracks', { artistId: id })
+  const catalog = { id, request, expiresAt: Infinity }
+  recentArtistCatalog = catalog
+  void request.then(
+    () => { catalog.expiresAt = Date.now() + 120_000 },
+    () => { if (recentArtistCatalog === catalog) recentArtistCatalog = undefined },
+  )
+  return request
+}
+
 export function useDownloads() {
   void init()
   const { t } = useI18n()
@@ -475,8 +493,7 @@ export function useDownloads() {
     resolveLink,
     albumDetail: (id: number) => invoke<ExternalAlbumDetail | null>('downloads_album', { albumId: id }),
     artistDetail: (id: number) => invoke<ExternalArtistDetail | null>('downloads_artist', { artistId: id }),
-    artistTracks: (id: number, index: number, limit: number, name?: string) =>
-      invoke<ExternalSearchPage>('downloads_artist_tracks', { artistId: id, artistName: name || undefined, index, limit }),
+    artistTracks,
     enqueue,
     notQueued,
     cancel: (id: number) => invoke('downloads_cancel', { id }),

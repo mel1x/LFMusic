@@ -146,9 +146,7 @@ const featureProgressAriaLabel = computed(() => {
 const displayPercent = ref(0);
 const liveDisplayPercent = () => displayPercent.value;
 const displayPercentRounded = computed(() => Math.round(displayPercent.value));
-let trickle = 0;
 let lastTarget = 0;
-let stalledMs = 0;
 
 const progressLoop = frameLoop((_ts, frameDt) => {
     const dt = frameDt ? Math.min(120, frameDt) : 16;
@@ -156,39 +154,9 @@ const progressLoop = frameLoop((_ts, frameDt) => {
     const p = featureProgress.value;
     const target = featureProgressPercent.value;
 
-    // Compare against lastTarget, not displayPercent: the trickle overshoot would falsely reset
-    // the bar.
-    if (p.active && target < lastTarget - 25) {
-        displayPercent.value = target;
-        trickle = target;
-        stalledMs = 0;
-    }
-
-    if (Math.abs(target - lastTarget) > 0.1) {
-        stalledMs = 0;
-    } else {
-        stalledMs += dt;
-    }
+    if (p.active && target < lastTarget - 25) displayPercent.value = target;
     lastTarget = target;
-    trickle = Math.max(trickle, target);
-
-    let goal: number;
-    if (!p.active) {
-        goal = 100;
-    } else if (featureProgressIsDownload.value) {
-        if (stalledMs > 350) {
-            const slotEnd = p.total > 0
-                ? ((Math.min(p.current, p.total) + 1) / p.total) * 100
-                : 95;
-            const ceiling = Math.min(95, slotEnd);
-            if (trickle < ceiling) {
-                trickle += (ceiling - trickle) * (1 - Math.pow(0.75, dt / 1000));
-            }
-        }
-        goal = Math.max(target, trickle);
-    } else {
-        goal = target;
-    }
+    const goal = p.active ? target : 100;
 
     const k = 1 - Math.pow(0.018, dt / 1000);
     displayPercent.value += (goal - displayPercent.value) * k;
@@ -197,9 +165,7 @@ const progressLoop = frameLoop((_ts, frameDt) => {
 
 function startProgressAnim(initial: number) {
     displayPercent.value = initial;
-    trickle = initial;
     lastTarget = initial;
-    stalledMs = 0;
     progressLoop.start();
 }
 

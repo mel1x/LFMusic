@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useI18n } from '../composables/useI18n'
-import { applyMixPreset, autoTransition, mixOverlap, mixKey, mixPresets, savedTransition, saveTransition, type MixPreset, type MixEffect, type MixPoint, type LaneCurves } from '../composables/usePlaylistMix'
+import { applyMixPreset, mixBarSeconds, mixOverlap, mixKey, mixPresets, resolveMixTransition, saveTransition, type MixPreset, type MixEffect, type MixPoint, type LaneCurves } from '../composables/usePlaylistMix'
 import { usePlayer, type TrackMetadata } from '../composables/usePlayer'
 import defaultCover from '../assets/trackCover.webp'
 import MixSelect from './MixSelect.vue'
@@ -16,9 +16,10 @@ const emit = defineEmits<{ close: [] }>()
 const { t } = useI18n()
 const { currentTrack, playbackState, togglePlayPause, formatTime, volume } = usePlayer()
 const dialog = ref<HTMLDialogElement>()
+const visible = ref(true)
 const expanded = ref(false)
 const selectedEffect = ref<MixEffect>('volume')
-const initial = savedTransition(props.source, props.from.file_path, props.to.file_path) ?? autoTransition(props.from, props.to)
+const initial = resolveMixTransition(props.source, props.from, props.to.file_path, props.to)
 const draft = ref({ ...initial, volumeCurve: initial.volumeCurve ?? (initial.equalPower ? 'smooth' : 'linear') })
 const preset = computed(() => draft.value.preset ?? 'custom')
 const peaks = shallowRef<(Uint8Array | undefined)[]>([])
@@ -50,7 +51,7 @@ const overview = computed(() => {
     }
 })
 const context = computed(() => Math.min(3, Math.max(1, overlap.value / 4)))
-const bars = computed(() => 240 / (props.from.bpm || props.to.bpm || 120))
+const bars = computed(() => mixBarSeconds(props.from, props.to))
 const lengthOptions = computed(() => {
     const options = [1, 2, 4, 8, 16].map(n => ({ value: String(n * bars.value), label: n + ' ' + t('playlistMix.bars') }))
         .filter(n => Number(n.value) <= 32)
@@ -188,21 +189,31 @@ function changeLength(value: string) {
     draft.value.seconds = Math.min(32, Math.max(0.1, seconds))
     draft.value.preset = 'custom'
 }
+function requestClose() {
+    if (!visible.value) return
+    visible.value = false
+    stop()
+}
+function finishClose() {
+    dialog.value?.close()
+    emit('close')
+}
 function save() {
     saveTransition(props.source, props.from.file_path, props.to.file_path, preset.value === 'auto' ? null : draft.value)
-    emit('close')
+    requestClose()
 }
 </script>
 
 <template>
-    <dialog ref="dialog" :class="{ expanded }" aria-labelledby="mix-heading" @cancel.prevent="emit('close')" @click="($event.target === dialog) && emit('close')">
-        <article>
+    <Transition name="mix-modal" appear @after-leave="finishClose">
+    <dialog v-show="visible" ref="dialog" :class="{ expanded }" aria-labelledby="mix-heading" @cancel.prevent="requestClose" @click.self="requestClose">
+        <article :inert="!visible">
             <header><h2 id="mix-heading">{{ t('playlistMix.edit') }}</h2>
                 <button class="save" :disabled="!dirty" @click="save">{{ t('playlistMix.save') }}</button>
                 <button class="close expand" :aria-label="t(expanded ? 'playlistMix.collapse' : 'playlistMix.expand')" :aria-pressed="expanded" @click="expanded = !expanded">
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 6V2h4m4 0h4v4m0 4v4h-4m-4 0H2v-4" /></svg>
                 </button>
-                <button class="close" :aria-label="t('playlistMix.close')" @click="emit('close')"><CloseIcon width="16" height="16" /></button>
+                <button class="close" :aria-label="t('playlistMix.close')" @click="requestClose"><CloseIcon width="16" height="16" /></button>
             </header>
             <main :aria-busy="pendingWaves > 0">
                 <LoadingSpinner v-if="pendingWaves" class="waveLoading" role="status" :aria-label="t('playlistMix.loading')" />
@@ -250,6 +261,7 @@ function save() {
             </footer>
         </article>
     </dialog>
+    </Transition>
 </template>
 
 <style scoped>
@@ -257,6 +269,19 @@ dialog { --mix-volume:#51c6ef; --mix-eq:#ffcd28; --mix-filter:#dc8eef; margin:au
 .expanded { width:calc(98vw / var(--overlay-scale, 1)); max-width:none; }
 .expanded :deep(.detail) { height:clamp(90px,21vh,220px); }
 dialog::backdrop { background:#000a; }
+.mix-modal-enter-active, .mix-modal-leave-active {
+    transition: opacity var(--duration-modal) var(--ease-smooth), transform var(--duration-modal) var(--ease-smooth);
+}
+.mix-modal-enter-active::backdrop, .mix-modal-leave-active::backdrop {
+    transition: opacity var(--duration-modal) var(--ease-smooth);
+}
+.mix-modal-enter-from, .mix-modal-leave-to {
+    opacity: 0;
+    transform: translateY(8px) scale(.98);
+}
+.mix-modal-enter-from::backdrop, .mix-modal-leave-to::backdrop {
+    opacity: 0;
+}
 article { padding:22px 26px; }
 header,.track,.presets,.parameters { display:flex; align-items:center; }
 header { gap:10px; margin-bottom:16px; }
@@ -297,6 +322,7 @@ footer { margin-top:16px; }
 p { color:#fffb; font-size:12px; }
 @media(max-width:600px) {
     dialog { width:100%; max-width:100%; max-height:100dvh; margin:auto 0 0; border-radius:22px 22px 0 0; }
+    .mix-modal-enter-from, .mix-modal-leave-to { opacity:1; transform:translateY(100%); }
     article { padding:16px 14px max(16px,env(safe-area-inset-bottom)); }
     .expand { display:none; }
     main :deep(.detail) { height:clamp(94px, 20dvh, 185px); }
@@ -304,5 +330,11 @@ p { color:#fffb; font-size:12px; }
     footer { display:flex; flex-direction:column-reverse; gap:8px; margin-top:8px; }
     .parameters { gap:4px; margin:0; }
     .presets button { min-height:38px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .mix-modal-enter-active, .mix-modal-leave-active,
+    .mix-modal-enter-active::backdrop, .mix-modal-leave-active::backdrop {
+        transition: none;
+    }
 }
 </style>

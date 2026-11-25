@@ -20,6 +20,8 @@ use ytdlp::{Control, Cookies, NetOptions, Source};
 
 /// Parallel downloads: two keep a batch moving without looking like a scraper.
 const MAX_WORKERS: usize = 2;
+const SEARCH_SHARE: f64 = 0.2;
+const SEARCH_RAMP: Duration = Duration::from_secs(6);
 /// Candidates tried per source before moving on.
 const CANDIDATES_PER_SOURCE: usize = 3;
 const AUTO_UPDATE_INTERVAL_SECS: u64 = 24 * 60 * 60;
@@ -142,7 +144,7 @@ pub struct DownloadItem {
     pub source_url: Option<String>,
     pub thumbnail_url: Option<String>,
     pub stage: Stage,
-    /// 0..1 within the download step.
+    /// 0..1 across search and download.
     pub progress: f64,
     pub speed_bps: Option<f64>,
     pub eta_secs: Option<u64>,
@@ -204,8 +206,6 @@ struct Manager {
     updating: bool,
     last_auto_update_attempt: Option<Instant>,
     controls: HashMap<u64, Arc<Control>>,
-    /// Per-job download fraction, for the titlebar's combined progress.
-    fractions: HashMap<u64, f64>,
     batch_total: usize,
     batch_done: usize,
     last_progress_emit: Option<Instant>,
@@ -314,9 +314,10 @@ fn emit_tools(app: &AppHandle) {
 
 fn report_titlebar(app: &AppHandle) {
     let (done, total, frac) = with(app, |m| {
-        (m.batch_done, m.batch_total, m.fractions.values().sum::<f64>())
+        let fraction = m.items.iter().filter(|item| item.stage.is_active()).map(|item| item.progress).sum();
+        (m.batch_done, m.batch_total, fraction)
     });
-    crate::report_download_progress_frac(app, done, total, frac.min(1.0));
+    crate::report_download_progress_frac(app, done, total, frac);
 }
 
 pub fn snapshot(app: &AppHandle) -> QueueSnapshot {
@@ -420,7 +421,6 @@ pub fn cancel(app: &AppHandle, id: u64) {
                 m.batch_total = m.batch_total.saturating_sub(1);
             }
         }
-        m.fractions.remove(&id);
         save_queue(app, m);
     });
     emit_queue(app);
@@ -579,7 +579,6 @@ fn take_job(app: &AppHandle) -> Option<(DownloadItem, Arc<Control>)> {
         let job = item.clone();
         let control = Arc::new(Control::default());
         m.controls.insert(job.id, control.clone());
-        m.fractions.insert(job.id, 0.0);
         Some((job, control))
     })
 }
@@ -601,7 +600,6 @@ fn worker_loop(app: AppHandle) {
             let r = (m.batch_done, m.batch_total);
             m.batch_done = 0;
             m.batch_total = 0;
-            m.fractions.clear();
             r
         });
         crate::report_download_progress(&app, total.max(done), total.max(done));
@@ -611,7 +609,6 @@ fn worker_loop(app: AppHandle) {
 fn finish_job(app: &AppHandle, id: u64, result: Result<PathBuf, JobError>) {
     with(app, |m| {
         m.controls.remove(&id);
-        m.fractions.remove(&id);
         let Some(item) = m.items.iter_mut().find(|i| i.id == id) else { return };
         item.speed_bps = None;
         item.eta_secs = None;
@@ -645,6 +642,7 @@ fn update_item(app: &AppHandle, id: u64, f: impl FnOnce(&mut DownloadItem)) {
         }
     });
     emit_queue(app);
+    report_titlebar(app);
 }
 
 fn resolved_tools(app: &AppHandle) -> Result<Resolved, JobError> {
@@ -731,6 +729,7 @@ fn run_job(app: &AppHandle, job: &DownloadItem, control: &Control) -> Result<Pat
     control.check()?;
     update_item(app, job.id, |i| {
         i.stage = Stage::Processing;
+        i.progress = 1.0;
         i.source = Some(source);
         i.media_url = Some(media_url);
         i.speed_bps = None;
@@ -806,15 +805,20 @@ fn find_and_download(
     };
     let query = format!("{} - {}", job.artist, job.title);
     let mut failure: Option<JobError> = None;
+    let search_started = Instant::now();
+    let mut on_wait = || on_search_progress(app, job.id, search_started.elapsed());
 
     for source in [Source::YouTube, Source::SoundCloud] {
         control.check()?;
         update_item(app, job.id, |i| {
             i.stage = Stage::Searching;
             i.source = Some(source.label().into());
-            i.progress = 0.0;
+            i.media_url = None;
+            i.progress = i.progress.min(SEARCH_SHARE);
+            i.speed_bps = None;
+            i.eta_secs = None;
         });
-        let candidates = match search_with_retries(tools, net, source, &query, control) {
+        let candidates = match search_with_retries(tools, net, source, &query, control, &mut on_wait) {
             Ok(c) => c,
             Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
             Err(e) => {
@@ -840,10 +844,6 @@ fn find_and_download(
         }
         for cand in ranked {
             control.check()?;
-            update_item(app, job.id, |i| {
-                i.stage = Stage::Downloading;
-                i.media_url = Some(cand.url.clone());
-            });
             match download_with_retries(app, job.id, tools, net, &cand.url, work, control) {
                 Ok(file) => return Ok((file, source.label().into(), cand.url)),
                 Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
@@ -872,10 +872,11 @@ fn search_with_retries(
     source: Source,
     query: &str,
     control: &Control,
+    on_wait: &mut dyn FnMut(),
 ) -> Result<Vec<Candidate>, JobError> {
     let mut attempt = 0;
     loop {
-        match ytdlp::search(tools, net, source, query, 8, control) {
+        match ytdlp::search(tools, net, source, query, 8, control, Some(on_wait)) {
             Err(e) if e.kind.is_transient() && attempt < 1 => {
                 attempt += 1;
                 control.sleep(Duration::from_secs(3))?;
@@ -894,6 +895,10 @@ fn download_with_retries(
     work: &WorkDir,
     control: &Control,
 ) -> Result<PathBuf, JobError> {
+    update_item(app, id, |item| {
+        reset_download_progress(item);
+        item.media_url = Some(url.to_string());
+    });
     let mut attempt = 0u64;
     loop {
         let mut on_progress = |p: ytdlp::Progress| on_progress(app, id, p);
@@ -901,11 +906,46 @@ fn download_with_retries(
             Err(e) if e.kind.is_transient() && attempt < 2 => {
                 attempt += 1;
                 work.clear();
+                update_item(app, id, reset_download_progress);
                 control.sleep(Duration::from_secs(3 * attempt * attempt))?;
             }
             other => return other,
         }
     }
+}
+
+fn search_progress(elapsed: Duration) -> f64 {
+    SEARCH_SHARE * (elapsed.as_secs_f64() / SEARCH_RAMP.as_secs_f64()).min(1.0)
+}
+
+fn on_search_progress(app: &AppHandle, id: u64, elapsed: Duration) {
+    let progress = search_progress(elapsed);
+    let changed = with(app, |m| {
+        let Some(item) = m.items.iter_mut().find(|i| i.id == id && i.stage == Stage::Searching) else {
+            return false;
+        };
+        if item.progress >= progress {
+            return false;
+        }
+        item.progress = progress;
+        true
+    });
+    if changed {
+        emit_queue(app);
+        report_titlebar(app);
+    }
+}
+
+fn download_progress(from_link: bool, fraction: f64) -> f64 {
+    let start = if from_link { 0.0 } else { SEARCH_SHARE };
+    start + (1.0 - start) * fraction
+}
+
+fn reset_download_progress(item: &mut DownloadItem) {
+    item.stage = Stage::Downloading;
+    item.progress = download_progress(item.source_url.is_some(), 0.0);
+    item.speed_bps = None;
+    item.eta_secs = None;
 }
 
 /// Progress updates arrive many times a second; the queue snapshot is re-emitted at most every 200
@@ -914,8 +954,7 @@ fn on_progress(app: &AppHandle, id: u64, p: ytdlp::Progress) {
     let emit = with(app, |m| {
         if let Some(item) = m.items.iter_mut().find(|i| i.id == id) {
             if let Some(f) = p.fraction {
-                item.progress = f;
-                m.fractions.insert(id, f);
+                item.progress = download_progress(item.source_url.is_some(), f);
             }
             item.speed_bps = p.speed_bps;
             item.eta_secs = p.eta_secs;
@@ -1305,6 +1344,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn progress_reserves_only_the_first_twenty_percent_for_search() {
+        assert_eq!(search_progress(Duration::ZERO), 0.0);
+        assert_eq!(search_progress(SEARCH_RAMP / 2), 0.1);
+        assert_eq!(search_progress(SEARCH_RAMP * 2), 0.2);
+        assert_eq!(download_progress(false, 0.0), 0.2);
+        assert!((download_progress(false, 0.5) - 0.6).abs() < f64::EPSILON);
+        assert_eq!(download_progress(false, 1.0), 1.0);
+        assert_eq!(download_progress(true, 0.5), 0.5);
+    }
+
+    #[test]
     fn file_names_are_safe_and_unique() {
         let dir = std::env::temp_dir().join(format!("lfm-dl-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1376,7 +1426,7 @@ mod tests {
             let query = format!("{} - {}", track.artist, track.title);
             for source in [Source::YouTube, Source::SoundCloud] {
                 let started = Instant::now();
-                match ytdlp::search(&resolved, &net, source, &query, 8, &control) {
+                match ytdlp::search(&resolved, &net, source, &query, 8, &control, None) {
                     Ok(cands) => {
                         let ranked = matching::rank(&target, &cands);
                         println!(
@@ -1400,7 +1450,7 @@ mod tests {
             };
             let mut outcome = Err(JobError::new(ErrorKind::NotFound, "no candidates"));
             'sources: for source in [Source::YouTube, Source::SoundCloud] {
-                let Ok(cands) = ytdlp::search(&resolved, &net, source, &query, 8, &control) else { continue };
+                let Ok(cands) = ytdlp::search(&resolved, &net, source, &query, 8, &control, None) else { continue };
                 for cand in matching::rank(&target, &cands).into_iter().take(CANDIDATES_PER_SOURCE) {
                     match ytdlp::download(&resolved, &net, &cand.url, &work.0, &control, &mut cb) {
                         Ok(f) => {

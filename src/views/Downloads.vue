@@ -57,7 +57,7 @@ import { usePlayer } from '../composables/usePlayer'
 import { useScrollLine } from '../composables/useScrollLine'
 import { useTypeToSearch } from '../composables/useTypeToSearch'
 import { switchLayout } from '../composables/useSearch'
-import { albumsCountText, tracksCountText } from '../utils/format'
+import { tracksCountText } from '../utils/format'
 import { useCoverTint } from '../composables/useCoverTint'
 
 const { t } = useI18n()
@@ -481,8 +481,7 @@ const showBatchHeader = computed(() => pendingCount.value > 0 || failedCount.val
 const batch = computed(() => {
     const list = queue.value.filter(i => i.stage !== 'error')
     const done = list.filter(i => i.stage === 'done').length
-    const sum = list.reduce((acc, i) =>
-        acc + (i.stage === 'done' ? 1 : i.stage === 'processing' ? 0.95 : i.stage === 'downloading' ? i.progress * 0.9 : 0), 0)
+    const sum = list.reduce((acc, i) => acc + i.progress, 0)
     const speed = queue.value.reduce((acc, i) => acc + (i.stage === 'downloading' && i.speed_bps ? i.speed_bps : 0), 0)
     return {
         done,
@@ -881,9 +880,6 @@ onUnmounted(() => {
                                 <span>{{ t('downloads.typeArtist') }}</span>
                             </div>
                             <div class="bestName" v-truncate>{{ best.artist.name }}</div>
-                            <div v-if="best.artist.nb_album" class="bestMeta">
-                                <span>{{ albumsCountText(best.artist.nb_album) }}</span>
-                            </div>
                         </div>
                         <span class="bestGo" aria-hidden="true">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
@@ -945,7 +941,6 @@ onUnmounted(() => {
                         <div v-for="a in artists.slice(0, 8)" :key="a.id" class="artistCard" @click="openArtist(a)">
                             <div class="artistAvatar"><CoverImage :src="a.picture_url" :fallback="defaultCover" /></div>
                             <div class="artistName" v-truncate>{{ a.name }}</div>
-                            <div v-if="a.nb_album" class="artistSub">{{ albumsCountText(a.nb_album) }}</div>
                         </div>
                     </div>
                 </section>
@@ -999,7 +994,6 @@ onUnmounted(() => {
                     <div v-for="a in artists" :key="a.id" class="artistCard" @click="openArtist(a)">
                         <div class="artistAvatar"><CoverImage :src="a.picture_url" :fallback="defaultCover" /></div>
                         <div class="artistName" v-truncate>{{ a.name }}</div>
-                        <div v-if="a.nb_album" class="artistSub">{{ albumsCountText(a.nb_album) }}</div>
                     </div>
                 </div>
             </section>
@@ -1832,7 +1826,6 @@ onUnmounted(() => {
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.artistSub { font-size: 12px; font-variant-numeric: tabular-nums; color: hsla(0, 0%, 100%, 0.45); }
 
 .albumLine {
     display: flex;

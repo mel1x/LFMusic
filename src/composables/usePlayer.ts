@@ -1,4 +1,4 @@
-import { autoTransition, mixOverlap, playlistMix, savedTransition, type MixTransition } from "./usePlaylistMix";
+import { mixOverlap, playlistMix, resolveMixTransition, type MixTransition } from "./usePlaylistMix";
 import { ref, shallowRef, reactive, computed, watch, effectScope } from "vue";
 import { playbackSpeed } from "./useSoundFx";
 import { frameLoop } from "../utils/frameLoop";
@@ -1158,7 +1158,7 @@ function createPlayer() {
         isSeeking.value || isLoading.value || isHandlingTrackEnd ||
         status.state !== "Playing") return;
     const incoming = peekTrackByPath(next);
-    const transition = savedTransition(source, from.file_path, next) ?? autoTransition(from, incoming);
+    const transition = resolveMixTransition(source, from, next, incoming);
     const speed = playbackSpeed.value || 1;
     const end = Math.max(1, from.duration_secs - transition.skipOutro);
     const remaining = (end - status.position_secs) / speed;

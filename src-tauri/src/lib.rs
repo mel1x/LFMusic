@@ -162,7 +162,7 @@ fn report_prep_progress(app: &tauri::AppHandle, mutate: impl FnOnce(&mut PrepCou
             "done"
         };
         let percent = if total > 0 {
-            ((current as f64 + p.d_frac.clamp(0.0, 1.0)) / total as f64 * 100.0).clamp(0.0, 100.0)
+            ((current as f64 + p.d_frac) / total as f64 * 100.0).clamp(0.0, 100.0)
         } else {
             100.0
         };
@@ -234,7 +234,7 @@ pub(crate) fn report_download_progress_frac(
     report_prep_progress(app, |p| {
         p.d_total = total;
         p.d_done = done.min(total);
-        p.d_frac = frac.clamp(0.0, 1.0);
+        p.d_frac = frac.clamp(0.0, total.saturating_sub(done) as f64);
     });
 }
 
@@ -1992,24 +1992,20 @@ async fn downloads_artist(
     .await
 }
 
-/// Paginated artist tracks for the "all tracks" list (infinite scroll).
+/// The catalog used for both the artist track count and the full track list.
 #[tauri::command]
 async fn downloads_artist_tracks(
     app: tauri::AppHandle,
     artist_id: u64,
-    artist_name: Option<String>,
-    index: u32,
-    limit: u32,
-) -> Result<external::ExternalSearchPage, String> {
+) -> Result<Vec<external::ExternalSearchTrack>, String> {
     run_blocking(move || {
-        let mut page = external::artist_tracks(artist_id, artist_name.as_deref(), index, limit)?;
+        let mut tracks = external::artist_tracks(artist_id)?;
         mark_in_library(
             &app,
-            page.tracks
-                .iter_mut()
+            tracks.iter_mut()
                 .map(|t| (t.artist.as_str(), t.title.as_str(), t.album.as_deref(), &mut t.in_library)),
         );
-        Ok(page)
+        Ok(tracks)
     })
     .await
 }

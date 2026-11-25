@@ -220,6 +220,7 @@
     "downloadAll": "Скачать альбом",
     "albumQueued": "В очереди",
     "albumNotFound": "Не удалось загрузить альбом",
+    "artistReleases": "Релизы",
     "artistNotFound": "Не удалось загрузить исполнителя",
     "artistEmpty": "Нет альбомов и популярных треков",
     "popularTracks": "Популярные треки",
@@ -230,6 +231,7 @@
     "artistTopCount": "Популярных треков: {count}",
     "showMore": "Смотреть больше",
     "artistAllTracks": "Все треки",
+    "artistTracksLoadError": "Не удалось загрузить треки исполнителя",
     "artistTracksEmpty": "Треков не найдено",
     "folder": {
       "sectionTitle": "Папка для скачивания",
